@@ -58,10 +58,11 @@ pub(crate) enum NavigationDialogKind {
     ClipboardModify,
     CalculationChart,
     MarkdownPrint,
+    PasswordGenerator,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -84,6 +85,7 @@ impl NavigationDialogKind {
         Self::ClipboardModify,
         Self::CalculationChart,
         Self::MarkdownPrint,
+        Self::PasswordGenerator,
     ];
 
     const fn index(self) -> usize {
@@ -110,6 +112,7 @@ impl NavigationDialogKind {
             Self::ClipboardModify => 19,
             Self::CalculationChart => 20,
             Self::MarkdownPrint => 21,
+            Self::PasswordGenerator => 22,
         }
     }
 
@@ -137,6 +140,7 @@ impl NavigationDialogKind {
             Self::ClipboardModify => "clipboard-modify",
             Self::CalculationChart => "calculation-chart",
             Self::MarkdownPrint => "markdown-print",
+            Self::PasswordGenerator => "password-generator",
         }
     }
 
@@ -167,6 +171,7 @@ impl NavigationDialogKind {
             Self::ZipExtractor => egui::Id::new("zip_extractor_dialog"),
             Self::CalculationChart => egui::Id::new("calculation-chart-window"),
             Self::MarkdownPrint => egui::Id::new("markdown-print-window"),
+            Self::PasswordGenerator => egui::Id::new("password-generator-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -452,6 +457,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::MarkdownPrint
+                    | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets
                     | NavigationDialogKind::XmlToolkit
@@ -494,6 +500,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::MarkdownPrint
+                    | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets),
                 ..
@@ -4300,6 +4307,11 @@ mod tests {
                     }
                     NavigationDialogKind::CalculationChart => {
                         egui::Window::new("Charts").id(egui::Id::new("calculation-chart-window")).show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::PasswordGenerator => {
+                        egui::Window::new("Password Generator")
+                            .id(egui::Id::new("password-generator-window"))
+                            .show(ctx, |_| {});
                     }
                     NavigationDialogKind::MarkdownPrint => {
                         egui::Window::new("Export / Print")

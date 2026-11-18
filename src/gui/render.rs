@@ -2222,6 +2222,7 @@ impl LauncherApp {
             Panel::SnippetDialog => self.snippet_window_host.root_layer(),
             Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer(),
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer(),
+            Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer(),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
             Panel::MkMacroDialog => self
                 .mkmacro_dialog
@@ -4941,6 +4942,8 @@ impl LauncherApp {
             .prepare_open(ctx, &self.search_replace_dialog);
         self.hash_generator_host
             .prepare_open(ctx, &self.hash_generator_dialog);
+        self.password_generator_host
+            .prepare_open(ctx, &self.password_generator_dialog);
         self.todo_view_host
             .prepare_open(ctx, &self.todo_view_dialog);
         self.file_preview_host
@@ -5059,6 +5062,7 @@ impl LauncherApp {
                 || self.calculation_chart_host.needs_root_ui_when_hidden(self.calculation_chart_dialog.open)
                 || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
                 || self.markdown_print_dialog.output.busy()
+                || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
                 || self.calculation_sensitivity_host.needs_root_ui_when_hidden(self.calculation_sensitivity_dialog.open)
                 || self
                     .file_preview_host
@@ -6193,6 +6197,112 @@ impl LauncherApp {
             },
         );
     }
+    fn show_password_generator(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+
+        let open = self.password_generator_dialog.open;
+        if !open || (!root_visible && !self.password_generator_host.needs_root_ui_when_hidden(open)) {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.password_generator_host.root_layer();
+        let parent_owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx);
+        let keyboard_owner = parent_owner && focused_response_layer(ctx)
+            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::PasswordGenerator, instance } if keyboard_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("password-generator", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "password-generator/form",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let pinned = self.pinned_panels.contains(&super::Panel::PasswordGeneratorDialog);
+        self.password_generator_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        self.password_generator_host.show(
+            ctx,
+            &mut self.password_generator_dialog,
+            &(),
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: navigation_owner,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned && (layer.is_none() || keyboard_owner),
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+        );
+    }
+
+    fn complete_password_generator(&mut self, ctx: &egui::Context) {
+        self.complete_password_generator_with(ctx, crate::platform::protected_clipboard::copy_secret);
+    }
+
+    fn complete_password_generator_with(
+        &mut self,
+        ctx: &egui::Context,
+        mut publish: impl FnMut(&crate::password_generator::SecretResult) -> Result<
+            crate::platform::protected_clipboard::CopyStatus,
+            crate::platform::protected_clipboard::ClipboardError,
+        >,
+    ) {
+        use super::password_generator_dialog::PasswordGeneratorCommand;
+
+        let Some(completion) = self.password_generator_host.complete(ctx, &mut self.password_generator_dialog) else {
+            return;
+        };
+        for command in completion.commands {
+            match command {
+                PasswordGeneratorCommand::Closed => {
+                    self.password_generator_dialog.close();
+                    self.panel_stack.retain(|panel| *panel != super::Panel::PasswordGeneratorDialog);
+                }
+                PasswordGeneratorCommand::PreferencesChanged(preferences) => {
+                    if let Err(error) = crate::settings::Settings::update_if_changed(&self.settings_path, |settings| {
+                        settings.password_generator = preferences;
+                        Ok(())
+                    }) {
+                        self.report_error_message("password_generator.settings", error.to_string());
+                    }
+                }
+                PasswordGeneratorCommand::Copy(ticket) => {
+                    if completion.origin.as_ref().is_some_and(|origin| {
+                        self.password_generator_host.accepts_origin(&self.password_generator_dialog, origin)
+                    }) {
+                        let _ = self.password_generator_dialog.copy_with(ticket, &mut publish);
+                        ctx.request_repaint_of(completion.owner_viewport);
+                    }
+                }
+            }
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+    }
+
     fn show_markdown_print(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
         use super::jump_mode::ui::{
             NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
@@ -10081,6 +10191,7 @@ impl LauncherApp {
                         | super::Panel::ClipboardDialog
                         | super::Panel::JsonUtilityDialog
                         | super::Panel::CalculationChartDialog
+                        | super::Panel::PasswordGeneratorDialog
                         | super::Panel::ZipExtractorDialog
                         | super::Panel::RegexTesterDialog
                         | super::Panel::XmlToolkitDialog
@@ -10158,6 +10269,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::CalculationChart,
                 self.calculation_chart_dialog.open && self.calculation_chart_host.root_layer().is_some(),
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::PasswordGenerator,
+                self.password_generator_dialog.open && self.password_generator_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MarkdownPrint,
@@ -10295,6 +10410,7 @@ impl LauncherApp {
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
                     NavigationDialogKind::MarkdownPrint => self.markdown_print_host.root_layer(),
+                    NavigationDialogKind::PasswordGenerator => self.password_generator_host.root_layer(),
                     NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
                     _ => None,
                 }),
@@ -10332,6 +10448,8 @@ impl LauncherApp {
                         self.clipboard_history_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::JsonUtility {
                         self.json_utility_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::PasswordGenerator {
+                        self.password_generator_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MarkdownPrint {
                         self.markdown_print_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::CalculationChart {
@@ -11043,6 +11161,7 @@ impl LauncherApp {
             self.show_qr_host(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
             self.show_markdown_print(&ctx, first_ui_pass, false);
+            self.show_password_generator(&ctx, first_ui_pass, false);
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
             self.show_note_panels(&ctx, first_ui_pass, false, None);
             self.show_mkmacro_editor(&ctx, first_ui_pass, false);
@@ -13464,6 +13583,7 @@ impl LauncherApp {
         self.show_explorer_tabs(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_print(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_password_generator(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
             &ctx,
             first_ui_pass,
@@ -15969,6 +16089,7 @@ impl eframe::App for LauncherApp {
             || self.markdown_studio_dialog.needs_root_ui_when_hidden()
             || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
             || self.markdown_print_dialog.output.busy()
+            || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.recording_dialog.needs_setup_root_ui_when_hidden()
@@ -16075,6 +16196,7 @@ impl eframe::App for LauncherApp {
         let note_aux_visibility = self.complete_note_auxiliaries(_ctx);
         self.complete_markdown_diagram_handoff(_ctx);
         self.complete_markdown_print(_ctx);
+        self.complete_password_generator(_ctx);
         self.complete_quick_notes_dialog(_ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(_ctx);
@@ -16318,6 +16440,7 @@ impl LauncherApp {
         let note_aux_visibility = self.complete_note_auxiliaries(ctx);
         self.complete_markdown_diagram_handoff(ctx);
         self.complete_markdown_print(ctx);
+        self.complete_password_generator(ctx);
         self.complete_quick_notes_dialog(ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(ctx);
@@ -45299,6 +45422,183 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         (app, directory)
+    }
+
+    #[test]
+    fn password_generator_keyboard_activation_persists_preferences_and_registers_native_controls() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::commands::{
+                    ActivationSource, CommandBus, CommandInvocation, HistoryPolicy, parse_action,
+                };
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                use crate::gui::password_generator_dialog::PasswordGeneratorDialog;
+                use crate::gui::utility_window_host::{HostedUtilityDialog, UtilityWindowHost};
+
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (mut app, directory) = new_prompt_app(&ctx);
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let action = Action {
+                    label: "Open Password Generator".into(),
+                    desc: "Generate passwords and passphrases".into(),
+                    action: "password:generator".into(),
+                    args: None,
+                };
+                let invocation = CommandInvocation {
+                    command: parse_action(&action).unwrap(),
+                    original_action: action,
+                    query_override: None,
+                    source: ActivationSource::Enter,
+                };
+                let outcome = CommandBus.dispatch(&invocation, &mut app).unwrap();
+                assert_eq!(outcome.history, HistoryPolicy::Skip);
+                assert!(app.password_generator_dialog.open);
+                assert!(app.password_generator_dialog.test_result_id().is_none());
+
+                let render = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false)
+                        .drop_without_applying_deltas();
+                };
+                for _ in 0..4 {
+                    render(&mut app, Vec::new());
+                }
+                let layer = app.password_generator_host.root_layer().unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    render(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    render(&mut app, Vec::new());
+                }
+                let kind = NavigationDialogKind::PasswordGenerator;
+                let instance = app.jump_mode_ui.dialog_instance(kind).unwrap();
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog { kind, instance },
+                );
+                let generate = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Generate")
+                    .unwrap()
+                    .response_id();
+
+                render(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                render(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Generate");
+                render(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(generate));
+                assert!(app.password_generator_dialog.test_result_id().is_none());
+
+                render(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)]);
+                render(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)]);
+                assert!(app.password_generator_dialog.test_result_id().is_some());
+
+                let target = |app: &LauncherApp, label| {
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .find(|target| target.metadata().label() == label)
+                        .unwrap()
+                        .clipped_rect()
+                };
+                let reveal = target(&app, "Reveal");
+                for pressed in [true, false] {
+                    render(&mut app, tool_dialog_pointer_events(reveal, pressed));
+                }
+                render(&mut app, Vec::new());
+                let _conceal = target(&app, "Conceal");
+
+                let result_id = app.password_generator_dialog.test_result_id().unwrap();
+                let copy = target(&app, "Copy result");
+                let mut copies = Vec::new();
+                for discard_release in [false, true] {
+                    render(&mut app, tool_dialog_pointer_events(copy, true));
+                    let mut input = actual_query_input(true);
+                    input.events = tool_dialog_pointer_events(copy, false);
+                    let mut frame = eframe::Frame::_new_kittest();
+                    let mut first = true;
+                    with_immediate_viewport_renderer(&ctx, || {
+                        ctx.run_ui(input, |ui| {
+                            app.begin_root_frame_logic(ui.ctx(), &mut frame);
+                            app.render_root_ui(ui);
+                            if discard_release && first {
+                                ui.ctx().request_discard("retain only valid password Copy");
+                            }
+                            first = false;
+                        })
+                    }).drop_without_applying_deltas();
+                    app.complete_password_generator_with(&ctx, |secret| {
+                        copies.push(secret.id());
+                        Ok(crate::platform::protected_clipboard::CopyStatus::AcceptedAndPersisted)
+                    });
+                    app.complete_query_jump_pointer_transfer(&ctx);
+                    app.finish_ui_frame_receipt();
+                    app.complete_jump_mode_frame(&ctx);
+                    assert_eq!(copies, [result_id]);
+                    render(&mut app, Vec::new());
+                }
+
+                let exclude = target(&app, "Exclude ambiguous characters");
+                for pressed in [true, false] {
+                    render(&mut app, tool_dialog_pointer_events(exclude, pressed));
+                }
+                assert!(app.password_generator_dialog.test_result_id().is_none());
+                let saved = Settings::read_current(directory.path().join("settings.json")).unwrap();
+                assert!(saved.password_generator.password.exclude_ambiguous);
+                assert_eq!(&saved.password_generator, app.password_generator_dialog.preferences());
+
+                let pop = target(&app, "Pop Out");
+                for pressed in [true, false] {
+                    render(&mut app, tool_dialog_pointer_events(pop, pressed));
+                }
+                assert!(app.password_generator_host.is_popped_out());
+                assert!(app.password_generator_dialog.open);
+                assert!(eframe::App::needs_root_ui_when_hidden(&app));
+                let viewport = UtilityWindowHost::<PasswordGeneratorDialog>::test_viewport(
+                    app.password_generator_dialog.session(),
+                );
+                // Advance the detached window's initial scroll-area size animation.
+                for _ in 0..24 {
+                    run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                    if app.password_generator_host.test_native_target("Generate").is_some() {
+                        break;
+                    }
+                }
+                assert_eq!(app.password_generator_host.owner_viewport(), viewport);
+                assert_eq!(
+                    app.password_generator_host.test_native_owner(),
+                    NavigationOwner::Dialog {
+                        kind,
+                        instance: app.password_generator_dialog.session(),
+                    },
+                );
+                assert!(app.password_generator_host.test_native_target("Dock").is_some());
+                assert!(app.password_generator_host.test_native_target("Generate").is_some());
+                assert!(app.password_generator_host.test_native_target("Copy result").is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

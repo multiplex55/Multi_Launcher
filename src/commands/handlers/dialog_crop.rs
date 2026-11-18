@@ -17,6 +17,7 @@ where
         Command::Dialog(DialogCommand::DateTimeStudio) => host.open_date_time_studio_dialog(),
         Command::Dialog(DialogCommand::DiagramStudio) => host.open_diagram_studio_dialog(),
         Command::Dialog(DialogCommand::MarkdownStudio) => host.open_markdown_studio_dialog(),
+        Command::Dialog(DialogCommand::PasswordGenerator) => host.open_password_generator_dialog(),
         Command::Dialog(DialogCommand::Help) => host.open_help_dialog(),
         Command::Dialog(DialogCommand::Convert) => host.open_convert_dialog(),
         Command::Dialog(DialogCommand::Settings) => host.open_settings_dialog(),

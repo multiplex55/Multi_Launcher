@@ -100,6 +100,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "note-templates",
     "ocr-result",
     "paste-sequences",
+    "password-generator",
     "plugin-settings",
     "qr-generator",
     "quick-help",

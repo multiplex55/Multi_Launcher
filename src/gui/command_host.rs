@@ -312,6 +312,10 @@ impl DialogCommandHost for LauncherApp {
         self.diagram_studio_dialog.open();
         self.focus_panel(super::Panel::DiagramStudioDialog);
     }
+    fn open_password_generator_dialog(&mut self) {
+        self.focus_panel(super::Panel::PasswordGeneratorDialog);
+    }
+
     fn open_markdown_studio_dialog(&mut self) {
         self.markdown_studio_dialog.open();
         self.focus_panel(super::Panel::MarkdownStudioDialog);

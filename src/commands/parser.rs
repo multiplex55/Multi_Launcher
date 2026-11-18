@@ -371,6 +371,9 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         if action.args.is_some() {
             return Err(invalid());
         }
+        if s == "password:generator" {
+            return Ok(Command::Dialog(DialogCommand::PasswordGenerator));
+        }
         let raw = s.strip_prefix("password:copy:").ok_or_else(invalid)?;
         if raw.is_empty() || raw.len() > 3 || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(invalid());

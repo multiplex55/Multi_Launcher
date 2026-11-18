@@ -33,6 +33,14 @@ impl Default for RandomPlugin {
 impl Plugin for RandomPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
+        if trimmed.eq_ignore_ascii_case("password") {
+            return vec![Action {
+                label: "Open Password Generator".into(),
+                desc: "Generate passwords and passphrases".into(),
+                action: "password:generator".into(),
+                args: None,
+            }];
+        }
         let rest = if let Some(r) = crate::common::strip_prefix_ci(trimmed, "rand ") {
             r
         } else if let Some(r) = crate::common::strip_prefix_ci(trimmed, "random ") {
@@ -133,6 +141,12 @@ impl Plugin for RandomPlugin {
                 args: None,
             },
             Action {
+                label: "password".into(),
+                desc: "Open Password Generator".into(),
+                action: "query:password".into(),
+                args: None,
+            },
+            Action {
                 label: "rand pw <len>".into(),
                 desc: "Random password".into(),
                 action: "query:rand pw ".into(),
@@ -146,6 +160,26 @@ impl Plugin for RandomPlugin {
 mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn password_generator_discovery_is_an_exact_payload_free_open() {
+        let plugin = RandomPlugin::from_seed(7);
+        let result = plugin.search(" PASSWORD ");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].action, "password:generator");
+        assert!(result[0].args.is_none());
+        assert_eq!(
+            crate::commands::parse_action(&result[0]).unwrap(),
+            crate::commands::Command::Dialog(crate::commands::DialogCommand::PasswordGenerator)
+        );
+        assert!(plugin.search("password extra").is_empty());
+        assert!(
+            plugin
+                .commands()
+                .iter()
+                .any(|command| command.action == "query:password")
+        );
+    }
 
     #[test]
     fn poisoned_rng_lock_falls_back_without_panic() {

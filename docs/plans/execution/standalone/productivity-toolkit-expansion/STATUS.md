@@ -54,7 +54,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M8-A1 | complete |
 | M8-A2 | implementation complete, focused admission verified, live clipboard persistence unverified |
 | M8-A3 | complete |
-| M8-B | pending |
+| M8-B | implementation complete, live generation/reveal/restart verified, live clipboard unavailable |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
@@ -428,3 +428,12 @@ M8-A2 was pushed at 979b112582416a0595e5f4567c4f799f3645938b. The rand/random pw
 Independent review found that saved macro steps resolve legacy random password queries through the headless executor and that the historical radial clipboard handoff must remain ExternalInput. Both now use the protected typed path and preserve those existing behaviors. The final fixtures exercise actual query resolution and typed headless dispatch with an injected writer, launcher no-retention outcome, failed-copy retry ID, strict malformed or attached input rejection, literal compatibility, radial policy and ordinary seeded random behavior. No host clipboard was written in verification.
 
 Initial targeted verification passed 6 of 6 before the compatibility review. The final focused run passed 7 of 7 in 0.170s after an 8m 55s compile with cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --test plugin_queries --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(password_wire_is_strict) | test(password_headless_) | test(password_search_is_options_only) | test(legacy_password_) | test(random_plugin::generate_number)'. Diff whitespace verification passed. M8-B adds the hosted password/passphrase utility and only persists its options.
+
+
+## M8-B hosted password and passphrase generator
+
+The Random plugin exposes an exact password entry and a payload-free typed dialog command. Both modes use the retained utility host. Only generator preferences and ordinary geometry/presentation persist. The current result stays in the dialog session. Generate, Reveal and protected Copy are explicitly bound to the accepted frame, session, policy and result identity. Editing options invalidates the prior result. Host changes remask it. Reveal paints the result with a safe accessibility description, keeping plaintext out of widget metadata and the macro recorder's UI Automation name capture. The passphrase view credits the EFF word list and labels the entropy estimate.
+
+The scoped Nextest expression was test(password_generator) | test(password_dialog_) | test(password_preferences_) | test(expanded_dialog_layer_inventory_matches_actual_window_ids). All 10 passed. The retained test exercised keyboard focus and generation, Reveal, the exact result ID at the injected Copy writer, rejection of a discarded Copy click, preference persistence and real detached-viewport registration. The AccessKit test inspected nodes without printing generated output.
+
+The ordinary Windows build completed with SHA-256 9D86C819CAB27C93D38306D58ACA2DCACBD48012A8603B0342A56057AA4BE818. With only the Random plugin enabled in an isolated profile, the live app opened from search, generated a masked password, revealed and concealed it, invalidated that result on the mode change and generated a masked passphrase. A separate Password Generator window opened and its presentation was saved. Windows automation exposed only its frame in this session. The profile had exactly the mode and two option sets under password_generator. For the restart observation, the fixture's saved presentation alone was set back to docked. The live app loaded the saved passphrase mode with Copy disabled and no result. Both test processes were closed. Live Copy and history ingestion across restart remain unverified because the isolated profile shares the desktop clipboard and the separate window-station preflight failed in M8-A2.

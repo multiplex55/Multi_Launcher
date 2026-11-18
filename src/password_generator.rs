@@ -55,7 +55,8 @@ impl fmt::Display for GeneratorError {
 }
 impl std::error::Error for GeneratorError {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PasswordSettings {
     pub length: usize,
     pub uppercase: bool,
@@ -76,14 +77,16 @@ impl Default for PasswordSettings {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Capitalization {
     #[default]
     Lowercase,
     InitialUppercase,
     Uppercase,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Separator {
     #[default]
     Hyphen,
@@ -101,7 +104,8 @@ impl Separator {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PassphraseSettings {
     pub words: usize,
     pub separator: Separator,
@@ -120,6 +124,22 @@ impl Default for PassphraseSettings {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorMode {
+    #[default]
+    Password,
+    Passphrase,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct GeneratorPreferences {
+    pub mode: GeneratorMode,
+    pub password: PasswordSettings,
+    pub passphrase: PassphraseSettings,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SecretResultId(u64);
 
@@ -197,6 +217,12 @@ fn classes(settings: &PasswordSettings) -> Result<Vec<Vec<u8>>, GeneratorError> 
     }
     Ok(classes)
 }
+pub(crate) fn validate_password_settings(
+    settings: &PasswordSettings,
+) -> Result<(), GeneratorError> {
+    classes(settings).map(|_| ())
+}
+
 /// Exact cardinality of length-n strings containing at least one character
 /// from each disjoint class, via inclusion-exclusion.
 fn constrained_count(sizes: &[usize], length: usize) -> BigUint {
@@ -320,11 +346,23 @@ fn pool() -> Result<&'static [&'static str], GeneratorError> {
         .map(Vec::as_slice)
         .map_err(|e| *e)
 }
-pub fn passphrase_entropy_bits(settings: &PassphraseSettings) -> Result<u64, GeneratorError> {
+fn passphrase_pool(
+    settings: &PassphraseSettings,
+) -> Result<&'static [&'static str], GeneratorError> {
     if !PASSPHRASE_WORD_RANGE.contains(&settings.words) {
         return Err(GeneratorError::InvalidLength);
     }
-    let mut count = BigUint::from(pool()?.len()).pow(settings.words as u32);
+    pool()
+}
+
+pub(crate) fn validate_passphrase_settings(
+    settings: &PassphraseSettings,
+) -> Result<(), GeneratorError> {
+    passphrase_pool(settings).map(|_| ())
+}
+
+pub fn passphrase_entropy_bits(settings: &PassphraseSettings) -> Result<u64, GeneratorError> {
+    let mut count = BigUint::from(passphrase_pool(settings)?.len()).pow(settings.words as u32);
     if settings.suffix_digit {
         count *= BigUint::from(DIGITS.len());
     }

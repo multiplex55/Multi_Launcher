@@ -63,6 +63,7 @@ pub trait DialogCommandHost {
     fn open_date_time_studio_dialog(&mut self) {}
     fn open_diagram_studio_dialog(&mut self) {}
     fn open_markdown_studio_dialog(&mut self) {}
+    fn open_password_generator_dialog(&mut self) {}
     fn open_help_dialog(&mut self);
     fn open_timer_dialog(&mut self);
     fn open_alarm_dialog(&mut self);

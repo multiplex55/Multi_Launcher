@@ -442,6 +442,9 @@ fn execute_with_external(
         Command::Dialog(DialogCommand::DiagramStudio) => {
             anyhow::bail!("Diagram Studio requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::PasswordGenerator) => {
+            anyhow::bail!("Password Generator requires the launcher interface")
+        }
         Command::Dialog(DialogCommand::MarkdownStudio) => {
             anyhow::bail!("Markdown Studio requires the launcher interface")
         }
