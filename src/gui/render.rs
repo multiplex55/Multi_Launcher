@@ -6051,8 +6051,17 @@ impl LauncherApp {
             .pinned_panels
             .contains(&super::Panel::CalculationChartDialog);
         let runtime = self.calculation_pad_dialog.chart_runtime(pinned);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationChart, instance } if owner && popup.is_none() => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("calculation-chart", instance),
+                super::jump_mode::TargetGeneration(instance),
+                "calculation-pad-charts/form", ctx.viewport_id(), navigation_owner, false,
+            ),
+            _ => None,
+        };
         self.calculation_chart_host
-            .configure_jump(&self.jump_mode_ui, false);
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.calculation_chart_host.show(
             ctx,
             &mut self.calculation_chart_dialog,
@@ -6062,14 +6071,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
@@ -9837,6 +9846,7 @@ impl LauncherApp {
                         | super::Panel::SnippetDialog
                         | super::Panel::ClipboardDialog
                         | super::Panel::JsonUtilityDialog
+                        | super::Panel::CalculationChartDialog
                         | super::Panel::ZipExtractorDialog
                         | super::Panel::RegexTesterDialog
                         | super::Panel::XmlToolkitDialog
@@ -9910,6 +9920,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
                 self.json_utility_dialog.open && self.json_utility_host.root_layer().is_some(),
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::CalculationChart,
+                self.calculation_chart_dialog.open && self.calculation_chart_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
@@ -10041,6 +10055,7 @@ impl LauncherApp {
                         self.clipboard_history_host.root_layer()
                     }
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
+                    NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
                     NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
                     _ => None,
                 }),
@@ -10078,6 +10093,8 @@ impl LauncherApp {
                         self.clipboard_history_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::JsonUtility {
                         self.json_utility_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::CalculationChart {
+                        self.calculation_chart_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::Snippets {
                         self.snippet_window_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MouseSettings {
@@ -23373,6 +23390,48 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
             "a second completion does not emit the same copy twice"
         );
+    }
+
+    #[test]
+    fn chart_jump_targets_follow_docked_and_native_owner() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("values = [1, 2]");
+        app.focus_panel(super::super::Panel::CalculationChartDialog);
+        for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+        let layer = app.calculation_chart_host.root_layer().unwrap();
+        let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+        let point = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+        for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(point, pressed), false).drop_without_applying_deltas(); }
+        for _ in 0..12 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+        let instance = app.jump_mode_ui.dialog_instance(NavigationDialogKind::CalculationChart).unwrap();
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationChart, instance }, "top={:?} focus={:?} chart={layer:?}", super::super::jump_mode::ui::visible_top_middle_layer(&ctx), super::super::jump_mode::ui::focused_response_layer(&ctx));
+        let target = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "X label").cloned().unwrap_or_else(|| panic!("chart label target: labels={:?}, area={:?}, chart_open={}", app.jump_mode_ui.retained_registry().targets().iter().map(|target| target.metadata().label()).collect::<Vec<_>>(), ctx.memory(|memory| memory.area_rect(layer.id)), app.calculation_chart_dialog.open));
+        let before = app.calculation_pad_dialog.chart_runtime(false).definition;
+        let before_targets = app.jump_mode_ui.retained_registry().targets().iter().map(|target| format!("{:?}", target.id())).collect::<Vec<_>>();
+        let zoom_response = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Zoom out").map(|target| target.response_id());
+        let before_zoom = zoom_response.and_then(|id| ctx.read_response(id)).map(|response| response.rect);
+        run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false).drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some(), "owner={:?} outcome={:?} top={:?} focus={:?} zoom={:?}->{:?} before={:?} after={:?}", app.jump_mode_ui.frame_navigation_owner(), app.jump_mode_ui.last_outcome(), super::super::jump_mode::ui::visible_top_middle_layer(&ctx), super::super::jump_mode::ui::focused_response_layer(&ctx), before_zoom, zoom_response.and_then(|id| ctx.read_response(id)).map(|response| response.rect), before_targets, app.jump_mode_ui.retained_registry().targets().iter().map(|target| format!("{:?}", target.id())).collect::<Vec<_>>());
+        run_tool_dialog_frame(&ctx, &mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false).drop_without_applying_deltas();
+        let hint = dialog_hint_for_label(&app, "X label");
+        run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+        assert_eq!(app.calculation_pad_dialog.chart_runtime(false).definition, before);
+        for _ in 0..2 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+        let pop = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Pop Out").unwrap().clipped_rect();
+        for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop, pressed), false).drop_without_applying_deltas(); }
+        assert!(app.calculation_chart_host.root_layer().is_none());
+        let viewport = super::super::utility_window_host::CalculationChartWindowHost::test_viewport(app.calculation_chart_dialog.epoch());
+        for _ in 0..4 { super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || { app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0.drop_without_applying_deltas(); }); }
+        assert!(app.calculation_chart_host.test_native_target("X label").is_some());
+        }).unwrap().join().unwrap();
     }
 
     #[test]

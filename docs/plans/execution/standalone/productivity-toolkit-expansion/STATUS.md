@@ -29,7 +29,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-C1A | complete |
 | M4-C1B | complete |
 | M4-C1C | complete |
-| M4-C2 | pending |
+| M4-C2A1 | complete |
+| M4-C2A2, M4-C2B | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -200,3 +201,14 @@ cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P prod
 M4-C1B was pushed at 2f2e08bbc1122c4f0fc1b0ae304b15986ea1ba3e. Exact interval endpoints drive the shared scene, including the nominal final edge above the finite scalar range. The current-vector adapter selects Count or Percentage. Fixed display bounds clip geometry while retaining complete counts and interval membership. The reviewed fixes extend hover across the clipped bar, show exact representable-value membership, render valid log ticks over the finite portion of its exact domain, and exclude offscreen constant anchors. An interior shared-pixel-edge right-bin tie-break remains a small C2 follow-up.
 
 The initial frozen run exposed an assertion that treated zero-count-bin hover as unexpected. It was corrected to check the two nonempty bins and bounded zero-bin behavior. The final frozen-source command cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::chart::tests::histogram_scene_) | test(gui::calculation_chart_dialog::tests::histogram_adapter_) | test(calculation_pad::chart::tests::cumulative_scene_) | test(calculation_pad::chart::tests::chart_options_) | test(calculation_pad::chart::distribution::tests::)' passed 14 of 14. Diff whitespace verification passed. Companion controls remain pending.
+
+
+## M4-C2A1 chart keyboard ownership
+
+M4-C1C was pushed at 413fc31a25dc670decc28d17d73aca4b1ea80f92. Its initial histogram run passed 11, failed one incorrect assertion about zero-bin hits and canceled two. The same filter passed 14 of 14 after correction.
+
+The existing Jump Mode coordinator now recognizes docked and native Charts and registers the visible controls. Series targets follow the source identity across reorder. Selecting a hint focuses without editing the chart. Histogram hover favors the right bin at a shared interior pixel edge.
+
+The new retained app fixture initially overflowed the Windows test stack, so it runs on a 16 MiB test thread and disables both Paste Sequence shortcuts before application construction. One follow-up fixture clicked the chart collapse control. Registration diagnostics showed the layer was correctly owned while the collapsing content clipped its controls. The corrected title interaction passes and temporary instrumentation was removed.
+
+Final frozen-source cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::render::tests::chart_jump_targets_follow_docked_and_native_owner) | test(gui::jump_mode::ui::tests::expanded_dialog_layer_inventory_matches_actual_window_ids) | test(calculation_pad::chart::tests::histogram_shared_edge_hover_prefers_right_bin) | test(gui::calculation_chart_dialog::tests::chart_owned_popup_menus_) | test(gui::calculation_chart_dialog::tests::chart_series_jump_identity_)' passed 5 of 5. Diff whitespace verification passed.

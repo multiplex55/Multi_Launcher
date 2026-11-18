@@ -56,10 +56,11 @@ pub(crate) enum NavigationDialogKind {
     Activity,
     ZipExtractor,
     ClipboardModify,
+    CalculationChart,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 20] = [
+    pub(crate) const ALL: [Self; 21] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -80,6 +81,7 @@ impl NavigationDialogKind {
         Self::Activity,
         Self::ZipExtractor,
         Self::ClipboardModify,
+        Self::CalculationChart,
     ];
 
     const fn index(self) -> usize {
@@ -104,6 +106,7 @@ impl NavigationDialogKind {
             Self::Activity => 17,
             Self::ZipExtractor => 18,
             Self::ClipboardModify => 19,
+            Self::CalculationChart => 20,
         }
     }
 
@@ -129,6 +132,7 @@ impl NavigationDialogKind {
             Self::Activity => "activity",
             Self::ZipExtractor => "zip-extractor",
             Self::ClipboardModify => "clipboard-modify",
+            Self::CalculationChart => "calculation-chart",
         }
     }
 
@@ -157,6 +161,7 @@ impl NavigationDialogKind {
             Self::DuplicateFinder => egui::Id::new(Some("Duplicate Finder")),
             Self::Activity => egui::Id::new("activity_dialog"),
             Self::ZipExtractor => egui::Id::new("zip_extractor_dialog"),
+            Self::CalculationChart => egui::Id::new("calculation-chart-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -440,6 +445,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::ClipboardModify
+                    | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets
                     | NavigationDialogKind::XmlToolkit
@@ -480,6 +486,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::ClipboardModify
+                    | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets),
                 ..
@@ -4283,6 +4290,9 @@ mod tests {
                         egui::Window::new("JSON Utility")
                             .id(egui::Id::new("json_utility_dialog"))
                             .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::CalculationChart => {
+                        egui::Window::new("Charts").id(egui::Id::new("calculation-chart-window")).show(ctx, |_| {});
                     }
                     NavigationDialogKind::ZipExtractor => {
                         egui::Window::new("ZIP Extractor")

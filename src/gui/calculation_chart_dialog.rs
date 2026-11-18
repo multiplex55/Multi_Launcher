@@ -5,6 +5,10 @@ use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScen
 use eframe::egui;
 use std::sync::Arc;
 
+fn chart_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, order: &mut u64) {
+    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ChartStamp { Evaluation(EvaluationBasis), Sensitivity(SensitivityBasis), SensitivityWithEvaluation(SensitivityBasis, EvaluationBasis) }
 
@@ -89,14 +93,22 @@ impl CalculationChartDialog {
     }
 
     pub(super) fn render_host(&mut self, ctx: &egui::Context, runtime: &ChartRuntime, owner: bool, first: bool, child: Option<&mut egui::Ui>, presentation: UtilityPresentation) -> ChartActions {
+        self.render_host_with_jump(ctx, runtime, owner, first, child, presentation, None)
+    }
+
+    pub(super) fn render_host_with_jump(&mut self, ctx: &egui::Context, runtime: &ChartRuntime, owner: bool, first: bool, child: Option<&mut egui::Ui>, presentation: UtilityPresentation, scope: Option<&super::jump_mode::ui::JumpModeScope>) -> ChartActions {
+        use super::jump_mode::TargetKind;
         let mut actions = ChartActions { identity: runtime.identity, pad_host: runtime.pad_host, base: runtime.definition.clone(), evaluation: runtime.evaluation.as_ref().map(|value| value.basis), table: runtime.table.as_ref().map(|value| value.basis.clone()), basis: runtime.basis, viewport: Some(ctx.viewport_id()), ..Default::default() };
         let mut window_open = self.open;
+        let mut order = 0;
         let mut body = |ui: &mut egui::Ui| {
             let active = owner && first && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard();
             ui.horizontal(|ui| {
-                let (button, next) = super::utility_host::presentation_button(ui, presentation, active);
+                let (button, next) = super::utility_host::presentation_button(ui, presentation, owner);
+                chart_target(scope, ui, &button, "presentation", if presentation == UtilityPresentation::Docked { "Pop Out" } else { "Dock" }, TargetKind::Button, &mut order);
                 if active && button.clicked() { actions.host_request = Some(next); }
-                let close = ui.add_enabled(active && !runtime.pinned, egui::Button::new("Close"));
+                let close = ui.add_enabled(owner && !runtime.pinned, egui::Button::new("Close"));
+                chart_target(scope, ui, &close, "close", "Close", TargetKind::Button, &mut order);
                 if close.clicked() { actions.close = true; }
                 #[cfg(test)]
                 { actions.controls.push(("presentation".into(), button.rect)); actions.controls.push(("close".into(), close.rect)); }
@@ -107,15 +119,20 @@ impl CalculationChartDialog {
                 .map(|evaluation| vector_choices(evaluation)).unwrap_or_default();
             let mut definition = runtime.definition.clone().unwrap_or_else(|| ChartDefinition { source: ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0.clone()]).unwrap_or_default() }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new(), distribution: None, options: Default::default() });
             let original = definition.clone();
-            ui.add_enabled_ui(active, |ui| {
+            ui.add_enabled_ui(owner, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut definition.kind, ChartKind::Line, "Line");
-                    ui.selectable_value(&mut definition.kind, ChartKind::Bar, "Bar");
-                    ui.selectable_value(&mut definition.kind, ChartKind::Scatter, "Scatter");
+                    for (kind, name) in [(ChartKind::Line, "Line"), (ChartKind::Bar, "Bar"), (ChartKind::Scatter, "Scatter")] {
+                        let response = ui.selectable_value(&mut definition.kind, kind, name);
+                        chart_target(scope, ui, &response, &format!("kind/{name}"), name, TargetKind::Selectable, &mut order);
+                    }
                 });
                 ui.horizontal(|ui| {
-                    if ui.selectable_label(matches!(&definition.source, ChartSource::Vectors { .. }), "Vectors").clicked() { definition.source = ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0.clone()]).unwrap_or_default() }; }
-                    if ui.selectable_label(matches!(&definition.source, ChartSource::Sensitivity { .. }), "Sensitivity").clicked() { definition.source = ChartSource::Sensitivity { outputs: runtime.table.as_ref().map(|table| table.basis.definition.outputs.clone()).unwrap_or_default() }; }
+                    let response = ui.selectable_label(matches!(&definition.source, ChartSource::Vectors { .. }), "Vectors");
+                    chart_target(scope, ui, &response, "source/vectors", "Vectors", TargetKind::Selectable, &mut order);
+                    if response.clicked() { definition.source = ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0.clone()]).unwrap_or_default() }; }
+                    let response = ui.selectable_label(matches!(&definition.source, ChartSource::Sensitivity { .. }), "Sensitivity");
+                    chart_target(scope, ui, &response, "source/sensitivity", "Sensitivity", TargetKind::Selectable, &mut order);
+                    if response.clicked() { definition.source = ChartSource::Sensitivity { outputs: runtime.table.as_ref().map(|table| table.basis.definition.outputs.clone()).unwrap_or_default() }; }
                 });
                 match &mut definition.source {
                     ChartSource::Vectors { x, y } => {
@@ -124,6 +141,7 @@ impl CalculationChartDialog {
                             ui.selectable_value(x, None, "Indexes 0…N−1");
                             for (reference, label) in &vectors { let _response = ui.selectable_value(x, Some(reference.clone()), label); #[cfg(test)] actions.controls.push((format!("x/{label}"), _response.rect)); }
                         });
+                        chart_target(scope, ui, &response.response, "source/x", "X vector", TargetKind::Button, &mut order);
                         #[cfg(test)] actions.controls.push(("x-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
                         let response = ui.menu_button("Y vectors", |ui| {
@@ -141,12 +159,13 @@ impl CalculationChartDialog {
                             });
                             #[cfg(test)] actions.controls.push(("y-scroll".into(), _scroll.inner_rect));
                         });
+                        chart_target(scope, ui, &response.response, "source/y", "Y vectors", TargetKind::Button, &mut order);
                         #[cfg(test)] actions.controls.push(("y-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
                     }
-                    ChartSource::Sensitivity { outputs } => if let Some(table) = &runtime.table { let response = ui.menu_button("Y outputs", |ui| for name in &table.basis.definition.outputs { let mut selected = outputs.contains(name); let response = ui.checkbox(&mut selected, name); #[cfg(test)] actions.controls.push((format!("output/{name}"), response.rect)); if response.changed() { if selected && outputs.len() < 8 { outputs.push(name.clone()); } else if !selected { outputs.retain(|value| value != name); } } }); #[cfg(test)] actions.controls.push(("output-menu".into(), response.response.rect)); actions.popup_anchors.push((response.response.id, response.response.layer_id)); },
+                    ChartSource::Sensitivity { outputs } => if let Some(table) = &runtime.table { let response = ui.menu_button("Y outputs", |ui| for name in &table.basis.definition.outputs { let mut selected = outputs.contains(name); let response = ui.checkbox(&mut selected, name); #[cfg(test)] actions.controls.push((format!("output/{name}"), response.rect)); if response.changed() { if selected && outputs.len() < 8 { outputs.push(name.clone()); } else if !selected { outputs.retain(|value| value != name); } } }); chart_target(scope, ui, &response.response, "source/outputs", "Y outputs", TargetKind::Button, &mut order); #[cfg(test)] actions.controls.push(("output-menu".into(), response.response.rect)); actions.popup_anchors.push((response.response.id, response.response.layer_id)); },
                 }
-                ui.horizontal(|ui| { ui.label("X label"); ui.add(egui::TextEdit::singleline(&mut definition.x_label).char_limit(129).desired_width(100.0)); ui.label("Y label"); ui.add(egui::TextEdit::singleline(&mut definition.y_label).char_limit(129).desired_width(100.0)); });
+                ui.horizontal(|ui| { ui.label("X label"); let response = ui.add(egui::TextEdit::singleline(&mut definition.x_label).char_limit(129).desired_width(100.0)); chart_target(scope, ui, &response, "label/x", "X label", TargetKind::TextEntry, &mut order); ui.label("Y label"); let response = ui.add(egui::TextEdit::singleline(&mut definition.y_label).char_limit(129).desired_width(100.0)); chart_target(scope, ui, &response, "label/y", "Y label", TargetKind::TextEntry, &mut order); });
             });
             if definition.source != original.source {
                 let old = series_keys(&original.source);
@@ -170,7 +189,7 @@ impl CalculationChartDialog {
                 cache.as_ref().map(|cache| Arc::clone(&cache.dataset)).unwrap()
             };
             if !matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
-                ui.horizontal_wrapped(|ui| for (index, series) in dataset.series.iter().enumerate() { let mut visible = series.visible; if ui.checkbox(&mut visible, &series.label).changed() && active { if visible { definition.hidden.retain(|i| *i != index); } else if !definition.hidden.contains(&index) { definition.hidden.push(index); } actions.definition = Some(definition.clone()); } });
+                ui.horizontal_wrapped(|ui| for (index, series) in dataset.series.iter().enumerate() { let mut visible = series.visible; let response = ui.add_enabled(owner, egui::Checkbox::new(&mut visible, &series.label)); chart_target(scope, ui, &response, &series_target_id(&definition.source, index), &format!("Series: {}", series.label), TargetKind::Checkbox, &mut order); if response.changed() && active { if visible { definition.hidden.retain(|i| *i != index); } else if !definition.hidden.contains(&index) { definition.hidden.push(index); } actions.definition = Some(definition.clone()); } });
             }
             if definition.kind == ChartKind::Bar {
                 egui::CollapsingHeader::new("Bar labels").show(ui, |ui| {
@@ -189,9 +208,9 @@ impl CalculationChartDialog {
             }
             let mut view = if self.bound == runtime.identity { self.view } else { ChartView::default() };
             ui.horizontal(|ui| {
-                if ui.add_enabled(active, egui::Button::new("−")).clicked() { let _ = view.set(view.zoom_x / 1.2, view.zoom_y / 1.2, view.pan_x, view.pan_y); }
-                if ui.add_enabled(active, egui::Button::new("+")).clicked() { let _ = view.set(view.zoom_x * 1.2, view.zoom_y * 1.2, view.pan_x, view.pan_y); }
-                if ui.add_enabled(active, egui::Button::new("Reset View")).clicked() { view.reset(); }
+                let response = ui.add_enabled(owner, egui::Button::new("−")); chart_target(scope, ui, &response, "zoom/out", "Zoom out", TargetKind::Button, &mut order); if active && response.clicked() { let _ = view.set(view.zoom_x / 1.2, view.zoom_y / 1.2, view.pan_x, view.pan_y); }
+                let response = ui.add_enabled(owner, egui::Button::new("+")); chart_target(scope, ui, &response, "zoom/in", "Zoom in", TargetKind::Button, &mut order); if active && response.clicked() { let _ = view.set(view.zoom_x * 1.2, view.zoom_y * 1.2, view.pan_x, view.pan_y); }
+                let response = ui.add_enabled(owner, egui::Button::new("Reset View")); chart_target(scope, ui, &response, "zoom/reset", "Reset View", TargetKind::Button, &mut order); if active && response.clicked() { view.reset(); }
             });
             let width = ui.available_width().clamp(160.0, 1024.0) as u32;
             let height = 300;
@@ -211,7 +230,7 @@ impl CalculationChartDialog {
                     if response.dragged() && active { let delta = response.drag_delta(); let _ = view.set(view.zoom_x, view.zoom_y, view.pan_x - f64::from(delta.x) / f64::from(width), view.pan_y + f64::from(delta.y) / f64::from(height)); }
                     if let Some(pointer) = response.hover_pos() && let Some(hit) = scene.hit([(pointer.x - rect.min.x), (pointer.y - rect.min.y)], 8.0) { let x = hit.bin_bounds.as_ref().map_or_else(|| hit.raw_x.clone(), |bounds| bounds.membership_label()); response.on_hover_text(format!("{} · {}{}", x, hit.raw_y, if hit.approximate { " (approximate)" } else { "" })); }
                     if scene.approximate || scene.coordinate_collisions { ui.label("Plot coordinates are approximate; exact values remain in tooltips."); }
-                    if ui.add_enabled(active && actions.definition.is_none(), egui::Button::new("Copy Chart as Image")).clicked() { actions.copy = Some((stamp, definition.clone(), (*scene).clone())); }
+                    let response = ui.add_enabled(owner && actions.definition.is_none(), egui::Button::new("Copy Chart as Image")); chart_target(scope, ui, &response, "copy", "Copy Chart as Image", TargetKind::Button, &mut order); if active && response.clicked() { actions.copy = Some((stamp, definition.clone(), (*scene).clone())); }
                 }
                 Ok(None) => { ui.label("No data"); }
                 Err(error) => { ui.colored_label(ui.visuals().error_fg_color, error); }
@@ -355,6 +374,11 @@ fn series_keys(source: &ChartSource) -> Vec<String> {
     match source { ChartSource::Vectors { y, .. } => y.iter().map(|reference| match reference { ChartVectorReference::Physical(id) => format!("line:{}", id.get()), ChartVectorReference::Named { name } => format!("name:{name}") }).collect(), ChartSource::Sensitivity { outputs } => outputs.iter().map(|name| format!("output:{name}")).collect() }
 }
 
+fn series_target_id(source: &ChartSource, index: usize) -> String {
+    let keys = series_keys(source);
+    keys.get(index).map_or_else(|| format!("series/missing/{index}"), |key| format!("series/{:x}", egui::Id::new(key).value()))
+}
+
 fn paint_scene(ui: &egui::Ui, origin: egui::Pos2, scene: &ChartScene) {
     let painter = ui.painter();
     let color = |c: &[u8; 4]| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
@@ -370,6 +394,15 @@ fn paint_scene(ui: &egui::Ui, origin: egui::Pos2, scene: &ChartScene) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chart_series_jump_identity_follows_source_not_position() {
+        let reference = |name: &str| ChartVectorReference::Named { name: name.into() };
+        let first = ChartSource::Vectors { x: None, y: vec![reference("alpha"), reference("beta")] };
+        let reordered = ChartSource::Vectors { x: None, y: vec![reference("beta"), reference("alpha")] };
+        assert_eq!(series_target_id(&first, 0), series_target_id(&reordered, 1));
+        assert_ne!(series_target_id(&first, 0), series_target_id(&reordered, 0));
+    }
 
     #[test]
     fn cumulative_adapter_uses_current_vector_even_with_dormant_sensitivity() {

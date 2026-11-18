@@ -610,6 +610,21 @@ mod tests {
     }
 
     #[test]
+    fn histogram_shared_edge_hover_prefers_right_bin() {
+        use distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        let mut definition = chart_definition_for(ChartKind::Histogram);
+        let spec = DistributionDefinition { vector: ChartVectorReference::Named { name: "values".into() }, bins: DistributionBins::Count { count: 2 }, scale: DistributionScale::Count };
+        definition.distribution = Some(spec.clone());
+        let dataset = ChartDataset::from_histogram("values", &[0.0, 1.0, 2.0], &spec).unwrap();
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        let left = scene.hits.iter().find(|hit| hit.row == 0).unwrap().region.unwrap();
+        let right = scene.hits.iter().find(|hit| hit.row == 1).unwrap().region.unwrap();
+        assert_eq!(left[2], right[0]);
+        assert_eq!(scene.hit([right[0], left[3]], 0.0).unwrap().row, 1);
+        assert_eq!(scene.hit([right[2], right[3]], 0.0).unwrap().row, 1);
+    }
+
+    #[test]
     fn chart_appearance_and_reference_share_raster_scene() {
         let dataset = ChartDataset::from_vectors(Some(&[1.0, 2.0, 3.0]), &[("values", &[1.0, 2.0, 3.0])]).unwrap();
         let mut definition = chart_definition_for(ChartKind::Line);
@@ -1148,10 +1163,12 @@ impl ChartScene {
                 } else { (hit.position[0] - position[0], hit.position[1] - position[1]) };
                 let distance = dx * dx + dy * dy;
                 let tie = (hit.position[0] - position[0]).abs();
-                (distance <= radius * radius).then_some((distance, tie, hit))
+                // Adjacent histogram intervals exclude the left bin's upper edge.
+                let edge_rank = usize::from(!hit.region.is_some_and(|[left, _, right, _]| position[0] == left && left < right));
+                (distance <= radius * radius).then_some((distance, edge_rank, tie, hit))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)))
-            .map(|(_, _, hit)| hit)
+            .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.total_cmp(&b.2)))
+            .map(|(_, _, _, hit)| hit)
     }
 
     pub(crate) fn rasterize(&self) -> Result<image::RgbaImage, String> {

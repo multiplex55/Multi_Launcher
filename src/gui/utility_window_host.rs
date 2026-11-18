@@ -3040,11 +3040,14 @@ pub(super) enum CalculationChartHostCommand {
     Apply(super::calculation_chart_dialog::ChartActions),
 }
 impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::CalculationChart);
     const KEY: &'static str = "calculation-pad-charts";
+    const SURFACE_KIND: &'static str = "calculation-chart";
     const TITLE: &'static str = "Charts";
     const SIZE: egui::Vec2 = egui::vec2(560.0, 500.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
     const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     type Runtime = super::calculation_chart_dialog::ChartRuntime;
     type Actions = super::calculation_chart_dialog::ChartActions;
     type Checkpoint = ();
@@ -3055,9 +3058,6 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
             egui::Id::new("calculation-chart-window"),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
@@ -3065,7 +3065,7 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
         self.epoch()
     }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -3100,7 +3100,7 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -3110,7 +3110,7 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, parent, first, child, presentation)
+        self.render_host_with_jump(ctx, runtime, parent, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
