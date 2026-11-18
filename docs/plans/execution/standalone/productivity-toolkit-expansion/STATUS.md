@@ -82,7 +82,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M11-A | complete |
 | M11-B | complete |
 | M11-C | in_progress |
-| M11-D | pending |
+| M11-D | in_progress |
 | M12-A, M12-B | pending |
 | M13-A | pending |
 
@@ -631,3 +631,14 @@ The Inbox defaults to Off and initializes no WinRT access service while disabled
 The optional Windows SDK script copies the ordinary executable, retains an existing Win32 manifest when present, embeds the matching sparse identity, and packages the capability. Deployment and exact removal are documented separately. The script does not install the package, purchase signing or change trust. SDK version 10.0.26100.0 produced the expected unsigned package (`4FED825DBA98C4BCDE41250F1C09E6BFD2E8997A8D120502540CC40DC5F20E0C`) from the checked-in script with an unchanged ordinary executable. A separately staged native foreground probe verified its embedded manifest bytes. A disposable external synthetic sender is compiled for M11-D. Neither probe nor sender has been installed, trusted or run.
 
 Four scoped automated checks passed (cb62ed72-c818-4594-9992-b5c8c7920ab8), including unpackaged aliases, disabled WinRT behavior, exact identity validation and real internal transfer operation. Independent review found no actionable source issues. M11-C remains in progress because actual signed-package Win32 consent still needs authorized temporary certificate trust and native observation. Microsoft documents that some WinRT consent methods are unavailable in desktop processes. The unsigned package and tests do not prove that this listener's permission works on this host.
+
+
+### M11-D Windows listener and exact current-item actions
+
+The existing Inbox worker owns the optional notification subscription and bounded current-toast reads. Permission is checked before reads, during large batches and before adopting results. Change callbacks coalesce work, a bounded periodic refresh checks permission and missed changes, and unchanged checks do not repaint. Coverage reports Off, Setup required, Permission not granted, Denied, Active, Disconnected, Unsupported or Error and states when collection began. Limited snapshots never imply source removal. The adapter filters its own app identities and bounds each observation to 512 items and 1 MiB of normalized input. The authorized debug signing identity additionally filters to the one synthetic sender before retrieving notification text.
+
+The local projection keeps read/pin metadata across source content updates and distinguishes reused Windows IDs by creation time. Source actions recheck current app, notification ID, creation time and Windows permission. Dismissal with text enabled also rechecks current title and body. The native API only accepts a numeric ID for the final call, so Windows provides no atomic identity-and-version fence. The UI reports a dismissal request separately from a subsequent observed removal. Opening a supported source validates an installed package identity through Windows and supplies no launch arguments.
+
+The 37-test Inbox/backup run passed (d3975fba-a926-49b8-be06-393ba4a17a7d). Review identified the in-place source update window. After adding current text checks and removing redundant idle repainting and GUI permission polling, 14 scoped checks passed (b8ee9b28-21eb-4207-b53a-232ee7013e41). These included stale/missing dismissal text, ID reuse, incomplete snapshots, bounded UTF-16 handling, unpublished idle state and ordinary internal operations.
+
+After explicit approval for Current User trust, the SDK signed the exact short-lived non-exportable fixture package (SHA-256 `593C80368142F6A7D8BB0B3B11D2CBA8B30AFDEF687FFF5AC6502FFA64C495AB`). Windows 10 build 19045 `Add-AppxPackage` rejected it with `0x80073CF0` and inner signature error `0x800B0109` despite the exact public certificate in Current User Trusted People. The import was rolled back and no fixture package is installed. The in-progress C/D native acceptance requires a signed installation with trust recognized by Windows, actual permission and the independent synthetic toast. Temporary Local Computer Trusted People authorization is a separate security decision.

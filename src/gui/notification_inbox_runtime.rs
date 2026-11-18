@@ -9,7 +9,7 @@ use super::{LauncherApp, Panel};
 use crate::commands::DialogCommandHost;
 use crate::notifications::{
     Category, FactId, InboxCommandOutcome, InternalEvent, InternalFact, Record, RelatedItem,
-    Status, SubmitError, unix_now,
+    Status, SubmitError, WindowsAccess, unix_now,
 };
 use eframe::egui;
 use egui_toast::ToastKind;
@@ -41,10 +41,7 @@ impl LauncherApp {
             .notification_inbox
             .as_ref()
             .is_some_and(|service| service.snapshot().inbox.settings().external_enabled);
-        if let Some(delay) = self
-            .notification_windows_consent
-            .tick(enabled, std::time::Instant::now())
-        {
+        if let Some(delay) = self.notification_windows_consent.tick(enabled) {
             ctx.request_repaint_after(delay);
         }
     }
@@ -126,6 +123,16 @@ impl LauncherApp {
             self.notification_request = None;
         }
 
+        let mut windows_capture = snapshot
+            .as_ref()
+            .map_or_else(Default::default, |view| view.windows_capture);
+        if windows_capture.access == WindowsAccess::PermissionNotGranted {
+            let consent = self.notification_windows_consent.access();
+            if matches!(consent, WindowsAccess::Requesting | WindowsAccess::Denied) {
+                windows_capture.access = consent;
+            }
+        }
+
         let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
         let layer = self.notification_inbox_host.root_layer();
         let parent_owner = root_input
@@ -166,7 +173,7 @@ impl LauncherApp {
                 notice: self.notification_notice.clone(),
                 now_unix: Some(unix_now()),
                 busy: self.notification_request.is_some(),
-                windows_access: self.notification_windows_consent.access(),
+                windows_capture,
             },
             HostInput {
                 first,
@@ -397,6 +404,13 @@ fn receipt_notice(outcome: InboxCommandOutcome) -> Option<&'static str> {
         Outcome::SnoozeFailed => {
             Some("The reminder could not be snoozed. It may have changed or expired.")
         }
+        Outcome::SourceOpened => Some("Windows opened the source app."),
+        Outcome::SourceDismissRequested => {
+            Some("Windows accepted the request to dismiss this notification.")
+        }
+        Outcome::SourceUnavailable => Some(
+            "The source action is unavailable. Windows may have removed the notification or revoked access.",
+        ),
         Outcome::StoreFailed => Some("The Inbox could not save this change."),
     }
 }

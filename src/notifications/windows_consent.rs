@@ -8,6 +8,8 @@ pub(crate) enum WindowsAccess {
     Requesting,
     Denied,
     Allowed,
+    Active,
+    Disconnected,
     Unsupported,
     Error,
 }
@@ -21,6 +23,8 @@ impl WindowsAccess {
             Self::Requesting => "Waiting for Windows consent",
             Self::Denied => "Denied",
             Self::Allowed => "Permission granted",
+            Self::Active => "Active",
+            Self::Disconnected => "Disconnected",
             Self::Unsupported => "Unsupported",
             Self::Error => "Error",
         }
@@ -30,11 +34,7 @@ impl WindowsAccess {
 #[cfg(windows)]
 mod native {
     use super::WindowsAccess;
-    use std::{
-        marker::PhantomData,
-        rc::Rc,
-        time::{Duration, Instant},
-    };
+    use std::{marker::PhantomData, rc::Rc, time::Duration};
     use windows::{
         Foundation::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation},
         UI::Notifications::Management::{
@@ -75,7 +75,7 @@ mod native {
         valid_family && application.strip_prefix(family) == Some("!MultiLauncher")
     }
 
-    pub(super) fn runtime_aumid() -> Result<Option<String>, WindowsAccess> {
+    pub(crate) fn runtime_aumid() -> Result<Option<String>, WindowsAccess> {
         let mut family = [0u16; 128];
         let mut family_size = family.len() as u32;
         // Both writable buffers have the capacity supplied to their respective APIs.
@@ -110,7 +110,7 @@ mod native {
         Ok(inbox_identity(&family, &application).then_some(application))
     }
 
-    fn status(access: UserNotificationListenerAccessStatus) -> WindowsAccess {
+    pub(crate) fn access_status(access: UserNotificationListenerAccessStatus) -> WindowsAccess {
         if access == UserNotificationListenerAccessStatus::Allowed {
             WindowsAccess::Allowed
         } else if access == UserNotificationListenerAccessStatus::Denied {
@@ -121,7 +121,7 @@ mod native {
             WindowsAccess::Unsupported
         }
     }
-    fn error(error: Error) -> WindowsAccess {
+    pub(crate) fn windows_error(error: Error) -> WindowsAccess {
         match error.code() {
             E_NOTIMPL | REGDB_E_CLASSNOTREG => WindowsAccess::Unsupported,
             _ => WindowsAccess::Error,
@@ -132,7 +132,7 @@ mod native {
     impl ForegroundApartment {
         fn initialize() -> Result<Self, WindowsAccess> {
             // The app owns this STA initialization on its UI thread.
-            unsafe { RoInitialize(RO_INIT_SINGLETHREADED) }.map_err(error)?;
+            unsafe { RoInitialize(RO_INIT_SINGLETHREADED) }.map_err(windows_error)?;
             Ok(Self(PhantomData))
         }
     }
@@ -148,7 +148,6 @@ mod native {
         pending: Option<IAsyncOperation<UserNotificationListenerAccessStatus>>,
         listener: Option<UserNotificationListener>,
         apartment: Option<ForegroundApartment>,
-        last_check: Option<Instant>,
         access: WindowsAccess,
     }
 
@@ -157,46 +156,23 @@ mod native {
             self.access
         }
 
-        pub(crate) fn tick(&mut self, enabled: bool, now: Instant) -> Option<Duration> {
+        pub(crate) fn tick(&mut self, enabled: bool) -> Option<Duration> {
             if !enabled {
                 self.stop();
                 return None;
             }
-            if let Some(operation) = &self.pending {
-                match operation.Status() {
-                    Ok(AsyncStatus::Started) => return Some(REFRESH),
-                    Ok(AsyncStatus::Completed) => {
-                        self.access = operation.GetResults().map(status).unwrap_or_else(error);
-                        self.pending = None;
-                        self.last_check = Some(now);
-                        return Some(REFRESH);
-                    }
-                    Ok(_) | Err(_) => {
-                        self.pending = None;
-                        self.access = WindowsAccess::Error;
-                        self.last_check = Some(now);
-                        return Some(REFRESH);
-                    }
-                }
-            }
-            if let Some(last) = self.last_check {
-                let remaining = REFRESH.saturating_sub(now.saturating_duration_since(last));
-                if !remaining.is_zero() {
-                    return Some(remaining);
-                }
-            }
-            self.last_check = Some(now);
-            self.access = match self.initialize() {
-                Ok(()) => self
-                    .listener
-                    .as_ref()
-                    .map_or(WindowsAccess::Error, |listener| {
-                        listener.GetAccessStatus().map(status).unwrap_or_else(error)
-                    }),
-                Err(access) => access,
+            let operation = self.pending.as_ref()?;
+            self.access = match operation.Status() {
+                Ok(AsyncStatus::Started) => return Some(REFRESH),
+                Ok(AsyncStatus::Completed) => operation
+                    .GetResults()
+                    .map(access_status)
+                    .unwrap_or_else(windows_error),
+                Ok(_) | Err(_) => WindowsAccess::Error,
             };
-            // Setup does not change for a running executable.
-            (self.access != WindowsAccess::SetupRequired).then_some(REFRESH)
+            self.pending = None;
+            self.release_platform();
+            None
         }
 
         pub(crate) fn request(
@@ -204,13 +180,7 @@ mod native {
             enabled: bool,
             wake: impl Fn() + Send + 'static,
         ) -> Result<(), &'static str> {
-            if !enabled
-                || self.pending.is_some()
-                || !matches!(
-                    self.access,
-                    WindowsAccess::PermissionNotGranted | WindowsAccess::Denied
-                )
-            {
+            if !enabled || self.pending.is_some() {
                 return Err("Windows access cannot be requested in the current Inbox state.");
             }
             // Request consent only on the foreground launcher window's UI thread.
@@ -220,13 +190,29 @@ mod native {
             {
                 return Err("Focus the Inbox window before requesting Windows access.");
             }
+            self.initialize().map_err(|access| {
+                self.access = access;
+                "The Windows notification listener is unavailable."
+            })?;
             let Some(listener) = &self.listener else {
                 return Err("The Windows notification listener is unavailable.");
             };
-            let operation = listener.RequestAccessAsync().map_err(|failure| {
-                self.access = error(failure);
-                "Windows could not start the notification access request."
-            })?;
+            self.access = listener
+                .GetAccessStatus()
+                .map(access_status)
+                .unwrap_or_else(windows_error);
+            if self.access != WindowsAccess::PermissionNotGranted {
+                self.release_platform();
+                return Err("Windows access cannot be requested in the current Inbox state.");
+            }
+            let operation = match listener.RequestAccessAsync() {
+                Ok(operation) => operation,
+                Err(failure) => {
+                    self.access = windows_error(failure);
+                    self.release_platform();
+                    return Err("Windows could not start the notification access request.");
+                }
+            };
             let handler = AsyncOperationCompletedHandler::new(move |_, _| {
                 wake();
                 Ok(())
@@ -242,10 +228,13 @@ mod native {
             if let Some(operation) = self.pending.take() {
                 let _ = operation.Cancel();
             }
+            self.release_platform();
+            self.access = WindowsAccess::Off;
+        }
+
+        fn release_platform(&mut self) {
             self.listener = None;
             self.apartment = None;
-            self.last_check = None;
-            self.access = WindowsAccess::Off;
         }
 
         fn initialize(&mut self) -> Result<(), WindowsAccess> {
@@ -256,7 +245,7 @@ mod native {
                 return Err(WindowsAccess::SetupRequired);
             }
             let apartment = ForegroundApartment::initialize()?;
-            let listener = UserNotificationListener::Current().map_err(error)?;
+            let listener = UserNotificationListener::Current().map_err(windows_error)?;
             self.apartment = Some(apartment);
             self.listener = Some(listener);
             Ok(())
@@ -282,7 +271,7 @@ mod native {
         #[test]
         fn notification_inbox_windows_disabled_consent_never_initializes_winrt() {
             let mut consent = WindowsConsent::default();
-            assert_eq!(consent.tick(false, Instant::now()), None);
+            assert_eq!(consent.tick(false), None);
             assert_eq!(consent.access(), WindowsAccess::Off);
             assert!(
                 consent
@@ -297,6 +286,8 @@ mod native {
 
 #[cfg(windows)]
 pub(crate) use native::WindowsConsent;
+#[cfg(windows)]
+pub(super) use native::{access_status, runtime_aumid, windows_error};
 
 #[cfg(not(windows))]
 #[derive(Default)]
@@ -305,11 +296,7 @@ pub(crate) struct WindowsConsent {
 }
 #[cfg(not(windows))]
 impl WindowsConsent {
-    pub(crate) fn tick(
-        &mut self,
-        enabled: bool,
-        _: std::time::Instant,
-    ) -> Option<std::time::Duration> {
+    pub(crate) fn tick(&mut self, enabled: bool) -> Option<std::time::Duration> {
         self.access = if enabled {
             WindowsAccess::Unsupported
         } else {

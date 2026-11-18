@@ -1,7 +1,8 @@
 //! Profile-owned worker for bounded, typed Inbox changes.
 use super::{
     ActionKind, Category, FactId, Inbox, InboxStore, Ingest, InternalFact, Record, RelatedItem,
-    Settings, Source, Status, create_todo_from_action,
+    Settings, Source, Status, WindowsCapture, WindowsCaptureView, WindowsSourceAction,
+    create_todo_from_action,
 };
 use crate::platform::app_data::AppDataRoot;
 use crate::plugins::calendar::CalendarInboxReminders;
@@ -51,6 +52,10 @@ pub(crate) enum InboxCommand {
         expected: Record,
         minutes: u8,
     },
+    WindowsAction {
+        expected: Record,
+        action: WindowsSourceAction,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SubmitError {
@@ -76,6 +81,9 @@ pub(crate) enum InboxCommandOutcome {
     TodoFailed,
     Snoozed,
     SnoozeFailed,
+    SourceOpened,
+    SourceDismissRequested,
+    SourceUnavailable,
     StoreFailed,
 }
 #[derive(Clone, Debug)]
@@ -89,6 +97,7 @@ pub(crate) struct InboxServiceSnapshot {
     pub persistence: PersistenceStatus,
     pub dropped_events: u64,
     pub calendar_warning: bool,
+    pub windows_capture: WindowsCaptureView,
     pub receipts: Arc<[InboxCommandReceipt]>,
 }
 impl Default for InboxServiceSnapshot {
@@ -98,6 +107,7 @@ impl Default for InboxServiceSnapshot {
             persistence: PersistenceStatus::Loading,
             dropped_events: 0,
             calendar_warning: false,
+            windows_capture: WindowsCaptureView::default(),
             receipts: Arc::from([]),
         }
     }
@@ -271,7 +281,7 @@ fn bounded_command(command: &InboxCommand) -> bool {
         InboxCommand::Snooze { expected, minutes } => {
             bounded_id(&expected.id) && matches!(minutes, 5 | 10 | 15)
         }
-        InboxCommand::CreateTodo { expected } => {
+        InboxCommand::CreateTodo { expected } | InboxCommand::WindowsAction { expected, .. } => {
             bounded_id(&expected.id)
                 && bounded_related(expected.related.as_ref())
                 && match &expected.content {
@@ -311,6 +321,7 @@ fn publish(
     persistence: PersistenceStatus,
     receipts: &VecDeque<InboxCommandReceipt>,
     calendar_warning: bool,
+    windows_capture: WindowsCaptureView,
 ) {
     let mut view = store.inbox().clone();
     view.prune(now());
@@ -319,6 +330,7 @@ fn publish(
         persistence,
         dropped_events: shared.dropped.load(Ordering::Relaxed),
         calendar_warning,
+        windows_capture,
         receipts: receipts.iter().cloned().collect::<Vec<_>>().into(),
     };
     *shared.snapshot.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snapshot);
@@ -339,6 +351,13 @@ fn run(
     let mut calendar = None;
     let mut calendar_deadline: Option<chrono::NaiveDateTime> = None;
     let mut calendar_warning = false;
+    let mut windows = WindowsCapture::default();
+    let callback_owner = Arc::downgrade(&shared);
+    let source_wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if let Some(owner) = callback_owner.upgrade() {
+            let _ = owner.enqueue(Message::Wake);
+        }
+    });
 
     prune_due(&mut store, &mut persistence, &mut expiry_retry);
     publish(
@@ -348,6 +367,7 @@ fn run(
         persistence,
         &receipts,
         calendar_warning,
+        windows.view(),
     );
     loop {
         let stopped = shared.stopped.load(Ordering::Acquire);
@@ -402,7 +422,33 @@ fn run(
                 persistence,
                 &receipts,
                 calendar_warning,
+                windows.view(),
             );
+        }
+        let previous_capture = windows.view();
+        if stopped {
+            if previous_capture != WindowsCaptureView::default() {
+                windows.stop();
+            }
+        } else {
+            let prior_write = store.write_generation();
+            let update = windows.tick(&mut store, &source_wake);
+            if update.is_err() {
+                persistence = PersistenceStatus::WriteFailed;
+            } else if store.write_generation() != prior_write {
+                persistence = PersistenceStatus::Durable;
+            }
+            if update.unwrap_or(true) || windows.view() != previous_capture {
+                publish(
+                    &shared,
+                    &wake,
+                    &store,
+                    persistence,
+                    &receipts,
+                    calendar_warning,
+                    windows.view(),
+                );
+            }
         }
         let message = if stopped {
             match receiver.try_recv() {
@@ -424,7 +470,10 @@ fn run(
                     .to_std()
                     .unwrap_or_default()
             });
-            let wait = [expiry_wait, calendar_wait].into_iter().flatten().min();
+            let wait = [expiry_wait, calendar_wait, windows.wait()]
+                .into_iter()
+                .flatten()
+                .min();
             match wait {
                 Some(wait) => match receiver.recv_timeout(wait) {
                     Ok(message) => Some(message),
@@ -439,7 +488,11 @@ fn run(
         };
 
         // Apply retention before even a busy command stream can act on a row.
-        prune_due(&mut store, &mut persistence, &mut expiry_retry);
+        let expired = prune_due(&mut store, &mut persistence, &mut expiry_retry);
+        let worked = matches!(
+            message.as_ref(),
+            Some(Message::Event(_) | Message::Command(..))
+        );
         let prior_write = store.write_generation();
         match message {
             None | Some(Message::Wake) => {}
@@ -450,7 +503,12 @@ fn run(
                 }
             }
             Some(Message::Command(request, command)) => {
-                let outcome = apply_command(&mut store, &profile, calendar.as_mut(), command);
+                let outcome = match command {
+                    InboxCommand::WindowsAction { expected, action } => {
+                        apply_windows_action(&store, &mut windows, &expected, action)
+                    }
+                    _ => apply_command(&mut store, &profile, calendar.as_mut(), command),
+                };
                 if outcome == InboxCommandOutcome::StoreFailed {
                     persistence = PersistenceStatus::WriteFailed;
                 }
@@ -466,14 +524,17 @@ fn run(
         if store.write_generation() != prior_write {
             persistence = PersistenceStatus::Durable;
         }
-        publish(
-            &shared,
-            &wake,
-            &store,
-            persistence,
-            &receipts,
-            calendar_warning,
-        );
+        if expired || worked {
+            publish(
+                &shared,
+                &wake,
+                &store,
+                persistence,
+                &receipts,
+                calendar_warning,
+                windows.view(),
+            );
+        }
     }
 }
 
@@ -495,12 +556,12 @@ fn prune_due(
     store: &mut InboxStore,
     status: &mut PersistenceStatus,
     retry_at: &mut Option<Instant>,
-) {
+) -> bool {
     let current = now();
     if !next_expiry(store.inbox(), current).is_some_and(|due| due.is_zero())
         || retry_at.is_some_and(|due| due > Instant::now())
     {
-        return;
+        return false;
     }
     let prior_write = store.write_generation();
     if store.transact(|inbox| inbox.prune(current)).is_err() {
@@ -512,6 +573,7 @@ fn prune_due(
             *status = PersistenceStatus::Durable;
         }
     }
+    true
 }
 
 fn apply_command(
@@ -621,12 +683,47 @@ fn apply_command(
                         O::Invalid
                     }
                 }
-                InboxCommand::CreateTodo { .. } | InboxCommand::Snooze { .. } => unreachable!(),
+                InboxCommand::CreateTodo { .. }
+                | InboxCommand::Snooze { .. }
+                | InboxCommand::WindowsAction { .. } => unreachable!(),
             }
         }) {
             Ok(result) => result,
             Err(_) => O::StoreFailed,
         },
+    }
+}
+
+fn apply_windows_action(
+    store: &InboxStore,
+    windows: &mut WindowsCapture,
+    expected: &Record,
+    action: WindowsSourceAction,
+) -> InboxCommandOutcome {
+    use InboxCommandOutcome as O;
+    let inbox = store.inbox();
+    let settings = inbox.settings();
+    let FactId::Windows { app, .. } = &expected.id else {
+        return O::Invalid;
+    };
+    if !settings.external_enabled
+        || settings.excluded.contains(&Source::Windows)
+        || settings.excluded_apps.contains(app)
+        || expired(inbox, expected)
+        || inbox
+            .records()
+            .iter()
+            .find(|record| record.id == expected.id)
+            != Some(expected)
+    {
+        return O::Stale;
+    }
+    if !windows.action(expected, action, settings.retain_external_text) {
+        return O::SourceUnavailable;
+    }
+    match action {
+        WindowsSourceAction::Open => O::SourceOpened,
+        WindowsSourceAction::Dismiss => O::SourceDismissRequested,
     }
 }
 

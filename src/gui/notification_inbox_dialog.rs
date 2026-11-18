@@ -12,7 +12,7 @@ use crate::gui::{
 };
 use crate::notifications::{
     Category, Content, FactId, InboxCommand, InboxServiceSnapshot, PersistenceStatus, Record,
-    RelatedItem, Settings, Source, Status, WindowsAccess,
+    RelatedItem, Settings, Source, Status, WindowsAccess, WindowsCaptureView, WindowsSourceAction,
 };
 use eframe::egui;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ pub(super) struct Runtime {
     /// Current Unix time for relative-date filtering.
     pub now_unix: Option<i64>,
     pub busy: bool,
-    pub windows_access: WindowsAccess,
+    pub windows_capture: WindowsCaptureView,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum ReadFilter {
@@ -121,6 +121,7 @@ enum Intent {
     OpenRelated,
     CreateTodo,
     Snooze(u8),
+    WindowsAction(WindowsSourceAction),
     ApplySettings,
     RequestWindowsAccess,
     BeginClear(ClearTarget),
@@ -326,6 +327,11 @@ impl HostedUtilityDialog for NotificationInboxDialog {
                 Command::OpenRelated(record)
             }
             Intent::CreateTodo => Command::Submit(InboxCommand::CreateTodo { expected: record }),
+            Intent::WindowsAction(action) if matches!(&record.id, FactId::Windows { .. })
+                && record.status == Status::Current =>
+            {
+                Command::Submit(InboxCommand::WindowsAction { expected: record, action })
+            }
             Intent::Snooze(minutes)
                 if [5, 10, 15].contains(&minutes)
                     && record.status != Status::SourceRemoved
@@ -411,7 +417,13 @@ impl NotificationInboxDialog {
             if snapshot.dropped_events > 0 { ui.label(format!("{} incoming notifications could not be retained.",snapshot.dropped_events)); }
             if snapshot.inbox.omitted() > 0 { ui.label(format!("Inbox capacity omitted {} notifications.", snapshot.inbox.omitted())); }
             if snapshot.calendar_warning { ui.label("Calendar reminders need attention."); }
-            ui.label(format!("Windows notifications · {}", runtime.windows_access.label()));
+            ui.label(format!("Windows notifications · {}", runtime.windows_capture.access.label()));
+            if let Some(started) = runtime.windows_capture.started_at {
+                ui.weak(format!("Windows collection began {}", date(started)));
+            }
+            if runtime.windows_capture.incomplete {
+                ui.weak("Windows returned a limited snapshot. Some current toasts may be missing.");
+            }
             let records=snapshot.inbox.records(); let unread=snapshot.inbox.unmuted_unread_count();
             ui.heading(format!("Inbox — {unread} unread"));
             let search=ui.add(egui::TextEdit::singleline(&mut actions.view.search).hint_text("Search notifications").char_limit(256)); target!(ui,search,"search","Search notifications",TargetKind::TextEntry); if search.changed(){actions.view.page=0;}
@@ -460,6 +472,27 @@ impl NotificationInboxDialog {
                     }
                     let b=ui.add_enabled(!runtime.busy && record.related.is_some() && record.status!=Status::SourceRemoved,egui::Button::new("Open related")); target!(ui,b,"related","Open related",TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::OpenRelated);}
                 });
+                if let Some(app_id) = app(record) {
+                    if record.status == Status::SourceRemoved {
+                        ui.weak("Removed from Windows.");
+                    }
+                    if runtime.windows_capture.access == WindowsAccess::Active && record.status == Status::Current {
+                        ui.horizontal_wrapped(|ui| {
+                            if app_id.contains('!') {
+                                let open = ui.add_enabled(!runtime.busy, egui::Button::new("Open source app"));
+                                target!(ui, open, "windows/open", "Open source app", TargetKind::Button);
+                                if open.clicked() {
+                                    actions.intent = Some(Intent::WindowsAction(WindowsSourceAction::Open));
+                                }
+                            }
+                            let dismiss = ui.add_enabled(!runtime.busy, egui::Button::new("Dismiss from Windows"));
+                            target!(ui, dismiss, "windows/dismiss", "Dismiss from Windows", TargetKind::Button);
+                            if dismiss.clicked() {
+                                actions.intent = Some(Intent::WindowsAction(WindowsSourceAction::Dismiss));
+                            }
+                        });
+                    }
+                }
                 if record.status!=Status::SourceRemoved && matches!(&record.related,Some(RelatedItem::Timer{..}|RelatedItem::Calendar{..})) {
                     ui.horizontal_wrapped(|ui| for minutes in [5,10,15] { let label=format!("Snooze {minutes} min"); let b=ui.add_enabled(!runtime.busy,egui::Button::new(&label)); target!(ui,b,&format!("snooze/{minutes}"),label,TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::Snooze(minutes));} });
                 }
@@ -495,14 +528,14 @@ impl NotificationInboxDialog {
                 if settings.retain_external_text && settings.persist_external {
                     ui.weak("Windows notification text can be saved to this profile.");
                 }
-                if matches!(runtime.windows_access, WindowsAccess::Off | WindowsAccess::SetupRequired | WindowsAccess::Unsupported) {
+                if matches!(runtime.windows_capture.access, WindowsAccess::Off | WindowsAccess::SetupRequired | WindowsAccess::Unsupported) {
                     ui.weak("Windows capture setup is documented in docs/notification-inbox-windows.md.");
                 }
-                if runtime.windows_access == WindowsAccess::Denied {
+                if runtime.windows_capture.access == WindowsAccess::Denied {
                     ui.weak("You can review notification access in Windows privacy settings.");
                 }
                 let can_request = settings.external_enabled && snapshot.inbox.settings().external_enabled
-                    && matches!(runtime.windows_access, WindowsAccess::PermissionNotGranted | WindowsAccess::Denied);
+                    && runtime.windows_capture.access == WindowsAccess::PermissionNotGranted;
                 let request = ui.add_enabled(!runtime.busy && can_request, egui::Button::new("Request Windows access"));
                 target!(ui, request, "settings/windows/request", "Request Windows access", TargetKind::Button);
                 if request.clicked() {

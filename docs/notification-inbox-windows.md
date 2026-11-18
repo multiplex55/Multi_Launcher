@@ -45,6 +45,12 @@ Production distribution requires a signature trusted by the destination PC and a
 
 **Off** means Inbox capture is disabled. **Setup required** means the running process lacks the expected identity. **Permission not granted** or **Denied** reflects Windows permission. Review the Notifications privacy page in Windows Settings to grant or revoke access. If Windows reports a setup problem after you moved the executable, re-register the package for the new external directory and relaunch the copied executable using the same profile working directory.
 
+## Coverage and actions
+
+The Inbox shows the current toasts Windows exposes and changes it observes while the listener is active. The capture status shows when collection started and reports limited snapshots. An incomplete snapshot leaves existing entries intact. Windows permission is checked before reading and again before the Inbox adopts results. Disabling capture or revoking access stops collection and preserves existing entries until local retention or an explicit clear removes them.
+
+**Open source app** uses a supported installed package identity checked through Windows. **Dismiss from Windows** checks access and the selected toast's source, ID and creation time immediately before requesting removal. When text is enabled, it also compares the current title and body. Windows accepts a numeric ID for the final removal call and provides no atomic identity-and-version check. The Inbox reports the request separately from observed removal. Local read, pin, dismissal and clear only affect Multi Launcher.
+
 ## Remove the optional integration
 
 Disable **Capture Windows notifications** and apply settings. If you also want to remove existing external Inbox records, use the explicit local clear action. Close the launcher. Find the exact package for the installed publisher and remove that specific package for the current Windows user.
