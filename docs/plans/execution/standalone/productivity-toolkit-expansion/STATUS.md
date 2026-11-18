@@ -57,7 +57,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M8-B | implementation complete, live generation/reveal/restart verified, live clipboard unavailable |
 | M9-A1 | complete |
 | M9-A2A | complete |
-| M9-A2B, M9-B, M9-C, M9-D | pending |
+| M9-A2B | complete |
+| M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -457,3 +458,12 @@ Transfer review now preserves explicitly chosen root order and enumerates each o
 Directory listings preserve placeholder and reparse classifications before child admission. Windows can expose recall-on-open attributes during enumeration alone. The planner records those entries as unavailable without opening them. Ordinary child probes still use no-recall and fresh handle metadata. All 14 focused Nextest cases passed after this review correction, including a real junction, hard-link and overlap rejection, sorted snapshots, cancellation/bounds, the regression case for a listing-only cloud flag, and the directly affected native rename and archive cases. Staged whitespace verification passed.
 
 [Windows file attributes](https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants)
+
+
+## M9-A2B destination and conflict review
+
+The transfer review maps Copy, Move and Duplicate in source order. Each destination refers to an exact held-parent observation or an earlier directory entry that the worker must create exclusively. It refuses source aliases and descendant destinations, and surfaces case-insensitive name collisions within the job. Duplicate makes a reviewed vacant sibling proposal. The configured copy verification choice is retained. Streamed outputs inherit destination permissions, while an atomic rename preserves source permissions.
+
+The current review generation binds each explicit Skip, Keep Both, Replace or Merge choice. A group choice applies to an explicit compatible set of occupied rows. Merge admits the exact existing directory and exposes child conflicts independently. Keep Both checks a fresh alternate under the exact current existing or planned parent. A competing arrival that changes a proposed Duplicate parent invalidates a child alternate. A maximum-length source leaf can use an explicitly chosen shorter alternate. Before sealing, the plan checks every retained source and occupied or vacant destination observation. Pending conflicts, unsafe entries and stale evidence cannot seal. The worker will acquire held guards and check supported streams before publication or source removal.
+
+The final scoped Nextest filter test(transfer_review_) | test(transfer_tree_) passed 16 of 16. Observed cases cover current-generation rejection, late replacement, group scope, a real case-only collision, the maximum supported NTFS name, sibling duplication, exact planned-parent binding, and independent merge conflicts. All fixtures used disposable roots and approval produced no write effects. Staged whitespace verification passed.

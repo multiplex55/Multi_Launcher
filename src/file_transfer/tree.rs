@@ -16,6 +16,12 @@ const MAX_METADATA_BYTES: usize = 32 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SourceNodeId(usize);
 
+impl SourceNodeId {
+    pub(super) fn index(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Debug)]
 pub enum SourceObservation {
     Ready(EntrySnapshot),

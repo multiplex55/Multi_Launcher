@@ -3,7 +3,13 @@
 //! Snapshots carry observations, with handles reacquired before use. A vacant
 //! leaf is evidence from a single anchored open, never permission to write.
 
+mod plan;
 mod tree;
+pub use plan::{
+    ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, GroupChoice, ReviewBlock,
+    ReviewChoice, ReviewError, ReviewGeneration, ReviewRow, ReviewState, TransferAction,
+    TransferDraft, TransferReview, review_transfer,
+};
 
 pub use tree::{
     SourceNodeId, SourceObservation, SourceTree, SourceTreeEntry, SourceTreeError,
