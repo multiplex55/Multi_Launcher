@@ -35,6 +35,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-C2B2 | complete, with partial interactive smoke |
 | M5-A1 | complete |
 | M5-A | complete |
+| M5-B1 | complete |
 | M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -261,3 +262,10 @@ Windows Nextest passed 4 of 4 (including the grouped legacy examples) using carg
 M5-A1 was pushed at 934997f887ecb2b5cc404cad63eaa6c41db69f89. The complete offline content has all 119 evaluator function names, with executable typed expectations and a check for the actual arities of fixed overloads. It covers operator spellings, statements, value forms, chart and Sensitivity usage, limits, and all 17 authoritative unit categories and their aliases. Existing grouped examples and their evaluator checks remain in place. Search ranks exact name and alias ahead of incidental matches. Every related ID resolves.
 
 Initial compile exposed a unit macro fragment restriction and was corrected. Both complete targeted runs passed 6 of 6 with cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::reference::tests::reference_) | test(shared_examples_evaluate_to_their_documented_results)'. The final compile took 2m 03s and its six tests took 0.588s. Independent recheck closed the material findings. Two final description-only details were aligned with existing Cumulative behavior (empty vector and linear Y); the same catalog tests will be included in the M5-B run. Diff whitespace verification passed. M5-B owns user-visible navigation and insertion.
+
+
+## M5-B1 safe prepared insertion
+
+M5-A was pushed at 1dbe374c17aab7f1d19b4447c7fbc1460ddcee82. Prepared examples admit UTF-8-safe top-level positions and complete selections without replacing a whole nonempty draft. The existing Pad source and rename analysis supplies contextual declarations, calls and physical row evidence. Preparation preserves surrounding bytes, flags names or physical references that would change, and keeps examples with their own physical references at the start of the document. This checkpoint does not mutate a draft. The next checkpoint wires preparation into retained help actions and normal Pad Undo.
+
+The initial compile exposed access to a private parser diagnostic. The corrected catalog-inclusive run passed 9 of 9 with the selectors below plus test(calculation_pad::reference::tests::). The final run after independent review passed 4 of 4 with cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(insertion_geometry_and_collisions) | test(insertion_detects_physical_rows_and_local_formula_calls) | test(row_named_formula_is_distinct_from_physical_row_reference) | test(document_rename_preserves_units_keywords_comments_and_physical_rows)'. Review recheck found all three behavior corrections in place. Diff whitespace verification passed.

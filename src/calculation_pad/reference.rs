@@ -2,6 +2,7 @@ use super::examples::{CalculationExample, ExampleExpectation};
 use super::function_signature_help;
 use crate::unit_conversion::{self, Category, UnitDefinition};
 
+pub(crate) mod insertion;
 mod functions;
 mod topics;
 mod units;

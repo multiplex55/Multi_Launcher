@@ -140,7 +140,25 @@ fn unit_spans(text: &str, base: usize, output: &mut Vec<Range<usize>>, depth: us
     }
 }
 
+#[derive(Default)]
+pub(crate) struct InsertionFacts {
+    pub names: Vec<(String, RenameScope, bool, Range<usize>)>,
+    pub calls: Vec<(String, Range<usize>)>,
+    pub physical_rows: Vec<(usize, Range<usize>)>,
+}
+
+pub(crate) fn insertion_facts(source: &str) -> Result<InsertionFacts, String> {
+    let mut facts = InsertionFacts::default();
+    let tokens = scan_tokens(source, Some(&mut facts))?;
+    facts.names = tokens.into_iter().map(|token| (token.name, token.scope, token.declaration, token.range)).collect();
+    Ok(facts)
+}
+
 fn tokens(source: &str) -> Result<Vec<Token>, String> {
+    scan_tokens(source, None)
+}
+
+fn scan_tokens(source: &str, mut facts: Option<&mut InsertionFacts>) -> Result<Vec<Token>, String> {
     let analysis = syntax::SourceAnalysis::new(source);
     let (functions, function_rows, _) = script::build_functions(&analysis);
     let declared = declared_names_in(&analysis);
@@ -280,6 +298,13 @@ fn tokens(source: &str) -> Result<Vec<Token>, String> {
             }
             if !braced && start >= expr_start && pos <= expr_end
                 && (text[pos..].trim_start().starts_with('(') || callbacks.contains(&(start..pos)))
+                && let Some(facts) = facts.as_deref_mut()
+                && let Some(range) = original(row, start..pos)
+            {
+                facts.calls.push((parsed.canonical.clone(), range));
+            }
+            if !braced && start >= expr_start && pos <= expr_end
+                && (text[pos..].trim_start().starts_with('(') || callbacks.contains(&(start..pos)))
                 && let Some(function) = functions[..visible].iter().find(|function| function.name == authored)
             {
                 let range = original(row, start..pos).ok_or("Name crosses a logical separator")?;
@@ -291,6 +316,13 @@ fn tokens(source: &str) -> Result<Vec<Token>, String> {
                 continue;
             }
             if is_row_reference_name(&parsed.canonical) {
+                if (braced || !text[pos..].trim_start().starts_with('('))
+                    && let Some(facts) = facts.as_deref_mut()
+                    && let RowReference::Line(index) = parse_row_reference(&parsed.canonical)
+                    && let Some(range) = original(row, start..pos)
+                {
+                    facts.physical_rows.push((index + 1, range));
+                }
                 continue;
             }
             let mut scope = RenameScope::Document;
