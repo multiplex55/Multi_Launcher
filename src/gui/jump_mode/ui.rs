@@ -71,10 +71,12 @@ pub(crate) enum NavigationDialogKind {
     FolderSize,
     DateTimeStudio,
     Calendar,
+    CalendarDetails,
+    CalendarEditor,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 35] = [
+    pub(crate) const ALL: [Self; 37] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -110,6 +112,8 @@ impl NavigationDialogKind {
         Self::Convert,
         Self::DateTimeStudio,
         Self::Calendar,
+        Self::CalendarDetails,
+        Self::CalendarEditor,
     ];
 
     const fn index(self) -> usize {
@@ -149,6 +153,8 @@ impl NavigationDialogKind {
             Self::FolderSize => 31,
             Self::DateTimeStudio => 33,
             Self::Calendar => 34,
+            Self::CalendarDetails => 35,
+            Self::CalendarEditor => 36,
         }
     }
 
@@ -189,6 +195,8 @@ impl NavigationDialogKind {
             Self::FolderSize => "folder-size",
             Self::DateTimeStudio => "date-time-studio",
             Self::Calendar => "calendar",
+            Self::CalendarDetails => "calendar-event-details",
+            Self::CalendarEditor => "calendar-event-editor",
         }
     }
 
@@ -232,6 +240,8 @@ impl NavigationDialogKind {
             Self::FolderSize => egui::Id::new(Some("Folder Size")),
             Self::DateTimeStudio => egui::Id::new("date-time-studio-window"),
             Self::Calendar => egui::Id::new(Some("Calendar")),
+            Self::CalendarDetails => egui::Id::new(Some("Event Details")),
+            Self::CalendarEditor => egui::Id::new(Some("Calendar Event")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -537,6 +547,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::FolderSize
                     | NavigationDialogKind::DateTimeStudio
                     | NavigationDialogKind::Calendar
+                    | NavigationDialogKind::CalendarDetails
+                    | NavigationDialogKind::CalendarEditor
                     | NavigationDialogKind::DashboardEditor
                     | NavigationDialogKind::MouseGestures
                     | NavigationDialogKind::MouseSettings
@@ -4469,6 +4481,12 @@ mod tests {
                     }
                     NavigationDialogKind::Calendar => {
                         egui::Window::new("Calendar").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::CalendarDetails => {
+                        egui::Window::new("Event Details").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::CalendarEditor => {
+                        egui::Window::new("Calendar Event").show(ctx, |_| {});
                     }
                     NavigationDialogKind::RegexTester => {
                         egui::Window::new("Regex Tester")

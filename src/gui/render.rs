@@ -5370,6 +5370,13 @@ impl LauncherApp {
             let panel = Panel::CalendarEventDetails;
             let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
             let epoch = self.calendar_event_details.host_session_epoch();
+            let kind = super::jump_mode::ui::NavigationDialogKind::CalendarDetails;
+            let instance = self.jump_mode_ui.dialog_instance(kind);
+            let scope = match navigation_owner {
+                super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalendarDetails, instance } => self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("calendar-event-details", instance), super::jump_mode::TargetGeneration(epoch), "calendar-event-details", ctx.viewport_id(), navigation_owner, false),
+                _ => None,
+            };
             self.calendar_details_host.show(
                 ctx,
                 &mut self.calendar_event_details,
@@ -5382,10 +5389,10 @@ impl LauncherApp {
                 owner,
                 allowed,
                 root_shortcut,
-                None,
+                Some(super::calendar_window_host::CalendarJumpConfig { kind, instance, root_scope: scope.as_ref(), launcher: &self.jump_mode_ui, enabled: jump_enabled, root_active: self.jump_mode_ui.active_session().is_some() }),
                 super::CalendarEventDetails::popup_anchors,
-                |dialog, ctx, owner, first, child, host, _, _| {
-                    dialog.render_host(ctx, true, owner, first, child, host)
+                |dialog, ctx, owner, first, child, host, scope, _| {
+                    dialog.render_host(ctx, true, owner, first, child, host, scope)
                 },
             );
         }
@@ -5393,6 +5400,13 @@ impl LauncherApp {
             let panel = Panel::CalendarEventEditor;
             let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
             let epoch = self.calendar_event_editor.host_session_epoch();
+            let kind = super::jump_mode::ui::NavigationDialogKind::CalendarEditor;
+            let instance = self.jump_mode_ui.dialog_instance(kind);
+            let scope = match navigation_owner {
+                super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalendarEditor, instance } => self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("calendar-event-editor", instance), super::jump_mode::TargetGeneration(epoch), "calendar-event-editor", ctx.viewport_id(), navigation_owner, false),
+                _ => None,
+            };
             self.calendar_editor_host.show(
                 ctx,
                 &mut self.calendar_event_editor,
@@ -5405,10 +5419,10 @@ impl LauncherApp {
                 owner,
                 allowed,
                 root_shortcut,
-                None,
+                Some(super::calendar_window_host::CalendarJumpConfig { kind, instance, root_scope: scope.as_ref(), launcher: &self.jump_mode_ui, enabled: jump_enabled, root_active: self.jump_mode_ui.active_session().is_some() }),
                 super::CalendarEventEditor::popup_anchors,
-                |dialog, ctx, owner, first, child, host, _, _| {
-                    dialog.render_host(ctx, true, owner, first, child, host)
+                |dialog, ctx, owner, first, child, host, scope, _| {
+                    dialog.render_host(ctx, true, owner, first, child, host, scope)
                 },
             );
         }
@@ -10588,6 +10602,8 @@ impl LauncherApp {
                         | super::Panel::FolderSizeDialog
                         | super::Panel::DateTimeStudioDialog
                         | super::Panel::CalendarPopover
+                        | super::Panel::CalendarEventDetails
+                        | super::Panel::CalendarEventEditor
                         | super::Panel::FileLockDialog
                         | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
@@ -10690,6 +10706,8 @@ impl LauncherApp {
             (crate::gui::jump_mode::ui::NavigationDialogKind::FolderSize, self.folder_size_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::DateTimeStudio, self.date_time_studio_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::Calendar, self.calendar_popover_open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::CalendarDetails, self.calendar_details_open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::CalendarEditor, self.calendar_editor_open),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::RegexTester,
                 self.regex_tester_dialog.open,
@@ -10860,6 +10878,10 @@ impl LauncherApp {
                         self.date_time_studio_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::Calendar {
                         self.calendar_panel_root_layer(super::Panel::CalendarPopover).and(current)
+                    } else if kind == NavigationDialogKind::CalendarDetails {
+                        self.calendar_panel_root_layer(super::Panel::CalendarEventDetails).and(current)
+                    } else if kind == NavigationDialogKind::CalendarEditor {
+                        self.calendar_panel_root_layer(super::Panel::CalendarEventEditor).and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -25025,6 +25047,97 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
             [RootDialogEffect::SaveConverterPreferences]
         ));
+    }
+
+    #[test]
+    fn calendar_editor_jump_focus_requires_fresh_save_activation() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.open_calendar_editor(None, None);
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer = app
+                    .calendar_panel_root_layer(super::super::Panel::CalendarEventEditor)
+                    .unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Save event")
+                    .cloned()
+                    .expect("editor owns Save");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Save event");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(!app.calendar_event_editor.test_has_error("title"));
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.calendar_editor_open);
+                assert!(app.calendar_event_editor.test_has_error("title"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

@@ -66,30 +66,6 @@ struct CalendarViewState {
     #[cfg(test)]
     agenda_button: Option<(egui::Rect, egui::Rect, bool)>,
 }
-struct CalendarJumpTargets<'a> {
-    scope: Option<&'a super::jump_mode::ui::JumpModeScope>,
-    order: u64,
-}
-impl CalendarJumpTargets<'_> {
-    fn focus(
-        &mut self,
-        ui: &egui::Ui,
-        response: &egui::Response,
-        id: impl AsRef<str>,
-        label: impl Into<String>,
-        kind: super::jump_mode::TargetKind,
-    ) {
-        super::jump_mode::ui::register_and_apply_target(
-            self.scope,
-            ui,
-            response,
-            id,
-            label,
-            kind,
-            &mut self.order,
-        );
-    }
-}
 impl CalendarPopover {
     pub(crate) fn begin_host_session(&mut self) {
         self.host_session_epoch = self.host_session_epoch.wrapping_add(1).max(1);
@@ -200,7 +176,7 @@ impl CalendarPopover {
         let mut open = visible;
         self.host_popups.clear();
         let mut grid_dates = Vec::new();
-        let mut targets = CalendarJumpTargets { scope, order: 0 };
+        let mut targets = super::calendar_window_host::CalendarTargets::new(scope);
         let mut draw_body = |ui: &mut egui::Ui| {
             let allowed =
                 owner && first && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard();
@@ -264,7 +240,7 @@ impl CalendarPopover {
                     }
                     ui.separator();
                     ui.label("View");
-                    let popup_scope = scope.map(|scope| scope.combo_popup_scope("view-mode"));
+                    let popup_scope = targets.popup("view-mode");
                     let combo = egui::ComboBox::from_id_salt("calendar_view_mode")
                         .selected_text(match self.view_mode {
                             CalendarViewMode::Day => "Day",
@@ -282,23 +258,13 @@ impl CalendarPopover {
                                     CalendarViewMode::Week,
                                     "Week",
                                 );
-                                super::jump_mode::ui::register_and_apply_target(
-                                    popup_scope.as_ref(),
-                                    ui,
-                                    &day,
-                                    "day",
-                                    "Day view",
-                                    super::jump_mode::TargetKind::Button,
-                                    &mut targets.order,
-                                );
-                                super::jump_mode::ui::register_and_apply_target(
+                                targets.option(popup_scope.as_ref(), ui, &day, "day", "Day view");
+                                targets.option(
                                     popup_scope.as_ref(),
                                     ui,
                                     &week,
                                     "week",
                                     "Week view",
-                                    super::jump_mode::TargetKind::Button,
-                                    &mut targets.order,
                                 );
                             });
                         });
@@ -526,7 +492,7 @@ fn month_grid(
     month: NaiveDate,
     markers: &HashSet<NaiveDate>,
     today: NaiveDate,
-    targets: &mut CalendarJumpTargets<'_>,
+    targets: &mut super::calendar_window_host::CalendarTargets<'_>,
     grid_dates: &mut Vec<(egui::Id, NaiveDate)>,
     keyboard_moved: bool,
     allowed: bool,
@@ -623,7 +589,7 @@ fn agenda_view(
     app: &mut CalendarViewState,
     mode: CalendarViewMode,
     date: NaiveDate,
-    targets: &mut CalendarJumpTargets<'_>,
+    targets: &mut super::calendar_window_host::CalendarTargets<'_>,
 ) {
     let start = NaiveDateTime::new(date, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
     let end = match mode {

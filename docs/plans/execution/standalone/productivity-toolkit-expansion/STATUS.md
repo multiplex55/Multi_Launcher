@@ -89,6 +89,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A4a | complete |
 | M12-A4b | complete |
 | M12-A5a | complete |
+| M12-A5b | complete |
 | M12-A remaining, M12-B | pending |
 | M13-A | pending |
 
@@ -699,3 +700,8 @@ The retained Date/Time Studio registers current docked and native targets, inclu
 ### M12-A5a Calendar navigation
 
 The retained Calendar host coordinates docked and native Jump scopes. The main toolbar, exact dates, occurrence rows and the Day/Week popup register current controls. Independent review found that date-grid keys could act on the last selected day after focus moved. The corrected path uses the focused day for the next arrow or Enter. A hint leaves the selection unchanged. The focused Nextest rerun passed 4/4 (`1fcc3e2d-9225-4070-82e1-f6c9c1b2f4b2`) after correcting that finding and a borrow-check error. This covers the real root grid and toolbar, shared layer inventory, and existing detached edit and open behavior. Calendar Details and the Event Editor follow in M12-A5b. Native popup hints were not exercised in this gate.
+
+
+### M12-A5b Calendar Event Details and Event Editor navigation
+
+Both surfaces now use separate docked and native Jump scopes and register current popup choices. Calendar actions retain their exact accepted owner and occurrence checks. A Save hint focuses the current button without validating or saving the draft. The initial focused gate passed 7/7 (`6a47eb23-68f8-494e-b6fd-b387dadecd12`). Review identified clipped focus in short windows. All three Calendar surfaces now share one-shot focused-control reveal. The corrected gate passed 5/5 (`c5b9123a-74e7-46ec-9d4d-a89b4ee921d4`), including actual Tab reveal of a clipped recurrence checkbox without toggling it. Direct native popup hints remain unverified.

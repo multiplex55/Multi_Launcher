@@ -106,6 +106,66 @@ pub(super) struct CalendarJumpConfig<'a> {
     pub enabled: bool,
     pub root_active: bool,
 }
+pub(super) struct CalendarTargets<'a> {
+    scope: Option<&'a super::jump_mode::ui::JumpModeScope>,
+    order: u64,
+}
+impl<'a> CalendarTargets<'a> {
+    pub fn new(scope: Option<&'a super::jump_mode::ui::JumpModeScope>) -> Self {
+        Self { scope, order: 0 }
+    }
+    pub fn focus(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: impl AsRef<str>,
+        label: impl Into<String>,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.scope,
+            ui,
+            response,
+            id,
+            label,
+            kind,
+            &mut self.order,
+        );
+        Self::reveal(ui, response);
+    }
+    pub fn popup(&self, anchor: &str) -> Option<super::jump_mode::ui::JumpModeScope> {
+        self.scope.map(|scope| scope.combo_popup_scope(anchor))
+    }
+    pub fn option(
+        &mut self,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: &str,
+        label: &str,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            scope,
+            ui,
+            response,
+            id,
+            label,
+            super::jump_mode::TargetKind::Button,
+            &mut self.order,
+        );
+        Self::reveal(ui, response);
+    }
+    fn reveal(ui: &egui::Ui, response: &egui::Response) {
+        if response.enabled()
+            && response.gained_focus()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+        {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
+    }
+}
 struct CalendarFrame<D, A> {
     draft: D,
     actions: A,

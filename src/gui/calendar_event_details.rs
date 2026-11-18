@@ -92,7 +92,9 @@ impl CalendarEventDetails {
                 && current.end == instance.end
                 && current.all_day == instance.all_day
                 && match (&current.recurrence, &instance.recurrence) {
-                    (Some(left), Some(right)) => left.occurrence_index == right.occurrence_index && left.rule == right.rule,
+                    (Some(left), Some(right)) => {
+                        left.occurrence_index == right.occurrence_index && left.rule == right.rule
+                    }
                     (None, None) => true,
                     _ => false,
                 }
@@ -145,8 +147,9 @@ impl CalendarEventDetails {
         first: bool,
         child_ui: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> CalendarDetailsHostActions {
-        self.render_inner(ctx, open, owner, first, child_ui, Some(presentation))
+        self.render_inner(ctx, open, owner, first, child_ui, Some(presentation), scope)
     }
     fn render_inner(
         &mut self,
@@ -156,6 +159,7 @@ impl CalendarEventDetails {
         first: bool,
         child_ui: Option<&mut egui::Ui>,
         presentation: Option<super::utility_host::UtilityPresentation>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> CalendarDetailsHostActions {
         let mut actions = CalendarDetailsHostActions {
             epoch: self.host_session_epoch,
@@ -201,6 +205,7 @@ impl CalendarEventDetails {
         };
 
         let mut open = visible;
+        let mut targets = super::calendar_window_host::CalendarTargets::new(scope);
         self.host_popups.clear();
         let mut draw_body = |ui: &mut egui::Ui| {
             let allowed =
@@ -210,6 +215,13 @@ impl CalendarEventDetails {
                     ui,
                     current,
                     owner && ui.is_visible() && !ui.is_sizing_pass(),
+                );
+                targets.focus(
+                    ui,
+                    &response,
+                    "presentation",
+                    "Dock or pop out",
+                    super::jump_mode::TargetKind::Button,
                 );
                 #[cfg(test)]
                 {
@@ -247,6 +259,13 @@ impl CalendarEventDetails {
                         ui.horizontal_wrapped(|ui| {
                             let edit = ui.button("Edit");
                             let edit = with_button_emphasis(ui, edit, ButtonEmphasis::Primary);
+                            targets.focus(
+                                ui,
+                                &edit,
+                                "edit",
+                                "Edit event",
+                                super::jump_mode::TargetKind::Button,
+                            );
                             #[cfg(test)]
                             {
                                 actions.edit_button =
@@ -266,7 +285,15 @@ impl CalendarEventDetails {
                                 actions.effect =
                                     Some(CalendarDetailsEffect::Edit(event.clone(), split_scope));
                             }
-                            if ui.button("Duplicate").clicked() && allowed {
+                            let duplicate = ui.button("Duplicate");
+                            targets.focus(
+                                ui,
+                                &duplicate,
+                                "duplicate",
+                                "Duplicate event",
+                                super::jump_mode::TargetKind::Button,
+                            );
+                            if duplicate.clicked() && allowed {
                                 actions.effect =
                                     Some(CalendarDetailsEffect::Duplicate(event.id.clone(), start));
                             }
@@ -275,27 +302,38 @@ impl CalendarEventDetails {
                         if event.recurrence.is_some() {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("Edit scope");
+                                let popup = targets.popup("edit-scope");
                                 let combo = egui::ComboBox::from_id_salt("calendar_edit_scope")
                                     .selected_text(self.edit_scope.label())
                                     .show_ui(ui, |ui| {
-                                        ui.add_enabled_ui(allowed, |ui| {
-                                            ui.selectable_value(
-                                                &mut self.edit_scope,
+                                        ui.add_enabled_ui(owner, |ui| {
+                                            for option in [
                                                 RecurrenceScope::This,
-                                                RecurrenceScope::This.label(),
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.edit_scope,
                                                 RecurrenceScope::ThisAndFollowing,
-                                                RecurrenceScope::ThisAndFollowing.label(),
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.edit_scope,
                                                 RecurrenceScope::All,
-                                                RecurrenceScope::All.label(),
-                                            );
+                                            ] {
+                                                let response = ui.selectable_value(
+                                                    &mut self.edit_scope,
+                                                    option,
+                                                    option.label(),
+                                                );
+                                                targets.option(
+                                                    popup.as_ref(),
+                                                    ui,
+                                                    &response,
+                                                    option.label(),
+                                                    option.label(),
+                                                );
+                                            }
                                         });
                                     });
+                                targets.focus(
+                                    ui,
+                                    &combo.response,
+                                    "edit-scope",
+                                    "Edit scope",
+                                    super::jump_mode::TargetKind::ComboBox,
+                                );
                                 self.host_popups.push(
                                     super::calendar_window_host::CalendarPopupAnchor::new(
                                         ui,
@@ -310,6 +348,13 @@ impl CalendarEventDetails {
                             let delete = ui.button("Delete");
                             let delete =
                                 with_button_emphasis(ui, delete, ButtonEmphasis::Destructive);
+                            targets.focus(
+                                ui,
+                                &delete,
+                                "delete",
+                                "Delete event",
+                                super::jump_mode::TargetKind::Button,
+                            );
                             #[cfg(test)]
                             {
                                 actions.delete_button =
@@ -324,27 +369,38 @@ impl CalendarEventDetails {
                             }
                             if event.recurrence.is_some() {
                                 ui.label("Delete scope");
+                                let popup = targets.popup("delete-scope");
                                 let combo = egui::ComboBox::from_id_salt("calendar_delete_scope")
                                     .selected_text(self.delete_scope.label())
                                     .show_ui(ui, |ui| {
-                                        ui.add_enabled_ui(allowed, |ui| {
-                                            ui.selectable_value(
-                                                &mut self.delete_scope,
+                                        ui.add_enabled_ui(owner, |ui| {
+                                            for option in [
                                                 RecurrenceScope::This,
-                                                RecurrenceScope::This.label(),
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.delete_scope,
                                                 RecurrenceScope::ThisAndFollowing,
-                                                RecurrenceScope::ThisAndFollowing.label(),
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.delete_scope,
                                                 RecurrenceScope::All,
-                                                RecurrenceScope::All.label(),
-                                            );
+                                            ] {
+                                                let response = ui.selectable_value(
+                                                    &mut self.delete_scope,
+                                                    option,
+                                                    option.label(),
+                                                );
+                                                targets.option(
+                                                    popup.as_ref(),
+                                                    ui,
+                                                    &response,
+                                                    option.label(),
+                                                    option.label(),
+                                                );
+                                            }
                                         });
                                     });
+                                targets.focus(
+                                    ui,
+                                    &combo.response,
+                                    "delete-scope",
+                                    "Delete scope",
+                                    super::jump_mode::TargetKind::ComboBox,
+                                );
                                 self.host_popups.push(
                                     super::calendar_window_host::CalendarPopupAnchor::new(
                                         ui,
@@ -357,8 +413,25 @@ impl CalendarEventDetails {
 
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Snooze (minutes)");
-                            ui.add(egui::DragValue::new(&mut self.snooze_minutes).range(1..=1440));
-                            if ui.button("Snooze").clicked() && allowed {
+                            let minutes = ui.add(
+                                egui::DragValue::new(&mut self.snooze_minutes).range(1..=1440),
+                            );
+                            targets.focus(
+                                ui,
+                                &minutes,
+                                "snooze-minutes",
+                                "Snooze minutes",
+                                super::jump_mode::TargetKind::Slider,
+                            );
+                            let snooze = ui.button("Snooze");
+                            targets.focus(
+                                ui,
+                                &snooze,
+                                "snooze",
+                                "Snooze event",
+                                super::jump_mode::TargetKind::Button,
+                            );
+                            if snooze.clicked() && allowed {
                                 actions.effect = Some(CalendarDetailsEffect::Snooze(
                                     event.id.clone(),
                                     self.snooze_minutes,
