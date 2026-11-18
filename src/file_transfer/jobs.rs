@@ -166,6 +166,7 @@ pub enum TransferReceiptFailure {
     Collision,
     InvalidRecord,
     Poisoned,
+    QueueCommitUncertain,
     Io(std::io::ErrorKind),
 }
 impl From<super::receipts::store::ReceiptStoreError> for TransferReceiptFailure {
@@ -179,6 +180,7 @@ impl From<super::receipts::store::ReceiptStoreError> for TransferReceiptFailure 
             E::Collision => Self::Collision,
             E::InvalidRecord => Self::InvalidRecord,
             E::Poisoned => Self::Poisoned,
+            E::QueueCommitUncertain => Self::QueueCommitUncertain,
             E::Io(kind) => Self::Io(kind),
             E::AfterCreate { reason, .. } => (*reason).into(),
         }

@@ -1,4 +1,6 @@
 //! Bounded durable receipt catalogue. Reading never creates the namespace.
+mod queue_snapshot;
+pub(in crate::file_transfer) use queue_snapshot::{QueueAction, QueuePreview, QueueSnapshotRead};
 use super::adapter::ReceiptProjection;
 use super::frames::{
     FrameProblem, FrameWriteError, FrameWriter, MAX_RECEIPT_BYTES, read_prefix_from_file,
@@ -27,6 +29,8 @@ const ENTRY_RESERVE: u64 = 130;
 const JOB_RESERVE: u64 = 80;
 const FILE_HEADER: u64 = 12;
 const MAX_CATALOG_ENTRIES: usize = 10_000;
+const QUEUE_RESERVE: u64 = 512 * 1024;
+const QUEUE_FILE_RESERVE: usize = 64;
 
 #[derive(Debug)]
 pub(in crate::file_transfer) enum ReceiptStoreError {
@@ -37,6 +41,7 @@ pub(in crate::file_transfer) enum ReceiptStoreError {
     Collision,
     InvalidRecord,
     Poisoned,
+    QueueCommitUncertain,
     Io(io::ErrorKind),
     AfterCreate {
         id: [u8; 16],
@@ -96,12 +101,16 @@ pub(super) struct ReceiptCatalog {
     pub absent: bool,
     pub entries: Vec<CatalogEntry>,
     pub charged_bytes: u64,
+    queue_bytes: u64,
+    queue_files: usize,
     pub admission_blocked: bool,
     pub unavailable: Vec<OsString>,
 }
+#[derive(Clone)]
 pub(in crate::file_transfer) struct ReceiptStore {
     root: PathBuf,
-    root_proof: std::sync::OnceLock<crate::file_transfer::ParentSnapshot>,
+    root_proof: std::sync::Arc<std::sync::OnceLock<crate::file_transfer::ParentSnapshot>>,
+    queue_lock: std::sync::Arc<std::sync::Mutex<()>>,
 }
 struct ReceiptLocation {
     path: PathBuf,
@@ -112,7 +121,8 @@ impl ReceiptStore {
     pub fn new(root: &AppDataRoot) -> Self {
         Self {
             root: root.path().to_path_buf(),
-            root_proof: std::sync::OnceLock::new(),
+            root_proof: std::sync::Arc::new(std::sync::OnceLock::new()),
+            queue_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
         }
     }
     pub(super) fn scan(&self) -> Result<ReceiptCatalog, ReceiptStoreError> {
@@ -121,6 +131,8 @@ impl ReceiptStore {
                 absent: true,
                 entries: Vec::new(),
                 charged_bytes: 0,
+                queue_bytes: 0,
+                queue_files: 0,
                 admission_blocked: false,
                 unavailable: Vec::new(),
             });
@@ -150,6 +162,8 @@ impl ReceiptStore {
             absent: false,
             entries: Vec::new(),
             charged_bytes: 0,
+            queue_bytes: 0,
+            queue_files: 0,
             admission_blocked: false,
             unavailable: Vec::new(),
         };
@@ -190,6 +204,17 @@ impl ReceiptStore {
                 .charged_bytes
                 .checked_add(bytes)
                 .ok_or(ReceiptStoreError::Capacity)?;
+            if queue_snapshot::parse_slot_name(&entry.name).is_some() {
+                if file.validate().is_err() || file.file().metadata().map(|m| m.len()).ok() != Some(bytes) {
+                    catalog.admission_blocked = true;
+                    catalog.unavailable.push(entry.name);
+                    continue;
+                }
+                catalog.queue_files += 1;
+                catalog.queue_bytes = catalog.queue_bytes.checked_add(bytes).ok_or(ReceiptStoreError::Capacity)?;
+                if catalog.queue_bytes > QUEUE_RESERVE || catalog.queue_files > QUEUE_FILE_RESERVE { catalog.admission_blocked = true; }
+                continue;
+            }
             let (prefix, mut diagnostic) = if bytes > MAX_RECEIPT_BYTES {
                 (SemanticPrefix::default(), ReceiptDiagnostic::Oversized)
             } else if decoded_bytes
@@ -422,6 +447,8 @@ impl ReceiptStore {
         if needed > MAX_RECEIPT_BYTES {
             return Err(ReceiptStoreError::Capacity);
         }
+        let queue_lock = self.queue_lock.clone();
+        let admission_guard = queue_lock.lock().unwrap_or_else(|e| e.into_inner());
         let location = self
             .locate(plan.recovery_origin().is_none())?
             .ok_or(ReceiptStoreError::Unavailable)?;
@@ -430,9 +457,13 @@ impl ReceiptStore {
             return Err(ReceiptStoreError::UnsafeNamespace);
         }
         protect_recovery_relations(&mut catalog, plan.recovery_origin())?;
-        self.ensure_room(&location, &mut catalog, needed, MAX_CATALOG_ENTRIES)?;
+        let queue_remaining = QUEUE_RESERVE.saturating_sub(catalog.queue_bytes);
+        let reserved_needed = needed.checked_add(queue_remaining).ok_or(ReceiptStoreError::Capacity)?;
+        let receipt_entry_limit = MAX_CATALOG_ENTRIES.saturating_sub(QUEUE_FILE_RESERVE);
+        self.ensure_room(&location, &mut catalog, reserved_needed, receipt_entry_limit)?;
         let capacity = MAX_RECEIPT_BYTES
             .checked_sub(catalog.charged_bytes)
+            .and_then(|n| n.checked_sub(queue_remaining))
             .ok_or(ReceiptStoreError::Capacity)?;
         if capacity < needed {
             return Err(ReceiptStoreError::Capacity);
@@ -478,6 +509,7 @@ impl ReceiptStore {
             id: id.0,
             reason: Box::new(reason),
         })?;
+        drop(admission_guard);
         Ok(ReceiptSession {
             _store: self,
             id,

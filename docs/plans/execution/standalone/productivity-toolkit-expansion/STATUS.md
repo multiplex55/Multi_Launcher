@@ -73,7 +73,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-C1B3 | complete |
 | M9-C2A | complete |
 | M9-C2B | complete |
-| M9-C2C, M9-D | pending |
+| M9-C2C1 | complete |
+| M9-C2C2, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -553,3 +554,8 @@ The receipt history reports Interrupted from a clean unfinished prefix and retai
 ### M9-C2B explicit Retry and verified atomic Move Undo
 
 Retry prepares a fresh single-file review of an unchanged, untouched row with its exact reviewed parent and leaf. Confirmed nested parent evidence is required. Completed/possibly effected rows, occupied targets and a catalog that could conceal prior Retry are refused. Related receipts record the original job/item and guard actual repeat admission after external output removal. Undo is explicit and restricted to clean completed verified same-volume atomic Move with both historical parent proofs and exact vacancy. It rechecks the held file and current named Zone Identifier digest before rename and uses the guarded no-replace rename. A durable Undo origin refuses generic Retry after interruption. The 26-test union passed (`3c8e5de2-7868-40fc-a828-956207b868b6`) and the final four action checks passed (`747fe525-2d68-4fe3-8552-66c9e608199d`), covering actual nested retry, completed-repeat refusal, named Zone changes, late foreign original, interrupted Undo binding, and successful same-ID restoration of both streams. History/queue service and user-facing actions follow.
+
+
+### M9-C2C1 ordered unstarted queue snapshots
+
+The pinned receipt namespace now stores display-only queue generations under exact create-new handles. Generations preserve a prior complete snapshot and retain torn files. Completion of a new generation survives failed cleanup of an older one. A 512 KiB and 64-entry reserve remains available inside the aggregate receipt limits. Held metadata accounting permits queue saves while an actual transfer receipt is open, with short shared coordination at initial admission. The final 15 targeted queue/store/recovery-action checks passed (`a569166a-b00c-4980-8d78-9ac391171ed0`). The worker integration and restart summary requests follow.
