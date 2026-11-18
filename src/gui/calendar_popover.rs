@@ -18,6 +18,7 @@ enum CalendarViewMode {
 pub struct CalendarPopover {
     host_session_epoch: u64,
     host_popups: Vec<super::calendar_window_host::CalendarPopupAnchor>,
+    grid_focus_dates: Vec<(egui::Id, NaiveDate)>,
     view_month: NaiveDate,
     view_mode: CalendarViewMode,
 }
@@ -28,6 +29,7 @@ impl Default for CalendarPopover {
         Self {
             host_session_epoch: 0,
             host_popups: Vec::new(),
+            grid_focus_dates: Vec::new(),
             view_month: NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today),
             view_mode: CalendarViewMode::Day,
         }
@@ -64,9 +66,34 @@ struct CalendarViewState {
     #[cfg(test)]
     agenda_button: Option<(egui::Rect, egui::Rect, bool)>,
 }
+struct CalendarJumpTargets<'a> {
+    scope: Option<&'a super::jump_mode::ui::JumpModeScope>,
+    order: u64,
+}
+impl CalendarJumpTargets<'_> {
+    fn focus(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: impl AsRef<str>,
+        label: impl Into<String>,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.scope,
+            ui,
+            response,
+            id,
+            label,
+            kind,
+            &mut self.order,
+        );
+    }
+}
 impl CalendarPopover {
     pub(crate) fn begin_host_session(&mut self) {
         self.host_session_epoch = self.host_session_epoch.wrapping_add(1).max(1);
+        self.grid_focus_dates.clear();
     }
     pub(super) fn popup_anchors(&self) -> &[super::calendar_window_host::CalendarPopupAnchor] {
         &self.host_popups
@@ -103,6 +130,8 @@ impl CalendarPopover {
         runtime: &CalendarPopoverRuntime,
         child_ui: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        jump_active: bool,
     ) -> CalendarPopoverHostActions {
         self.render_inner(
             ctx,
@@ -112,6 +141,8 @@ impl CalendarPopover {
             runtime,
             child_ui,
             Some(presentation),
+            scope,
+            jump_active,
         )
     }
     fn render_inner(
@@ -123,6 +154,8 @@ impl CalendarPopover {
         runtime: &CalendarPopoverRuntime,
         child_ui: Option<&mut egui::Ui>,
         presentation: Option<super::utility_host::UtilityPresentation>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        jump_active: bool,
     ) -> CalendarPopoverHostActions {
         let mut actions = CalendarPopoverHostActions {
             epoch: self.host_session_epoch,
@@ -146,12 +179,28 @@ impl CalendarPopover {
         if self.view_month != selected_month {
             self.view_month = selected_month;
         }
-        if owner && first && !egui::Popup::is_any_open(ctx) && !ctx.will_discard() {
-            handle_keyboard(ctx, &mut state, &mut self.view_month);
-        }
+        let focused = ctx.memory(|memory| memory.focused());
+        let focused_date = focused.and_then(|id| {
+            self.grid_focus_dates
+                .iter()
+                .find_map(|&(response, date)| (response == id).then_some(date))
+        });
+        let keyboard_moved = if owner
+            && first
+            && (focused.is_none() || focused_date.is_some())
+            && !jump_active
+            && !egui::Popup::is_any_open(ctx)
+            && !ctx.will_discard()
+        {
+            handle_keyboard(ctx, &mut state, &mut self.view_month, focused_date)
+        } else {
+            false
+        };
         let markers = build_marker_set(&runtime.calendar, self.view_month);
         let mut open = visible;
         self.host_popups.clear();
+        let mut grid_dates = Vec::new();
+        let mut targets = CalendarJumpTargets { scope, order: 0 };
         let mut draw_body = |ui: &mut egui::Ui| {
             let allowed =
                 owner && first && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard();
@@ -161,6 +210,13 @@ impl CalendarPopover {
                     current,
                     owner && ui.is_visible() && !ui.is_sizing_pass(),
                 );
+                targets.focus(
+                    ui,
+                    &response,
+                    "presentation",
+                    "Dock or pop out",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(test)]
                 {
                     actions.host_button = Some((response.rect, ui.clip_rect(), response.enabled()));
@@ -169,43 +225,90 @@ impl CalendarPopover {
                     actions.host_request = Some(requested);
                 }
             }
-            ui.add_enabled_ui(owner && first, |ui| {
+            ui.add_enabled_ui(owner && ui.is_visible() && !ui.is_sizing_pass(), |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("<").clicked() {
+                    let previous = ui.button("<");
+                    targets.focus(
+                        ui,
+                        &previous,
+                        "previous-month",
+                        "Previous month",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if previous.clicked() {
                         shift_month(&mut state, -1, &mut self.view_month);
                     }
-                    if ui.button(">").clicked() {
+                    let next = ui.button(">");
+                    targets.focus(
+                        ui,
+                        &next,
+                        "next-month",
+                        "Next month",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if next.clicked() {
                         shift_month(&mut state, 1, &mut self.view_month);
                     }
-                    if ui
-                        .button(self.view_month.format("%B %Y").to_string())
-                        .clicked()
-                    {
+                    let today_button = ui.button(self.view_month.format("%B %Y").to_string());
+                    targets.focus(
+                        ui,
+                        &today_button,
+                        "today",
+                        "Today",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if today_button.clicked() {
                         state.calendar_selected_date = Some(today);
                         self.view_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
                             .unwrap_or(today);
                     }
                     ui.separator();
                     ui.label("View");
+                    let popup_scope = scope.map(|scope| scope.combo_popup_scope("view-mode"));
                     let combo = egui::ComboBox::from_id_salt("calendar_view_mode")
                         .selected_text(match self.view_mode {
                             CalendarViewMode::Day => "Day",
                             CalendarViewMode::Week => "Week",
                         })
                         .show_ui(ui, |ui| {
-                            ui.add_enabled_ui(allowed, |ui| {
-                                ui.selectable_value(
+                            ui.add_enabled_ui(owner, |ui| {
+                                let day = ui.selectable_value(
                                     &mut self.view_mode,
                                     CalendarViewMode::Day,
                                     "Day",
                                 );
-                                ui.selectable_value(
+                                let week = ui.selectable_value(
                                     &mut self.view_mode,
                                     CalendarViewMode::Week,
                                     "Week",
                                 );
+                                super::jump_mode::ui::register_and_apply_target(
+                                    popup_scope.as_ref(),
+                                    ui,
+                                    &day,
+                                    "day",
+                                    "Day view",
+                                    super::jump_mode::TargetKind::Button,
+                                    &mut targets.order,
+                                );
+                                super::jump_mode::ui::register_and_apply_target(
+                                    popup_scope.as_ref(),
+                                    ui,
+                                    &week,
+                                    "week",
+                                    "Week view",
+                                    super::jump_mode::TargetKind::Button,
+                                    &mut targets.order,
+                                );
                             });
                         });
+                    targets.focus(
+                        ui,
+                        &combo.response,
+                        "view-mode",
+                        "Calendar view",
+                        super::jump_mode::TargetKind::ComboBox,
+                    );
                     self.host_popups
                         .push(super::calendar_window_host::CalendarPopupAnchor::new(
                             ui,
@@ -222,18 +325,50 @@ impl CalendarPopover {
                         .auto_shrink([false, false])
                         .max_height(ui.available_height().max(0.0))
                         .show(ui, |ui| {
-                            month_grid(ui, &mut state, self.view_month, &markers, today);
+                            month_grid(
+                                ui,
+                                &mut state,
+                                self.view_month,
+                                &markers,
+                                today,
+                                &mut targets,
+                                &mut grid_dates,
+                                keyboard_moved,
+                                allowed,
+                            );
                             ui.separator();
-                            agenda_view(ui, &mut state, self.view_mode, selected_date);
+                            agenda_view(
+                                ui,
+                                &mut state,
+                                self.view_mode,
+                                selected_date,
+                                &mut targets,
+                            );
                         });
                 } else {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            month_grid(ui, &mut state, self.view_month, &markers, today);
+                            month_grid(
+                                ui,
+                                &mut state,
+                                self.view_month,
+                                &markers,
+                                today,
+                                &mut targets,
+                                &mut grid_dates,
+                                keyboard_moved,
+                                allowed,
+                            );
                         });
                         ui.separator();
                         ui.vertical(|ui| {
-                            agenda_view(ui, &mut state, self.view_mode, selected_date);
+                            agenda_view(
+                                ui,
+                                &mut state,
+                                self.view_mode,
+                                selected_date,
+                                &mut targets,
+                            );
                         });
                     });
                 }
@@ -261,6 +396,9 @@ impl CalendarPopover {
                     .with_maximum(ctx.content_rect().size()),
                     |ui| draw_body(ui),
                 );
+        }
+        if owner && first && !ctx.will_discard() {
+            self.grid_focus_dates = grid_dates;
         }
         if owner && first && !ctx.will_discard() {
             actions.close = !open;
@@ -296,9 +434,14 @@ impl CalendarPopover {
     }
 }
 
-fn handle_keyboard(ctx: &egui::Context, app: &mut CalendarViewState, view_month: &mut NaiveDate) {
-    let Some(selected_date) = app.calendar_selected_date else {
-        return;
+fn handle_keyboard(
+    ctx: &egui::Context,
+    app: &mut CalendarViewState,
+    view_month: &mut NaiveDate,
+    focused_date: Option<NaiveDate>,
+) -> bool {
+    let Some(selected_date) = focused_date.or(app.calendar_selected_date) else {
+        return false;
     };
     let mut updated = None;
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)) {
@@ -316,6 +459,10 @@ fn handle_keyboard(ctx: &egui::Context, app: &mut CalendarViewState, view_month:
         let shifted = shift_date_month(selected_date, 1);
         updated = Some(shifted);
     } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+        if app.calendar_selected_date != Some(selected_date) {
+            app.calendar_selected_date = Some(selected_date);
+            app.calendar_selected_event = None;
+        }
         if let Some(event_id) = app.calendar_selected_event.clone() {
             if let Some(event) = CALENDAR_DATA
                 .read()
@@ -336,7 +483,9 @@ fn handle_keyboard(ctx: &egui::Context, app: &mut CalendarViewState, view_month:
         let month_start =
             NaiveDate::from_ymd_opt(new_date.year(), new_date.month(), 1).unwrap_or(new_date);
         *view_month = month_start;
+        return true;
     }
+    false
 }
 
 fn shift_month(app: &mut CalendarViewState, delta: i32, view_month: &mut NaiveDate) {
@@ -377,6 +526,10 @@ fn month_grid(
     month: NaiveDate,
     markers: &HashSet<NaiveDate>,
     today: NaiveDate,
+    targets: &mut CalendarJumpTargets<'_>,
+    grid_dates: &mut Vec<(egui::Id, NaiveDate)>,
+    keyboard_moved: bool,
+    allowed: bool,
 ) {
     let first_weekday = month.weekday().num_days_from_sunday() as i32;
     let days = days_in_month(month);
@@ -427,10 +580,38 @@ fn month_grid(
                 if Some(date) == app.calendar_selected_date {
                     text = text.strong();
                 }
-                let resp = ui.selectable_label(Some(date) == app.calendar_selected_date, text);
-                if resp.clicked() {
+                let resp = ui
+                    .push_id(date, |ui| {
+                        ui.selectable_label(Some(date) == app.calendar_selected_date, text)
+                    })
+                    .inner;
+                grid_dates.push((resp.id, date));
+                targets.focus(
+                    ui,
+                    &resp,
+                    format!("date/{date}"),
+                    format!("Date {date}"),
+                    super::jump_mode::TargetKind::Selectable,
+                );
+                if allowed && resp.clicked() {
                     app.calendar_selected_date = Some(date);
                     app.calendar_selected_event = None;
+                    resp.request_focus();
+                }
+                if allowed && keyboard_moved && Some(date) == app.calendar_selected_date {
+                    resp.request_focus();
+                }
+                if resp.has_focus() {
+                    ui.memory_mut(|memory| {
+                        memory.set_focus_lock_filter(
+                            resp.id,
+                            egui::EventFilter {
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                                ..Default::default()
+                            },
+                        )
+                    });
                 }
                 day += 1;
             }
@@ -442,6 +623,7 @@ fn agenda_view(
     app: &mut CalendarViewState,
     mode: CalendarViewMode,
     date: NaiveDate,
+    targets: &mut CalendarJumpTargets<'_>,
 ) {
     let start = NaiveDateTime::new(date, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
     let end = match mode {
@@ -453,7 +635,15 @@ fn agenda_view(
             CalendarViewMode::Day => "Agenda",
             CalendarViewMode::Week => "Week agenda",
         });
-        if ui.button("+ Add").clicked() {
+        let add = ui.button("+ Add");
+        targets.focus(
+            ui,
+            &add,
+            "add",
+            "Add event",
+            super::jump_mode::TargetKind::Button,
+        );
+        if add.clicked() {
             app.dispatch = Some(CalendarPopoverDispatch::OpenEditor(None));
         }
     });
@@ -488,7 +678,18 @@ fn agenda_view(
                     )
                 };
                 let label = format!("{title} ({time_label})");
-                let resp = ui.selectable_label(false, label);
+                let resp = ui
+                    .push_id((&instance.instance_id, instance.start), |ui| {
+                        ui.selectable_label(false, label)
+                    })
+                    .inner;
+                targets.focus(
+                    ui,
+                    &resp,
+                    format!("occurrence/{}/{}", instance.instance_id, instance.start),
+                    format!("Event {title} {time_label}"),
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(test)]
                 {
                     app.agenda_button = Some((resp.rect, ui.clip_rect(), resp.enabled()));

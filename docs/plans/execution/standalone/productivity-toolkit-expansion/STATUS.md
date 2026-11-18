@@ -88,6 +88,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A3 | complete |
 | M12-A4a | complete |
 | M12-A4b | complete |
+| M12-A5a | complete |
 | M12-A remaining, M12-B | pending |
 | M13-A | pending |
 
@@ -693,3 +694,8 @@ Adding the 33rd dialog exposed the standard array Default limit. The shared Jump
 ### M12-A4b Date/Time Studio keyboard navigation
 
 The retained Date/Time Studio registers current docked and native targets, including owned date and option popups. Keyboard hints focus controls before a separate activation. Independent review found no actionable issues. Scoped Nextest passed 5/5 in run `c20b432b-4225-46c6-8ed2-7afb253fc569`. The native popup hint interaction still needs live verification.
+
+
+### M12-A5a Calendar navigation
+
+The retained Calendar host coordinates docked and native Jump scopes. The main toolbar, exact dates, occurrence rows and the Day/Week popup register current controls. Independent review found that date-grid keys could act on the last selected day after focus moved. The corrected path uses the focused day for the next arrow or Enter. A hint leaves the selection unchanged. The focused Nextest rerun passed 4/4 (`1fcc3e2d-9225-4070-82e1-f6c9c1b2f4b2`) after correcting that finding and a borrow-check error. This covers the real root grid and toolbar, shared layer inventory, and existing detached edit and open behavior. Calendar Details and the Event Editor follow in M12-A5b. Native popup hints were not exercised in this gate.

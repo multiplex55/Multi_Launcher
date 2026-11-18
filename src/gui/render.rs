@@ -5329,6 +5329,15 @@ impl LauncherApp {
             && !self.pin_list_open;
         let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
         let root_shortcut = !jump_escape_preempted && self.jump_mode_ui.active_session().is_none();
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let jump_enabled = self.jump_mode_enabled();
+        let calendar_kind = super::jump_mode::ui::NavigationDialogKind::Calendar;
+        let calendar_instance = self.jump_mode_ui.dialog_instance(calendar_kind);
+        let calendar_scope = match navigation_owner {
+            super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::Calendar, instance } => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("calendar", instance), super::jump_mode::TargetGeneration(self.calendar_popover.host_session_epoch()), "calendar", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
 
         if self.calendar_popover_open {
             let panel = Panel::CalendarPopover;
@@ -5347,9 +5356,13 @@ impl LauncherApp {
                 owner,
                 allowed,
                 root_shortcut,
+                Some(super::calendar_window_host::CalendarJumpConfig {
+                    kind: calendar_kind, instance: calendar_instance, root_scope: calendar_scope.as_ref(),
+                    launcher: &self.jump_mode_ui, enabled: jump_enabled, root_active: self.jump_mode_ui.active_session().is_some(),
+                }),
                 super::CalendarPopover::popup_anchors,
-                |dialog, ctx, owner, first, child, host| {
-                    dialog.render_host(ctx, true, owner, first, &runtime, child, host)
+                |dialog, ctx, owner, first, child, host, scope, active| {
+                    dialog.render_host(ctx, true, owner, first, &runtime, child, host, scope, active)
                 },
             );
         }
@@ -5369,8 +5382,9 @@ impl LauncherApp {
                 owner,
                 allowed,
                 root_shortcut,
+                None,
                 super::CalendarEventDetails::popup_anchors,
-                |dialog, ctx, owner, first, child, host| {
+                |dialog, ctx, owner, first, child, host, _, _| {
                     dialog.render_host(ctx, true, owner, first, child, host)
                 },
             );
@@ -5391,8 +5405,9 @@ impl LauncherApp {
                 owner,
                 allowed,
                 root_shortcut,
+                None,
                 super::CalendarEventEditor::popup_anchors,
-                |dialog, ctx, owner, first, child, host| {
+                |dialog, ctx, owner, first, child, host, _, _| {
                     dialog.render_host(ctx, true, owner, first, child, host)
                 },
             );
@@ -10572,6 +10587,7 @@ impl LauncherApp {
                         | super::Panel::DuplicateFinderDialog
                         | super::Panel::FolderSizeDialog
                         | super::Panel::DateTimeStudioDialog
+                        | super::Panel::CalendarPopover
                         | super::Panel::FileLockDialog
                         | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
@@ -10673,6 +10689,7 @@ impl LauncherApp {
             (crate::gui::jump_mode::ui::NavigationDialogKind::FileLock, self.file_lock_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::FolderSize, self.folder_size_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::DateTimeStudio, self.date_time_studio_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::Calendar, self.calendar_popover_open),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::RegexTester,
                 self.regex_tester_dialog.open,
@@ -10841,6 +10858,8 @@ impl LauncherApp {
                         self.folder_size_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DateTimeStudio {
                         self.date_time_studio_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::Calendar {
+                        self.calendar_panel_root_layer(super::Panel::CalendarPopover).and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -25006,6 +25025,159 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
             [RootDialogEffect::SaveConverterPreferences]
         ));
+    }
+
+    #[test]
+    fn calendar_jump_focus_then_enter_changes_month_once() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let date = chrono::NaiveDate::from_ymd_opt(2026, 4, 12).unwrap();
+                app.open_calendar_popover(Some(date));
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer = app
+                    .calendar_panel_root_layer(super::super::Panel::CalendarPopover)
+                    .unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Next month")
+                    .cloned()
+                    .expect("Calendar owns its toolbar");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Next month");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.calendar_selected_date, Some(date));
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.calendar_selected_date,
+                    chrono::NaiveDate::from_ymd_opt(2026, 5, 12)
+                );
+                assert!(!app.calendar_editor_open);
+
+                let focus_date = |app: &mut LauncherApp, label: &str| {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        app,
+                        vec![
+                            key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                            egui::Event::Text(" ".into()),
+                        ],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    run_tool_dialog_frame(
+                        &ctx,
+                        app,
+                        vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    let before = app.calendar_selected_date;
+                    let hint = dialog_hint_for_label(app, label);
+                    run_tool_dialog_frame(&ctx, app, vec![egui::Event::Text(hint)], false)
+                        .drop_without_applying_deltas();
+                    assert_eq!(app.calendar_selected_date, before);
+                    assert!(!app.calendar_editor_open);
+                };
+
+                focus_date(&mut app, "Date 2026-05-14");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.calendar_selected_date,
+                    chrono::NaiveDate::from_ymd_opt(2026, 5, 15)
+                );
+                assert!(!app.calendar_editor_open);
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+
+                focus_date(&mut app, "Date 2026-05-13");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.calendar_editor_open);
+                assert_eq!(app.calendar_event_editor.test_start_date(), "2026-05-13");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
