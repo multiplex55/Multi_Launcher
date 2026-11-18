@@ -2634,11 +2634,13 @@ pub(super) enum FilePreviewHostCommand {
     Apply(super::file_search_preview_dialog::FileSearchPreviewHostActions),
 }
 impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPreviewDialogState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::FilePreview);
     const KEY: &'static str = "file-preview";
     const TITLE: &'static str = "File preview";
     const SIZE: egui::Vec2 = egui::vec2(860.0, 620.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
     const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     type Runtime = crate::file_search::settings::FileSearchSettings;
     type Actions = super::file_search_preview_dialog::FileSearchPreviewHostActions;
     type Checkpoint = ();
@@ -2649,17 +2651,17 @@ impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPrevie
             egui::Id::new(super::file_search_preview_dialog::preview_window_id_source()),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
+    fn target_generation(&self) -> TargetGeneration {
+        TargetGeneration(self.jump_generation())
+    }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2696,7 +2698,7 @@ impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPrevie
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2706,7 +2708,7 @@ impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPrevie
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, allowed, first, child, presentation)
+        self.render_host(ctx, runtime, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -2737,6 +2739,7 @@ pub(super) enum HashGeneratorHostCommand {
     Apply(super::hash_generator_dialog::HashHostActions, Option<usize>),
 }
 impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::HashGenerator);
     const KEY: &'static str = "hash-generator";
     const TITLE: &'static str = "Hash Generator";
     const SIZE: egui::Vec2 = egui::vec2(620.0, 440.0);
@@ -2750,17 +2753,17 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new("hash_generator_dialog"))
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
+    fn target_generation(&self) -> TargetGeneration {
+        TargetGeneration(self.jump_generation())
+    }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2797,7 +2800,7 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2807,7 +2810,7 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, allowed, first, child, presentation)
+        self.render_host(ctx, runtime, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request

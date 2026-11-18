@@ -37,7 +37,8 @@ enum PreviewAction {
 
 pub(super) struct FileSearchPreviewHostActions {
     pub(super) host_request: Option<super::utility_host::UtilityPresentation>,
-    #[cfg(test)] pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
     epoch: u64,
     request_generation: u64,
     request: Option<PreviewRequest>,
@@ -190,7 +191,10 @@ impl FileSearchPreviewDialogState {
     }
 
     pub fn start_loading_current_preview(&mut self) {
-        if !self.session_active { self.epoch = self.epoch.wrapping_add(1); self.session_active = true; }
+        if !self.session_active {
+            self.epoch = self.epoch.wrapping_add(1);
+            self.session_active = true;
+        }
         self.request_generation = self.request_generation.wrapping_add(1);
         let Some(request) = self.current_request.clone() else {
             self.loaded_preview = None;
@@ -249,6 +253,9 @@ impl FileSearchPreviewDialogState {
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch
     }
+    pub(super) fn jump_generation(&self) -> u64 {
+        self.request_generation
+    }
 
     #[cfg(test)]
     pub(crate) fn test_request_generation(&self) -> u64 {
@@ -275,21 +282,42 @@ impl FileSearchPreviewDialogState {
         first: bool,
         child: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> FileSearchPreviewHostActions {
         let mut open = self.open;
         let pending_auto_scroll = self.pending_auto_scroll;
         let reset_horizontal_scroll = self.reset_horizontal_scroll;
         let mut actions = Vec::new();
         let mut host_request = None;
+        let mut close_requested = false;
+        let mut order = 0;
         #[cfg(test)]
         let mut host_button = None;
         let mut body = |ui: &mut egui::Ui| {
-            let active = input_allowed
-                && first
-                && ui.is_visible()
-                && !ui.is_sizing_pass()
-                && !ctx.will_discard();
-            let (button, next) = super::utility_host::presentation_button(ui, presentation, active);
+            let interactive = input_allowed && ui.is_visible() && !ui.is_sizing_pass();
+            let active = interactive && first && !ctx.will_discard();
+            let (button, next) =
+                super::utility_host::presentation_button(ui, presentation, interactive);
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &button,
+                "presentation",
+                "Dock or pop out",
+                super::jump_mode::TargetKind::Button,
+                &mut order,
+            );
+            let close = ui.add_enabled(interactive, egui::Button::new("Close"));
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &close,
+                "close",
+                "Close preview",
+                super::jump_mode::TargetKind::Button,
+                &mut order,
+            );
+            close_requested |= active && close.clicked();
             #[cfg(test)]
             {
                 host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
@@ -297,8 +325,8 @@ impl FileSearchPreviewDialogState {
             if active && button.clicked() {
                 host_request = Some(next);
             }
-            ui.add_enabled_ui(active, |ui| {
-                self.render_contents(ui, settings, &mut actions)
+            ui.add_enabled_ui(interactive, |ui| {
+                self.render_contents(ui, settings, &mut actions, scope, &mut order, active)
             });
         };
         if let Some(ui) = child {
@@ -335,7 +363,7 @@ impl FileSearchPreviewDialogState {
             epoch: self.epoch,
             request_generation: self.request_generation,
             request: self.current_request.clone(),
-            close: !open || self.close_requested,
+            close: !open || self.close_requested || close_requested,
             consumed_auto_scroll,
             actions: if first && input_allowed && !ctx.will_discard() {
                 actions
@@ -350,7 +378,11 @@ impl FileSearchPreviewDialogState {
         pending: FileSearchPreviewHostActions,
         immediate_ctx: Option<&egui::Context>,
     ) {
-        if !self.open || self.epoch != pending.epoch || self.request_generation != pending.request_generation || self.current_request != pending.request {
+        if !self.open
+            || self.epoch != pending.epoch
+            || self.request_generation != pending.request_generation
+            || self.current_request != pending.request
+        {
             return;
         }
         self.open = !pending.close;
@@ -388,11 +420,14 @@ impl FileSearchPreviewDialogState {
         ui: &mut egui::Ui,
         settings: &FileSearchSettings,
         actions: &mut Vec<PreviewAction>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
+        active: bool,
     ) {
         let Some(request) = self.current_request.clone() else {
             return;
         };
-        self.render_header(ui, &request, settings, actions);
+        self.render_header(ui, &request, settings, actions, scope, order);
         ui.separator();
         if self.loading {
             ui.horizontal(|ui| {
@@ -406,7 +441,7 @@ impl FileSearchPreviewDialogState {
         };
         match preview.kind {
             PreviewKind::Text => {
-                self.render_text_preview(ui, &preview);
+                self.render_text_preview(ui, &preview, scope, order, active);
             }
             _ => {
                 widgets::semantic_status(
@@ -429,6 +464,8 @@ impl FileSearchPreviewDialogState {
         request: &PreviewRequest,
         _settings: &FileSearchSettings,
         actions: &mut Vec<PreviewAction>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
     ) {
         ui.vertical(|ui| {
             widgets::compact_section_heading(ui, "Preview", None);
@@ -455,13 +492,42 @@ impl FileSearchPreviewDialogState {
             });
             ui.horizontal_wrapped(|ui| {
                 let open = ui.button("Open in Explorer");
+                super::jump_mode::ui::register_and_apply_target(
+                    scope,
+                    ui,
+                    &open,
+                    "open",
+                    "Open in Explorer",
+                    super::jump_mode::TargetKind::Button,
+                    order,
+                );
                 if widgets::with_button_emphasis(ui, open, ButtonEmphasis::Primary).clicked() {
                     actions.push(PreviewAction::Open);
                 }
-                if ui.button("Copy Full Path").clicked() {
+                let copy_path = ui.button("Copy Full Path");
+                super::jump_mode::ui::register_and_apply_target(
+                    scope,
+                    ui,
+                    &copy_path,
+                    "copy-path",
+                    "Copy full path",
+                    super::jump_mode::TargetKind::Button,
+                    order,
+                );
+                if copy_path.clicked() {
                     actions.push(PreviewAction::Copy(request.path.display().to_string()));
                 }
-                if ui.button("Copy Matching Line").clicked() {
+                let copy_line = ui.button("Copy Matching Line");
+                super::jump_mode::ui::register_and_apply_target(
+                    scope,
+                    ui,
+                    &copy_line,
+                    "copy-line",
+                    "Copy matching line",
+                    super::jump_mode::TargetKind::Button,
+                    order,
+                );
+                if copy_line.clicked() {
                     actions.push(match self.selected_match.as_ref() {
                         Some(found) => PreviewAction::Copy(found.line.clone()),
                         None => PreviewAction::MissingMatch,
@@ -486,6 +552,9 @@ impl FileSearchPreviewDialogState {
         &mut self,
         ui: &mut egui::Ui,
         preview: &FilePreview,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
+        active: bool,
     ) -> egui::scroll_area::ScrollAreaOutput<()> {
         let selected_line = self.selected_match.as_ref().map(|m| m.line_number);
         let scroll_target = self
@@ -505,30 +574,82 @@ impl FileSearchPreviewDialogState {
         let path = preview.path.clone();
         let row_count = preview.lines.len();
         let (font_id, row_height) = preview_row_metrics(ui);
-
-        let output = egui::ScrollArea::both()
-            .id_salt(preview_scroll_id_source(path))
-            .auto_shrink([false, false])
-            .show_rows(ui, row_height, row_count, |ui, row_range| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                for row_index in row_range {
-                    let Some(line) = preview.lines.get(row_index) else {
-                        continue;
-                    };
-                    let is_selected = Some(line.line_number) == selected_line;
-                    let response = render_preview_line(
-                        ui,
-                        line,
-                        line_number_width,
-                        &font_id,
-                        row_height,
-                        is_selected,
-                    );
-                    if scroll_target == Some(row_index) {
-                        response.scroll_to_me(Some(egui::Align::Center));
-                    }
+        let content_id = ui.make_persistent_id(("preview-content", self.request_generation));
+        let label = ui.label("Preview text · Page Up / Page Down");
+        let content = ui.interact(label.rect, content_id, egui::Sense::click());
+        super::jump_mode::ui::register_and_apply_target(
+            scope,
+            ui,
+            &content,
+            "content",
+            "Preview text",
+            super::jump_mode::TargetKind::Button,
+            order,
+        );
+        let mut offset = None;
+        if active && content.has_focus() && scroll_target.is_none() {
+            ui.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    content.id,
+                    egui::EventFilter {
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                )
+            });
+            let page = ui.available_height().max(row_height);
+            let current = egui::scroll_area::State::load(
+                ui.ctx(),
+                ui.make_persistent_id(egui::IdSalt::new(preview_scroll_id_source(&path))),
+            )
+            .map_or(0.0, |state| state.offset.y);
+            let command = ui.input_mut(|input| {
+                let modifiers = egui::Modifiers::NONE;
+                if input.consume_key(modifiers, egui::Key::PageDown) {
+                    Some(current + page)
+                } else if input.consume_key(modifiers, egui::Key::PageUp) {
+                    Some((current - page).max(0.0))
+                } else if input.consume_key(modifiers, egui::Key::ArrowDown) {
+                    Some(current + row_height)
+                } else if input.consume_key(modifiers, egui::Key::ArrowUp) {
+                    Some((current - row_height).max(0.0))
+                } else if input.consume_key(modifiers, egui::Key::Home) {
+                    Some(0.0)
+                } else if input.consume_key(modifiers, egui::Key::End) {
+                    Some(row_count as f32 * row_height)
+                } else {
+                    None
                 }
             });
+            offset = command;
+        }
+
+        let mut scroll = egui::ScrollArea::both()
+            .id_salt(preview_scroll_id_source(path))
+            .auto_shrink([false, false]);
+        if let Some(offset) = offset {
+            scroll = scroll.vertical_scroll_offset(offset);
+        }
+        let output = scroll.show_rows(ui, row_height, row_count, |ui, row_range| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            for row_index in row_range {
+                let Some(line) = preview.lines.get(row_index) else {
+                    continue;
+                };
+                let is_selected = Some(line.line_number) == selected_line;
+                let response = render_preview_line(
+                    ui,
+                    line,
+                    line_number_width,
+                    &font_id,
+                    row_height,
+                    is_selected,
+                );
+                if scroll_target == Some(row_index) {
+                    response.scroll_to_me(Some(egui::Align::Center));
+                }
+            }
+        });
         if self.pending_auto_scroll {
             self.pending_auto_scroll = false;
         }
@@ -771,6 +892,86 @@ mod tests {
     }
 
     #[test]
+    fn preview_content_keyboard_scroll_requires_owned_focus() {
+        let ctx = egui::Context::default();
+        let path = PathBuf::from("long-preview.txt");
+        let preview = FilePreview {
+            path,
+            kind: PreviewKind::Text,
+            lines: (1..=500).map(preview_line).collect(),
+            metadata: crate::file_search::preview::PreviewMetadata {
+                is_directory: false,
+                len_bytes: 5000,
+                modified: None,
+                readonly: false,
+                sampled_bytes: 5000,
+            },
+            binary_or_unsupported: None,
+            error: None,
+            coverage: PreviewCoverage::Complete,
+            displayed_start_line: Some(1),
+            displayed_end_line: Some(500),
+            warnings: Vec::new(),
+            lossy_utf8: false,
+            cache_hit: false,
+        };
+        let mut state = FileSearchPreviewDialogState::default();
+        let raw = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 300.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let key = || egui::Event::Key {
+            key: egui::Key::PageDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut focus = None;
+        ctx.run_ui(raw(Vec::new()), |ui| {
+            focus = Some(ui.make_persistent_id(("preview-content", state.request_generation)));
+            state.render_text_preview(ui, &preview, None, &mut 0, true);
+        })
+        .drop_without_applying_deltas();
+        ctx.memory_mut(|memory| memory.request_focus(focus.unwrap()));
+        let mut scrolled = 0.0;
+        ctx.run_ui(raw(vec![key()]), |ui| {
+            scrolled = state
+                .render_text_preview(ui, &preview, None, &mut 0, true)
+                .state
+                .offset
+                .y;
+        })
+        .drop_without_applying_deltas();
+        assert!(scrolled > 0.0);
+        let mut after = 0.0;
+        let mut still_pressed = false;
+        let release = egui::Event::Key {
+            key: egui::Key::PageDown,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        ctx.run_ui(raw(vec![release, key()]), |ui| {
+            after = state
+                .render_text_preview(ui, &preview, None, &mut 0, false)
+                .state
+                .offset
+                .y;
+            still_pressed = ui.input(|input| input.key_pressed(egui::Key::PageDown));
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(after, scrolled);
+        assert!(still_pressed, "an unowned preview must not consume the key");
+    }
+
+    #[test]
     fn scaled_preview_rows_use_measured_font_height_without_changing_request_payload() {
         let path = PathBuf::from(
             r"G:\projects\a-long-preview-path\with-several\nested\directories\and\source.rs",
@@ -851,9 +1052,11 @@ mod tests {
                     &request,
                     &FileSearchSettings::default(),
                     &mut Vec::new(),
+                    None,
+                    &mut 0,
                 );
                 ui.separator();
-                let scroll = state.render_text_preview(ui, &preview);
+                let scroll = state.render_text_preview(ui, &preview, None, &mut 0, true);
                 rendered = Some((
                     font_id,
                     row_height,

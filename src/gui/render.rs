@@ -5767,6 +5767,7 @@ impl LauncherApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let native_input = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()
@@ -5783,8 +5784,24 @@ impl LauncherApp {
         let preview_pinned = self
             .pinned_panels
             .contains(&super::Panel::FileSearchPreviewDialog);
+        let preview_scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::FilePreview,
+                instance,
+            } if preview_owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("file-preview", instance),
+                super::jump_mode::TargetGeneration(
+                    self.file_search_dialog.preview_dialog.jump_generation(),
+                ),
+                "file-preview/form",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
         self.file_preview_host
-            .configure_jump(&self.jump_mode_ui, false);
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.file_preview_host.show(
             ctx,
             &mut self.file_search_dialog.preview_dialog,
@@ -5794,14 +5811,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: preview_owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !preview_pinned,
                 allow_os_close: !preview_pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (preview_scope.as_ref(), None),
             },
         );
         let hash_layer = self.hash_generator_host.root_layer();
@@ -5819,8 +5836,22 @@ impl LauncherApp {
         let hash_pinned = self
             .pinned_panels
             .contains(&super::Panel::HashGeneratorDialog);
+        let hash_scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::HashGenerator,
+                instance,
+            } if hash_owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("hash-generator", instance),
+                super::jump_mode::TargetGeneration(self.hash_generator_dialog.jump_generation()),
+                "hash-generator/form",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
         self.hash_generator_host
-            .configure_jump(&self.jump_mode_ui, false);
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         let hash_runtime = super::hash_generator_dialog::HashRuntime {
             host: self.hash_generator_host.identity(),
         };
@@ -5833,14 +5864,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: hash_owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !hash_pinned,
                 allow_os_close: !hash_pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (hash_scope.as_ref(), None),
             },
         );
         let todo_layer = self.todo_view_host.root_layer();
@@ -10463,6 +10494,8 @@ impl LauncherApp {
                         | super::Panel::TimerDialog
                         | super::Panel::PasteSequenceDialog
                         | super::Panel::FileSearchDialog
+                        | super::Panel::FileSearchPreviewDialog
+                        | super::Panel::HashGeneratorDialog
                         | super::Panel::SnippetDialog
                         | super::Panel::ClipboardDialog
                         | super::Panel::JsonUtilityDialog
@@ -10549,6 +10582,10 @@ impl LauncherApp {
                 crate::gui::jump_mode::ui::NavigationDialogKind::CalculationChart,
                 self.calculation_chart_dialog.open && self.calculation_chart_host.root_layer().is_some(),
             ),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::FilePreview,
+                self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::HashGenerator,
+                self.hash_generator_dialog.open && self.hash_generator_host.root_layer().is_some()),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::PasswordGenerator,
                 self.password_generator_dialog.open && self.password_generator_host.root_layer().is_some(),
@@ -10696,6 +10733,8 @@ impl LauncherApp {
                     }
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
+                    NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
+                    NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
                     NavigationDialogKind::MarkdownPrint => self.markdown_print_host.root_layer(),
                     NavigationDialogKind::PasswordGenerator => self.password_generator_host.root_layer(),
                     NavigationDialogKind::FileOperations => self.file_operations_center_root_layer(),
@@ -10750,6 +10789,10 @@ impl LauncherApp {
                         self.markdown_print_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::CalculationChart {
                         self.calculation_chart_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::FilePreview {
+                        self.file_preview_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::HashGenerator {
+                        self.hash_generator_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::Snippets {
                         self.snippet_window_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MouseSettings {
@@ -24223,6 +24266,91 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
             "a second completion does not emit the same copy twice"
         );
+    }
+
+    #[test]
+    fn hash_jump_focus_does_not_calculate() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.focus_panel(super::super::Panel::HashGeneratorDialog);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer = app.hash_generator_host.root_layer().unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let instance = app
+                    .jump_mode_ui
+                    .dialog_instance(NavigationDialogKind::HashGenerator)
+                    .unwrap();
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::HashGenerator,
+                        instance
+                    },
+                );
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Calculate")
+                    .cloned()
+                    .unwrap();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Calculate");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(!app.hash_generator_dialog.is_running());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

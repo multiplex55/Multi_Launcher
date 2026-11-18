@@ -83,7 +83,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M11-B | complete |
 | M11-C | in_progress |
 | M11-D | in_progress |
-| M12-A, M12-B | pending |
+| M12-A1 | complete |
+| M12-A remaining, M12-B | pending |
 | M13-A | pending |
 
 ## M0-B platform decisions
@@ -642,3 +643,16 @@ The local projection keeps read/pin metadata across source content updates and d
 The 37-test Inbox/backup run passed (d3975fba-a926-49b8-be06-393ba4a17a7d). Review identified the in-place source update window. After adding current text checks and removing redundant idle repainting and GUI permission polling, 14 scoped checks passed (b8ee9b28-21eb-4207-b53a-232ee7013e41). These included stale/missing dismissal text, ID reuse, incomplete snapshots, bounded UTF-16 handling, unpublished idle state and ordinary internal operations.
 
 After explicit approval for Current User trust, the SDK signed the exact short-lived non-exportable fixture package (SHA-256 `593C80368142F6A7D8BB0B3B11D2CBA8B30AFDEF687FFF5AC6502FFA64C495AB`). Windows 10 build 19045 `Add-AppxPackage` rejected it with `0x80073CF0` and inner signature error `0x800B0109` despite the exact public certificate in Current User Trusted People. The import was rolled back and no fixture package is installed. The in-progress C/D native acceptance requires a signed installation with trust recognized by Windows, actual permission and the independent synthetic toast. Temporary Local Computer Trusted People authorization is a separate security decision.
+
+
+### M12-A1 File Search Preview and Hash keyboard ownership
+
+The existing retained holders now publish distinct current Preview and Hash owners in docked and native presentations. Targets bind the current preview request or hash draft generation. Preview registers its header, close and presentation controls and a focusable text target. Owned Page Up/Down, Home/End and arrow keys scroll its existing virtualized text area and preserve pending matched-line reveal. An unowned preview leaves keys available to the current owner. Hash registers its fields, current actions and owned source/algorithm choices. Hint navigation alone focuses action controls and never starts hashing or copies output.
+
+Six initial focused checks passed (49971aec-1802-4a41-ab65-9e66cf37f14e). Independent review identified the need to navigate long preview contents. The four final checks passed after the review correction (afc8a934-c67d-47cc-8a12-94c01e791bbd), covering long-preview focus and scrolling, scaled rows, the actual layer inventory and a retained Hash hint that focuses Calculate without running it. Preview scrolling was exercised at the shared body boundary. Native Hash popup and Preview scrolling interactions remain for representative final smoke.
+
+### M12 native Downloads, File Operations and Inbox handoff
+
+In isolated Windows profile `m12-native-transfer-3050f698`, both Paste Sequences shortcuts were disabled before startup. Keyboard activation opened Downloads, selected and marked one synthetic file reviewed, and opened the prefilled Move draft using the stored synthetic destination. Review showed the exact one ready row. Queue left the source and destination untouched until explicit Start. The native transfer completed a 57-byte same-volume Move. The source was gone and the destination retained SHA-256 `02D034B6CB9AFF5F4277D6B4F9AD95C2FFFC883EEDB276ACE72039730AD1C881`, matching the recorded input. The native Inbox showed one completed transfer without retaining the path. Its Open related action and Activity's Open owner tool each focused the exact retained completed job in File Operations. Escape closed the File Operations child while leaving Downloads visible.
+
+This closes the earlier M9-D2, M10-B and M11-B representative native Move and related-navigation gaps. The original direct file picker acceptance remains unverified. A separate synthetic ZIP was staged, but foreground PID checks failed before extraction could be started after relaunch. Its archive remained present with no extracted output. Both owned launcher fixture processes exited. No user's Downloads directory was used.

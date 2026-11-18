@@ -62,10 +62,12 @@ pub(crate) enum NavigationDialogKind {
     FileOperations,
     DownloadsTriage,
     NotificationInbox,
+    FilePreview,
+    HashGenerator,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 26] = [
+    pub(crate) const ALL: [Self; 28] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -92,6 +94,8 @@ impl NavigationDialogKind {
         Self::FileOperations,
         Self::DownloadsTriage,
         Self::NotificationInbox,
+        Self::FilePreview,
+        Self::HashGenerator,
     ];
 
     const fn index(self) -> usize {
@@ -122,6 +126,8 @@ impl NavigationDialogKind {
             Self::FileOperations => 23,
             Self::DownloadsTriage => 24,
             Self::NotificationInbox => 25,
+            Self::FilePreview => 26,
+            Self::HashGenerator => 27,
         }
     }
 
@@ -153,6 +159,8 @@ impl NavigationDialogKind {
             Self::FileOperations => "file-operations-center",
             Self::DownloadsTriage => "downloads-triage",
             Self::NotificationInbox => "notification-inbox",
+            Self::FilePreview => "file-preview",
+            Self::HashGenerator => "hash-generator",
         }
     }
 
@@ -187,6 +195,8 @@ impl NavigationDialogKind {
             Self::FileOperations => egui::Id::new("file-operations-center-window"),
             Self::DownloadsTriage => egui::Id::new("downloads-triage-window"),
             Self::NotificationInbox => egui::Id::new("notification-inbox-window"),
+            Self::FilePreview => egui::Id::new(super::super::file_search_preview_dialog::preview_window_id_source()),
+            Self::HashGenerator => egui::Id::new("hash_generator_dialog"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -471,6 +481,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::CalculationChart
+                    | NavigationDialogKind::FilePreview
+                    | NavigationDialogKind::HashGenerator
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::DownloadsTriage
@@ -517,6 +529,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::CalculationChart
+                    | NavigationDialogKind::FilePreview
+                    | NavigationDialogKind::HashGenerator
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::DownloadsTriage
@@ -4328,6 +4342,16 @@ mod tests {
                     }
                     NavigationDialogKind::CalculationChart => {
                         egui::Window::new("Charts").id(egui::Id::new("calculation-chart-window")).show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::FilePreview => {
+                        egui::Window::new("File preview")
+                            .id(egui::Id::new(crate::gui::file_search_preview_dialog::preview_window_id_source()))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::HashGenerator => {
+                        egui::Window::new("Hash Generator")
+                            .id(egui::Id::new("hash_generator_dialog"))
+                            .show(ctx, |_| {});
                     }
                     NavigationDialogKind::NotificationInbox => {
                         egui::Window::new("Notification Inbox").id(egui::Id::new("notification-inbox-window")).show(ctx, |_| {});
