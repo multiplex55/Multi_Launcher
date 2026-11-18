@@ -1,7 +1,9 @@
 //! Shared retained preview worker for the current Markdown draft.
 
 mod dialog;
-pub(super) use dialog::{Command as PrintHostCommand, DraftRef, PrintDialog};
+mod output;
+pub(super) use dialog::{Command as PrintHostCommand, DraftRef, PdfIntent, PrintDialog};
+pub(super) use output::choose_pdf_destination;
 
 #[derive(Debug)]
 pub(crate) struct PrintOpen {

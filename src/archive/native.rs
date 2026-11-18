@@ -2126,9 +2126,14 @@ impl OwnedStage {
         self.flush_final()
     }
 
-    pub(crate) fn publish(
+    pub(crate) fn publish(self, target_leaf: &OsStr) -> Result<NativeFileIdentity, NativeArchiveError> {
+        self.publish_admitted(target_leaf, || true)
+    }
+
+    fn publish_admitted(
         mut self,
         target_leaf: &OsStr,
+        admit: impl FnOnce() -> bool,
     ) -> Result<NativeFileIdentity, NativeArchiveError> {
         if let Err(error) = validate_single_component(target_leaf, "relative rename target") {
             return Err(self.fail_and_cleanup(error.primary));
@@ -2197,6 +2202,13 @@ impl OwnedStage {
                 Some(actual_identity),
             );
             return Err(self.fail_and_cleanup(primary));
+        }
+        if !admit() {
+            return Err(self.fail_and_cleanup(NativeFailure::validation(
+                "publication admission retired",
+                io::ErrorKind::Interrupted,
+                Some(actual_identity),
+            )));
         }
         match rename_open_file_relative_no_replace(file, &self.parent, target_leaf, actual_identity)
         {
@@ -3465,11 +3477,12 @@ pub(crate) mod print_publication {
         pub(crate) fn publish(
             self,
             name: &OsStr,
+            admit: impl FnOnce() -> bool,
         ) -> Result<NativeFileIdentity, (io::Error, Option<(OsString, NativeFileIdentity)>)>
         {
             let leaf = self.0.leaf.clone();
             let identity = self.0.identity();
-            self.0.publish(name).map_err(|e| {
+            self.0.publish_admitted(name, admit).map_err(|e| {
                 let retained = e.cleanup_failed().then_some((leaf, identity));
                 (error(e), retained)
             })

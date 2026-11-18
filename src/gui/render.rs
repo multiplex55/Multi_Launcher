@@ -5058,6 +5058,7 @@ impl LauncherApp {
                     .needs_root_ui_when_hidden(self.calculation_dependency_dialog.open)
                 || self.calculation_chart_host.needs_root_ui_when_hidden(self.calculation_chart_dialog.open)
                 || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
+                || self.markdown_print_dialog.pdf_output.busy()
                 || self.calculation_sensitivity_host.needs_root_ui_when_hidden(self.calculation_sensitivity_dialog.open)
                 || self
                     .file_preview_host
@@ -6229,6 +6230,7 @@ impl LauncherApp {
             }
             _ => None,
         };
+        let close_shortcut = layer.is_none() || keyboard_owner;
         self.markdown_print_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.markdown_print_host.show(ctx, &mut self.markdown_print_dialog, &(), HostInput {
             first,
@@ -6238,7 +6240,7 @@ impl LauncherApp {
             root_owner: navigation_owner,
             parent_owner: owner,
             root_jump_active: self.jump_mode_ui.active_session().is_some(),
-            close_shortcut: layer.is_none() || keyboard_owner,
+            close_shortcut,
             allow_os_close: true,
             confirmation_owner: NavigationOwner::Blocked,
             parent_instance: 0,
@@ -6277,10 +6279,98 @@ impl LauncherApp {
         }
     }
 
+    fn current_markdown_output_scene(&self) -> Option<std::sync::Arc<super::markdown_print::SceneReceipt>> {
+        use super::markdown_print::DocumentStamp;
+
+        let receipt = self.markdown_print_dialog.output_scene()?;
+        let live = match &receipt.stamp {
+            DocumentStamp::Note { panel, .. } => self.note_panels.iter()
+                .find(|note| note.prompt_identity() == *panel)
+                .and_then(super::NotePanel::print_draft),
+            DocumentStamp::Studio { .. } => self.markdown_studio_dialog.print_draft(),
+        }?;
+        (live.stamp == receipt.stamp
+            && live.source == receipt.source.as_ref()
+            && live.base == receipt.base)
+            .then_some(receipt)
+    }
+
+    fn run_markdown_pdf_command(
+        &mut self,
+        ctx: &egui::Context,
+        origin: &super::utility_host::AcceptedParentOpen<u64>,
+        viewport: egui::ViewportId,
+        command: super::markdown_print::PrintHostCommand,
+        choose: impl FnOnce(Option<usize>) -> Result<Option<std::path::PathBuf>, &'static str>,
+    ) {
+        use super::markdown_print::{PdfIntent, PrintHostCommand};
+
+        let PrintHostCommand::Pdf { intent, scene, hwnd } = command else { return };
+        if !self.markdown_print_host.accepts_origin(&self.markdown_print_dialog, origin) {
+            return;
+        }
+        if matches!(intent, PdfIntent::Cancel) {
+            self.markdown_print_dialog.pdf_output.cancel();
+            ctx.request_repaint_of(viewport);
+            return;
+        }
+        let Some(scene) = scene else { return };
+        let still_current = |app: &Self| {
+            app.markdown_print_host.accepts_origin(&app.markdown_print_dialog, origin)
+                && app.current_markdown_output_scene()
+                    .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &scene))
+        };
+        if !still_current(self) {
+            return;
+        }
+        let host = self.markdown_print_host.identity();
+        match intent {
+            PdfIntent::Choose => match choose(hwnd) {
+                Ok(Some(path)) if still_current(self) => {
+                    self.markdown_print_dialog.pdf_output.review(path, host, scene, ctx, viewport);
+                }
+                Ok(_) => {}
+                Err(error) => self.markdown_print_dialog.pdf_output.report_error(error),
+            },
+            PdfIntent::Confirm => self.markdown_print_dialog.pdf_output.confirm(host, &scene, ctx, viewport),
+            PdfIntent::Cancel => {}
+        }
+        ctx.request_repaint_of(viewport);
+    }
+
+    fn poll_markdown_pdf(&mut self, ctx: &egui::Context) {
+        if !self.markdown_print_dialog.pdf_output.busy()
+            && !self.markdown_print_dialog.pdf_output.confirming()
+        {
+            return;
+        }
+        let host = self.markdown_print_host.identity();
+        let viewport = self.markdown_print_host.owner_viewport();
+        // The retained editor completion has already retired any changed draft.
+        let scene = self.markdown_print_dialog.output_scene();
+        let output = &mut self.markdown_print_dialog.pdf_output;
+        output.observe(host, scene.as_ref());
+        if let Some((kind, message)) = output.poll(host, scene.as_ref(), ctx, viewport) {
+            if matches!(kind, ToastKind::Error) {
+                self.report_error_message("markdown.pdf", message);
+            } else {
+                self.add_toast(Toast {
+                    kind,
+                    text: message.into(),
+                    options: ToastOptions::default().duration_in_seconds(8.0),
+                    style: Default::default(),
+                });
+            }
+        }
+    }
+
     fn complete_markdown_print(&mut self, ctx: &egui::Context) {
         use super::markdown_print::{DocumentStamp, PrintHostCommand};
 
-        let Some(stamp) = self.markdown_print_dialog.current_stamp() else { return };
+        let Some(stamp) = self.markdown_print_dialog.current_stamp() else {
+            self.poll_markdown_pdf(ctx);
+            return;
+        };
         let draft = match stamp {
             DocumentStamp::Note { panel, .. } => self.note_panels.iter()
                 .find(|note| note.prompt_identity() == *panel)
@@ -6295,12 +6385,19 @@ impl LauncherApp {
         }
         if self.markdown_print_dialog.current_stamp().is_none() {
             self.markdown_print_host.close_from_app(ctx);
+            self.poll_markdown_pdf(ctx);
             return;
         }
         if let Some(completion) = self.markdown_print_host.complete(ctx, &mut self.markdown_print_dialog) {
             for command in completion.commands {
                 match command {
                     PrintHostCommand::Closed => self.markdown_print_dialog.close(),
+                    command @ PrintHostCommand::Pdf { .. } => {
+                        if let Some(origin) = &completion.origin {
+                            self.run_markdown_pdf_command(ctx, origin, completion.owner_viewport,
+                                command, super::markdown_print::choose_pdf_destination);
+                        }
+                    }
                 }
             }
             if completion.show_root {
@@ -6308,6 +6405,7 @@ impl LauncherApp {
             }
         }
         self.markdown_print_dialog.poll(ctx);
+        self.poll_markdown_pdf(ctx);
     }
 
     fn show_markdown_studio(
@@ -15854,6 +15952,7 @@ impl eframe::App for LauncherApp {
             || self.notes_dialog.needs_root_ui_when_hidden()
             || self.markdown_studio_dialog.needs_root_ui_when_hidden()
             || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
+            || self.markdown_print_dialog.pdf_output.busy()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.recording_dialog.needs_setup_root_ui_when_hidden()
@@ -45184,6 +45283,55 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         (app, directory)
+    }
+
+    #[test]
+    fn markdown_print_pdf_chooser_requires_exact_current_scene_and_cancel_keeps_output_idle() {
+        use super::super::markdown_print::{PdfIntent, PrintHostCommand, SceneReceipt};
+        use super::super::utility_host::{AcceptedParentOpen, ChildOpenOrigin, ViewportPassProvenance};
+        use super::super::utility_window_host::HostedUtilityDialog;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (mut app, _directory) = new_prompt_app(&ctx);
+        app.markdown_studio_dialog.open();
+        let draft = app.markdown_studio_dialog.print_draft().unwrap();
+        app.markdown_print_dialog.open(draft, &ctx);
+        app.markdown_print_host.open_from_origin(&ctx, &app.markdown_print_dialog, false, &ChildOpenOrigin::<()>::Root);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let scene = loop {
+            app.markdown_print_dialog.poll(&ctx);
+            if let Some(scene) = app.current_markdown_output_scene() { break scene; }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+
+        let mut pass = None;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            pass = Some(ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT));
+        }).drop_without_applying_deltas();
+        let pass = pass.unwrap();
+        let origin = AcceptedParentOpen::from_retained(
+            &ctx, app.markdown_print_host.identity(), app.markdown_print_dialog.session(), pass, pass,
+        ).unwrap();
+        let stale = std::sync::Arc::new(SceneReceipt {
+            stamp: scene.stamp.clone(), source: scene.source.clone(), base: scene.base.clone(),
+            settings: scene.settings.clone(), date: scene.date.clone(), scene: scene.scene.clone(),
+        });
+        app.run_markdown_pdf_command(&ctx, &origin, egui::ViewportId::ROOT, PrintHostCommand::Pdf {
+            intent: PdfIntent::Choose, scene: Some(stale), hwnd: Some(1),
+        }, |_| panic!("A stale scene must not open the native chooser"));
+
+        let mut calls = 0;
+        app.run_markdown_pdf_command(&ctx, &origin, egui::ViewportId::ROOT, PrintHostCommand::Pdf {
+            intent: PdfIntent::Choose, scene: Some(scene), hwnd: Some(1),
+        }, |hwnd| {
+            assert_eq!(hwnd, Some(1));
+            calls += 1;
+            Ok(None)
+        });
+        assert_eq!(calls, 1);
+        assert!(!app.markdown_print_dialog.pdf_output.busy());
     }
 
     #[test]

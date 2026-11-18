@@ -1,6 +1,6 @@
 //! Retained Notes and Studio preview over the shared page scene.
 
-use super::{AssetBase, DocumentStamp, PreviewWorker, SceneReceipt, Snapshot};
+use super::{AssetBase, DocumentStamp, PreviewWorker, SceneReceipt, Snapshot, output::PdfOutput};
 use crate::gui::{
     jump_mode::{
         TargetKind,
@@ -150,6 +150,7 @@ pub(in crate::gui) struct PrintDialog {
     raster_scale: f32,
     display_metrics: DisplayMetrics,
     focus_pending: bool,
+    pub(in crate::gui) pdf_output: PdfOutput,
 }
 
 impl PrintDialog {
@@ -163,6 +164,7 @@ impl PrintDialog {
             .is_some_and(|stamp| stamp.same_document(&draft.stamp))
         {
             self.refresh(draft, ctx, egui::ViewportId::ROOT);
+            self.focus_pending = true;
             return;
         }
         self.close();
@@ -188,12 +190,14 @@ impl PrintDialog {
         if !previous.stamp.same_document(&draft.stamp) {
             self.close();
         } else if previous.stamp != draft.stamp || previous.base != draft.base {
+            self.pdf_output.retire();
             self.draft = Some(draft.into());
             self.invalidate_scene(ctx, viewport);
         }
     }
 
     pub fn close(&mut self) {
+        self.pdf_output.retire();
         if let Some(worker) = &self.worker {
             worker.retire();
         }
@@ -213,6 +217,13 @@ impl PrintDialog {
                 && self.controls.settings == receipt.settings
                 && self.date == receipt.date
         })
+    }
+
+    pub(in crate::gui) fn output_scene(&self) -> Option<Arc<SceneReceipt>> {
+        self.receipt
+            .as_ref()
+            .filter(|receipt| self.matches_receipt(receipt))
+            .cloned()
     }
 
     fn invalidate_scene(&mut self, ctx: &egui::Context, viewport: egui::ViewportId) {
@@ -311,10 +322,24 @@ pub(in crate::gui) struct Actions {
     viewport: egui::ViewportId,
     display_metrics: DisplayMetrics,
     focus_control: Option<(egui::LayerId, egui::Id)>,
+    confirmation_focus: Option<(egui::LayerId, egui::Id, egui::Id)>,
+    pdf_intent: Option<PdfIntent>,
 }
 
 pub(in crate::gui) enum Command {
     Closed,
+    Pdf {
+        intent: PdfIntent,
+        scene: Option<Arc<SceneReceipt>>,
+        hwnd: Option<usize>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::gui) enum PdfIntent {
+    Choose,
+    Confirm,
+    Cancel,
 }
 
 impl HostedUtilityDialog for PrintDialog {
@@ -391,6 +416,8 @@ impl HostedUtilityDialog for PrintDialog {
             viewport: ctx.viewport_id(),
             display_metrics: DisplayMetrics::for_viewport(ctx),
             focus_control: None,
+            confirmation_focus: None,
+            pdf_intent: None,
         };
         let mut open = true;
         let mut show = |ui: &mut egui::Ui| {
@@ -417,12 +444,35 @@ impl HostedUtilityDialog for PrintDialog {
     fn closed_command() -> Command {
         Command::Closed
     }
-    fn command_closes(_: &Command) -> bool {
+    fn command_closes(command: &Command) -> bool {
+        matches!(command, Command::Closed)
+    }
+    fn accept_close(&mut self, keyboard: bool) -> bool {
+        if keyboard && self.pdf_output.confirming() {
+            self.pdf_output.cancel();
+            return false;
+        }
+        self.pdf_output.retire();
         true
     }
-    fn complete_actions(&mut self, actions: Actions, _: Option<usize>) -> Vec<Command> {
+    fn complete_actions(&mut self, actions: Actions, hwnd: Option<usize>) -> Vec<Command> {
         if actions.close {
+            self.pdf_output.retire();
             return vec![Command::Closed];
+        }
+        if let Some((layer, cancel, replace)) = actions.confirmation_focus {
+            if actions.viewport != egui::ViewportId::ROOT {
+                self.pdf_output.finish_confirmation_focus();
+            } else if crate::gui::jump_mode::ui::visible_top_middle_layer(&actions.ctx)
+                == Some(layer)
+            {
+                actions.ctx.memory_mut(|memory| {
+                    if !memory.has_focus(cancel) && !memory.has_focus(replace) {
+                        memory.request_focus(cancel);
+                    }
+                });
+                self.pdf_output.finish_confirmation_focus();
+            }
         }
         if self.focus_pending
             && let Some((layer, target)) = actions.focus_control
@@ -442,6 +492,9 @@ impl HostedUtilityDialog for PrintDialog {
                 .display_metrics
                 .raster_scale(&actions.controls, actions.display_scale)
                 != self.raster_scale;
+        if layout_changed || actions.host_request.is_some() {
+            self.pdf_output.retire();
+        }
         self.controls = actions.controls;
         self.display_scale = actions.display_scale;
         self.display_metrics = actions.display_metrics;
@@ -449,6 +502,18 @@ impl HostedUtilityDialog for PrintDialog {
             self.invalidate_scene(&actions.ctx, actions.viewport);
         } else if raster_changed {
             self.schedule(&actions.ctx, actions.viewport);
+        }
+        if let Some(intent) = actions.pdf_intent
+            && actions.host_request.is_none()
+        {
+            let scene = self.output_scene();
+            if matches!(intent, PdfIntent::Cancel) || scene.is_some() {
+                return vec![Command::Pdf {
+                    intent,
+                    scene,
+                    hwnd,
+                }];
+            }
         }
         Vec::new()
     }
@@ -580,6 +645,8 @@ mod tests {
             viewport: egui::ViewportId::ROOT,
             display_metrics: DisplayMetrics::for_viewport(&ctx),
             focus_control: None,
+            confirmation_focus: None,
+            pdf_intent: None,
         };
         assert!(dialog.complete_actions(actions, None).is_empty());
         assert!(Arc::ptr_eq(&wait_for_receipt(&mut dialog, &ctx), &ready));
@@ -594,6 +661,53 @@ mod tests {
 }
 
 impl PrintDialog {
+    fn replacement_ui(
+        &self,
+        ui: &mut egui::Ui,
+        actions: &mut Actions,
+        scope: Option<&JumpModeScope>,
+        path: &std::path::Path,
+    ) {
+        ui.strong("Replace the existing PDF?");
+        ui.label(path.display().to_string());
+        ui.horizontal_wrapped(|ui| {
+            let cancel = ui.button("Cancel");
+            let replace = ui.button("Replace PDF");
+            if !ui.is_enabled() {
+                return;
+            }
+            let mut order = 0;
+            for (response, key, label) in [
+                (&cancel, "cancel-pdf-replace", "Cancel PDF replacement"),
+                (&replace, "replace-pdf", "Replace PDF"),
+            ] {
+                register_and_apply_target(
+                    scope,
+                    ui,
+                    response,
+                    key,
+                    label,
+                    TargetKind::Button,
+                    &mut order,
+                );
+            }
+            if self.pdf_output.confirmation_needs_focus() && !ui.ctx().will_discard() {
+                if actions.viewport != egui::ViewportId::ROOT
+                    && !cancel.has_focus()
+                    && !replace.has_focus()
+                {
+                    cancel.request_focus();
+                }
+                actions.confirmation_focus = Some((ui.layer_id(), cancel.id, replace.id));
+            }
+            if cancel.clicked() {
+                actions.pdf_intent = Some(PdfIntent::Cancel);
+            } else if replace.clicked() {
+                actions.pdf_intent = Some(PdfIntent::Confirm);
+            }
+        });
+    }
+
     fn controls_ui(
         &self,
         ui: &mut egui::Ui,
@@ -604,8 +718,16 @@ impl PrintDialog {
         let mut order = 0;
         macro_rules! target {
             ($ui:expr, $response:expr, $key:expr, $label:expr, $kind:expr) => {
-                register_and_apply_target(scope, $ui, &$response, $key, $label, $kind, &mut order);
+                if $response.enabled() {
+                    register_and_apply_target(
+                        scope, $ui, &$response, $key, $label, $kind, &mut order,
+                    );
+                }
             };
+        }
+        if let Some(path) = self.pdf_output.target_path() {
+            self.replacement_ui(ui, actions, scope, &path);
+            return;
         }
         ui.horizontal_wrapped(|ui| {
             let enabled = ui.is_enabled();
@@ -623,7 +745,40 @@ impl PrintDialog {
             let close = ui.button("Close");
             target!(ui, close, "close", "Close preview", TargetKind::Button);
             actions.close |= close.clicked();
+            let save = ui.add_enabled(
+                self.output_scene().is_some()
+                    && !self.pdf_output.busy()
+                    && !self.pdf_output.confirming(),
+                egui::Button::new("Save PDF…"),
+            );
+            target!(ui, save, "save-pdf", "Save PDF", TargetKind::Button);
+            if save.clicked() {
+                actions.pdf_intent = Some(PdfIntent::Choose);
+            }
+            if self.pdf_output.busy() {
+                let cancel = ui.add_enabled(
+                    self.pdf_output.can_cancel_job(),
+                    egui::Button::new("Cancel PDF save"),
+                );
+                target!(
+                    ui,
+                    cancel,
+                    "cancel-pdf-save",
+                    "Cancel PDF save",
+                    TargetKind::Button
+                );
+                if cancel.clicked() {
+                    actions.pdf_intent = Some(PdfIntent::Cancel);
+                }
+            }
         });
+        if let Some((error, feedback)) = self.pdf_output.feedback() {
+            if error {
+                ui.colored_label(ui.visuals().error_fg_color, feedback);
+            } else {
+                ui.label(feedback);
+            }
+        }
         ui.separator();
         let half = ui.available_width() / 2.0;
         let settings_width = half.clamp(210.0, 310.0);

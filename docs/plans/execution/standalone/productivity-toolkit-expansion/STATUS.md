@@ -48,7 +48,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M7-B1A | complete |
 | M7-B1B1A | complete |
 | M7-B1B1B | complete |
-| M7-B1B2, M7-B2 | pending |
+| M7-B1B2 | implementation complete, native editor smoke pending |
+| M7-B2A, M7-B2B | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -369,3 +370,12 @@ Independent review addressed lost latest requests, read and metadata races, canc
 M7-B1B1A was pushed at 0b7028dff2de5a4dd46ea08b34a2a41a901edd8d. Both editor menus now open the hosted Export / Print preview from an accepted current draft. Studio applies the same-frame editor change before handing off the open. Notes refreshes its same-panel draft, including a first saved path. The preview registers the actual native utility key, participates in visible and hidden-root completion, tracks the current parent document and clears stale scenes on edits, layout changes or retirement. It provides actual page settings, title and counter tokens, page navigation, zoom, Fit Page and warnings. Page and zoom reuse the accepted scene. The preview worker starts lazily and prepares the upload pixels off the UI thread. The retained viewport supplies numeric DPI and texture limits. Root navigation follows keyboard ownership, and initial fallback focus respects a control already focused by the user. The final editor Save PDF and native print actions follow in B1B2 and B2.
 
 The assigned implementer returned without source changes on this integration, so the orchestrator completed it sequentially. Independent reviews identified native geometry registration, hidden-window lifetime, Fit stability, viewport DPI, texture handling and keyboard ownership issues. The initial targeted run passed 11 of 11. After the final keyboard check and rendered Fit fixture, the final targeted run passed 12 of 12 in 1.106s after a 2m 07s compile. Exact command: cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(markdown_print_) | test(utility_dialog_sizes_keep_docked_and_native_geometry_independent)'. The headless app test used a disposable profile and disabled both Paste Sequences shortcuts before construction. Diff whitespace verification passed. Standalone native editor/Save/print verification remains assigned to B2.
+
+
+## M7-B1B2 guarded Save PDF from the accepted preview
+
+M7-B1B1B was pushed at 0228db6c03ebc4927277fe075ce9e12350216f24. The Save PDF action completes only from the retained preview host and compares the exact accepted scene with the live editor draft before and after its owned native Save As chooser. The output worker reviews the chosen path, exposes a separate exact replacement confirmation when required, and encodes the accepted scene without saving the source. Confirmation starts with focus on Cancel, and Escape follows the shared viewport's keyboard ownership. The worker couples revocation with one final atomic admission after native stage validation, handles original-file restoration on refusal, and reports the actual outcome when a save crossed admission before the window closed. Pending work remains visible to hidden-root completion.
+
+The assigned implementer declined this integration without source edits, so the orchestrator completed it sequentially. Independent review prompted the admission, late completion, root lifetime and keyboard changes. Windows tests exercise actual new/replacement PDF bytes, replacement cancellation, refusal at final admission with clean restoration, active-source and native no-replace guards, and exact retained app action acceptance. The app fixture used a disposable profile and disabled both Paste Sequences shortcuts. Separate launch and editor Save As proof is scheduled with B2B.
+
+The first compile exposed an import through the private publication module; corrected through its public facade. The final focused Nextest run passed 26 of 26 in 2.047s after a 3m 53s compile. Exact command: cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(markdown_print_) | test(pdf_publication_) | test(c06_root_relative_publication_commits_exact_bytes_without_replacement)'. Diff whitespace verification passed.

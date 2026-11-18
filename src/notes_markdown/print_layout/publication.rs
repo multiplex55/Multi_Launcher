@@ -178,6 +178,17 @@ mod windows_impl {
         path: &Path,
         source: Option<&Path>,
     ) -> Result<PdfDestinationReview, PdfPublishError> {
+        review_pdf_destination_with_cancel(path, source, || false)
+    }
+
+    pub fn review_pdf_destination_with_cancel(
+        path: &Path,
+        source: Option<&Path>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PdfDestinationReview, PdfPublishError> {
+        if cancelled() {
+            return Err(PdfPublishError::Cancelled);
+        }
         let (parent, leaf) = validate(path)?;
         let directory = Directory::open(&parent, false).map_err(io)?;
         let parent_id = directory.identity().map_err(io)?;
@@ -217,13 +228,16 @@ mod windows_impl {
         let target = target_leaf
             .map(|leaf| {
                 leaf.validate_security().map_err(io)?;
-                let (revision, digest) = leaf.fingerprint(&mut || false).map_err(io)?;
+                let (revision, digest) = leaf.fingerprint(&mut cancelled).map_err(io)?;
                 if Some(&revision) != target_revision.as_ref() {
                     return Err(PdfPublishError::Stale);
                 }
                 Ok(TargetObservation { revision, digest })
             })
             .transpose()?;
+        if cancelled() {
+            return Err(PdfPublishError::Cancelled);
+        }
         Ok(PdfDestinationReview {
             parent,
             leaf,
@@ -252,6 +266,9 @@ mod windows_impl {
         retained: Option<(OsString, NativeFileIdentity)>,
         parent: &Path,
     ) -> PdfPublishError {
+        if error.kind() == std::io::ErrorKind::Interrupted && retained.is_none() {
+            return PdfPublishError::Cancelled;
+        }
         let message = if let Some((leaf, identity)) = retained {
             format!(
                 "Could not publish PDF: {error}; owned stage {} (identity {identity:?}) was retained",
@@ -268,13 +285,25 @@ mod windows_impl {
         cancelled: impl FnMut() -> bool,
         source_current: impl FnMut() -> bool,
     ) -> Result<PdfPublishOutcome, PdfPublishError> {
-        publish_inner(permit, bytes, cancelled, source_current, |_| {})
+        publish_pdf_with_admission(permit, bytes, cancelled, source_current, || true)
     }
+
+    pub fn publish_pdf_with_admission(
+        permit: PdfPublishPermit,
+        bytes: &[u8],
+        cancelled: impl FnMut() -> bool,
+        source_current: impl FnMut() -> bool,
+        admit: impl FnOnce() -> bool,
+    ) -> Result<PdfPublishOutcome, PdfPublishError> {
+        publish_inner(permit, bytes, cancelled, source_current, admit, |_| {})
+    }
+
     fn publish_inner(
         permit: PdfPublishPermit,
         bytes: &[u8],
         mut cancelled: impl FnMut() -> bool,
         mut source_current: impl FnMut() -> bool,
+        admit: impl FnOnce() -> bool,
         after_backup: impl FnOnce(&Path),
     ) -> Result<PdfPublishOutcome, PdfPublishError> {
         if bytes.len() > MAX_OUTPUT_BYTES {
@@ -362,9 +391,11 @@ mod windows_impl {
                 if !source_current() {
                     return Err(abort(stage, &review.parent, PdfPublishError::Stale));
                 }
-                stage.publish(&review.leaf).map_err(|(error, retained)| {
-                    stage_publish_error(error, retained, &review.parent)
-                })?;
+                stage
+                    .publish(&review.leaf, || !cancelled() && source_current() && admit())
+                    .map_err(|(error, retained)| {
+                        stage_publish_error(error, retained, &review.parent)
+                    })?;
                 Ok(PdfPublishOutcome {
                     backup_retained: None,
                 })
@@ -434,10 +465,12 @@ mod windows_impl {
                         }
                     };
                 }
-                if let Err((error, retained)) = stage.publish(&review.leaf) {
-                    let message = stage_publish_error(error, retained, &review.parent).to_string();
+                if let Err((error, retained)) =
+                    stage.publish(&review.leaf, || !cancelled() && source_current() && admit())
+                {
+                    let message = stage_publish_error(error, retained, &review.parent);
                     return match directory.rename(&original, &review.leaf) {
-                        Ok(()) => Err(PdfPublishError::Io(message)),
+                        Ok(()) => Err(message),
                         Err(restore) => Err(PdfPublishError::Recovery {
                             message: format!("{message}; restoring original failed: {restore}"),
                             backup: review.parent.join(backup),
@@ -466,6 +499,28 @@ mod windows_impl {
         ) -> Result<PdfPublishOutcome, PdfPublishError> {
             publish_pdf(permit, data, || false, || true)
         }
+        #[test]
+        fn pdf_publication_denied_final_admission_restores_existing_target() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("draft.pdf");
+            let permit = review_pdf_destination(&path, None).unwrap().authorize();
+            let result = publish_pdf_with_admission(permit, b"draft", || false, || true, || false);
+            assert!(matches!(result, Err(PdfPublishError::Cancelled)));
+            assert!(
+                std::fs::read_dir(directory.path())
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+
+            std::fs::write(&path, b"original").unwrap();
+            let permit = review_pdf_destination(&path, None).unwrap().authorize();
+            let result = publish_pdf_with_admission(permit, b"draft", || false, || true, || false);
+            assert!(matches!(result, Err(PdfPublishError::Cancelled)));
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+
         #[test]
         fn pdf_publication_new_replace_and_stale_revision() {
             let dir = tempfile::tempdir().unwrap();
@@ -506,6 +561,7 @@ mod windows_impl {
                 permit,
                 b"new",
                 || false,
+                || true,
                 || true,
                 |path| fs::write(path, b"intruder").unwrap(),
             );
@@ -640,6 +696,7 @@ mod windows_impl {
                 b"draft",
                 || cancel.get(),
                 || true,
+                || true,
                 |_| cancel.set(true),
             );
             assert!(matches!(result, Err(PdfPublishError::Cancelled)));
@@ -668,7 +725,8 @@ mod windows_impl {
 }
 #[cfg(windows)]
 pub use windows_impl::{
-    PdfDestinationReview, PdfPublishPermit, publish_pdf, review_pdf_destination,
+    PdfDestinationReview, PdfPublishPermit, publish_pdf, publish_pdf_with_admission,
+    review_pdf_destination, review_pdf_destination_with_cancel,
 };
 #[cfg(not(windows))]
 #[derive(Debug)]
@@ -696,11 +754,30 @@ pub fn review_pdf_destination(
     Err(PdfPublishError::Unsupported)
 }
 #[cfg(not(windows))]
+pub fn review_pdf_destination_with_cancel(
+    _path: &Path,
+    _source: Option<&Path>,
+    _cancelled: impl FnMut() -> bool,
+) -> Result<PdfDestinationReview, PdfPublishError> {
+    Err(PdfPublishError::Unsupported)
+}
+#[cfg(not(windows))]
 pub fn publish_pdf(
     _permit: PdfPublishPermit,
     _bytes: &[u8],
     _cancelled: impl FnMut() -> bool,
     _source_current: impl FnMut() -> bool,
+) -> Result<PdfPublishOutcome, PdfPublishError> {
+    Err(PdfPublishError::Unsupported)
+}
+
+#[cfg(not(windows))]
+pub fn publish_pdf_with_admission(
+    _permit: PdfPublishPermit,
+    _bytes: &[u8],
+    _cancelled: impl FnMut() -> bool,
+    _source_current: impl FnMut() -> bool,
+    _admit: impl FnOnce() -> bool,
 ) -> Result<PdfPublishOutcome, PdfPublishError> {
     Err(PdfPublishError::Unsupported)
 }

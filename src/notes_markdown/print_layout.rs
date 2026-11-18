@@ -1,6 +1,7 @@
 //! Bounded point geometry and reusable, embedded-font shaping for print output.
 mod markdown;
 mod publication;
+pub(crate) use publication::{publish_pdf_with_admission, review_pdf_destination_with_cancel};
 mod assets;
 mod document;
 pub mod pdf;

@@ -131,6 +131,9 @@ pub(super) trait HostedUtilityDialog: Sized {
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation>;
     fn closed_command() -> Self::Command;
     fn command_closes(command: &Self::Command) -> bool;
+    fn accept_close(&mut self, _keyboard: bool) -> bool {
+        true
+    }
     fn complete_actions(
         &mut self,
         actions: Self::Actions,
@@ -947,6 +950,11 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             return None;
         }
         if frame.close || frame.os_close {
+            if !dialog.accept_close(!frame.os_close) {
+                self.cancel_jump();
+                ctx.request_repaint_of(frame.owner.viewport_id);
+                return None;
+            }
             self.remember_presentation(ctx, frame.host.host);
             self.retire(ctx);
             return Some(HostCompletion {
