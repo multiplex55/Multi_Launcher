@@ -1451,7 +1451,7 @@ impl super::LauncherApp {
         self.egui_ctx.request_repaint();
     }
 
-    pub(crate) fn render_hotfolder_manager(&mut self, ctx: &eframe::egui::Context, dispatch: bool) {
+    pub(crate) fn render_hotfolder_manager(&mut self, ctx: &eframe::egui::Context, first: bool) {
         let snapshot = self.hotfolder_runtime.snapshot();
         let root_visible = self.visible_flag.load(std::sync::atomic::Ordering::Relaxed);
         if !self
@@ -1460,22 +1460,115 @@ impl super::LauncherApp {
         {
             return;
         }
-        if self.hotfolder_dialog.needs_picker_snapshot() {
+        if first {
+            self.hotfolder_dialog.poll_background(&snapshot);
+        }
+        if first && self.hotfolder_dialog.needs_picker_snapshot() {
             let inputs = self.hotfolder_capability_inputs();
             self.hotfolder_dialog
                 .set_picker_snapshot(inputs.launcher_targets, inputs.mkmacro_document);
         }
-        let actions = self.hotfolder_dialog.ui(ctx, &snapshot);
-        if dispatch {
-            self.dispatch_hotfolder_dialog_actions(
-                actions,
-                snapshot.store.as_ref().map(|s| s.revision),
-            );
+        let layer = eframe::egui::LayerId::new(
+            eframe::egui::Order::Middle,
+            eframe::egui::Id::new("hotfolder_manager_window"),
+        );
+        let popup = self.hotfolder_dialog.owned_popup_layer(ctx, layer);
+        let owner = self.native_ui_host_input_allowed(ctx, root_visible)
+            && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            && (!eframe::egui::Popup::is_any_open(ctx) || popup.is_some())
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer
+                    || Some(focus) == popup
+                    || focus.order == eframe::egui::Order::Background
+            });
+        let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match nav {
+            super::jump_mode::ui::NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::HotFolder,
+                instance,
+            } if owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("hotfolder-manager", instance),
+                super::jump_mode::TargetGeneration(
+                    self.hotfolder_dialog.jump_generation(&snapshot),
+                ),
+                "hotfolder-manager/form",
+                ctx.viewport_id(),
+                nav,
+                false,
+            ),
+            _ => None,
+        }
+        .map(|scope| {
+            if first && !ctx.will_discard() {
+                scope
+            } else {
+                scope.registration_only()
+            }
+        });
+        self.hotfolder_dialog
+            .stage_root(ctx, &snapshot, owner, first, scope.as_ref());
+    }
+
+    pub(super) fn complete_hotfolder_manager(&mut self, ctx: &eframe::egui::Context) {
+        if let Some((actions, revision)) = self.hotfolder_dialog.complete_root(ctx) {
+            self.dispatch_hotfolder_dialog_actions(ctx, actions, revision);
+        }
+    }
+
+    fn choose_hotfolder_path(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        editor_id: u128,
+        draft_revision: u64,
+        kind: super::hotfolder_dialog::HotFolderPathKind,
+    ) {
+        use super::hotfolder_dialog::HotFolderPathKind;
+
+        if !self
+            .hotfolder_dialog
+            .editor_is_current(editor_id, draft_revision)
+        {
+            return;
+        }
+        #[cfg(windows)]
+        let (hwnd, generation) = self.root_window_bridge.identity();
+        #[cfg(windows)]
+        let picker = {
+            let parent = std::num::NonZeroIsize::new(hwnd as isize)
+                .filter(|_| self.launcher_hwnd == Some(hwnd))
+                .filter(|_| self.root_window_bridge.is_current(hwnd, generation));
+            let Some(parent) = parent else {
+                self.hotfolder_dialog.submission_failed(
+                    "Cannot verify the Hot Folder picker window. Focus the manager and try again.",
+                );
+                return;
+            };
+            rfd::FileDialog::new().set_parent(&super::add_action_dialog::NativeDialogParent(parent))
+        };
+        #[cfg(not(windows))]
+        let picker = rfd::FileDialog::new();
+
+        let path = match kind {
+            HotFolderPathKind::WatchedDirectory | HotFolderPathKind::DestinationDirectory => {
+                picker.pick_folder()
+            }
+            HotFolderPathKind::SampleFile => picker.pick_file(),
+        };
+        #[cfg(windows)]
+        if !self.root_window_bridge.is_current(hwnd, generation) {
+            return;
+        }
+        if self
+            .hotfolder_dialog
+            .complete_path_choice(editor_id, draft_revision, kind, path)
+        {
+            ctx.request_repaint();
         }
     }
 
     fn dispatch_hotfolder_dialog_actions(
         &mut self,
+        ctx: &eframe::egui::Context,
         actions: Vec<super::hotfolder_dialog::HotFolderDialogAction>,
         current_revision: Option<u64>,
     ) {
@@ -1593,6 +1686,10 @@ impl super::LauncherApp {
                     PendingKind::ClearHistory,
                     None,
                 ),
+                Action::ChoosePath { editor_id, draft_revision, kind } => {
+                    self.choose_hotfolder_path(ctx, editor_id, draft_revision, kind);
+                    continue;
+                }
                 Action::TestRule {
                     editor_id,
                     rule,
@@ -2195,7 +2292,7 @@ mod m10e_driver_lifecycle_fixtures {
         let frame_started = Instant::now();
         dialog_context
             .run_ui(eframe::egui::RawInput::default(), |ctx| {
-                let _ = dialog.ui(ctx, &live);
+                let _ = dialog.ui(ctx, &live, true, true, None);
             })
             .drop_without_applying_deltas();
         assert!(
@@ -2266,7 +2363,7 @@ mod m10e_driver_lifecycle_fixtures {
         let cancellation_frame_started = Instant::now();
         dialog_context
             .run_ui(eframe::egui::RawInput::default(), |ctx| {
-                let _ = dialog.ui(ctx, &cancellation_snapshot);
+                let _ = dialog.ui(ctx, &cancellation_snapshot, true, true, None);
             })
             .drop_without_applying_deltas();
         assert!(

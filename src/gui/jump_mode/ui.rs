@@ -73,10 +73,11 @@ pub(crate) enum NavigationDialogKind {
     Calendar,
     CalendarDetails,
     CalendarEditor,
+    HotFolder,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 37] = [
+    pub(crate) const ALL: [Self; 38] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -114,6 +115,7 @@ impl NavigationDialogKind {
         Self::Calendar,
         Self::CalendarDetails,
         Self::CalendarEditor,
+        Self::HotFolder,
     ];
 
     const fn index(self) -> usize {
@@ -155,6 +157,7 @@ impl NavigationDialogKind {
             Self::Calendar => 34,
             Self::CalendarDetails => 35,
             Self::CalendarEditor => 36,
+            Self::HotFolder => 37,
         }
     }
 
@@ -197,6 +200,7 @@ impl NavigationDialogKind {
             Self::Calendar => "calendar",
             Self::CalendarDetails => "calendar-event-details",
             Self::CalendarEditor => "calendar-event-editor",
+            Self::HotFolder => "hotfolder-manager",
         }
     }
 
@@ -242,6 +246,7 @@ impl NavigationDialogKind {
             Self::Calendar => egui::Id::new(Some("Calendar")),
             Self::CalendarDetails => egui::Id::new(Some("Event Details")),
             Self::CalendarEditor => egui::Id::new(Some("Calendar Event")),
+            Self::HotFolder => egui::Id::new("hotfolder_manager_window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -4485,6 +4490,7 @@ mod tests {
                     NavigationDialogKind::CalendarDetails => {
                         egui::Window::new("Event Details").show(ctx, |_| {});
                     }
+                    NavigationDialogKind::HotFolder => { egui::Window::new("Hot Folder Manager").id(egui::Id::new("hotfolder_manager_window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalendarEditor => {
                         egui::Window::new("Calendar Event").show(ctx, |_| {});
                     }

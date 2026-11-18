@@ -10677,6 +10677,7 @@ impl LauncherApp {
             ),
             (crate::gui::jump_mode::ui::NavigationDialogKind::FilePreview,
                 self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::HotFolder, self.hotfolder_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::Convert, self.convert_panel.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::QrGenerator, self.qr_dialog.open && self.qr_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::ExplorerTabs, self.explorer_tabs_dialog.open && self.explorer_tabs_host.root_layer().is_some()),
@@ -10837,6 +10838,7 @@ impl LauncherApp {
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
                     NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
+                    NavigationDialogKind::HotFolder => self.hotfolder_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hotfolder_manager_window"))),
                     NavigationDialogKind::Convert => self.convert_panel.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"))),
                     NavigationDialogKind::QrGenerator => self.qr_host.root_layer(),
                     NavigationDialogKind::ExplorerTabs => self.explorer_tabs_host.root_layer(),
@@ -10908,6 +10910,8 @@ impl LauncherApp {
                         self.calculation_chart_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::FilePreview {
                         self.file_preview_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::HotFolder {
+                        self.hotfolder_dialog.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::Convert {
                         self.convert_panel.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::QrGenerator {
@@ -15058,6 +15062,7 @@ impl LauncherApp {
     }
 
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
+        self.complete_hotfolder_manager(ctx);
         let mut effects = Vec::new();
         if let Some(text) = self.complete_mouse_gestures_host(ctx) {
             effects.push(RootDialogEffect::CopyText {
@@ -24400,6 +24405,90 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
             "a second completion does not emit the same copy twice"
         );
+    }
+
+    #[test]
+    fn hotfolder_confirmation_jump_focus_does_not_accept() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.open_hotfolder_manager();
+                app.hotfolder_dialog.test_set_clear_confirmation(true);
+
+                let frame = |app: &mut LauncherApp, events, discard| {
+                    run_tool_dialog_frame(&ctx, app, events, discard)
+                        .drop_without_applying_deltas();
+                };
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new(), false);
+                }
+                let layer = egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("hotfolder_manager_window"),
+                );
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed), false);
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new(), false);
+                }
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                let keep_history = targets
+                    .iter()
+                    .find(|target| target.metadata().label() == "Keep History")
+                    .expect("the current decision owns Keep History")
+                    .response_id();
+                assert!(!targets.iter().any(|target| target.metadata().label() == "New Rule"));
+
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                );
+                let hint = dialog_hint_for_label(&app, "Keep History");
+                frame(&mut app, vec![egui::Event::Text(hint)], false);
+                assert_eq!(ctx.memory(|m| m.focused()), Some(keep_history));
+                assert!(app.hotfolder_dialog.test_clear_confirmation());
+
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    true,
+                );
+                assert!(app.hotfolder_dialog.test_clear_confirmation());
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                );
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                );
+                assert!(!app.hotfolder_dialog.test_clear_confirmation());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

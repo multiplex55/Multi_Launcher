@@ -90,6 +90,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A4b | complete |
 | M12-A5a | complete |
 | M12-A5b | complete |
+| M12-A6a | complete |
 | M12-A remaining, M12-B | pending |
 | M13-A | pending |
 
@@ -705,3 +706,10 @@ The retained Calendar host coordinates docked and native Jump scopes. The main t
 ### M12-A5b Calendar Event Details and Event Editor navigation
 
 Both surfaces now use separate docked and native Jump scopes and register current popup choices. Calendar actions retain their exact accepted owner and occurrence checks. A Save hint focuses the current button without validating or saving the draft. The initial focused gate passed 7/7 (`6a47eb23-68f8-494e-b6fd-b387dadecd12`). Review identified clipped focus in short windows. All three Calendar surfaces now share one-shot focused-control reveal. The corrected gate passed 5/5 (`c5b9123a-74e7-46ec-9d4d-a89b4ee921d4`), including actual Tab reveal of a clipped recurrence checkbox without toggling it. Direct native popup hints remain unverified.
+
+
+### M12-A6a Hot Folder Manager navigation
+
+The existing root manager exposes current rule, editor, action picker, history and exclusive decision targets. Trigger and sample-event choices use their exact owned popup anchors. The retained root pass owns draft adoption and submission of the existing typed actions. A discarded pass preserves the live draft and sample receiver. File and folder choices run through the verified launcher window and recheck the current editor revision on return. Rule setup, explicit enable and other worker semantics remain with the Hot Folder runtime.
+
+Review identified the ordinary ComboBox ownership conflict and clipped editor footer. The corrected gate passed 5/5 (`a1e15c58-eec3-421b-bd0f-d3c3a214822d`), including exact popup/path-ticket checks, real short-window Tab reveal, the prior read-only sample test and the live root decision that rejects discarded keyboard activation. Native chooser acceptance was not exercised.
