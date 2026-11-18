@@ -10,6 +10,7 @@ mod execute;
 mod jobs;
 mod journal;
 mod plan;
+mod receipts;
 mod relocate;
 mod tree;
 

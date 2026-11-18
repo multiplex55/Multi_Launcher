@@ -67,7 +67,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B3C | complete |
 | M9-B3D1 | complete |
 | M9-B3D2 | complete |
-| M9-C, M9-D | pending |
+| M9-C1A | complete |
+| M9-C1B, M9-C2, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -517,3 +518,8 @@ M9-B3D1 passed 54 targeted Windows Nextest checks after independent review. Move
 
 
 M9-B3D2 passed 62 focused Windows Nextest checks after independent review. The worker resolves planned destinations through the exact created parent. Native nested Move succeeded on one volume and across actual C: and G:, including source cleanup in child-before-parent order, directory timestamps and Zone bytes. A reviewed skip, late source child, replacement source folder or late target metadata edit preserved the appropriate original. The kernel's nonrecursive disposition independently rejected a nonempty guarded directory. The journal-required worker paths remain private until the durable store is wired.
+
+
+### M9-C1A receipt framing
+
+Six focused Nextest checks passed (run `5862a6bf-494e-44f6-ad15-0cc2008adece`). Create-new, ordered SHA-256 frames, bounded read and write capacity, write-through plus sync, and Windows read-only sharing protect the active receipt. Readers preserve the valid prefix at the first malformed, truncated or over-budget frame. This checkpoint supplies the format for the upcoming durable store.
