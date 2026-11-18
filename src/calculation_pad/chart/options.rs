@@ -65,7 +65,7 @@ pub(crate) struct AxisOptions {
 }
 
 impl AxisOptions {
-    fn validate(&self) -> Result<(), &'static str> {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if let AxisBounds::Fixed { min, max } = self.bounds {
             if min.get() >= max.get() { return Err("chart bounds must increase"); }
             if self.scale == AxisScale::Log10 && min.get() <= 0.0 {

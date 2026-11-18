@@ -68,8 +68,9 @@ pub(crate) use input::{InputConfig, InputControl, InputKind, SampleNumber};
 pub(crate) use sensitivity::{Sampling, SensitivityBasis, SensitivityDefinition, SensitivityRow, SensitivityStatus, SensitivityTable};
 pub(crate) use chart::{ChartDataset, ChartHit, ChartKind, ChartPoint, ChartScene, ChartSeries, ChartVectorReference, ChartView, ResolvedReferenceLine, ScenePrimitive};
 pub(crate) use chart::scalar_reference_coordinate;
-pub(crate) use chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+pub(crate) use chart::distribution::{DistributionBins, DistributionData, DistributionDefinition, DistributionScale};
 pub(crate) use chart::options::ReferenceValue as ChartReferenceValue;
+pub(crate) use chart::options::{AxisBounds as ChartAxisBounds, AxisOptions as ChartAxisOptions, AxisScale as ChartAxisScale, AxisTicks as ChartAxisTicks, ChartOptions, LegendPlacement as ChartLegendPlacement};
 #[cfg(test)]
 pub(crate) use chart::options::{ReferenceAxis as ChartReferenceAxis, ReferenceLine as ChartReferenceLine};
 pub(crate) use chart::options::FiniteValue as ChartFiniteValue;

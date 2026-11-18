@@ -1,12 +1,64 @@
 //! Read-only chart companion; actions are committed by its retained utility host.
 use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use super::utility_host::UtilityPresentation;
-use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, ChartReferenceValue, ChartFiniteValue, DistributionBins, DistributionDefinition, DistributionScale, ResolvedReferenceLine, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
+use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, ChartReferenceValue, ChartFiniteValue, ChartAxisBounds, ChartAxisOptions, ChartAxisScale, ChartAxisTicks, ChartOptions, ChartLegendPlacement, DistributionBins, DistributionData, DistributionDefinition, DistributionScale, ResolvedReferenceLine, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
 use eframe::egui;
 use std::sync::Arc;
 
 fn chart_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, order: &mut u64) -> Option<super::jump_mode::ui::FocusDirective> {
     super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order)
+}
+
+fn distribution_summary(data: &DistributionData, kind: ChartKind, index: usize) -> Option<String> {
+    if kind == ChartKind::Histogram {
+        let bin = data.bins.get(index)?;
+        Some(format!("{} · count {} · {:.4}% · cumulative {}", bin.bounds.membership_label(), bin.count, bin.percentage(data.total), bin.cumulative_count))
+    } else {
+        let step = data.ecdf.get(index)?;
+        Some(format!("≤ {:.17e} · count {} · cumulative {} / {} ({:.4}%)", step.threshold, step.count, step.cumulative_count, data.total, step.cumulative_rate(data.total) * 100.0))
+    }
+}
+
+fn axis_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::JumpModeScope>, axis: &mut AxisDraft, name: &str, order: &mut u64, actions: &mut ChartActions) {
+    use super::jump_mode::TargetKind;
+    ui.group(|ui| {
+        ui.label(format!("{name} axis"));
+        ui.horizontal_wrapped(|ui| {
+            for (scale, label) in [(ChartAxisScale::Linear, "Linear"), (ChartAxisScale::Log10, "Log10")] {
+                let response = ui.selectable_value(&mut axis.scale, scale, label);
+                if response.changed() { axis.ticks = TickMode::Auto; }
+                chart_target(scope, ui, &response, &format!("options/{name}/scale/{label}"), &format!("{name} {label}"), TargetKind::Selectable, order);
+                #[cfg(test)] actions.controls.push((format!("options/{name}/scale/{label}"), response.rect));
+            }
+            for (fixed, label) in [(false, "Auto"), (true, "Fixed")] {
+                let response = ui.selectable_value(&mut axis.fixed, fixed, label);
+                chart_target(scope, ui, &response, &format!("options/{name}/bounds/{label}"), &format!("{name} bounds {label}"), TargetKind::Selectable, order);
+                #[cfg(test)] actions.controls.push((format!("options/{name}/bounds/{label}"), response.rect));
+            }
+        });
+        if axis.fixed {
+            ui.horizontal(|ui| for (field, label) in [(&mut axis.min, "Min"), (&mut axis.max, "Max")] {
+                ui.label(label);
+                let response = ui.add(egui::TextEdit::singleline(field).char_limit(40).desired_width(90.0));
+                chart_target(scope, ui, &response, &format!("options/{name}/{label}"), &format!("{name} {label}"), TargetKind::TextEntry, order);
+                #[cfg(test)] actions.controls.push((format!("options/{name}/{label}"), response.rect));
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            let modes = if axis.scale == ChartAxisScale::Linear { &[(TickMode::Auto, "Auto ticks"), (TickMode::Step, "Step"), (TickMode::Density, "Density")][..] } else { &[(TickMode::Auto, "Auto ticks"), (TickMode::Density, "Density"), (TickMode::Decades, "Decades"), (TickMode::Subdivisions, "Subdivisions")][..] };
+            for &(mode, label) in modes {
+                let response = ui.selectable_value(&mut axis.ticks, mode, label);
+                chart_target(scope, ui, &response, &format!("options/{name}/ticks/{label}"), &format!("{name} {label}"), TargetKind::Selectable, order);
+                #[cfg(test)] actions.controls.push((format!("options/{name}/ticks/{label}"), response.rect));
+            }
+        });
+        let field = match axis.ticks { TickMode::Step => Some((&mut axis.step, "Tick step")), TickMode::Density | TickMode::Subdivisions => Some((&mut axis.count, "Tick count")), _ => None };
+        if let Some((text, label)) = field {
+            let response = ui.add(egui::TextEdit::singleline(text).char_limit(40).desired_width(90.0));
+            chart_target(scope, ui, &response, &format!("options/{name}/tick-value"), &format!("{name} {label}"), TargetKind::TextEntry, order);
+            #[cfg(test)] actions.controls.push((format!("options/{name}/tick-value"), response.rect));
+        }
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,6 +81,48 @@ impl DistributionDraft {
             BinMode::Count => self.count.trim().parse::<u16>().ok().filter(|count| (1..=1024).contains(count)).map(|count| DistributionBins::Count { count }).ok_or("Bin count must be between 1 and 1024."),
             BinMode::Width => self.width.trim().parse::<f64>().ok().filter(|value| value.is_finite() && *value > 0.0).and_then(|value| ChartFiniteValue::try_from(value).ok()).map(|width| DistributionBins::Width { width }).ok_or("Bin width must be finite and positive."),
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TickMode { Auto, Step, Density, Decades, Subdivisions }
+
+#[derive(Clone, PartialEq, Eq)]
+struct AxisDraft { scale: ChartAxisScale, fixed: bool, min: String, max: String, ticks: TickMode, step: String, count: String }
+impl AxisDraft {
+    fn new(axis: &ChartAxisOptions) -> Self {
+        let (fixed, min, max) = match axis.bounds { ChartAxisBounds::Auto => (false, "0".into(), "1".into()), ChartAxisBounds::Fixed { min, max } => (true, min.get().to_string(), max.get().to_string()) };
+        let (ticks, step, count) = match axis.ticks {
+            ChartAxisTicks::Auto => (TickMode::Auto, "1".into(), "5".into()),
+            ChartAxisTicks::LinearStep { step } => (TickMode::Step, step.get().to_string(), "5".into()),
+            ChartAxisTicks::Density { count } => (TickMode::Density, "1".into(), count.to_string()),
+            ChartAxisTicks::LogDecades => (TickMode::Decades, "1".into(), "5".into()),
+            ChartAxisTicks::LogSubdivisions { count } => (TickMode::Subdivisions, "1".into(), count.to_string()),
+        };
+        Self { scale: axis.scale, fixed, min, max, ticks, step, count }
+    }
+    fn axis(&self) -> Result<ChartAxisOptions, String> {
+        let number = |text: &str| text.trim().parse::<f64>().ok().and_then(|value| ChartFiniteValue::try_from(value).ok()).ok_or_else(|| "Enter a finite axis value.".to_owned());
+        let bounds = if self.fixed { ChartAxisBounds::Fixed { min: number(&self.min)?, max: number(&self.max)? } } else { ChartAxisBounds::Auto };
+        let ticks = match self.ticks {
+            TickMode::Auto => ChartAxisTicks::Auto,
+            TickMode::Step => ChartAxisTicks::LinearStep { step: number(&self.step)? },
+            TickMode::Density => ChartAxisTicks::Density { count: self.count.trim().parse().map_err(|_| "Enter a valid tick density.")? },
+            TickMode::Decades => ChartAxisTicks::LogDecades,
+            TickMode::Subdivisions => ChartAxisTicks::LogSubdivisions { count: self.count.trim().parse().map_err(|_| "Enter valid log subdivisions.")? },
+        };
+        Ok(ChartAxisOptions { scale: self.scale, bounds, ticks })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ChartOptionsDraft { basis: ChartOptions, options: ChartOptions, x: AxisDraft, y: AxisDraft, error: Option<String> }
+impl ChartOptionsDraft {
+    fn new(definition: &ChartDefinition) -> Self { Self { basis: definition.options.clone(), options: definition.options.clone(), x: AxisDraft::new(&definition.options.x), y: AxisDraft::new(&definition.options.y), error: None } }
+    fn options(&self) -> Result<ChartOptions, String> {
+        let mut options = self.options.clone(); options.x = self.x.axis()?; options.y = self.y.axis()?;
+        options.x.validate().map_err(str::to_owned)?; options.y.validate().map_err(str::to_owned)?;
+        Ok(options)
     }
 }
 
@@ -58,6 +152,7 @@ pub(crate) struct CalculationChartDialog {
     popup_anchors: Vec<(egui::Id, egui::LayerId)>,
     popup_viewport: Option<egui::ViewportId>,
     distribution_draft: Option<DistributionDraft>,
+    options_draft: Option<ChartOptionsDraft>,
     summary_row: Option<usize>,
     summary_focus: Option<usize>,
     summary_stamp: Option<(ChartStamp, ChartKind, DistributionDefinition)>,
@@ -87,6 +182,7 @@ pub(super) struct ChartActions {
     pub popup_anchors: Vec<(egui::Id, egui::LayerId)>,
     pub viewport: Option<egui::ViewportId>,
     draft: Option<DistributionDraft>,
+    options_draft: Option<Option<ChartOptionsDraft>>,
     summary_row: Option<usize>,
     summary_focus: Option<Option<usize>>,
     summary_stamp: Option<(ChartStamp, ChartKind, DistributionDefinition)>,
@@ -96,14 +192,15 @@ pub(super) struct ChartActions {
 
 impl CalculationChartDialog {
     pub(super) fn open(&mut self) { if !self.open { self.epoch = self.epoch.wrapping_add(1); self.open = true; self.close_requested = false; self.view.reset(); } }
-    pub(super) fn close(&mut self) { self.open = false; self.close_requested = false; self.view.reset(); self.bound = None; self.popup_anchors.clear(); self.popup_viewport = None; self.distribution_draft = None; self.summary_row = None; self.summary_focus = None; self.summary_stamp = None; *self.cache.borrow_mut() = None; }
+    pub(super) fn close(&mut self) { self.open = false; self.close_requested = false; self.view.reset(); self.bound = None; self.popup_anchors.clear(); self.popup_viewport = None; self.distribution_draft = None; self.options_draft = None; self.summary_row = None; self.summary_focus = None; self.summary_stamp = None; *self.cache.borrow_mut() = None; }
     pub(super) fn request_close(&mut self) { self.close_requested = true; }
     pub(super) fn epoch(&self) -> u64 { self.epoch }
     pub(super) fn commit(&mut self, actions: &ChartActions) {
-        if self.bound != actions.identity { self.view.reset(); self.bound = actions.identity; self.distribution_draft = None; self.summary_row = None; self.summary_focus = None; self.summary_stamp = None; *self.cache.borrow_mut() = None; }
+        if self.bound != actions.identity { self.view.reset(); self.bound = actions.identity; self.distribution_draft = None; self.options_draft = None; self.summary_row = None; self.summary_focus = None; self.summary_stamp = None; *self.cache.borrow_mut() = None; }
         if let Some(stamp) = &actions.summary_stamp && self.summary_stamp.as_ref() != Some(stamp) { self.summary_row = None; self.summary_focus = None; self.summary_stamp = Some(stamp.clone()); }
         if let Some(view) = actions.view { self.view = view; }
         if let Some(draft) = &actions.draft { self.distribution_draft = Some(draft.clone()); }
+        if let Some(draft) = &actions.options_draft { self.options_draft = draft.clone(); }
         if let Some(row) = actions.summary_row { self.summary_row = Some(row); }
         if let Some(focus) = actions.summary_focus { self.summary_focus = focus; }
         self.popup_anchors.clone_from(&actions.popup_anchors);
@@ -133,6 +230,7 @@ impl CalculationChartDialog {
 
     pub(super) fn render_host_with_jump(&mut self, ctx: &egui::Context, runtime: &ChartRuntime, owner: bool, first: bool, child: Option<&mut egui::Ui>, presentation: UtilityPresentation, scope: Option<&super::jump_mode::ui::JumpModeScope>) -> ChartActions {
         use super::jump_mode::TargetKind;
+        if !owner { self.summary_focus = None; }
         let mut actions = ChartActions { identity: runtime.identity, pad_host: runtime.pad_host, base: runtime.definition.clone(), evaluation: runtime.evaluation.as_ref().map(|value| value.basis), table: runtime.table.as_ref().map(|value| value.basis.clone()), basis: runtime.basis, viewport: Some(ctx.viewport_id()), ..Default::default() };
         let mut window_open = self.open;
         let mut order = 0;
@@ -157,6 +255,7 @@ impl CalculationChartDialog {
             let mut definition = runtime.definition.clone().unwrap_or_else(|| ChartDefinition { source: ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0.clone()]).unwrap_or_default() }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new(), distribution: None, options: Default::default() });
             let original = definition.clone();
             let mut pending_bin_draft = false;
+            let mut pending_options = self.bound == runtime.identity && self.options_draft.as_ref().filter(|draft| draft.basis == original.options).is_some_and(|draft| draft.options().map_or(true, |options| options != original.options));
             ui.add_enabled_ui(owner, |ui| {
                 ui.horizontal(|ui| {
                     for (kind, name) in [(ChartKind::Line, "Line"), (ChartKind::Bar, "Bar"), (ChartKind::Scatter, "Scatter"), (ChartKind::Histogram, "Histogram"), (ChartKind::Cumulative, "Cumulative")] {
@@ -267,6 +366,60 @@ impl CalculationChartDialog {
                 }
                 ui.horizontal(|ui| { ui.label("X label"); let response = ui.add(egui::TextEdit::singleline(&mut definition.x_label).char_limit(129).desired_width(100.0)); chart_target(scope, ui, &response, "label/x", "X label", TargetKind::TextEntry, &mut order); ui.label("Y label"); let response = ui.add(egui::TextEdit::singleline(&mut definition.y_label).char_limit(129).desired_width(100.0)); chart_target(scope, ui, &response, "label/y", "Y label", TargetKind::TextEntry, &mut order); });
             });
+            ui.add_enabled_ui(owner, |ui| {
+                let header = egui::CollapsingHeader::new("Chart Options").id_salt("chart-options").show(ui, |ui| {
+                    let mut draft = self.options_draft.as_ref().filter(|draft| self.bound == runtime.identity && draft.basis == original.options).cloned().unwrap_or_else(|| ChartOptionsDraft::new(&original));
+                    let previous = draft.clone();
+                    axis_controls(ui, scope, &mut draft.x, "X", &mut order, &mut actions);
+                    axis_controls(ui, scope, &mut draft.y, "Y", &mut order, &mut actions);
+                    ui.horizontal(|ui| {
+                        let response = ui.checkbox(&mut draft.options.grid, "Gridlines"); chart_target(scope, ui, &response, "options/grid", "Gridlines", TargetKind::Checkbox, &mut order);
+                        #[cfg(test)] actions.controls.push(("options/grid".into(), response.rect));
+                        ui.label("Title"); let response = ui.add(egui::TextEdit::singleline(&mut draft.options.title).char_limit(128)); chart_target(scope, ui, &response, "options/title", "Chart title", TargetKind::TextEntry, &mut order);
+                        #[cfg(test)] actions.controls.push(("options/title".into(), response.rect));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Legend");
+                        for (placement, label) in [(ChartLegendPlacement::Top, "Top"), (ChartLegendPlacement::Bottom, "Bottom"), (ChartLegendPlacement::Hidden, "Hidden")] {
+                            let response = ui.selectable_value(&mut draft.options.legend, placement, label);
+                            chart_target(scope, ui, &response, &format!("options/legend/{label}"), &format!("Legend {label}"), TargetKind::Selectable, &mut order);
+                            #[cfg(test)] actions.controls.push((format!("options/legend/{label}"), response.rect));
+                        }
+                    });
+                    if draft.x != previous.x || draft.y != previous.y || draft.options != previous.options { draft.error = None; }
+                    let mut finished = false;
+                    ui.horizontal(|ui| {
+                        let response = ui.button("Apply options"); chart_target(scope, ui, &response, "options/apply", "Apply chart options", TargetKind::Button, &mut order);
+                        #[cfg(test)] actions.controls.push(("options/apply".into(), response.rect));
+                        if active && response.clicked() {
+                            let result = draft.options().and_then(|options| {
+                                let mut candidate = definition.clone(); candidate.options = options;
+                                candidate.options.validate(&candidate.source).map_err(str::to_owned)?;
+                                let axes_changed = candidate.options.x != original.options.x || candidate.options.y != original.options.y;
+                                if axes_changed && matches!(candidate.kind, ChartKind::Line | ChartKind::Scatter | ChartKind::Bar) && matches!(&candidate.source, ChartSource::Vectors { x: None, .. }) && candidate.options.x.scale == ChartAxisScale::Log10 { return Err("Logarithmic X requires an explicit positive X vector; index X includes zero.".into()); }
+                                if axes_changed && matches!(candidate.kind, ChartKind::Bar | ChartKind::Histogram | ChartKind::Cumulative) && candidate.options.y.scale == ChartAxisScale::Log10 { return Err("This chart requires a linear Y axis for the zero baseline.".into()); }
+                                if axes_changed && let Ok((_, dataset)) = chart_data(runtime, &candidate) && let Ok(references) = resolve_references(runtime, &candidate) {
+                                    dataset.scene_for_definition_with_references(&candidate, &references, ChartView::default(), 640, 400)?;
+                                }
+                                Ok(candidate.options)
+                            });
+                            match result { Ok(options) => { definition.options = options; actions.options_draft = Some(None); finished = true; }, Err(error) => draft.error = Some(error) }
+                        }
+                        let response = ui.button("Cancel options"); chart_target(scope, ui, &response, "options/cancel", "Cancel chart options", TargetKind::Button, &mut order);
+                        #[cfg(test)] actions.controls.push(("options/cancel".into(), response.rect));
+                        if active && response.clicked() { actions.options_draft = Some(None); finished = true; }
+                        let response = ui.button("Reset axes to Auto"); chart_target(scope, ui, &response, "options/reset-axes", "Reset axes to Auto", TargetKind::Button, &mut order);
+                        #[cfg(test)] actions.controls.push(("options/reset-axes".into(), response.rect));
+                        if active && response.clicked() { draft.x = AxisDraft::new(&ChartAxisOptions::default()); draft.y = AxisDraft::new(&ChartAxisOptions::default()); draft.error = None; }
+                    });
+                    let validation_error = draft.options().err();
+                    if let Some(error) = draft.error.as_ref().or(validation_error.as_ref()) { ui.colored_label(ui.visuals().error_fg_color, error); }
+                    pending_options = !finished && draft.options().map_or(true, |options| options != original.options);
+                    if active && !finished && self.options_draft.as_ref() != Some(&draft) { actions.options_draft = Some(Some(draft)); }
+                });
+                chart_target(scope, ui, &header.header_response, "options", "Chart Options", TargetKind::Button, &mut order);
+                #[cfg(test)] actions.controls.push(("options/header".into(), header.header_response.rect));
+            });
             if definition.source != original.source {
                 let old = series_keys(&original.source);
                 let new = series_keys(&definition.source);
@@ -296,28 +449,27 @@ impl CalculationChartDialog {
                 let snapshot_id = egui::Id::new(format!("{snapshot:?}")).value();
                 ui.label(format!("{} observations", data.total));
                 ui.add_enabled_ui(owner, |ui| {
-                let header = egui::CollapsingHeader::new("Distribution summary").default_open(true).show(ui, |ui| {
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id("distribution-summary-header"), true);
+                let header = state.show_header(ui, |ui| { ui.label("Distribution summary"); });
+                let summary_open = header.is_open();
+                if active && (!summary_open || !current_summary) && self.summary_focus.is_some() { actions.summary_focus = Some(None); }
+                let (toggle, _, _) = header.body_unindented(|ui| {
+                    if !owner || !summary_open { ui.disable(); }
                     let mut scroll = egui::ScrollArea::vertical().id_salt(("distribution-summary", snapshot_id)).max_height(150.0);
-                    if current_summary && let Some(index) = self.summary_focus { scroll = scroll.vertical_scroll_offset((index as f32 * (20.0 + ui.spacing().item_spacing.y) - 60.0).max(0.0)); }
+                    if summary_open && current_summary && let Some(index) = self.summary_focus { scroll = scroll.vertical_scroll_offset((index as f32 * (20.0 + ui.spacing().item_spacing.y) - 60.0).max(0.0)); }
                     scroll.show_rows(ui, 20.0, rows, |ui, visible| {
                         for index in visible {
-                            let text = if definition.kind == ChartKind::Histogram {
-                                let bin = &data.bins[index];
-                                format!("{} · count {} · {:.4}% · cumulative {}", bin.bounds.membership_label(), bin.count, bin.percentage(data.total), bin.cumulative_count)
-                            } else {
-                                let step = &data.ecdf[index];
-                                format!("≤ {:.17e} · count {} · cumulative {} / {} ({:.4}%)", step.threshold, step.count, step.cumulative_count, data.total, step.cumulative_rate(data.total) * 100.0)
-                            };
+                            let text = distribution_summary(data, definition.kind, index).unwrap_or_default();
                             let response = ui.push_id(("distribution-row", snapshot_id, index), |ui| ui.add_sized([ui.available_width(), 20.0], egui::Button::new(&text).selected(current_summary && self.summary_row == Some(index)).truncate())).inner.on_hover_text(text);
                             let directive = chart_target(scope, ui, &response, &format!("distribution/summary/{snapshot_id:x}/{index}"), "Distribution summary row", TargetKind::Selectable, &mut order);
                             #[cfg(test)] actions.controls.push((format!("summary/{index}"), response.rect));
-                            if active && current_summary && self.summary_focus == Some(index) {
+                            if active && summary_open && current_summary && self.summary_focus == Some(index) {
                                 response.request_focus(); response.scroll_to_me(Some(egui::Align::Center)); actions.summary_focus = Some(None);
                             }
-                            if active && (response.clicked() || directive == Some(super::jump_mode::ui::FocusDirective::Select)) {
+                            if active && summary_open && (response.clicked() || directive == Some(super::jump_mode::ui::FocusDirective::Select)) {
                                 actions.summary_row = Some(index); response.request_focus(); response.scroll_to_me(Some(egui::Align::Center));
                             }
-                            if active && current_summary && response.has_focus() {
+                            if active && summary_open && current_summary && response.has_focus() {
                                 ui.memory_mut(|memory| memory.set_focus_lock_filter(response.id, egui::EventFilter { vertical_arrows: true, ..Default::default() }));
                                 let next = if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) { Some((index + 1).min(rows - 1)) }
                                     else if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) { Some(index.saturating_sub(1)) } else { None };
@@ -325,8 +477,13 @@ impl CalculationChartDialog {
                             }
                         }
                     });
+                    if summary_open && current_summary && let Some(index) = self.summary_row && let Some(detail) = distribution_summary(data, definition.kind, index) {
+                        let _response = ui.add(egui::Label::new(detail).wrap());
+                        #[cfg(test)] actions.controls.push(("summary/detail".into(), _response.rect));
+                    }
                 });
-                chart_target(scope, ui, &header.header_response, "distribution/summary", "Distribution summary", TargetKind::Button, &mut order);
+                chart_target(scope, ui, &toggle, "distribution/summary", "Distribution summary", TargetKind::Button, &mut order);
+                #[cfg(test)] actions.controls.push(("summary/header".into(), toggle.rect));
                 });
             }
             if !matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
@@ -371,7 +528,7 @@ impl CalculationChartDialog {
                     if response.dragged() && active { let delta = response.drag_delta(); let _ = view.set(view.zoom_x, view.zoom_y, view.pan_x - f64::from(delta.x) / f64::from(width), view.pan_y + f64::from(delta.y) / f64::from(height)); }
                     if let Some(pointer) = response.hover_pos() && let Some(hit) = scene.hit([(pointer.x - rect.min.x), (pointer.y - rect.min.y)], 8.0) { let x = hit.bin_bounds.as_ref().map_or_else(|| hit.raw_x.clone(), |bounds| bounds.membership_label()); response.on_hover_text(format!("{} · {}{}", x, hit.raw_y, if hit.approximate { " (approximate)" } else { "" })); }
                     if scene.approximate || scene.coordinate_collisions { ui.label("Plot coordinates are approximate; exact values remain in tooltips."); }
-                    let response = ui.add_enabled(owner && actions.definition.is_none() && !pending_bin_draft, egui::Button::new("Copy Chart as Image")); chart_target(scope, ui, &response, "copy", "Copy Chart as Image", TargetKind::Button, &mut order); #[cfg(test)] actions.controls.push((if response.enabled() { "copy-enabled" } else { "copy-disabled" }.into(), response.rect)); if active && response.clicked() { actions.copy = Some((stamp, definition.clone(), (*scene).clone())); }
+                    let response = ui.add_enabled(owner && actions.definition.is_none() && !pending_bin_draft && !pending_options, egui::Button::new("Copy Chart as Image")); chart_target(scope, ui, &response, "copy", "Copy Chart as Image", TargetKind::Button, &mut order); #[cfg(test)] actions.controls.push((if response.enabled() { "copy-enabled" } else { "copy-disabled" }.into(), response.rect)); if active && response.clicked() { actions.copy = Some((stamp, definition.clone(), (*scene).clone())); }
                 }
                 Ok(None) => { ui.label("No data"); }
                 Err(error) => { ui.colored_label(ui.visuals().error_fg_color, error); }
@@ -778,6 +935,59 @@ mod tests {
         let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         assert_eq!(dialog.summary_row, Some(10));
         assert!(actions.controls.iter().any(|(name, _)| name == "summary/10"));
+        assert!(actions.controls.iter().any(|(name, _)| name == "summary/detail"));
+        dialog.summary_focus = Some(11);
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 900.0))), focused: true, ..Default::default() };
+        ctx.run_ui(input, |ui| { dialog.render_host(&ctx, &runtime, false, true, Some(ui), UtilityPresentation::Docked); }).drop_without_applying_deltas();
+        assert!(dialog.summary_focus.is_none());
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        let header = actions.controls.iter().find(|(name, _)| name == "summary/header").unwrap().1.center();
+        chart_frame(&ctx, &mut dialog, &mut runtime, vec![egui::Event::PointerMoved(header), egui::Event::PointerButton { pos: header, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]);
+        dialog.summary_focus = Some(11);
+        chart_frame(&ctx, &mut dialog, &mut runtime, vec![egui::Event::PointerMoved(header), egui::Event::PointerButton { pos: header, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]);
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert!(dialog.summary_focus.is_none());
+        assert!(!actions.controls.iter().any(|(name, _)| name == "summary/detail"));
+    }
+
+    #[test]
+    fn chart_options_are_staged_and_reset_axes_without_resetting_view() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("v = [1, 2]").unwrap(); session.evaluation();
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "v".into() }] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+        definition.options.x.bounds = ChartAxisBounds::Fixed { min: ChartFiniteValue::try_from(0.0).unwrap(), max: ChartFiniteValue::try_from(2.0).unwrap() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: None, table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
+        let ctx = egui::Context::default(); let mut dialog = CalculationChartDialog::default(); dialog.open();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        dialog.bound = runtime.identity; dialog.view.set(2.0, 2.0, 0.1, 0.0).unwrap();
+        let control = |actions: &ChartActions, name: &str| actions.controls.iter().find(|(key, _)| key == name).unwrap_or_else(|| panic!("missing {name}: {:?}", actions.controls)).1.center();
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/header"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/grid"));
+        assert!(!runtime.definition.as_ref().unwrap().options.grid);
+        runtime.definition.as_mut().unwrap().x_label = "changed independently".into();
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert!(dialog.options_draft.as_ref().unwrap().options.grid);
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/X/bounds/Auto"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/X/scale/Log10"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/apply"));
+        assert!(dialog.options_draft.as_ref().unwrap().error.as_deref().is_some_and(|error| error.contains("index X")));
+        assert_eq!(runtime.definition.as_ref().unwrap().options.x.bounds, definition.options.x.bounds);
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/reset-axes"));
+        assert_eq!(runtime.definition.as_ref().unwrap().options.x.bounds, definition.options.x.bounds);
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/apply"));
+        let saved = &runtime.definition.as_ref().unwrap().options;
+        assert!(saved.grid); assert_eq!(saved.x.bounds, ChartAxisBounds::Auto);
+        assert_eq!(dialog.view.zoom_x, 2.0); assert_eq!(dialog.view.pan_x, 0.1);
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert!(actions.copy.is_none());
     }
 
     #[test]

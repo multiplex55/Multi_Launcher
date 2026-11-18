@@ -31,7 +31,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-C1C | complete |
 | M4-C2A1 | complete |
 | M4-C2A2 | complete |
-| M4-C2B | pending |
+| M4-C2B1 | complete |
+| M4-C2B2 | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -220,3 +221,10 @@ Final frozen-source cargo nextest run --config-file target/productivity-toolkit-
 M4-C2A1 was pushed at 5bce6c718b18e7d029c457ecfcedba2f16adb977. Histogram and Cumulative now have real controls within Charts. The selected numeric vector and validated bin/scale settings are persisted while ordinary selections remain available. Invalid current widths cannot replace committed bins. Summary rows are virtualized, owner-gated, snapshot-bound and keyboard-selectable. Drafts follow the owning Pad document. Two related follow-ups remain in C2B: retiring queued summary focus on collapse/owner loss and wrapped selected-row details at narrow widths.
 
 Initial Nextest passed 5 of 5. Final focused cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::calculation_chart_dialog::tests::chart_distribution_) | test(gui::calculation_chart_dialog::tests::histogram_width_change_) | test(gui::calculation_chart_dialog::tests::chart_owned_popup_menus_) | test(gui::calculation_chart_dialog::tests::cumulative_adapter_) | test(gui::calculation_chart_dialog::tests::histogram_adapter_) | test(calculation_pad::chart::tests::cumulative_scene_)' passed 7 of 7 after review corrections. Diff whitespace verification passed.
+
+
+## M4-C2B1 staged chart axes and layout controls
+
+M4-C2A2 was pushed at a39bd1561ed7e3b4d5755425f4a9e6ede31b8497. Chart Options exposes separately staged axes, log scales, bounds, ticks, grid, title and legend. Reset Axes leaves the transient view intact. Unrelated chart changes preserve the staged draft. Definition-only restrictions remain enforceable with a stale evaluation. Summary collapse or owner loss retires queued focus before the animation, and the selected row has a wrapping detail.
+
+The first build exposed a test-only Context borrow error. The next run passed seven cases, then its animated panel click failed and two cases were canceled. Stabilizing the fixture preserved its behavioral assertions. Final cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::calculation_chart_dialog::tests::chart_options_are_staged_) | test(gui::calculation_chart_dialog::tests::chart_distribution_) | test(gui::calculation_chart_dialog::tests::histogram_width_change_) | test(gui::calculation_chart_dialog::tests::chart_owned_popup_menus_) | test(calculation_pad::chart::tests::chart_options_)' passed 10 of 10. Independent recheck confirmed all three fixes. Diff whitespace verification passed.
