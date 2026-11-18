@@ -68,7 +68,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B3D1 | complete |
 | M9-B3D2 | complete |
 | M9-C1A | complete |
-| M9-C1B, M9-C2, M9-D | pending |
+| M9-C1B1 | complete |
+| M9-C1B2, M9-C1B3, M9-C2, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -523,3 +524,8 @@ M9-B3D2 passed 62 focused Windows Nextest checks after independent review. The w
 ### M9-C1A receipt framing
 
 Six focused Nextest checks passed (run `5862a6bf-494e-44f6-ad15-0cc2008adece`). Create-new, ordered SHA-256 frames, bounded read and write capacity, write-through plus sync, and Windows read-only sharing protect the active receipt. Readers preserve the valid prefix at the first malformed, truncated or over-budget frame. This checkpoint supplies the format for the upcoming durable store.
+
+
+### M9-C1B1 typed receipt evidence and held native files
+
+Twelve targeted Nextest checks passed after independent review and remediation (run `cf2e3755-7905-4136-bfb3-50785d1290bc`). The typed wire validates exact source and runtime destination, effect lane and ordering, verified staged source retirement, guarded rollback, directory creation-time evolution and terminal outcomes. The native bridge uses synchronous held relative files, create-new write-through, no-follow/no-recall, guarded same-handle pruning and bounded frames. Exact applied-engine receipts and restart reconciliation still require the store and runner checkpoints.

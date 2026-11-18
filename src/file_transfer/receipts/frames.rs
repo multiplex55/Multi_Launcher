@@ -1,9 +1,14 @@
 //! Bounded, checksummed append-only receipt frames. Payloads are opaque here.
 use sha2::{Digest, Sha256};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::File;
+#[cfg(test)]
+use std::fs::OpenOptions;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(test)]
 use std::os::windows::fs::OpenOptionsExt;
+#[cfg(test)]
 use std::path::Path;
+#[cfg(test)]
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ};
 
 pub(super) const MAX_FRAME_BYTES: usize = 512 * 1024;
@@ -34,17 +39,27 @@ pub(super) struct FrameWriter {
 
 impl FrameWriter {
     /// The caller owns the exact target path; an existing file is never opened.
+    #[cfg(test)]
     pub(super) fn create(path: &Path, capacity: u64) -> Result<Self, FrameWriteError> {
         if !(FILE_HEADER..=MAX_RECEIPT_BYTES).contains(&capacity) {
             return Err(FrameWriteError::InvalidCapacity);
         }
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .share_mode(FILE_SHARE_READ.0)
             .custom_flags(FILE_FLAG_WRITE_THROUGH.0)
             .open(path)
             .map_err(FrameWriteError::Io)?;
+        Self::from_new_file(file, capacity)
+    }
+
+    /// Takes an already-held, newly created synchronous file. On header failure
+    /// its bytes are left in place for recovery rather than removed.
+    pub(super) fn from_new_file(mut file: File, capacity: u64) -> Result<Self, FrameWriteError> {
+        if !(FILE_HEADER..=MAX_RECEIPT_BYTES).contains(&capacity) {
+            return Err(FrameWriteError::InvalidCapacity);
+        }
         file.write_all(MAGIC)
             .and_then(|()| file.write_all(&VERSION.to_le_bytes()))
             .and_then(|()| file.flush())
@@ -57,6 +72,19 @@ impl FrameWriter {
             next: Some(0),
             poisoned: false,
         })
+    }
+
+    pub(super) fn remaining_bytes(&self) -> u64 {
+        self.capacity.saturating_sub(self.written)
+    }
+
+    pub(super) fn frame_size(payload_len: usize) -> Option<u64> {
+        if payload_len > MAX_FRAME_BYTES {
+            return None;
+        }
+        FRAME_HEADER
+            .checked_add(u64::try_from(payload_len).ok()?)?
+            .checked_add(DIGEST_BYTES)
     }
 
     pub(super) fn append(&mut self, payload: &[u8]) -> Result<(), FrameWriteError> {
@@ -134,20 +162,26 @@ pub(super) struct FrameRead {
 
 /// Reads only a valid prefix and never alters the receipt. Bounds apply to the
 /// whole file, including header and checksums, before any frame allocation.
+#[cfg(test)]
 pub(super) fn read_prefix(path: &Path, capacity: u64) -> io::Result<FrameRead> {
+    let mut file = File::open(path)?;
+    read_prefix_from_file(&mut file, capacity)
+}
+
+pub(super) fn read_prefix_from_file(file: &mut File, capacity: u64) -> io::Result<FrameRead> {
     if !(FILE_HEADER..=MAX_RECEIPT_BYTES).contains(&capacity) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid receipt capacity",
         ));
     }
-    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(0))?;
     let mut result = FrameRead {
         records: Vec::new(),
         problem: FrameProblem::Clean,
     };
     let mut header = [0u8; FILE_HEADER as usize];
-    if !read_complete(&mut file, &mut header)? {
+    if !read_complete(file, &mut header)? {
         result.problem = FrameProblem::Truncated { offset: 0 };
         return Ok(result);
     }
@@ -172,7 +206,7 @@ pub(super) fn read_prefix(path: &Path, capacity: u64) -> io::Result<FrameRead> {
             result.problem = FrameProblem::Limit { offset };
             return Ok(result);
         }
-        if !read_complete(&mut file, &mut frame_header[1..])? {
+        if !read_complete(file, &mut frame_header[1..])? {
             result.problem = FrameProblem::Truncated { offset };
             return Ok(result);
         }
@@ -204,7 +238,7 @@ pub(super) fn read_prefix(path: &Path, capacity: u64) -> io::Result<FrameRead> {
         }
         let mut payload = vec![0; length as usize];
         let mut actual = [0u8; DIGEST_BYTES as usize];
-        if !read_complete(&mut file, &mut payload)? || !read_complete(&mut file, &mut actual)? {
+        if !read_complete(file, &mut payload)? || !read_complete(file, &mut actual)? {
             result.problem = FrameProblem::Truncated { offset };
             return Ok(result);
         }
@@ -233,6 +267,28 @@ fn read_complete(file: &mut File, bytes: &mut [u8]) -> io::Result<bool> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn receipt_frames_use_preopened_files_and_count_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preopened");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut writer = FrameWriter::from_new_file(file, 128).unwrap();
+        let before = writer.remaining_bytes();
+        let size = FrameWriter::frame_size(3).unwrap();
+        writer.append(b"abc").unwrap();
+        assert_eq!(writer.remaining_bytes(), before - size);
+        assert!(FrameWriter::frame_size(MAX_FRAME_BYTES + 1).is_none());
+        drop(writer);
+        let mut file = File::open(path).unwrap();
+        let result = read_prefix_from_file(&mut file, 128).unwrap();
+        assert_eq!(result.records, [b"abc".to_vec()]);
+        assert_eq!(result.problem, FrameProblem::Clean);
+    }
 
     #[test]
     fn receipt_frames_roundtrip_and_create_never_clobbers() {

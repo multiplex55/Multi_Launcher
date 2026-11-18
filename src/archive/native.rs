@@ -3446,6 +3446,100 @@ pub(crate) mod transfer_native {
                 .open_child_with_options(name, false, false, true, true, false)
                 .map(Self)
         }
+        pub(crate) fn create_receipt(
+            &self,
+            leaf: &OsStr,
+        ) -> Result<ReceiptFile, NativeArchiveError> {
+            self.open_receipt_inner(leaf, ReceiptMode::Create)
+        }
+        pub(crate) fn open_receipt_read(
+            &self,
+            leaf: &OsStr,
+        ) -> Result<ReceiptFile, NativeArchiveError> {
+            self.open_receipt_inner(leaf, ReceiptMode::Read)
+        }
+        pub(crate) fn open_receipt_prune(
+            &self,
+            leaf: &OsStr,
+        ) -> Result<ReceiptFile, NativeArchiveError> {
+            self.open_receipt_inner(leaf, ReceiptMode::Prune)
+        }
+        fn open_receipt_inner(
+            &self,
+            leaf: &OsStr,
+            mode: ReceiptMode,
+        ) -> Result<ReceiptFile, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_CREATE, FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+                FILE_SYNCHRONOUS_IO_NONALERT, FILE_WRITE_THROUGH, NTCREATEFILE_CREATE_OPTIONS,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE,
+                FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, SYNCHRONIZE,
+            };
+            validate_single_component(leaf, "receipt name")?;
+            verify_receipt_chain(&self.0)?;
+            let creating = matches!(mode, ReceiptMode::Create);
+            let access = FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE
+                | match mode {
+                    ReceiptMode::Create => FILE_GENERIC_WRITE,
+                    ReceiptMode::Read => FILE_READ_DATA,
+                    ReceiptMode::Prune => FILE_READ_DATA | DELETE,
+                }
+                | FILE_ACCESS_RIGHTS(0);
+            let options = FILE_OPEN_NO_RECALL
+                | FILE_OPEN_REPARSE_POINT
+                | FILE_SYNCHRONOUS_IO_NONALERT
+                | if creating {
+                    FILE_WRITE_THROUGH
+                } else {
+                    NTCREATEFILE_CREATE_OPTIONS(0)
+                };
+            let (file, information) = open_relative(
+                &self.0,
+                leaf,
+                access,
+                FILE_SHARE_READ,
+                if creating { FILE_CREATE } else { FILE_OPEN },
+                options,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(receipt)",
+                || Ok(()),
+            )?;
+            if creating && information != 2 {
+                return Err(NativeArchiveError::validation(
+                    "receipt creation was not confirmed",
+                    io::ErrorKind::InvalidData,
+                    Some(self.0.identity),
+                )
+                .with_unconfirmed_name_effect());
+            }
+            let identity = native_file_identity(&file).map_err(|e| {
+                let error =
+                    NativeArchiveError::from_io("FILE_ID_INFO(receipt)", e, Some(self.0.identity));
+                if creating {
+                    error.with_unconfirmed_name_effect()
+                } else {
+                    error
+                }
+            })?;
+            let receipt = ReceiptFile {
+                file,
+                identity,
+                parent: self.0.clone(),
+                leaf: leaf.to_os_string(),
+                mode,
+            };
+            receipt.validate().map_err(|error| {
+                if creating {
+                    error.with_unconfirmed_name_effect()
+                } else {
+                    error
+                }
+            })?;
+            Ok(receipt)
+        }
         pub(crate) fn open_removable_directory_child(
             &self,
             name: &OsStr,
@@ -3933,6 +4027,161 @@ pub(crate) mod transfer_native {
             file,
             identity: actual,
         })
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReceiptMode {
+        Create,
+        Read,
+        Prune,
+    }
+
+    fn verify_receipt_chain(parent: &Arc<HeldDirectory>) -> Result<(), NativeArchiveError> {
+        let mut current = Some(parent.as_ref());
+        while let Some(directory) = current {
+            let identity = directory.verify_identity()?;
+            let attributes = query_attribute_tag(
+                &directory.file,
+                "FileAttributeTagInformation(receipt ancestor)",
+                identity,
+            )
+            .map_err(|primary| NativeArchiveError {
+                primary,
+                cleanup_attempted: false,
+                cleanup_failure: None,
+                cleanup_failed: false,
+                unconfirmed_name_effect: false,
+            })?;
+            if attributes.FileAttributes
+                & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+                || crate::file_operations::has_cloud_placeholder_attributes(
+                    attributes.FileAttributes,
+                )
+            {
+                return Err(NativeArchiveError::validation(
+                    "receipt ancestor is a reparse point or unavailable",
+                    io::ErrorKind::InvalidData,
+                    Some(identity),
+                ));
+            }
+            current = directory.parent.as_deref();
+        }
+        Ok(())
+    }
+
+    /// Owns the exact synchronous receipt handle; drop only closes it.
+    pub(crate) struct ReceiptFile {
+        file: File,
+        identity: NativeFileIdentity,
+        parent: Arc<HeldDirectory>,
+        leaf: OsString,
+        mode: ReceiptMode,
+    }
+    impl ReceiptFile {
+        pub(crate) fn file(&self) -> &File {
+            &self.file
+        }
+        pub(crate) fn file_mut(&mut self) -> &mut File {
+            &mut self.file
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.identity
+        }
+        pub(crate) fn try_clone_file(&self) -> io::Result<File> {
+            if !matches!(self.mode, ReceiptMode::Create) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "only a newly created receipt can be cloned for writing",
+                ));
+            }
+            self.file.try_clone()
+        }
+        pub(crate) fn validate(&self) -> Result<(), NativeArchiveError> {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+            };
+            verify_receipt_chain(&self.parent)?;
+            let actual = native_file_identity(&self.file).map_err(|e| {
+                NativeArchiveError::from_io("FILE_ID_INFO(receipt)", e, Some(self.identity))
+            })?;
+            let meta = self.file.metadata().map_err(|e| {
+                NativeArchiveError::from_io("File::metadata(receipt)", e, Some(actual))
+            })?;
+            let mut standard = FILE_STANDARD_INFO::default();
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(self.file.as_raw_handle() as _),
+                    FileStandardInfo,
+                    std::ptr::from_mut(&mut standard).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            }
+            .map_err(|e| {
+                NativeArchiveError::from_win32("FileStandardInfo(receipt)", e, Some(actual))
+            })?;
+            if actual != self.identity
+                || actual.file_id() == [0; 16]
+                || actual.volume_serial_number() != self.parent.identity.volume_serial_number()
+                || !meta.is_file()
+                || standard.Directory.0 != 0
+                || standard.NumberOfLinks != 1
+                || standard.DeletePending.0 != 0
+                || meta.file_attributes()
+                    & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                    != 0
+                || crate::file_operations::has_cloud_placeholder_attributes(meta.file_attributes())
+            {
+                return Err(NativeArchiveError::validation(
+                    "receipt is not an ordinary single-link local file",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            let parent_path = crate::file_operations::final_path_for_handle(&self.parent.file)
+                .map_err(|e| {
+                    NativeArchiveError::from_io(
+                        "final path(receipt parent)",
+                        e,
+                        Some(self.parent.identity),
+                    )
+                })?;
+            let file_path = crate::file_operations::final_path_for_handle(&self.file)
+                .map_err(|e| NativeArchiveError::from_io("final path(receipt)", e, Some(actual)))?;
+            if !crate::batch_rename::compare_paths_windows_ordinal(
+                &parent_path.join(&self.leaf),
+                &file_path,
+            )
+            .is_eq()
+            {
+                return Err(NativeArchiveError::validation(
+                    "receipt name changed or is an alternate name",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            verify_receipt_chain(&self.parent)
+        }
+        pub(crate) fn mark_delete_pending(&self) -> Result<(), NativeArchiveError> {
+            if !matches!(self.mode, ReceiptMode::Prune) {
+                return Err(NativeArchiveError::validation(
+                    "receipt was not opened for pruning",
+                    io::ErrorKind::PermissionDenied,
+                    Some(self.identity),
+                ));
+            }
+            self.validate()?;
+            delete_open_file(&self.file, self.identity).map_err(|primary| NativeArchiveError {
+                primary,
+                cleanup_attempted: false,
+                cleanup_failure: None,
+                cleanup_failed: false,
+                unconfirmed_name_effect: true,
+            })?;
+            verify_receipt_chain(&self.parent)
+                .map_err(NativeArchiveError::with_unconfirmed_name_effect)
+        }
     }
 
     /// Holds the exact directory and parent; Drop never marks it for deletion.
