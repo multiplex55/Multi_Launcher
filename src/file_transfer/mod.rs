@@ -3,8 +3,14 @@
 //! Snapshots carry observations, with handles reacquired before use. A vacant
 //! leaf is evidence from a single anchored open, never permission to write.
 
+mod copy;
 mod plan;
 mod tree;
+
+pub use copy::{
+    CopiedFile, CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure,
+    CopyRecoveryArtifact, CopyVerification, copy_to_vacancy,
+};
 pub use plan::{
     ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, GroupChoice, ReviewBlock,
     ReviewChoice, ReviewError, ReviewGeneration, ReviewRow, ReviewState, TransferAction,
@@ -379,6 +385,13 @@ fn directory_stamp(
     })
 }
 
+#[derive(Clone, Copy)]
+enum DirectoryAccess {
+    Observe,
+    List,
+    CreateFile,
+}
+
 struct HeldParent {
     root: TransferDirectory,
     descendants: Vec<TransferDirectory>,
@@ -391,20 +404,22 @@ impl HeldParent {
     }
 
     fn open(path: &Path, cancellation: &ScanCancellation) -> Result<Self, AdmissionError> {
-        Self::open_with_listing(path, cancellation, false)
+        Self::open_with_access(path, cancellation, DirectoryAccess::Observe)
     }
 
-    fn open_with_listing(
+    fn open_with_access(
         path: &Path,
         cancellation: &ScanCancellation,
-        list: bool,
+        access: DirectoryAccess,
     ) -> Result<Self, AdmissionError> {
         check_cancel(cancellation)?;
         let (drive, components) = checked_parts(path)?;
-        let root = if list && components.is_empty() {
-            TransferDirectory::open_listable_root(&drive)?
-        } else {
-            TransferDirectory::open_root(&drive)?
+        let root = match (components.is_empty(), access) {
+            (true, DirectoryAccess::List) => TransferDirectory::open_listable_root(&drive)?,
+            (true, DirectoryAccess::CreateFile) => {
+                TransferDirectory::open_create_file_root(&drive)?
+            }
+            _ => TransferDirectory::open_root(&drive)?,
         };
         let volume = root.identity().volume_serial_number();
         let mut stamps = vec![directory_stamp(&root, volume)?];
@@ -423,10 +438,10 @@ impl HeldParent {
             }
             let identity = native_file_identity(&candidate)?;
             check_identity(identity, volume)?;
-            let child = if list && index == final_index {
-                parent.open_listable_child(&name)?
-            } else {
-                parent.open_child(&name)?
+            let child = match (index == final_index, access) {
+                (true, DirectoryAccess::List) => parent.open_listable_child(&name)?,
+                (true, DirectoryAccess::CreateFile) => parent.open_create_file_child(&name)?,
+                _ => parent.open_child(&name)?,
             };
             let stamp = directory_stamp(&child, volume)?;
             if stamp.identity != identity || stamp.created != info.CreationTime {
@@ -640,7 +655,7 @@ fn inspect_children(
         return Err(AdmissionError::NotADirectory);
     }
 
-    let held = HeldParent::open_with_listing(&source.path(), cancellation, true)?;
+    let held = HeldParent::open_with_access(&source.path(), cancellation, DirectoryAccess::List)?;
     let dir = held.directory().file();
     let check_source = || {
         if held.snapshot.chain.split_last().map(|(_, chain)| chain)

@@ -655,6 +655,7 @@ pub struct ApprovedTransferEntry {
     id: SourceNodeId,
     source: EntrySnapshot,
     destination: ApprovedTarget,
+    verify_content: bool,
 }
 
 impl ApprovedTransferEntry {
@@ -668,6 +669,10 @@ impl ApprovedTransferEntry {
 
     pub fn destination(&self) -> &ApprovedTarget {
         &self.destination
+    }
+
+    pub fn verify_content(&self) -> bool {
+        self.verify_content
     }
 }
 
@@ -987,6 +992,8 @@ impl TransferReview {
                 id: row.source,
                 source: source.clone(),
                 destination,
+                verify_content: self.draft.verify
+                    || matches!(self.draft.action, TransferAction::MoveTo(_)),
             });
         }
         if entries.is_empty() {

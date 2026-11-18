@@ -1853,6 +1853,22 @@ fn extended_path_wide_with_nul(path: &Path) -> Result<Vec<u16>, NativeArchiveErr
 }
 
 /// A create-new stage tied to its held parent and file identity.
+fn default_stage_leaf() -> OsString {
+    let serial = NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed);
+    OsString::from(format!(".multi-launcher-c06-{}-{serial}.stage", std::process::id()))
+}
+
+struct StageCreateObservation {
+    leaf: OsString,
+    identity: Option<NativeFileIdentity>,
+    creation_confirmed: bool,
+}
+
+struct TransferStageAdmission<'a> {
+    final_leaf: &'a OsStr,
+    observation: &'a mut Option<StageCreateObservation>,
+}
+
 pub(crate) struct OwnedStage {
     file: VerifiedOverlappedFile,
     parent: Arc<HeldDirectory>,
@@ -1897,14 +1913,32 @@ impl OwnedStage {
     fn create_after_parent_validation_with_access(
         parent: Arc<HeldDirectory>, before_native_create: impl FnOnce() -> Result<(), NativeArchiveError>, extra: windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS, sharing: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE,
     ) -> Result<Self, NativeArchiveError> {
+        Self::create_with_options(
+            parent, before_native_create, extra, sharing,
+            windows::Wdk::Storage::FileSystem::NTCREATEFILE_CREATE_OPTIONS(0),
+            None, default_stage_leaf,
+        )
+    }
+    fn create_with_options(
+        parent: Arc<HeldDirectory>,
+        before_native_create: impl FnOnce() -> Result<(), NativeArchiveError>,
+        extra: windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS,
+        sharing: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE,
+        options: windows::Wdk::Storage::FileSystem::NTCREATEFILE_CREATE_OPTIONS,
+        mut transfer: Option<TransferStageAdmission<'_>>,
+        mut next_leaf: impl FnMut() -> OsString,
+    ) -> Result<Self, NativeArchiveError> {
         let mut before_native_create = Some(before_native_create);
         let mut last_collision = None;
         for _ in 0..STAGE_ATTEMPTS {
-            let serial = NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed);
-            let leaf = OsString::from(format!(
-                ".multi-launcher-c06-{}-{serial}.stage",
-                std::process::id()
-            ));
+            let leaf = next_leaf();
+            if let Some(transfer) = &transfer
+                && crate::batch_rename::compare_paths_windows_ordinal(
+                    Path::new(&leaf), Path::new(transfer.final_leaf),
+                ).is_eq()
+            {
+                continue;
+            }
             let opened = open_relative(
                 &parent,
                 &leaf,
@@ -1917,7 +1951,7 @@ impl OwnedStage {
                 sharing,
                 windows::Wdk::Storage::FileSystem::FILE_CREATE,
                 windows::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
-                    | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT,
+                    | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT | options,
                 windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
                 "NtCreateFile(FILE_CREATE owned stage)",
                 || match before_native_create.take() {
@@ -1937,14 +1971,23 @@ impl OwnedStage {
                 Err(error) => return Err(error),
             };
 
-            // FILE_CREATE must report FILE_CREATED (2). If a filesystem returns
-            // an unexpected success disposition, the exact returned handle is
-            // nevertheless a new owned object, so delete only that handle.
+            if let Some(transfer) = &mut transfer {
+                *transfer.observation = Some(StageCreateObservation {
+                    leaf: leaf.clone(),
+                    identity: None,
+                    creation_confirmed: information == 2,
+                });
+            }
             if information != 2 {
+                let operation = "NtCreateFile did not report FILE_CREATED for stage";
+                if transfer.is_some() {
+                    // A contradictory disposition cannot establish transfer ownership.
+                    return Err(NativeArchiveError::validation(
+                        operation, io::ErrorKind::InvalidData, Some(parent.identity),
+                    ));
+                }
                 let primary = NativeFailure::validation(
-                    "NtCreateFile did not report FILE_CREATED for stage",
-                    io::ErrorKind::InvalidData,
-                    Some(parent.identity),
+                    operation, io::ErrorKind::InvalidData, Some(parent.identity),
                 );
                 let cleanup = delete_open_file_without_identity(&file);
                 return Err(NativeArchiveError::after_cleanup(primary, cleanup));
@@ -1995,6 +2038,21 @@ impl OwnedStage {
                 );
                 let cleanup = delete_open_file_without_identity(&file);
                 return Err(NativeArchiveError::after_cleanup(primary, cleanup));
+            }
+            if transfer.is_some() && identity.file_id() == [0; 16] {
+                let primary = NativeFailure::validation(
+                    "new stage has no supported file identity",
+                    io::ErrorKind::InvalidData,
+                    Some(parent.identity),
+                );
+                return Err(NativeArchiveError::after_cleanup(
+                    primary, delete_open_file_without_identity(&file),
+                ));
+            }
+            if let Some(transfer) = &mut transfer
+                && let Some(observation) = transfer.observation.as_mut()
+            {
+                observation.identity = Some(identity);
             }
             if let Err(error) = VerifiedOverlappedFile::verify_before_ownership(&file) {
                 let primary = match error {
@@ -2150,14 +2208,14 @@ impl OwnedStage {
     }
 
     pub(crate) fn publish(self, target_leaf: &OsStr) -> Result<NativeFileIdentity, NativeArchiveError> {
-        self.publish_admitted(target_leaf, || true)
+        self.publish_admitted(target_leaf, || true).map(|(identity, _)| identity)
     }
 
     fn publish_admitted(
         mut self,
         target_leaf: &OsStr,
         admit: impl FnOnce() -> bool,
-    ) -> Result<NativeFileIdentity, NativeArchiveError> {
+    ) -> Result<(NativeFileIdentity, VerifiedOverlappedFile), NativeArchiveError> {
         if let Err(error) = validate_single_component(target_leaf, "relative rename target") {
             return Err(self.fail_and_cleanup(error.primary));
         }
@@ -2237,7 +2295,7 @@ impl OwnedStage {
         {
             Ok(()) => {
                 self.finished = true;
-                Ok(actual_identity)
+                Ok((actual_identity, self.file.clone()))
             }
             Err(primary) => Err(self.fail_and_cleanup(primary)),
         }
@@ -3076,6 +3134,30 @@ mod tests {
     }
 
     #[test]
+    fn transfer_copy_native_stage_name_excludes_the_exact_final_name() {
+        let (_temp, selected, _held, _outside) = fixture_tree();
+        let (root, parts) = split_local_absolute_path(&selected).unwrap();
+        let mut parent = transfer_native::TransferDirectory::open_root(&root).unwrap();
+        for (index, name) in parts.iter().enumerate() {
+            parent = if index + 1 == parts.len() {
+                parent.open_create_file_child(name).unwrap()
+            } else {
+                parent.open_child(name).unwrap()
+            };
+        }
+        let mut names = [OsString::from("FINAL.STAGE"), OsString::from("distinct.stage")].into_iter();
+        let stage = parent.create_stage_with_names(
+            OsStr::new("Final.Stage"),
+            || names.next().expect("reserved and distinct stage names"),
+        ).unwrap();
+        assert_eq!(stage.leaf(), OsStr::new("distinct.stage"));
+        assert!(!selected.join("Final.Stage").exists());
+        assert!(selected.join("distinct.stage").exists());
+        stage.abort().unwrap();
+        assert_eq!(fs::read_dir(selected).unwrap().count(), 0);
+    }
+
+    #[test]
     fn transfer_admission_distinguishes_definitive_leaf_absence_from_other_failures() {
         use windows::Win32::Foundation::{
             STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
@@ -3232,6 +3314,118 @@ pub(crate) mod transfer_native {
                 .open_child_with_options(name, false, false, true, true)
                 .map(Self)
         }
+        /// Opens the final destination directory with create-file access only.
+        pub(crate) fn open_create_file_child(
+            &self,
+            name: &OsStr,
+        ) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, true, false, true, false)
+                .map(Self)
+        }
+        pub(crate) fn open_create_file_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            let (root, parts) = split_local_absolute_path(root)?;
+            if !parts.is_empty() {
+                return Err(NativeArchiveError::validation(
+                    "transfer root must be a drive root",
+                    io::ErrorKind::InvalidInput,
+                    None,
+                ));
+            }
+            open_volume_root_with_options(&root, true, false, true, false).map(Self)
+        }
+        pub(crate) fn open_read(&self, name: &OsStr) -> Result<TransferFile, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
+                SYNCHRONIZE,
+            };
+            validate_single_component(name, "transfer source name")?;
+            let (file, _) = open_relative(
+                &self.0,
+                name,
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer source)",
+                || Ok(()),
+            )?;
+            let metadata = file.metadata().map_err(|e| {
+                NativeArchiveError::from_io(
+                    "File::metadata(transfer source)",
+                    e,
+                    Some(self.0.identity),
+                )
+            })?;
+            let identity = native_file_identity(&file).map_err(|e| {
+                NativeArchiveError::from_io(
+                    "FILE_ID_INFO(transfer source)",
+                    e,
+                    Some(self.0.identity),
+                )
+            })?;
+            if !metadata.is_file()
+                || metadata.file_attributes()
+                    & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                    != 0
+                || identity.volume_serial_number() != self.0.identity.volume_serial_number()
+            {
+                return Err(NativeArchiveError::validation(
+                    "transfer source is not an ordinary local file",
+                    io::ErrorKind::InvalidData,
+                    Some(identity),
+                ));
+            }
+            let file = VerifiedOverlappedFile::verify(file).map_err(|_| {
+                NativeArchiveError::validation(
+                    "transfer source is not verified overlapped",
+                    io::ErrorKind::InvalidData,
+                    Some(identity),
+                )
+            })?;
+            Ok(TransferFile { file, identity })
+        }
+        pub(crate) fn create_stage(
+            &self,
+            final_leaf: &OsStr,
+        ) -> Result<TransferStage, TransferStageCreateFailure> {
+            self.create_stage_with_names(final_leaf, default_stage_leaf)
+        }
+
+        pub(super) fn create_stage_with_names(
+            &self,
+            final_leaf: &OsStr,
+            next_leaf: impl FnMut() -> OsString,
+        ) -> Result<TransferStage, TransferStageCreateFailure> {
+            use windows::Win32::Storage::FileSystem::{FILE_ACCESS_RIGHTS, FILE_SHARE_MODE};
+            let mut observation = None;
+            let result = (|| {
+                validate_single_component(final_leaf, "transfer destination name")?;
+                self.0.verify_identity()?;
+                OwnedStage::create_with_options(
+                    self.0.clone(),
+                    || Ok(()),
+                    FILE_ACCESS_RIGHTS(0),
+                    FILE_SHARE_MODE(0),
+                    windows::Wdk::Storage::FileSystem::FILE_WRITE_THROUGH,
+                    Some(TransferStageAdmission { final_leaf, observation: &mut observation }),
+                    next_leaf,
+                )
+            })();
+            result.map(TransferStage).map_err(|error| {
+                let unresolved = observation
+                    .filter(|observation| error.cleanup_failed() || !observation.creation_confirmed)
+                    .map(|observation| TransferStageAttempt {
+                        leaf: observation.leaf,
+                        identity: observation.identity,
+                    });
+                TransferStageCreateFailure { error, unresolved }
+            })
+        }
         pub(crate) fn open_relative_metadata(
             &self,
             name: &OsStr,
@@ -3256,6 +3450,87 @@ pub(crate) mod transfer_native {
                 || Ok(()),
             )
             .map(|(file, _)| file)
+        }
+    }
+
+    pub(crate) struct TransferFile {
+        file: VerifiedOverlappedFile,
+        identity: NativeFileIdentity,
+    }
+    impl TransferFile {
+        pub(crate) fn file(&self) -> &File {
+            self.file.as_file()
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.identity
+        }
+    }
+    #[derive(Clone)]
+    pub(crate) struct TransferIo(ArchiveIoControl);
+    impl TransferIo {
+        pub(crate) fn new(cancellation: ScanCancellation) -> Self {
+            Self(ArchiveIoControl::new(cancellation))
+        }
+        pub(crate) fn cancel(&self) {
+            self.0.cancel();
+        }
+        pub(crate) fn is_cancelled(&self) -> bool {
+            self.0.is_cancelled()
+        }
+        pub(crate) fn read_at(
+            &self,
+            file: &TransferFile,
+            offset: u64,
+            length: usize,
+        ) -> io::Result<(Box<[u8]>, usize)> {
+            self.0.read_at(&file.file, offset, length)
+        }
+    }
+    #[derive(Debug)]
+    pub(crate) struct TransferStageAttempt {
+        pub(crate) leaf: OsString,
+        pub(crate) identity: Option<NativeFileIdentity>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct TransferStageCreateFailure {
+        pub(crate) error: NativeArchiveError,
+        pub(crate) unresolved: Option<TransferStageAttempt>,
+    }
+
+    pub(crate) struct TransferStage(OwnedStage);
+    impl TransferStage {
+        pub(crate) fn leaf(&self) -> &OsStr {
+            &self.0.leaf
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.0.identity()
+        }
+        pub(crate) fn file(&self) -> &File {
+            self.0.file.as_file()
+        }
+        pub(crate) fn write(
+            &self,
+            io: &TransferIo,
+            offset: u64,
+            bytes: &[u8],
+        ) -> Result<usize, NativeArchiveError> {
+            self.0.write_chunk(&io.0, offset, bytes)
+        }
+        pub(crate) fn flush(&self) -> Result<(), NativeArchiveError> {
+            self.0.flush_final()
+        }
+        pub(crate) fn abort(self) -> Result<(), NativeArchiveError> {
+            self.0.abort()
+        }
+        pub(crate) fn publish(
+            self,
+            name: &OsStr,
+            admit: impl FnOnce() -> bool,
+        ) -> Result<TransferFile, NativeArchiveError> {
+            self.0
+                .publish_admitted(name, admit)
+                .map(|(identity, file)| TransferFile { file, identity })
         }
     }
 
@@ -3659,7 +3934,7 @@ pub(crate) mod print_publication {
         {
             let leaf = self.0.leaf.clone();
             let identity = self.0.identity();
-            self.0.publish_admitted(name, admit).map_err(|e| {
+            self.0.publish_admitted(name, admit).map(|(identity, _)| identity).map_err(|e| {
                 let retained = e.cleanup_failed().then_some((leaf, identity));
                 (error(e), retained)
             })

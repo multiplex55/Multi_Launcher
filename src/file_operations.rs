@@ -8751,7 +8751,7 @@ pub(crate) fn query_replace_basic_info(
 }
 
 #[cfg(windows)]
-fn set_replace_basic_info(
+pub(crate) fn set_replace_basic_info(
     file: &std::fs::File,
     info: windows::Win32::Storage::FileSystem::FILE_BASIC_INFO,
 ) -> std::io::Result<()> {

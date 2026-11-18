@@ -58,7 +58,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-A1 | complete |
 | M9-A2A | complete |
 | M9-A2B | complete |
-| M9-B, M9-C, M9-D | pending |
+| M9-B1A | complete |
+| M9-B1B, M9-B2+, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -467,3 +468,12 @@ The transfer review maps Copy, Move and Duplicate in source order. Each destinat
 The current review generation binds each explicit Skip, Keep Both, Replace or Merge choice. A group choice applies to an explicit compatible set of occupied rows. Merge admits the exact existing directory and exposes child conflicts independently. Keep Both checks a fresh alternate under the exact current existing or planned parent. A competing arrival that changes a proposed Duplicate parent invalidates a child alternate. A maximum-length source leaf can use an explicitly chosen shorter alternate. Before sealing, the plan checks every retained source and occupied or vacant destination observation. Pending conflicts, unsafe entries and stale evidence cannot seal. The worker will acquire held guards and check supported streams before publication or source removal.
 
 The final scoped Nextest filter test(transfer_review_) | test(transfer_tree_) passed 16 of 16. Observed cases cover current-generation rejection, late replacement, group scope, a real case-only collision, the maximum supported NTFS name, sibling duplication, exact planned-parent binding, and independent merge conflicts. All fixtures used disposable roots and approval produced no write effects. Staged whitespace verification passed.
+
+
+## M9-B1A guarded ordinary file copy
+
+An approved vacant-file entry reopens the exact source and destination parent chains. The source handle excludes unnamed-stream writers. The destination uses an exclusive write-through stage and the existing handle-relative no-replace rename. The staging name excludes the approved final name under Windows ordinal comparison. A native failure after stage creation can identify the attempted leaf and parent for reconciliation, with a proven file identity when available. The approved verification requirement controls the destination reread, and streamed moves always require that verification. The ordinary file adapter preserves supported attributes and the creation and modification times.
+
+The adapter checks the source and output stream inventories around copy and verification. It refuses unsupported or unknown alternate streams. A late stream change returns a failure with the still-identifiable published artifact. The next slice admits the specific Zone Identifier stream. Existing archive and PDF callers retain their publication API.
+
+All 11 focused Nextest cases passed. The filter was test(transfer_copy_native_) | test(c06_root_relative_publication_commits_exact_bytes_without_replacement) | test(c06_stage_identity_failure_reports_cleanup_and_preserves_foreign_files) | test(pending_read_cancel_drains_native_result_and_releases_owned_resources). Disposable Windows tests exercised real multi-chunk and empty copies, exact data and timestamps, SHA-256 verification, writer exclusion, stale source and parent refusal, cancellation and stage cleanup, reserved staging names, a late foreign destination, and a late source stream. Staged whitespace verification passed.
