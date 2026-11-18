@@ -27,6 +27,7 @@ pub use execute::{
 pub use jobs::{
     TRANSFER_QUEUE_LIMIT, TransferJobError, TransferJobId, TransferJobInfo, TransferJobPhase,
     TransferJobProgress, TransferJobResult, TransferJobStatus, TransferJobs, TransferQueueSnapshot,
+    TransferReceiptFailure, TransferReceiptId,
 };
 pub use plan::{
     ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, GroupChoice, ReviewBlock,

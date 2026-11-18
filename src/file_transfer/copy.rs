@@ -823,6 +823,27 @@ pub(super) fn copy_to_created_parent(
     )
 }
 
+pub(super) fn copy_to_vacancy_journaled(
+    entry: &ApprovedTransferEntry,
+    target: &TargetSnapshot,
+    control: &CopyControl,
+    progress: impl FnMut(u64),
+    verification: impl FnOnce(bool),
+    journal: &mut dyn super::journal::TransferJournal,
+) -> Result<CopiedFile, CopyError> {
+    let copy = GuardedCopy::open(entry.source(), target, control, false)?;
+    Ok(publish_vacant(
+        copy,
+        entry.verify_content(),
+        control,
+        progress,
+        (|_| {}, || {}),
+        verification,
+        Some(journal),
+    )?
+    .copied)
+}
+
 fn copy_file_bound(
     source: &EntrySnapshot,
     target: &TargetSnapshot,

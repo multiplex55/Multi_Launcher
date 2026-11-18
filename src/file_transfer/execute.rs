@@ -11,8 +11,8 @@ use crate::archive::transfer_native::{
 use crate::file_operations::set_replace_basic_info;
 
 use super::copy::{
-    copy_to_created_parent, copy_to_replacement_reporting, copy_to_vacancy_reporting,
-    move_file_by_copy, require_no_directory_streams,
+    copy_to_created_parent, copy_to_replacement_reporting, copy_to_vacancy_journaled,
+    copy_to_vacancy_reporting, move_file_by_copy, require_no_directory_streams,
 };
 use super::journal::{TransferJournal, TransferJournalEvent};
 use super::relocate::{MovedFile, move_same_volume_file};
@@ -54,6 +54,7 @@ pub enum DirectoryTimes {
     Pending,
     Preserved,
     Incomplete,
+    Cancelled,
     Failed(CopyFailure),
 }
 
@@ -105,6 +106,15 @@ pub fn execute_copy_plan(
     progress: impl FnMut(ExecutionProgress),
 ) -> Result<CopyExecution, CopyFailure> {
     execute_copy_with_hooks(plan, control, progress, |_| {}, None)
+}
+
+pub(super) fn execute_with_journal(
+    plan: &ApprovedTransferPlan,
+    control: &CopyControl,
+    progress: impl FnMut(ExecutionProgress),
+    journal: &mut dyn TransferJournal,
+) -> Result<CopyExecution, CopyFailure> {
+    execute_copy_with_hooks(plan, control, progress, |_| {}, Some(journal))
 }
 
 fn execute_copy_with_hooks(
@@ -159,15 +169,29 @@ fn execute_copy_with_hooks(
             ExecutionState::BlockedByParent(parent)
         } else {
             progress(ExecutionProgress::Preparing(id));
-            match execute_entry(
-                entry,
-                strategy,
-                &rows,
-                control,
-                &mut progress,
-                &mut before_directory_create,
-                &mut journal,
-            ) {
+            let result = if let Some(recorder) = journal.as_mut() {
+                recorder
+                    .begin_operation()
+                    .map_err(CopyFailure::Journal)
+                    .map_err(CopyError::from)
+            } else {
+                Ok(())
+            }
+            .and_then(|()| {
+                execute_entry(
+                    entry,
+                    strategy,
+                    &rows,
+                    control,
+                    &mut progress,
+                    &mut before_directory_create,
+                    &mut journal,
+                )
+            });
+            if let Some(recorder) = journal.as_mut() {
+                recorder.end_operation();
+            }
+            match result {
                 Ok(state) => state,
                 Err(error) if matches!(error.failure, CopyFailure::Cancelled) => {
                     ExecutionState::Cancelled(Some(error))
@@ -185,15 +209,17 @@ fn execute_copy_with_hooks(
             progress(ExecutionProgress::DirectoryCreated(id));
         }
     }
-    if let (ExecutionStrategy::Move { .. }, Some(journal)) = (strategy, journal) {
-        directory_move::finalize_directory_moves(
-            plan,
-            control,
-            &mut rows,
-            &mut progress,
-            journal,
-            journal_failed,
-        );
+    if matches!(strategy, ExecutionStrategy::Move { .. }) {
+        if let Some(recorder) = journal.as_mut() {
+            directory_move::finalize_directory_moves(
+                plan,
+                control,
+                &mut rows,
+                &mut progress,
+                &mut **recorder,
+                journal_failed,
+            );
+        }
     } else if journal_failed {
         for row in &mut rows {
             if let ExecutionState::CreatedDirectory(directory) = &mut row.state {
@@ -201,7 +227,16 @@ fn execute_copy_with_hooks(
             }
         }
     } else {
-        finalize_directory_times(plan, control, &mut rows, &mut progress);
+        match journal.as_mut() {
+            Some(recorder) => finalize_directory_times(
+                plan,
+                control,
+                &mut rows,
+                &mut progress,
+                Some(&mut **recorder),
+            ),
+            None => finalize_directory_times(plan, control, &mut rows, &mut progress, None),
+        }
     }
     Ok(CopyExecution {
         rows,
@@ -286,11 +321,20 @@ fn execute_entry(
         directory_move::check_directory_move_source_before_admission(entry.source(), control)?;
     }
     if let ApprovedTarget::Merge { target, directory } = entry.destination() {
-        return admit_merge(entry.source(), target, directory, control)
-            .map(ExecutionState::MergedDirectory)
-            .map_err(CopyError::from);
+        let admitted = admit_merge(entry.source(), target, directory, control)?;
+        if let Some(recorder) = journal.as_mut() {
+            recorder
+                .begin_entry(id, target)
+                .map_err(CopyFailure::Journal)?;
+        }
+        return Ok(ExecutionState::MergedDirectory(admitted));
     }
     let bound = resolve_transfer_target(entry, rows, control)?;
+    if let Some(recorder) = journal.as_mut() {
+        recorder
+            .begin_entry(id, bound.target())
+            .map_err(CopyFailure::Journal)?;
+    }
     if is_directory {
         if bound.replacing() {
             return Err(CopyFailure::UnsupportedPlan.into());
@@ -325,9 +369,21 @@ fn execute_entry(
         })
     };
     let copied = match entry.destination() {
-        ApprovedTarget::CreateAt(_) => copy_to_vacancy_reporting(entry, control, report, verify)?,
-        ApprovedTarget::CreateIn { .. } => {
-            copy_to_created_parent(entry, bound.target(), control, report, verify)?
+        ApprovedTarget::CreateAt(_) | ApprovedTarget::CreateIn { .. } => {
+            if let Some(recorder) = journal.as_mut() {
+                copy_to_vacancy_journaled(
+                    entry,
+                    bound.target(),
+                    control,
+                    report,
+                    verify,
+                    &mut **recorder,
+                )?
+            } else if matches!(entry.destination(), ApprovedTarget::CreateAt(_)) {
+                copy_to_vacancy_reporting(entry, control, report, verify)?
+            } else {
+                copy_to_created_parent(entry, bound.target(), control, report, verify)?
+            }
         }
         ApprovedTarget::Replace(_) => {
             let Some(journal) = journal else {
@@ -611,8 +667,10 @@ fn finalize_directory_times(
     control: &CopyControl,
     rows: &mut [ExecutionRow],
     progress: &mut impl FnMut(ExecutionProgress),
+    mut journal: Option<&mut dyn TransferJournal>,
 ) {
     let mut incomplete = vec![false; rows.len()];
+    let mut receipt_failed = false;
     for entry in plan.entries().iter().rev() {
         let index = entry.id().index();
         let state = &mut rows[index].state;
@@ -622,14 +680,42 @@ fn finalize_directory_times(
             | ExecutionState::MovedByCopy(_)
             | ExecutionState::Skipped => true,
             ExecutionState::CreatedDirectory(created) => {
-                created.times = if incomplete[index] || control.is_cancelled() {
+                created.times = if control.is_cancelled() {
+                    DirectoryTimes::Cancelled
+                } else if incomplete[index] || receipt_failed {
                     DirectoryTimes::Incomplete
                 } else {
                     progress(ExecutionProgress::Finalizing(entry.id()));
-                    match set_directory_times(entry.source(), created, control) {
+                    let start = if let Some(recorder) = journal.as_mut() {
+                        recorder
+                            .begin_operation()
+                            .and_then(|()| recorder.select_entry(entry.id()))
+                            .map_err(CopyFailure::Journal)
+                    } else {
+                        Ok(())
+                    };
+                    let result = start.and_then(|()| match journal.as_mut() {
+                        Some(recorder) => set_directory_times(
+                            entry.id(),
+                            entry.source(),
+                            created,
+                            control,
+                            Some(&mut **recorder),
+                        ),
+                        None => {
+                            set_directory_times(entry.id(), entry.source(), created, control, None)
+                        }
+                    });
+                    if let Some(recorder) = journal.as_mut() {
+                        recorder.end_operation();
+                    }
+                    match result {
                         Ok(()) => DirectoryTimes::Preserved,
-                        Err(CopyFailure::Cancelled) => DirectoryTimes::Incomplete,
-                        Err(failure) => DirectoryTimes::Failed(failure),
+                        Err(CopyFailure::Cancelled) => DirectoryTimes::Cancelled,
+                        Err(failure) => {
+                            receipt_failed |= matches!(failure, CopyFailure::Journal(_));
+                            DirectoryTimes::Failed(failure)
+                        }
                     }
                 };
                 matches!(created.times, DirectoryTimes::Preserved)
@@ -668,9 +754,11 @@ fn finalize_directory_times(
 }
 
 fn set_directory_times(
+    id: SourceNodeId,
     source: &EntrySnapshot,
     created: &DirectoryCopy,
     control: &CopyControl,
+    mut journal: Option<&mut dyn TransferJournal>,
 ) -> Result<(), CopyFailure> {
     let held_source = open_source_directory(source, control)?;
     let held = HeldParent::open_with_access(
@@ -679,6 +767,16 @@ fn set_directory_times(
         DirectoryAccess::WriteDirectoryMetadata,
     )?;
     let file = held.directory().file();
+    let baseline = observe_entry_metadata(file)?;
+    if let Some(recorder) = journal.as_mut() {
+        recorder
+            .record(TransferJournalEvent::DirectoryMetadataIntent {
+                entry: id,
+                source: source.clone(),
+                output: created.output.clone(),
+            })
+            .map_err(CopyFailure::Journal)?;
+    }
     let claim = loop {
         control.check()?;
         let Some(epoch) = control.admission_epoch()? else {
@@ -688,6 +786,9 @@ fn set_directory_times(
         held.check_chain(control.cancellation())?;
         if held.snapshot != created.snapshot {
             return Err(AdmissionError::StaleParent.into());
+        }
+        if observe_entry_metadata(file)? != baseline {
+            return Err(AdmissionError::StaleTarget.into());
         }
         if observe_entry_metadata(file)?.attributes != FILE_ATTRIBUTE_DIRECTORY.0 {
             return Err(CopyFailure::UnsupportedMetadata);
@@ -711,6 +812,15 @@ fn set_directory_times(
     let dates = observe_entry_metadata(file)?;
     if dates.created != metadata.created || dates.modified != metadata.modified {
         return Err(CopyFailure::UnsupportedMetadata);
+    }
+    if let Some(recorder) = journal.as_mut() {
+        recorder
+            .record(TransferJournalEvent::DirectoryMetadataObserved {
+                entry: id,
+                output: created.output.clone(),
+                revision: dates,
+            })
+            .map_err(CopyFailure::Journal)?;
     }
     Ok(())
 }
@@ -801,7 +911,7 @@ mod tests {
         assert!(matches!(
             &report.rows[0].state,
             ExecutionState::CreatedDirectory(DirectoryCopy {
-                times: DirectoryTimes::Incomplete,
+                times: DirectoryTimes::Cancelled,
                 ..
             })
         ));

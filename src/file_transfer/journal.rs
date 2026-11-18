@@ -121,5 +121,19 @@ pub(super) enum TransferJournalEvent {
 }
 
 pub(super) trait TransferJournal {
+    fn begin_operation(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn end_operation(&mut self) {}
+    fn begin_entry(
+        &mut self,
+        _id: super::SourceNodeId,
+        _target: &super::TargetSnapshot,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+    fn select_entry(&mut self, _id: super::SourceNodeId) -> io::Result<()> {
+        Ok(())
+    }
     fn record(&mut self, event: TransferJournalEvent) -> io::Result<()>;
 }

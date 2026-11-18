@@ -137,16 +137,23 @@ pub(super) fn finalize_directory_moves(
             moved.source = DirectorySourceOutcome::Cancelled;
         } else {
             progress(ExecutionProgress::Finalizing(id));
-            let result = finalize_one(
-                id,
-                source,
-                &mut moved.destination,
-                !incomplete.is_empty(),
-                !skipped.is_empty(),
-                control,
-                journal,
-                || progress(ExecutionProgress::RemovingSource(id)),
-            );
+            let start = journal
+                .begin_operation()
+                .and_then(|()| journal.select_entry(id))
+                .map_err(CopyFailure::Journal);
+            let result = start.and_then(|()| {
+                finalize_one(
+                    id,
+                    source,
+                    &mut moved.destination,
+                    !incomplete.is_empty(),
+                    !skipped.is_empty(),
+                    control,
+                    journal,
+                    || progress(ExecutionProgress::RemovingSource(id)),
+                )
+            });
+            journal.end_operation();
             moved.source = match result {
                 Ok(outcome @ DirectorySourceOutcome::ReceiptFailed { .. }) => {
                     receipt_failed = true;

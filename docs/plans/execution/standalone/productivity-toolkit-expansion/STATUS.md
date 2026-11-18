@@ -70,7 +70,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-C1A | complete |
 | M9-C1B1 | complete |
 | M9-C1B2 | complete |
-| M9-C1B3, M9-C2, M9-D | pending |
+| M9-C1B3 | complete |
+| M9-C2, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -535,3 +536,8 @@ Twelve targeted Nextest checks passed after independent review and remediation (
 ### M9-C1B2 durable receipt storage
 
 The store is read-only until explicit admission and pins the exact physical profile and receipt chain. Admission charges verified physical file lengths, limits decoded metadata and reserves bounded effect, compensation and terminal space. Corrupt and oversized receipts stay visible and charged. Pressure can remove only exact clean settled files on the same read-and-dispose handle after revalidation. The union passed 18 checks (`308744aa-bf01-46cc-be45-e9847e7d506e`). A final six store checks passed after also refusing a missing previously pinned root (`337ff0af-2c04-46ea-a774-b248a0e4a190`). Applied engine and worker activation follow.
+
+
+### M9-C1B3 applied receipts and transfer worker
+
+The app-owned worker opens its profile receipt store after an explicit Start and durably records the applied engine effects for ordinary Copy/Duplicate, directory finalization, verified Move and reviewed Replace. The 87-test Windows union passed (`7e54ff8c-4255-4347-b101-838767ca03fa`), with actual distinct-volume regressions, a fully finished case-differing Merge, staged source restoration after its disposal intent, retained exact Replace backup and live Copy reopened from disk. The final 14 checks passed (`ff7fe291-58a3-40f6-a384-7996f76c69c0`) after adding actual worker Activity Partial and Confirmed retirement with a sanitized diagnostic on terminal receipt refusal, and truthful cancelled directory metadata rows. Queued-only durability, interruption reconciliation, Retry and eligible Undo follow; cleanup without a durable exact observation remains conservative.

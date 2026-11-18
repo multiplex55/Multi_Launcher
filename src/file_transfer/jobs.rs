@@ -25,6 +25,17 @@ pub const TRANSFER_QUEUE_LIMIT: usize = 32;
 const JOB_HISTORY_LIMIT: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TransferReceiptId(pub [u8; 16]);
+impl fmt::Display for TransferReceiptId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TransferJobId(u64);
 
 impl TransferJobId {
@@ -146,82 +157,140 @@ impl TransferJobProgress {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferReceiptFailure {
+    Unavailable,
+    UnsafeNamespace,
+    IncompleteScan,
+    Capacity,
+    Collision,
+    InvalidRecord,
+    Poisoned,
+    Io(std::io::ErrorKind),
+}
+impl From<super::receipts::store::ReceiptStoreError> for TransferReceiptFailure {
+    fn from(error: super::receipts::store::ReceiptStoreError) -> Self {
+        use super::receipts::store::ReceiptStoreError as E;
+        match error {
+            E::Unavailable => Self::Unavailable,
+            E::UnsafeNamespace => Self::UnsafeNamespace,
+            E::IncompleteScan => Self::IncompleteScan,
+            E::Capacity => Self::Capacity,
+            E::Collision => Self::Collision,
+            E::InvalidRecord => Self::InvalidRecord,
+            E::Poisoned => Self::Poisoned,
+            E::Io(kind) => Self::Io(kind),
+            E::AfterCreate { reason, .. } => (*reason).into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TransferJobResult {
     Finished(CopyExecution),
     Rejected(CopyFailure),
     CancelledBeforeStart,
     WorkerPanicked,
+    ReceiptFailed {
+        report: Option<CopyExecution>,
+        receipt_id: Option<TransferReceiptId>,
+        failure: TransferReceiptFailure,
+    },
 }
 
 impl TransferJobResult {
-    fn status(&self) -> TransferJobStatus {
+    pub(super) fn status(&self) -> TransferJobStatus {
         use TransferJobStatus::{Cancelled, Completed, Failed, Partial};
         let Self::Finished(report) = self else {
             return match self {
                 Self::Rejected(CopyFailure::Cancelled) | Self::CancelledBeforeStart => Cancelled,
+                Self::ReceiptFailed {
+                    report: Some(report),
+                    ..
+                } if report_has_effect(report) => Partial,
                 _ => Failed,
             };
         };
-        let mut retained = false;
-        let mut incomplete = false;
-        let mut cancelled = report.cancelled;
-        let mut failed = false;
-        for row in &report.rows {
-            match &row.state {
-                ExecutionState::Copied(_)
-                | ExecutionState::Moved(_)
-                | ExecutionState::MovedByCopy(_) => retained = true,
-                ExecutionState::MovedDirectory(directory) => {
-                    retained |= directory.has_retained_effect();
-                    let kept_by_review = matches!(
-                        &directory.source,
-                        DirectorySourceOutcome::RetainedChildren { skipped, incomplete }
-                            if !skipped.is_empty() && incomplete.is_empty()
-                    );
-                    let finished = directory.completed() || kept_by_review;
-                    let stopped = matches!(directory.source, DirectorySourceOutcome::Cancelled);
-                    incomplete |= !finished;
-                    cancelled |= stopped;
-                    failed |= !finished && !stopped;
-                }
-                ExecutionState::CreatedDirectory(directory) => {
-                    retained = true;
-                    incomplete |= !matches!(directory.times, DirectoryTimes::Preserved);
-                    failed |= matches!(directory.times, DirectoryTimes::Failed(_));
-                }
-                ExecutionState::Failed(error) => {
-                    retained |= error.has_retained_effect();
-                    incomplete = true;
-                    failed = true;
-                }
-                ExecutionState::Cancelled(error) => {
-                    retained |= error.as_ref().is_some_and(CopyError::has_retained_effect);
-                    incomplete = true;
-                    cancelled = true;
-                }
-                ExecutionState::BlockedByParent(_) | ExecutionState::BlockedByReceipt => {
-                    incomplete = true
-                }
-                ExecutionState::MergedDirectory(_) | ExecutionState::Skipped => {}
+        execution_status(report)
+    }
+}
+
+fn execution_status(report: &CopyExecution) -> TransferJobStatus {
+    use TransferJobStatus::{Cancelled, Completed, Failed, Partial};
+    let mut retained = false;
+    let mut incomplete = false;
+    let mut cancelled = report.cancelled;
+    let mut failed = false;
+    for row in &report.rows {
+        match &row.state {
+            ExecutionState::Copied(_)
+            | ExecutionState::Moved(_)
+            | ExecutionState::MovedByCopy(_) => retained = true,
+            ExecutionState::MovedDirectory(directory) => {
+                retained |= directory.has_retained_effect();
+                let kept_by_review = matches!(
+                    &directory.source,
+                    DirectorySourceOutcome::RetainedChildren { skipped, incomplete }
+                        if !skipped.is_empty() && incomplete.is_empty()
+                );
+                let finished = directory.completed() || kept_by_review;
+                let stopped = matches!(directory.source, DirectorySourceOutcome::Cancelled);
+                incomplete |= !finished;
+                cancelled |= stopped;
+                failed |= !finished && !stopped;
             }
-        }
-        if !incomplete {
-            Completed
-        } else if retained {
-            Partial
-        } else if cancelled && !failed {
-            Cancelled
-        } else {
-            Failed
+            ExecutionState::CreatedDirectory(directory) => {
+                retained = true;
+                incomplete |= !matches!(directory.times, DirectoryTimes::Preserved);
+                failed |= matches!(directory.times, DirectoryTimes::Failed(_));
+            }
+            ExecutionState::Failed(error) => {
+                retained |= error.has_retained_effect();
+                incomplete = true;
+                failed = true;
+            }
+            ExecutionState::Cancelled(error) => {
+                retained |= error.as_ref().is_some_and(CopyError::has_retained_effect);
+                incomplete = true;
+                cancelled = true;
+            }
+            ExecutionState::BlockedByParent(_) | ExecutionState::BlockedByReceipt => {
+                incomplete = true
+            }
+            ExecutionState::MergedDirectory(_) | ExecutionState::Skipped => {}
         }
     }
+    if !incomplete {
+        Completed
+    } else if retained {
+        Partial
+    } else if cancelled && !failed {
+        Cancelled
+    } else {
+        Failed
+    }
+}
+
+fn report_has_effect(report: &CopyExecution) -> bool {
+    report.rows.iter().any(|row| match &row.state {
+        ExecutionState::Copied(_)
+        | ExecutionState::Moved(_)
+        | ExecutionState::MovedByCopy(_)
+        | ExecutionState::CreatedDirectory(_) => true,
+        ExecutionState::MovedDirectory(directory) => directory.has_retained_effect(),
+        ExecutionState::Failed(error) => error.has_retained_effect(),
+        ExecutionState::Cancelled(error) => {
+            error.as_ref().is_some_and(CopyError::has_retained_effect)
+        }
+        _ => false,
+    })
 }
 
 #[derive(Clone, Debug)]
 pub struct TransferJobInfo {
     pub id: TransferJobId,
     pub activity: Option<ActivityKey>,
+    pub receipt_id: Option<TransferReceiptId>,
     pub roots: Arc<[PathBuf]>,
     pub draft: TransferDraft,
     pub status: TransferJobStatus,
@@ -293,8 +362,11 @@ type TransferProgressHook = Arc<dyn Fn(TransferJobId, ExecutionProgress) + Send 
 struct Shared {
     state: Mutex<QueueState>,
     ready: Condvar,
+    receipt_root: Option<crate::platform::app_data::AppDataRoot>,
     #[cfg(test)]
     progress_hook: Option<TransferProgressHook>,
+    #[cfg(test)]
+    fail_terminal: bool,
 }
 
 impl Shared {
@@ -344,6 +416,27 @@ impl TransferJobs {
         }
     }
 
+    pub fn with_data_root(
+        activity: ActivityCenter,
+        root: crate::platform::app_data::AppDataRoot,
+    ) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                receipt_root: Some(root),
+                ..Shared::default()
+            }),
+            activity,
+            worker: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_terminal_for_test(&mut self) {
+        if let Some(shared) = Arc::get_mut(&mut self.shared) {
+            shared.fail_terminal = true;
+        }
+    }
+
     pub fn enqueue(&self, plan: ApprovedTransferPlan) -> Result<TransferJobId, TransferJobError> {
         let mut state = self.shared.lock();
         if state.closing {
@@ -380,6 +473,7 @@ impl TransferJobs {
         let info = TransferJobInfo {
             id,
             activity: activity.as_ref().map(ActivityTask::key),
+            receipt_id: None,
             roots: plan
                 .source()
                 .entries()
@@ -537,6 +631,10 @@ impl Drop for TransferJobs {
 }
 
 fn worker_loop(shared: &Shared) {
+    let mut receipt_store = shared
+        .receipt_root
+        .as_ref()
+        .map(super::receipts::store::ReceiptStore::new);
     loop {
         let (pending, control, preparing) = {
             let mut state = shared.lock();
@@ -579,7 +677,7 @@ fn worker_loop(shared: &Shared) {
             (pending, control, preparing)
         };
         let result = catch_unwind(AssertUnwindSafe(|| {
-            execute_copy_plan(&pending.plan, &control, |event| {
+            let mut report_progress = |event| {
                 #[cfg(test)]
                 if let Some(hook) = &shared.progress_hook {
                     hook(pending.info.id, event);
@@ -606,13 +704,60 @@ fn worker_loop(shared: &Shared) {
                         activity.set_progress(Some(job.info.progress.activity()));
                     }
                 }
-            })
+            };
+            if let Some(store) = receipt_store.as_mut() {
+                let mut receipt = match store.admit(&pending.plan) {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        let receipt_id = error.receipt_id().map(TransferReceiptId);
+                        if let Some(job) = &mut shared.lock().active {
+                            job.info.receipt_id = receipt_id;
+                        }
+                        return TransferJobResult::ReceiptFailed {
+                            report: None,
+                            receipt_id,
+                            failure: error.into(),
+                        };
+                    }
+                };
+                let receipt_id = TransferReceiptId(receipt.receipt_id());
+                if let Some(job) = &mut shared.lock().active {
+                    job.info.receipt_id = Some(receipt_id);
+                }
+                match super::execute::execute_with_journal(
+                    &pending.plan,
+                    &control,
+                    &mut report_progress,
+                    &mut receipt,
+                ) {
+                    Ok(report) => {
+                        let status = execution_status(&report);
+                        #[cfg(test)]
+                        if shared.fail_terminal {
+                            receipt.poison_terminal_for_test();
+                        }
+                        match finish_receipt(&mut receipt, &report, status) {
+                            Ok(()) => TransferJobResult::Finished(report),
+                            Err(error) => TransferJobResult::ReceiptFailed {
+                                report: Some(report),
+                                receipt_id: Some(receipt_id),
+                                failure: error.into(),
+                            },
+                        }
+                    }
+                    Err(error) => TransferJobResult::Rejected(error),
+                }
+            } else {
+                match execute_copy_plan(&pending.plan, &control, &mut report_progress) {
+                    Ok(report) => TransferJobResult::Finished(report),
+                    Err(error) => TransferJobResult::Rejected(error),
+                }
+            }
         }));
         drop(pending);
         drop(control);
         let result = match result {
-            Ok(Ok(report)) => TransferJobResult::Finished(report),
-            Ok(Err(error)) => TransferJobResult::Rejected(error),
+            Ok(result) => result,
             Err(_) => TransferJobResult::WorkerPanicked,
         };
         let mut state = shared.lock();
@@ -624,12 +769,81 @@ fn worker_loop(shared: &Shared) {
     }
 }
 
+pub(super) fn finish_receipt(
+    receipt: &mut super::receipts::store::ReceiptSession<'_>,
+    report: &CopyExecution,
+    status: TransferJobStatus,
+) -> Result<(), super::receipts::store::ReceiptStoreError> {
+    use super::receipts::wire::{Disposition, EntryOutcome, JobOutcome};
+    for row in &report.rows {
+        let mut disposition = receipt
+            .suggested_disposition(row.entry)
+            .unwrap_or(Disposition::Uncertain);
+        let outcome = match &row.state {
+            ExecutionState::Copied(_)
+            | ExecutionState::Moved(_)
+            | ExecutionState::MovedByCopy(_) => EntryOutcome::Completed,
+            ExecutionState::CreatedDirectory(directory) => {
+                if matches!(directory.times, DirectoryTimes::Preserved) {
+                    EntryOutcome::Completed
+                } else if matches!(directory.times, DirectoryTimes::Cancelled) {
+                    EntryOutcome::Cancelled
+                } else {
+                    EntryOutcome::Failed
+                }
+            }
+            ExecutionState::MergedDirectory(_) => EntryOutcome::Completed,
+            ExecutionState::MovedDirectory(directory) => match &directory.source {
+                DirectorySourceOutcome::Removed { .. } => EntryOutcome::Completed,
+                DirectorySourceOutcome::RetainedChildren {
+                    skipped,
+                    incomplete,
+                } if !skipped.is_empty() && incomplete.is_empty() => {
+                    if disposition != Disposition::Uncertain {
+                        disposition = Disposition::Settled;
+                    }
+                    EntryOutcome::RetainedByReview
+                }
+                DirectorySourceOutcome::Cancelled => EntryOutcome::Cancelled,
+                _ => EntryOutcome::Failed,
+            },
+            ExecutionState::Skipped => EntryOutcome::Skipped,
+            ExecutionState::BlockedByParent(_) | ExecutionState::BlockedByReceipt => {
+                EntryOutcome::Blocked
+            }
+            ExecutionState::Failed(error) => {
+                if error.has_retained_effect() && disposition == Disposition::NoEffect {
+                    disposition = Disposition::Uncertain;
+                }
+                EntryOutcome::Failed
+            }
+            ExecutionState::Cancelled(error) => {
+                if error.as_ref().is_some_and(CopyError::has_retained_effect)
+                    && disposition == Disposition::NoEffect
+                {
+                    disposition = Disposition::Uncertain;
+                }
+                EntryOutcome::Cancelled
+            }
+        };
+        receipt.finish_entry(row.entry, outcome, disposition)?;
+    }
+    let outcome = match status {
+        TransferJobStatus::Completed => JobOutcome::Completed,
+        TransferJobStatus::Partial => JobOutcome::Partial,
+        TransferJobStatus::Cancelled => JobOutcome::Cancelled,
+        _ => JobOutcome::Failed,
+    };
+    receipt.finish_job(outcome)
+}
+
 fn retain_terminal(
     state: &mut QueueState,
     mut info: TransferJobInfo,
     activity: Option<ActivityTask>,
     result: TransferJobResult,
 ) {
+    let receipt_failed = matches!(result, TransferJobResult::ReceiptFailed { .. });
     info.status = result.status();
     info.armed = false;
     info.progress.current = None;
@@ -637,7 +851,7 @@ fn retain_terminal(
     info.current_path = None;
     info.result = Some(Arc::new(result));
     if let Some(task) = activity {
-        let (outcome, diagnostic) = match info.status {
+        let (outcome, mut diagnostic) = match info.status {
             TransferJobStatus::Completed => (ActivityOutcome::Completed, None),
             TransferJobStatus::Partial => (ActivityOutcome::Partial, None),
             TransferJobStatus::Cancelled => (ActivityOutcome::Cancelled, None),
@@ -646,6 +860,9 @@ fn retain_terminal(
                 Some(ActivityDiagnostic::WorkerFailed),
             ),
         };
+        if receipt_failed {
+            diagnostic = Some(ActivityDiagnostic::TransferReceiptUnavailable);
+        }
         task.finish(outcome, diagnostic, ActivityRetirement::Confirmed);
     }
     state.history.push_front(info);

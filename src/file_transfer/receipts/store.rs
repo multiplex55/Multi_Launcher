@@ -29,7 +29,7 @@ const FILE_HEADER: u64 = 12;
 const MAX_CATALOG_ENTRIES: usize = 10_000;
 
 #[derive(Debug)]
-pub(super) enum ReceiptStoreError {
+pub(in crate::file_transfer) enum ReceiptStoreError {
     Unavailable,
     UnsafeNamespace,
     IncompleteScan,
@@ -38,6 +38,18 @@ pub(super) enum ReceiptStoreError {
     InvalidRecord,
     Poisoned,
     Io(io::ErrorKind),
+    AfterCreate {
+        id: [u8; 16],
+        reason: Box<ReceiptStoreError>,
+    },
+}
+impl ReceiptStoreError {
+    pub fn receipt_id(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::AfterCreate { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
 }
 impl From<io::Error> for ReceiptStoreError {
     fn from(value: io::Error) -> Self {
@@ -86,7 +98,7 @@ pub(super) struct ReceiptCatalog {
     pub charged_bytes: u64,
     pub admission_blocked: bool,
 }
-pub(super) struct ReceiptStore {
+pub(in crate::file_transfer) struct ReceiptStore {
     root: PathBuf,
     root_proof: std::sync::OnceLock<crate::file_transfer::ParentSnapshot>,
 }
@@ -102,7 +114,7 @@ impl ReceiptStore {
             root_proof: std::sync::OnceLock::new(),
         }
     }
-    pub fn scan(&self) -> Result<ReceiptCatalog, ReceiptStoreError> {
+    pub(super) fn scan(&self) -> Result<ReceiptCatalog, ReceiptStoreError> {
         let Some(location) = self.locate(false)? else {
             return Ok(ReceiptCatalog {
                 absent: true,
@@ -344,25 +356,35 @@ impl ReceiptStore {
             if error.kind() == io::ErrorKind::AlreadyExists {
                 ReceiptStoreError::Collision
             } else {
-                ReceiptStoreError::UnsafeNamespace
+                ReceiptStoreError::AfterCreate {
+                    id: id.0,
+                    reason: Box::new(ReceiptStoreError::UnsafeNamespace),
+                }
             }
         })?;
-        guard
-            .validate()
-            .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
-        let mut writer = FrameWriter::from_new_file(guard.try_clone_file()?, capacity)?;
-        guard
-            .validate()
-            .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
-        for bytes in encoded {
+        let writer = (|| -> Result<FrameWriter, ReceiptStoreError> {
             guard
                 .validate()
                 .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
-            writer.append(&bytes)?;
+            let mut writer = FrameWriter::from_new_file(guard.try_clone_file()?, capacity)?;
             guard
                 .validate()
                 .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
-        }
+            for bytes in encoded {
+                guard
+                    .validate()
+                    .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+                writer.append(&bytes)?;
+                guard
+                    .validate()
+                    .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+            }
+            Ok(writer)
+        })()
+        .map_err(|reason| ReceiptStoreError::AfterCreate {
+            id: id.0,
+            reason: Box::new(reason),
+        })?;
         Ok(ReceiptSession {
             _store: self,
             id,
@@ -558,9 +580,9 @@ fn parse_name(name: &OsStr) -> Option<ReceiptId> {
     Some(ReceiptId(id))
 }
 
-pub(super) struct ReceiptSession<'a> {
+pub(in crate::file_transfer) struct ReceiptSession<'a> {
     _store: &'a mut ReceiptStore,
-    pub id: ReceiptId,
+    id: ReceiptId,
     _held: HeldParent,
     guard: ReceiptFile,
     writer: FrameWriter,
@@ -572,6 +594,13 @@ pub(super) struct ReceiptSession<'a> {
     operation_remaining: u64,
 }
 impl ReceiptSession<'_> {
+    #[cfg(test)]
+    pub(in crate::file_transfer) fn poison_terminal_for_test(&mut self) {
+        self.poisoned = true;
+    }
+    pub fn receipt_id(&self) -> [u8; 16] {
+        self.id.0
+    }
     fn ensure(&mut self) -> Result<(), ReceiptStoreError> {
         if self.poisoned {
             return Err(ReceiptStoreError::Poisoned);
@@ -707,6 +736,21 @@ impl ReceiptSession<'_> {
     }
 }
 impl crate::file_transfer::journal::TransferJournal for ReceiptSession<'_> {
+    fn begin_operation(&mut self) -> io::Result<()> {
+        ReceiptSession::begin_operation(self)
+            .map_err(|_| io::Error::other("durable receipt unavailable"))
+    }
+    fn end_operation(&mut self) {
+        ReceiptSession::end_operation(self);
+    }
+    fn begin_entry(&mut self, id: SourceNodeId, target: &TargetSnapshot) -> io::Result<()> {
+        ReceiptSession::begin_entry(self, id, target)
+            .map_err(|_| io::Error::other("durable receipt unavailable"))
+    }
+    fn select_entry(&mut self, id: SourceNodeId) -> io::Result<()> {
+        ReceiptSession::select_entry(self, id)
+            .map_err(|_| io::Error::other("durable receipt unavailable"))
+    }
     fn record(&mut self, event: TransferJournalEvent) -> io::Result<()> {
         self.record_event(&event)
             .map_err(|_| io::Error::other("durable receipt unavailable"))
@@ -854,5 +898,602 @@ mod tests {
             store.scan(),
             Err(ReceiptStoreError::UnsafeNamespace)
         ));
+    }
+    #[test]
+    fn receipt_applied_worker_unverified_copy_and_activity() {
+        use crate::activity::{
+            ActivityCenter, ActivityLifecycle, ActivityOutcome, ActivityRetirement,
+        };
+        use crate::file_transfer::{
+            TransferAction, TransferDraft, TransferJobStatus, TransferJobs, inspect_source_tree,
+            review_transfer,
+        };
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(temp.path());
+        let source = temp.path().join("one.txt");
+        let target = temp.path().join("out");
+        fs::write(&source, b"one").unwrap();
+        fs::create_dir(&target).unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = Arc::new(inspect_source_tree(&[source], &cancel).unwrap());
+        let review = review_transfer(
+            tree,
+            TransferDraft {
+                action: TransferAction::CopyTo(target.clone()),
+                verify: false,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let plan = review.approve(review.generation(), &cancel).unwrap();
+        let activity = ActivityCenter::new();
+        let mut jobs = TransferJobs::with_data_root(activity.clone(), root.clone());
+        let id = jobs.enqueue(plan).unwrap();
+        jobs.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let info = loop {
+            let state = jobs.snapshot();
+            if let Some(info) = state.history.into_iter().find(|row| row.id == id) {
+                break info;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(info.status, TransferJobStatus::Completed);
+        assert_eq!(fs::read(target.join("one.txt")).unwrap(), b"one");
+        let snapshot = activity.snapshot();
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| Some(row.key) == info.activity)
+            .unwrap();
+        assert_eq!(
+            row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert_eq!(row.retirement, ActivityRetirement::Confirmed);
+        let catalog = ReceiptStore::new(&root).scan().unwrap();
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(info.receipt_id.unwrap().0, catalog.entries[0].id.unwrap().0);
+        assert!(
+            catalog.entries[0]
+                .prefix
+                .records
+                .iter()
+                .any(|record| matches!(
+                    record,
+                    Record::Effect {
+                        effect: wire::Effect::Verified {
+                            verification: wire::Verification::NotRequested,
+                            ..
+                        },
+                        ..
+                    }
+                ))
+        );
+        assert!(catalog.entries[0].settled);
+    }
+
+    #[test]
+    fn receipt_applied_nested_copy_records_directory_metadata() {
+        use crate::activity::ActivityCenter;
+        use crate::file_transfer::{
+            TransferAction, TransferDraft, TransferJobStatus, TransferJobs, inspect_source_tree,
+            review_transfer,
+        };
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(temp.path());
+        let source = temp.path().join("source");
+        let target = temp.path().join("out");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(source.join("nested").join("data.txt"), b"data").unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = Arc::new(inspect_source_tree(&[source], &cancel).unwrap());
+        let review = review_transfer(
+            tree,
+            TransferDraft {
+                action: TransferAction::CopyTo(target.clone()),
+                verify: false,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let plan = review.approve(review.generation(), &cancel).unwrap();
+        let mut jobs = TransferJobs::with_data_root(ActivityCenter::new(), root.clone());
+        jobs.enqueue(plan).unwrap();
+        jobs.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let info = loop {
+            let state = jobs.snapshot();
+            if let Some(info) = state.history.into_iter().next() {
+                break info;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(info.status, TransferJobStatus::Completed);
+        assert_eq!(
+            fs::read(target.join("source").join("nested").join("data.txt")).unwrap(),
+            b"data"
+        );
+        let catalog = ReceiptStore::new(&root).scan().unwrap();
+        assert!(
+            catalog.entries[0]
+                .prefix
+                .records
+                .iter()
+                .filter(|record| matches!(
+                    record,
+                    Record::Effect {
+                        effect: wire::Effect::DirectoryMetadataObserved { .. },
+                        ..
+                    }
+                ))
+                .count()
+                >= 2
+        );
+        assert!(catalog.entries[0].settled);
+    }
+    #[test]
+    fn receipt_applied_storage_refusal_precedes_any_copy_effect() {
+        use crate::activity::ActivityCenter;
+        use crate::file_transfer::{
+            TransferAction, TransferDraft, TransferJobStatus, TransferJobs, inspect_source_tree,
+            review_transfer,
+        };
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(temp.path());
+        let source = temp.path().join("source.txt");
+        let target = temp.path().join("out");
+        fs::write(&source, b"original").unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(temp.path().join("transfers"), b"unsafe occupant").unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = Arc::new(inspect_source_tree(&[source.clone()], &cancel).unwrap());
+        let review = review_transfer(
+            tree,
+            TransferDraft {
+                action: TransferAction::CopyTo(target.clone()),
+                verify: false,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let plan = review.approve(review.generation(), &cancel).unwrap();
+        let mut jobs = TransferJobs::with_data_root(ActivityCenter::new(), root);
+        jobs.enqueue(plan).unwrap();
+        jobs.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let info = loop {
+            let state = jobs.snapshot();
+            if let Some(info) = state.history.into_iter().next() {
+                break info;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(info.status, TransferJobStatus::Failed);
+        assert!(!target.join("source.txt").exists());
+        assert_eq!(fs::read(source).unwrap(), b"original");
+    }
+    #[test]
+    fn receipt_applied_case_differing_directory_merge_removes_source() {
+        use crate::activity::ActivityCenter;
+        use crate::file_transfer::{
+            ReviewChoice, TransferAction, TransferDraft, TransferJobStatus, TransferJobs,
+            inspect_source_tree, review_transfer,
+        };
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(temp.path());
+        let source = temp.path().join("Source");
+        let target = temp.path().join("out");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(target.join("source")).unwrap();
+        fs::write(source.join("data.txt"), b"data").unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = Arc::new(inspect_source_tree(&[source.clone()], &cancel).unwrap());
+        let review = review_transfer(
+            tree,
+            TransferDraft {
+                action: TransferAction::MoveTo(target.clone()),
+                verify: true,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let id = review.rows()[0].source();
+        let review = review
+            .choose(review.generation(), id, ReviewChoice::Merge, &cancel)
+            .unwrap();
+        let plan = review.approve(review.generation(), &cancel).unwrap();
+        let mut jobs = TransferJobs::with_data_root(ActivityCenter::new(), root.clone());
+        jobs.enqueue(plan).unwrap();
+        jobs.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let info = loop {
+            let state = jobs.snapshot();
+            if let Some(info) = state.history.into_iter().next() {
+                break info;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(info.status, TransferJobStatus::Completed);
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(target.join("source").join("data.txt")).unwrap(),
+            b"data"
+        );
+        let catalog = ReceiptStore::new(&root).scan().unwrap();
+        assert!(
+            catalog.entries[0]
+                .prefix
+                .records
+                .iter()
+                .any(|record| matches!(
+                    record,
+                    Record::Effect {
+                        effect: wire::Effect::DirectoryRemoveObserved {
+                            observation: wire::Removal::Removed,
+                            ..
+                        },
+                        ..
+                    }
+                ))
+        );
+    }
+    #[test]
+    fn receipt_applied_staged_replace_cancel_restores_source() {
+        use crate::file_transfer::journal::TransferJournal;
+        use crate::file_transfer::{
+            CopyControl, CopyRecoveryArtifact, ExecutionState, ReviewChoice, StagedMoveSourceState,
+            TransferAction, TransferDraft, inspect_source_tree, review_transfer,
+        };
+        use std::sync::Arc;
+        struct CancelAfterDispose<'a, 'b> {
+            receipt: &'a mut ReceiptSession<'b>,
+            control: CopyControl,
+        }
+        impl TransferJournal for CancelAfterDispose<'_, '_> {
+            fn begin_operation(&mut self) -> io::Result<()> {
+                TransferJournal::begin_operation(self.receipt)
+            }
+            fn end_operation(&mut self) {
+                TransferJournal::end_operation(self.receipt);
+            }
+            fn begin_entry(&mut self, id: SourceNodeId, target: &TargetSnapshot) -> io::Result<()> {
+                TransferJournal::begin_entry(self.receipt, id, target)
+            }
+            fn select_entry(&mut self, id: SourceNodeId) -> io::Result<()> {
+                TransferJournal::select_entry(self.receipt, id)
+            }
+            fn record(&mut self, event: TransferJournalEvent) -> io::Result<()> {
+                let cancel = matches!(
+                    &event,
+                    TransferJournalEvent::StagedSourceIntent {
+                        action: crate::file_transfer::copy::StagedSourceAction::Dispose,
+                        ..
+                    }
+                );
+                TransferJournal::record(self.receipt, event)?;
+                if cancel {
+                    self.control.cancel();
+                }
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(temp.path());
+        let a = temp.path().join("from");
+        let b = temp.path().join("to");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let source = a.join("same.txt");
+        let target = b.join("same.txt");
+        fs::write(&source, b"new content").unwrap();
+        fs::write(&target, b"old content").unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = Arc::new(inspect_source_tree(&[source.clone()], &cancel).unwrap());
+        let review = review_transfer(
+            tree,
+            TransferDraft {
+                action: TransferAction::MoveTo(b),
+                verify: true,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let review = review
+            .choose(
+                review.generation(),
+                review.rows()[0].source(),
+                ReviewChoice::Replace,
+                &cancel,
+            )
+            .unwrap();
+        let plan = review.approve(review.generation(), &cancel).unwrap();
+        let mut store = ReceiptStore::new(&root);
+        let mut receipt = store.admit(&plan).unwrap();
+        let control = CopyControl::default();
+        let mut recorder = CancelAfterDispose {
+            receipt: &mut receipt,
+            control: control.clone(),
+        };
+        let report = crate::file_transfer::execute::execute_with_journal(
+            &plan,
+            &control,
+            |_| {},
+            &mut recorder,
+        )
+        .unwrap();
+        drop(recorder);
+        let ExecutionState::Cancelled(Some(error)) = &report.rows[0].state else {
+            panic!("expected cancellation: {:?}", report.rows[0]);
+        };
+        let Some(CopyRecoveryArtifact::StagedMove(effect)) = &error.artifact else {
+            panic!("missing staged effect")
+        };
+        assert_eq!(effect.source_state, StagedMoveSourceState::Original);
+        assert_eq!(fs::read(&source).unwrap(), b"new content");
+        assert_eq!(fs::read(&target).unwrap(), b"new content");
+        let backup = error.replacement.as_ref().unwrap();
+        assert_eq!(fs::read(&backup.backup).unwrap(), b"old content");
+        receipt
+            .finish_entry(
+                report.rows[0].entry,
+                EntryOutcome::Cancelled,
+                Disposition::Retained,
+            )
+            .unwrap();
+        receipt.finish_job(JobOutcome::Partial).unwrap();
+        drop(receipt);
+        let catalog = store.scan().unwrap();
+        assert!(catalog.entries[0].prefix.records.iter().any(|r| matches!(
+            r,
+            Record::Effect {
+                effect: wire::Effect::StagedSourceObserved {
+                    action: wire::SourceAction::Restore,
+                    state: wire::SourceState::Original,
+                    ..
+                },
+                ..
+            }
+        )));
+    }
+    #[test]
+    fn receipt_applied_verified_move_replace_retains_backup() {
+        use crate::activity::ActivityCenter;
+        use crate::file_transfer::{
+            ReviewChoice, TransferAction, TransferDraft, TransferJobStatus, TransferJobs,
+            inspect_source_tree, review_transfer,
+        };
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(temp.path());
+        let a = temp.path().join("from");
+        let b = temp.path().join("to");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let source = a.join("same.txt");
+        let target = b.join("same.txt");
+        fs::write(&source, b"new").unwrap();
+        fs::write(&target, b"old").unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = Arc::new(inspect_source_tree(&[source.clone()], &cancel).unwrap());
+        let review = review_transfer(
+            tree,
+            TransferDraft {
+                action: TransferAction::MoveTo(b),
+                verify: true,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let review = review
+            .choose(
+                review.generation(),
+                review.rows()[0].source(),
+                ReviewChoice::Replace,
+                &cancel,
+            )
+            .unwrap();
+        let plan = review.approve(review.generation(), &cancel).unwrap();
+        let mut jobs = TransferJobs::with_data_root(ActivityCenter::new(), root.clone());
+        jobs.enqueue(plan).unwrap();
+        jobs.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let info = loop {
+            let state = jobs.snapshot();
+            if let Some(info) = state.history.into_iter().next() {
+                break info;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(info.status, TransferJobStatus::Completed);
+        assert!(!source.exists());
+        assert_eq!(fs::read(target).unwrap(), b"new");
+        let catalog = ReceiptStore::new(&root).scan().unwrap();
+        assert!(
+            catalog.entries[0]
+                .prefix
+                .records
+                .iter()
+                .any(|record| matches!(
+                    record,
+                    Record::Effect {
+                        effect: wire::Effect::Verified {
+                            verification: wire::Verification::Verified { .. },
+                            ..
+                        },
+                        ..
+                    }
+                ))
+        );
+        assert!(!catalog.entries[0].settled);
+    }
+    #[test]
+    fn receipt_applied_terminal_refusal_preserves_report_and_partial_status() {
+        use crate::activity::{
+            ActivityCenter, ActivityDiagnostic, ActivityLifecycle, ActivityOutcome,
+            ActivityRetirement,
+        };
+        use crate::file_transfer::{
+            TransferAction, TransferDraft, TransferJobResult, TransferJobStatus, TransferJobs,
+            inspect_source_tree, review_transfer,
+        };
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(temp.path());
+        let source = temp.path().join("data.txt");
+        let target = temp.path().join("out");
+        fs::write(&source, b"data").unwrap();
+        fs::create_dir(&target).unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = Arc::new(inspect_source_tree(&[source], &cancel).unwrap());
+        let review = review_transfer(
+            tree,
+            TransferDraft {
+                action: TransferAction::CopyTo(target.clone()),
+                verify: true,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let plan = review.approve(review.generation(), &cancel).unwrap();
+        let activity = ActivityCenter::new();
+        let mut jobs = TransferJobs::with_data_root(activity.clone(), root.clone());
+        jobs.fail_terminal_for_test();
+        let job = jobs.enqueue(plan).unwrap();
+        jobs.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let info = loop {
+            let state = jobs.snapshot();
+            if let Some(info) = state.history.into_iter().find(|row| row.id == job) {
+                break info;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(info.status, TransferJobStatus::Partial);
+        assert_eq!(fs::read(target.join("data.txt")).unwrap(), b"data");
+        let receipt_id = info.receipt_id.expect("durable id");
+        assert!(
+            matches!(info.result.as_deref(), Some(TransferJobResult::ReceiptFailed { report: Some(_), receipt_id: Some(found), .. }) if *found == receipt_id)
+        );
+        let snapshot = activity.snapshot();
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| Some(row.key) == info.activity)
+            .unwrap();
+        assert_eq!(
+            row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Partial)
+        );
+        assert_eq!(row.retirement, ActivityRetirement::Confirmed);
+        assert_eq!(
+            row.diagnostic,
+            Some(ActivityDiagnostic::TransferReceiptUnavailable)
+        );
+        let catalog = ReceiptStore::new(&root).scan().unwrap();
+        assert_eq!(catalog.entries[0].id.unwrap().0, receipt_id.0);
+        assert!(!catalog.entries[0].settled);
+        assert!(
+            !catalog.entries[0]
+                .prefix
+                .records
+                .iter()
+                .any(|r| matches!(r, Record::Finished { .. }))
+        );
+    }
+    #[test]
+    fn receipt_applied_cancelled_directory_times_are_recorded_as_cancelled() {
+        use crate::file_transfer::{
+            CopyControl, DirectoryTimes, ExecutionProgress, ExecutionState, TransferAction,
+            TransferDraft, TransferJobStatus, inspect_source_tree, review_transfer,
+        };
+        use std::sync::Arc;
+        let temp = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(temp.path());
+        let source = temp.path().join("dir");
+        let target = temp.path().join("out");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(source.join("data"), b"data").unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = Arc::new(inspect_source_tree(&[source], &cancel).unwrap());
+        let review = review_transfer(
+            tree,
+            TransferDraft {
+                action: TransferAction::CopyTo(target),
+                verify: true,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let plan = review.approve(review.generation(), &cancel).unwrap();
+        let mut store = ReceiptStore::new(&root);
+        let mut receipt = store.admit(&plan).unwrap();
+        let control = CopyControl::default();
+        let report = crate::file_transfer::execute::execute_with_journal(
+            &plan,
+            &control,
+            |event| {
+                if matches!(event, ExecutionProgress::Finalizing(id) if id.index() == 0) {
+                    control.cancel();
+                }
+            },
+            &mut receipt,
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.rows[0].state, ExecutionState::CreatedDirectory(directory) if matches!(directory.times, DirectoryTimes::Cancelled))
+        );
+        crate::file_transfer::jobs::finish_receipt(
+            &mut receipt,
+            &report,
+            TransferJobStatus::Partial,
+        )
+        .unwrap();
+        drop(receipt);
+        let catalog = store.scan().unwrap();
+        assert!(
+            catalog.entries[0]
+                .prefix
+                .records
+                .iter()
+                .any(|record| matches!(
+                    record,
+                    Record::EntryTerminal {
+                        node: NodeId(0),
+                        outcome: EntryOutcome::Cancelled,
+                        ..
+                    }
+                ))
+        );
     }
 }

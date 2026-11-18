@@ -4277,7 +4277,7 @@ impl LauncherApp {
             #[cfg(windows)]
             archive_session,
             #[cfg(windows)]
-            transfer_jobs: crate::file_transfer::TransferJobs::new(activity_center.clone()),
+            transfer_jobs: crate::file_transfer::TransferJobs::with_data_root(activity_center.clone(), data_root.clone()),
             #[cfg(windows)]
             zip_creation_session,
             regex_tester_dialog,

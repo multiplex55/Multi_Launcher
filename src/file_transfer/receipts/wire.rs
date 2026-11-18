@@ -255,7 +255,7 @@ pub(super) enum Effect {
     },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum EntryOutcome {
+pub(in crate::file_transfer) enum EntryOutcome {
     Completed,
     Skipped,
     RetainedByReview,
@@ -264,14 +264,14 @@ pub(super) enum EntryOutcome {
     Blocked,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum Disposition {
+pub(in crate::file_transfer) enum Disposition {
     NoEffect,
     Settled,
     Retained,
     Uncertain,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum JobOutcome {
+pub(in crate::file_transfer) enum JobOutcome {
     Completed,
     Partial,
     Failed,
