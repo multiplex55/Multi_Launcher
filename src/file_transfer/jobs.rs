@@ -39,6 +39,7 @@ pub enum TransferJobPhase {
     Transferring,
     Verifying,
     Finalizing,
+    RemovingSource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +125,11 @@ impl TransferJobProgress {
                 self.completed_files += 1;
                 self.completed_bytes = self.completed_bytes.saturating_add(bytes);
             }
+            ExecutionProgress::RemovingSource(entry) => {
+                self.phase = TransferJobPhase::RemovingSource;
+                self.current = Some(entry);
+                self.staged_bytes = 0;
+            }
             ExecutionProgress::DirectoryCreated(entry) | ExecutionProgress::Finalizing(entry) => {
                 self.phase = TransferJobPhase::Finalizing;
                 self.current = Some(entry);
@@ -163,7 +169,9 @@ impl TransferJobResult {
         let mut failed = false;
         for row in &report.rows {
             match &row.state {
-                ExecutionState::Copied(_) | ExecutionState::Moved(_) => retained = true,
+                ExecutionState::Copied(_)
+                | ExecutionState::Moved(_)
+                | ExecutionState::MovedAcrossVolumes(_) => retained = true,
                 ExecutionState::CreatedDirectory(directory) => {
                     retained = true;
                     incomplete |= !matches!(directory.times, DirectoryTimes::Preserved);

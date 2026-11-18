@@ -64,7 +64,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B2B | complete |
 | M9-B3A | complete |
 | M9-B3B | complete |
-| M9-B3C+, M9-C, M9-D | pending |
+| M9-B3C | complete |
+| M9-B3D1, M9-B3D2, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -505,3 +506,6 @@ M9-B3A passed 37 focused Windows Nextest tests after the native review and NTFS 
 
 
 M9-B3B passed 44 focused Windows Nextest tests after independent review. Native same-volume Move to an approved vacant name retains the file ID and streams, verifies the currently named Zone Identifier when requested, and keeps an exact relocation receipt after a late journal failure. A late competitor blocks admission, unknown streams remain intact on unverified atomic rename, and explicit verification refuses unsupported streams. Real attribute-only edits after Move rename and Replace publication survive guarded creation-time repair. Normal queue activation remains deferred to the durable recorder.
+
+
+M9-B3C passed 50 focused Nextest tests after independent review, including six opt-in real C: and G: disposable fixtures with distinct native volume identities. A 192 KiB file and its Zone Identifier were published, verified, and retained while the exact guarded source was relocated and removed. Absence was confirmed after all source handles closed. Cancellation, a refused verification receipt, and changed destination metadata preserved the source. A foreign original-name arrival survived with the former source recoverable by its exact identity. These fixtures use an in-memory receipt adapter. The app still requires the durable recorder before enabling the path.

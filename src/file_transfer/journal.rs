@@ -1,10 +1,18 @@
-//! Mutation records required by the guarded replacement path.
+//! Mutation records required by guarded transfer effects.
 use crate::file_operations::NativeFileIdentity;
 use std::io;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub(super) enum TransferJournalEvent {
+    CrossSourceIntent {
+        action: super::copy::CrossSourceAction,
+        effect: super::CrossMoveEffect,
+    },
+    CrossSourceObserved {
+        action: super::copy::CrossSourceAction,
+        effect: super::CrossMoveEffect,
+    },
     MoveRenameIntent {
         source: PathBuf,
         target: PathBuf,
@@ -63,6 +71,7 @@ pub(super) enum TransferJournalEvent {
         identity: NativeFileIdentity,
         verification: super::CopyVerification,
         bytes: u64,
+        revision: super::EntryMetadata,
     },
     RestoreIntent {
         original: PathBuf,

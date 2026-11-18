@@ -3520,7 +3520,7 @@ pub(crate) mod transfer_native {
             leaf: &OsStr,
             expected: NativeFileIdentity,
         ) -> Result<TransferRelocation, NativeArchiveError> {
-            self.open_relocation_inner(leaf, expected, false, false)
+            self.open_relocation_inner(leaf, expected, false, false, false)
         }
         pub(crate) fn open_move_relocation(
             &self,
@@ -3528,7 +3528,14 @@ pub(crate) mod transfer_native {
             expected: NativeFileIdentity,
             verify_content: bool,
         ) -> Result<TransferRelocation, NativeArchiveError> {
-            self.open_relocation_inner(leaf, expected, true, verify_content)
+            self.open_relocation_inner(leaf, expected, true, verify_content, false)
+        }
+        pub(crate) fn open_cross_volume_move_source(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferRelocation, NativeArchiveError> {
+            self.open_relocation_inner(leaf, expected, false, true, true)
         }
         fn open_relocation_inner(
             &self,
@@ -3536,6 +3543,7 @@ pub(crate) mod transfer_native {
             expected: NativeFileIdentity,
             moving: bool,
             verify_content: bool,
+            read_ea: bool,
         ) -> Result<TransferRelocation, NativeArchiveError> {
             use windows::Wdk::Storage::FileSystem::{
                 FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
@@ -3543,7 +3551,7 @@ pub(crate) mod transfer_native {
             };
             use windows::Win32::Storage::FileSystem::{
                 DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES,
-                FILE_READ_DATA, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, SYNCHRONIZE,
+                FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, SYNCHRONIZE,
             };
             validate_single_component(leaf, "transfer relocation source")?;
             let access = DELETE
@@ -3556,6 +3564,11 @@ pub(crate) mod transfer_native {
                 }
                 | if verify_content {
                     FILE_READ_DATA
+                } else {
+                    FILE_ACCESS_RIGHTS(0)
+                }
+                | if read_ea {
+                    FILE_READ_EA
                 } else {
                     FILE_ACCESS_RIGHTS(0)
                 };
@@ -3968,6 +3981,59 @@ pub(crate) mod transfer_native {
             }
             Ok(())
         }
+        /// Requires a successful, complete query proving there are no EAs.
+        pub(crate) fn require_no_extended_attributes(&self) -> Result<(), NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_EA_INFORMATION, FileEaInformation, NtQueryInformationFile,
+            };
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::IO::IO_STATUS_BLOCK;
+            self.validate()?;
+            let mut info = FILE_EA_INFORMATION::default();
+            let mut io_status = IO_STATUS_BLOCK::default();
+            // SAFETY: the retained handle and both output buffers remain valid
+            // for this synchronous metadata query.
+            let status = unsafe {
+                NtQueryInformationFile(
+                    HANDLE(self.file().as_raw_handle() as _),
+                    &mut io_status,
+                    std::ptr::from_mut(&mut info).cast(),
+                    std::mem::size_of::<FILE_EA_INFORMATION>() as u32,
+                    FileEaInformation,
+                )
+            };
+            let completed = unsafe { io_status.Anonymous.Status };
+            if status.0 != 0 || completed.0 != 0 {
+                let status = if status.0 != 0 { status } else { completed };
+                return Err(NativeArchiveError::from_ntstatus(
+                    "NtQueryInformationFile(FileEaInformation)",
+                    status,
+                    Some(self.identity),
+                ));
+            }
+            if io_status.Information < std::mem::size_of::<FILE_EA_INFORMATION>()
+                || info.EaSize != 0
+            {
+                return Err(NativeArchiveError::validation(
+                    "transfer source has extended attributes or an incomplete EA query",
+                    io::ErrorKind::Unsupported,
+                    Some(self.identity),
+                ));
+            }
+            Ok(())
+        }
+        /// Marks this exact held object for non-POSIX deletion; absence must
+        /// be checked independently after all source handles are closed.
+        pub(crate) fn mark_delete_pending(&self) -> Result<(), NativeArchiveError> {
+            self.validate()?;
+            delete_open_file(self.file(), self.identity).map_err(|primary| NativeArchiveError {
+                primary,
+                cleanup_attempted: false,
+                cleanup_failure: None,
+                cleanup_failed: false,
+                unconfirmed_name_effect: true,
+            })
+        }
         pub(crate) fn rename_no_replace(
             &self,
             target: &TransferDirectory,
@@ -3998,6 +4064,7 @@ pub(crate) mod transfer_native {
         }
     }
 
+    #[derive(Clone)]
     pub(crate) struct TransferFile {
         file: VerifiedOverlappedFile,
         identity: NativeFileIdentity,

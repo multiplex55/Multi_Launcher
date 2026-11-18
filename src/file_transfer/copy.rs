@@ -15,7 +15,8 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::SystemServices::FILE_NAMED_STREAMS;
 
 use crate::archive::transfer_native::{
-    NativeArchiveError, TransferFile, TransferIo, TransferStage, TransferStageCreateFailure,
+    NativeArchiveError, TransferFile, TransferIo, TransferRelocation, TransferStage,
+    TransferStageCreateFailure,
 };
 use crate::file_operations::{NativeFileIdentity, ScanCancellation, set_replace_basic_info};
 
@@ -204,6 +205,7 @@ impl From<NativeArchiveError> for CopyFailure {
 pub enum CopyRecoveryArtifact {
     Owned(CopyArtifact),
     Relocation(Box<super::relocate::MoveEffect>),
+    CrossVolume(Box<CrossMoveEffect>),
     UncertainPublication {
         stage: PathBuf,
         target: PathBuf,
@@ -258,6 +260,11 @@ impl fmt::Display for CopyError {
 
 impl std::error::Error for CopyError {}
 
+mod cross_move;
+
+pub use cross_move::{CrossMoveEffect, CrossMoveSourceState, CrossVolumeMovedFile};
+pub(super) use cross_move::{CrossSourceAction, move_across_volumes};
+
 struct HeldZone {
     file: TransferFile,
     length: u64,
@@ -267,6 +274,7 @@ struct GuardedCopy<'a> {
     source: &'a EntrySnapshot,
     source_parent: HeldParent,
     source_file: TransferFile,
+    source_relocation: Option<TransferRelocation>,
     source_zone: Option<HeldZone>,
     target: &'a TargetSnapshot,
     target_parent: HeldParent,
@@ -279,6 +287,24 @@ impl<'a> GuardedCopy<'a> {
         target: &'a TargetSnapshot,
         control: &CopyControl,
         replacement: bool,
+    ) -> Result<Self, CopyFailure> {
+        Self::open_scoped(source, target, control, replacement, false)
+    }
+
+    fn open_cross_volume(
+        source: &'a EntrySnapshot,
+        target: &'a TargetSnapshot,
+        control: &CopyControl,
+    ) -> Result<Self, CopyFailure> {
+        Self::open_scoped(source, target, control, false, true)
+    }
+
+    fn open_scoped(
+        source: &'a EntrySnapshot,
+        target: &'a TargetSnapshot,
+        control: &CopyControl,
+        replacement: bool,
+        cross_volume: bool,
     ) -> Result<Self, CopyFailure> {
         control.check()?;
         let metadata = source.metadata();
@@ -305,9 +331,30 @@ impl<'a> GuardedCopy<'a> {
         {
             return Err(AdmissionError::StaleParent.into());
         }
-        let source_file = source_parent
-            .directory()
-            .open_read(source.leaf().as_os_str())?;
+        if cross_volume
+            && source_parent.snapshot.identity().volume_serial_number()
+                == target_parent.snapshot.identity().volume_serial_number()
+        {
+            return Err(CopyFailure::UnsupportedPlan);
+        }
+        let source_relocation = if cross_volume {
+            let held = source_parent
+                .directory()
+                .open_cross_volume_move_source(source.leaf().as_os_str(), source.identity())?;
+            held.require_no_extended_attributes()?;
+            Some(held)
+        } else {
+            None
+        };
+        let source_file = if let Some(held) = &source_relocation {
+            held.data_file()
+                .ok_or(CopyFailure::UnsupportedPlan)?
+                .clone()
+        } else {
+            source_parent
+                .directory()
+                .open_read(source.leaf().as_os_str())?
+        };
         let current = source_parent.capture_entry(source_file.file(), source.leaf())?;
         if current != *source || source_file.identity() != source.identity() {
             return Err(AdmissionError::StaleEntry.into());
@@ -316,9 +363,15 @@ impl<'a> GuardedCopy<'a> {
         let source_zone = inventory
             .zone
             .map(|length| {
-                let file = source_parent
-                    .directory()
-                    .open_source_zone(source.leaf().as_os_str(), source.identity())?;
+                let file = if cross_volume {
+                    source_parent
+                        .directory()
+                        .open_move_source_zone(source.leaf().as_os_str(), source.identity())?
+                } else {
+                    source_parent
+                        .directory()
+                        .open_source_zone(source.leaf().as_os_str(), source.identity())?
+                };
                 if file.file().metadata()?.len() != length {
                     return Err(CopyFailure::ContentMismatch);
                 }
@@ -329,6 +382,7 @@ impl<'a> GuardedCopy<'a> {
             source,
             source_parent,
             source_file,
+            source_relocation,
             source_zone,
             target,
             target_parent,
@@ -346,6 +400,9 @@ impl<'a> GuardedCopy<'a> {
             .capture_entry(self.source_file.file(), self.source.leaf())?;
         if current != *self.source || self.source_file.identity() != self.source.identity() {
             return Err(AdmissionError::StaleEntry.into());
+        }
+        if let Some(held) = &self.source_relocation {
+            held.require_no_extended_attributes()?;
         }
         if stream_inventory(self.source_file.file(), self.length)? != self.streams() {
             return Err(AdmissionError::StaleEntry.into());
@@ -771,13 +828,96 @@ fn copy_file_bound(
     hooks: (impl FnOnce(&Path), impl FnOnce()),
     verification_progress: impl FnOnce(bool),
 ) -> Result<CopiedFile, CopyError> {
-    let (before_publication, after_publication) = hooks;
     let copy = GuardedCopy::open(source, target, control, false)?;
-    let (stage, stage_artifact) = start_guarded_stage(&copy, control, None)?;
+    Ok(publish_vacant(
+        copy,
+        verify_content,
+        control,
+        progress,
+        hooks,
+        verification_progress,
+        None,
+    )?
+    .copied)
+}
+
+struct VerifiedPublication<'a> {
+    copy: GuardedCopy<'a>,
+    published: TransferFile,
+    staged: StagedCopy,
+    copied: CopiedFile,
+    revision: EntryMetadata,
+}
+
+fn publish_vacant<'a>(
+    copy: GuardedCopy<'a>,
+    verify_content: bool,
+    control: &CopyControl,
+    progress: impl FnMut(u64),
+    hooks: (impl FnOnce(&Path), impl FnOnce()),
+    verification_progress: impl FnOnce(bool),
+    mut journal: Option<&mut dyn super::journal::TransferJournal>,
+) -> Result<VerifiedPublication<'a>, CopyError> {
+    use super::journal::TransferJournalEvent as Event;
+    use rand::TryRng;
+    if copy.source_relocation.is_some() && (!verify_content || journal.is_none()) {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    }
+    let (before_publication, after_publication) = hooks;
+    let candidate = if let Some(recorder) = journal.as_deref_mut() {
+        let number = rand::rngs::SysRng
+            .try_next_u64()
+            .map_err(|error| CopyFailure::Native(io::Error::other(error.to_string())))?;
+        let name = format!(".multi-launcher-{number:016x}.stage");
+        let leaf =
+            super::TransferLeaf::new(std::ffi::OsStr::new(&name)).map_err(CopyFailure::from)?;
+        super::check_target_bounds(copy.target.parent(), &leaf).map_err(CopyFailure::from)?;
+        recorder
+            .record(Event::StageIntent {
+                path: copy.target.parent().path().join(leaf.as_os_str()),
+                parent: copy.target.parent().identity(),
+            })
+            .map_err(CopyFailure::Journal)?;
+        Some(leaf)
+    } else {
+        None
+    };
+    let (stage, stage_artifact) = start_guarded_stage(&copy, control, candidate.as_ref())?;
+    if let Some(recorder) = journal.as_deref_mut() {
+        if let Err(error) = recorder.record(Event::StageCreated {
+            path: stage_artifact.path.clone(),
+            parent: stage_artifact.parent,
+            identity: stage_artifact.identity,
+        }) {
+            return Err(abort_stage(
+                stage,
+                stage_artifact,
+                CopyFailure::Journal(error),
+            ));
+        }
+    }
     let staged = match fill_stage(&stage, &copy, verify_content, control, progress) {
         Ok(hash) => hash,
         Err(failure) => return Err(abort_stage(stage, stage_artifact, failure)),
     };
+    if let Some(recorder) = journal.as_deref_mut() {
+        if let Err(error) = recorder.record(Event::PublishIntent {
+            stage: stage_artifact.path.clone(),
+            target: copy
+                .target
+                .parent()
+                .path()
+                .join(copy.target.requested_leaf().as_os_str()),
+            parent: stage_artifact.parent,
+            identity: stage_artifact.identity,
+        }) {
+            return Err(abort_stage(
+                stage,
+                stage_artifact,
+                CopyFailure::Journal(error),
+            ));
+        }
+    }
     let mut refused = None;
     let mut claim = None;
     let published_result = stage.publish(copy.target.requested_leaf().as_os_str(), || {
@@ -844,11 +984,25 @@ fn copy_file_bound(
         state: CopyArtifactState::Published,
     };
     let named_revision = observe_entry_metadata(published.file()).map_err(CopyFailure::from);
+    if let Some(recorder) = journal.as_deref_mut() {
+        if let Err(error) = recorder.record(Event::PublicationObserved {
+            target: artifact.path.clone(),
+            parent: artifact.parent,
+            identity: artifact.identity,
+        }) {
+            return Err(CopyError {
+                failure: CopyFailure::Journal(error),
+                artifact: Some(CopyRecoveryArtifact::Owned(artifact)),
+                recovery_error: None,
+                replacement: None,
+            });
+        }
+    }
     after_publication();
     verification_progress(staged.data_hash.is_some() || staged.zone.is_some());
-    let verification = named_revision
+    let (verification, revision) = named_revision
         .and_then(|revision| {
-            finish_publication(&copy, &published, &artifact, staged, control, revision)
+            finish_publication(&copy, &published, &artifact, &staged, control, revision)
         })
         .map_err(|failure| CopyError {
             failure,
@@ -856,13 +1010,37 @@ fn copy_file_bound(
             recovery_error: None,
             replacement: None,
         })?;
-    Ok(CopiedFile {
+    if let Some(recorder) = journal.as_deref_mut() {
+        recorder
+            .record(Event::Verified {
+                target: artifact.path.clone(),
+                parent: artifact.parent,
+                identity: artifact.identity,
+                verification,
+                bytes: copy.length,
+                revision,
+            })
+            .map_err(|error| CopyError {
+                failure: CopyFailure::Journal(error),
+                artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
+                recovery_error: None,
+                replacement: None,
+            })?;
+    }
+    let copied = CopiedFile {
         source: copy.source.identity(),
         output: artifact,
         bytes: copy.length,
         zone_bytes: copy.streams().zone,
         verification,
         replacement: None,
+    };
+    Ok(VerifiedPublication {
+        copy,
+        published,
+        staged,
+        copied,
+        revision,
     })
 }
 
@@ -927,10 +1105,10 @@ fn finish_publication(
     copy: &GuardedCopy<'_>,
     published: &TransferFile,
     artifact: &CopyArtifact,
-    staged: StagedCopy,
+    staged: &StagedCopy,
     control: &CopyControl,
     named_revision: EntryMetadata,
-) -> Result<CopyVerification, CopyFailure> {
+) -> Result<(CopyVerification, EntryMetadata), CopyFailure> {
     let file = published.file();
     let source = copy.source.metadata();
     let output_revision = loop {
@@ -999,7 +1177,7 @@ fn finish_publication(
         return Err(AdmissionError::StaleEntry.into());
     }
     control.check()?;
-    Ok(verification)
+    Ok((verification, output_revision))
 }
 
 pub(super) fn hash_file(
@@ -1627,9 +1805,9 @@ pub(super) fn copy_to_replacement_reporting(
         });
     }
     verification_progress(staged.data_hash.is_some() || staged.zone.is_some());
-    let verification = named_revision
+    let (verification, revision) = named_revision
         .and_then(|revision| {
-            finish_publication(&copy, &published, &artifact, staged, control, revision)
+            finish_publication(&copy, &published, &artifact, &staged, control, revision)
         })
         .map_err(|failure| CopyError {
             failure,
@@ -1644,6 +1822,7 @@ pub(super) fn copy_to_replacement_reporting(
             identity: artifact.identity,
             verification,
             bytes: copy.length,
+            revision,
         })
         .map_err(|error| CopyError {
             failure: CopyFailure::Journal(error),

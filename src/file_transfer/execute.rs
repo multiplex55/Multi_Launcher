@@ -12,16 +12,16 @@ use crate::file_operations::set_replace_basic_info;
 
 use super::copy::{
     copy_to_created_parent, copy_to_replacement_reporting, copy_to_vacancy_reporting,
-    require_no_directory_streams,
+    move_across_volumes, require_no_directory_streams,
 };
 use super::journal::TransferJournal;
 use super::relocate::{MovedFile, move_same_volume_file};
 use super::{
     AdmissionError, ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, CopiedFile,
     CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure, CopyRecoveryArtifact,
-    DirectoryAccess, EntryKind, EntrySnapshot, HeldParent, ParentSnapshot, SourceNodeId,
-    TargetOccupancy, TargetSnapshot, TransferAction, checked_final_path, copy_to_vacancy,
-    directory_stamp, inspect_target, observe_entry_metadata,
+    CrossVolumeMovedFile, DirectoryAccess, EntryKind, EntrySnapshot, HeldParent, ParentSnapshot,
+    SourceNodeId, TargetOccupancy, TargetSnapshot, TransferAction, checked_final_path,
+    copy_to_vacancy, directory_stamp, inspect_target, observe_entry_metadata,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -33,6 +33,7 @@ pub enum ExecutionProgress {
     },
     DirectoryCreated(SourceNodeId),
     Finalizing(SourceNodeId),
+    RemovingSource(SourceNodeId),
     Verifying {
         entry: SourceNodeId,
         verification_requested: bool,
@@ -62,6 +63,7 @@ pub struct DirectoryCopy {
 pub enum ExecutionState {
     Copied(CopiedFile),
     Moved(MovedFile),
+    MovedAcrossVolumes(CrossVolumeMovedFile),
     CreatedDirectory(DirectoryCopy),
     MergedDirectory(ParentSnapshot),
     Skipped,
@@ -108,10 +110,10 @@ fn execute_copy_with_hooks(
 ) -> Result<CopyExecution, CopyFailure> {
     let strategy = match plan.draft().action {
         TransferAction::MoveTo(_) => {
-            if journal.is_none() || !plan.entries().iter().all(supports_same_volume_move) {
+            if journal.is_none() || !plan.entries().iter().all(supports_regular_file_move) {
                 return Err(CopyFailure::UnsupportedPlan);
             }
-            ExecutionStrategy::SameVolumeMove {
+            ExecutionStrategy::Move {
                 verify: plan.draft().verify,
             }
         }
@@ -195,17 +197,15 @@ fn execute_copy_with_hooks(
 #[derive(Clone, Copy)]
 enum ExecutionStrategy {
     Copy,
-    SameVolumeMove { verify: bool },
+    Move { verify: bool },
 }
 
-fn supports_same_volume_move(entry: &ApprovedTransferEntry) -> bool {
+fn supports_regular_file_move(entry: &ApprovedTransferEntry) -> bool {
     let ApprovedTarget::CreateAt(target) = entry.destination() else {
         return false;
     };
     entry.source().metadata().kind == EntryKind::File
         && matches!(target.occupancy(), TargetOccupancy::Vacant)
-        && entry.source().identity().volume_serial_number()
-            == target.parent().identity().volume_serial_number()
 }
 
 fn execute_entry(
@@ -218,10 +218,41 @@ fn execute_entry(
     journal: &mut Option<&mut dyn TransferJournal>,
 ) -> Result<ExecutionState, CopyError> {
     let id = entry.id();
-    if let ExecutionStrategy::SameVolumeMove { verify } = strategy {
+    if let ExecutionStrategy::Move { verify } = strategy {
         let Some(journal) = journal else {
             return Err(CopyFailure::UnsupportedPlan.into());
         };
+        let ApprovedTarget::CreateAt(target) = entry.destination() else {
+            return Err(CopyFailure::UnsupportedPlan.into());
+        };
+        if entry.source().identity().volume_serial_number()
+            != target.parent().identity().volume_serial_number()
+        {
+            let callback = std::cell::RefCell::new(&mut *progress);
+            let moved = move_across_volumes(
+                entry,
+                control,
+                |staged_bytes| {
+                    (callback.borrow_mut())(ExecutionProgress::Copying {
+                        entry: id,
+                        staged_bytes,
+                    })
+                },
+                |verification_requested| {
+                    (callback.borrow_mut())(ExecutionProgress::Verifying {
+                        entry: id,
+                        verification_requested,
+                    })
+                },
+                || (callback.borrow_mut())(ExecutionProgress::RemovingSource(id)),
+                &mut **journal,
+            )?;
+            (callback.borrow_mut())(ExecutionProgress::FileCompleted {
+                entry: id,
+                bytes: moved.bytes,
+            });
+            return Ok(ExecutionState::MovedAcrossVolumes(moved));
+        }
         let moved = move_same_volume_file(
             entry,
             control,
@@ -489,7 +520,10 @@ fn finalize_directory_times(
         let index = entry.id().index();
         let state = &mut rows[index].state;
         let complete = match state {
-            ExecutionState::Copied(_) | ExecutionState::Moved(_) | ExecutionState::Skipped => true,
+            ExecutionState::Copied(_)
+            | ExecutionState::Moved(_)
+            | ExecutionState::MovedAcrossVolumes(_)
+            | ExecutionState::Skipped => true,
             ExecutionState::CreatedDirectory(created) => {
                 created.times = if incomplete[index] || control.is_cancelled() {
                     DirectoryTimes::Incomplete
@@ -1600,6 +1634,373 @@ mod tests {
             fs::read(alternate_stream_path(&fixture.source, stream)).unwrap(),
             b"preserved ADS"
         );
+    }
+
+    struct CrossVolumeFixture {
+        _source_root: tempfile::TempDir,
+        _target_root: tempfile::TempDir,
+        source: PathBuf,
+        target: PathBuf,
+        plan: ApprovedTransferPlan,
+    }
+
+    fn cross_volume_fixture() -> CrossVolumeFixture {
+        let source_root = tempfile::tempdir_in(
+            std::env::var_os("MULTI_LAUNCHER_CROSS_SOURCE_TEST_ROOT")
+                .expect("provide the disposable source-volume fixture parent"),
+        )
+        .unwrap();
+        let target_root = tempfile::tempdir_in(
+            std::env::var_os("MULTI_LAUNCHER_CROSS_DESTINATION_TEST_ROOT")
+                .expect("provide the disposable destination-volume fixture parent"),
+        )
+        .unwrap();
+        let source = source_root.path().join("cross-volume.txt");
+        let target = target_root.path().join("cross-volume.txt");
+        fs::write(&source, vec![29; 192 * 1024]).unwrap();
+        fs::write(
+            alternate_stream_path(&source, ":Zone.Identifier:$DATA"),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n",
+        )
+        .unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = inspect_source_tree(std::slice::from_ref(&source), &cancel).unwrap();
+        let review = review_transfer(
+            Arc::new(tree),
+            TransferDraft {
+                action: TransferAction::MoveTo(target_root.path().to_path_buf()),
+                verify: false,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let plan = approve(&review);
+        let ApprovedTarget::CreateAt(destination) = plan.entries()[0].destination() else {
+            panic!("expected a reviewed vacant destination");
+        };
+        assert_ne!(
+            plan.entries()[0].source().identity().volume_serial_number(),
+            destination.parent().identity().volume_serial_number(),
+            "native verification requires two distinct held local volumes"
+        );
+        CrossVolumeFixture {
+            _source_root: source_root,
+            _target_root: target_root,
+            source,
+            target,
+            plan,
+        }
+    }
+
+    fn run_cross_volume_move(
+        fixture: &CrossVolumeFixture,
+        control: &CopyControl,
+        journal: &mut dyn TransferJournal,
+    ) -> CopyExecution {
+        execute_copy_with_hooks(&fixture.plan, control, |_| {}, |_| {}, Some(journal)).unwrap()
+    }
+
+    use super::super::CrossMoveSourceState;
+    use super::super::copy::CrossSourceAction;
+
+    #[test]
+    #[ignore = "requires two distinct local fixture volumes set by the harness"]
+    fn transfer_cross_native_verified_receipt_precedes_exact_source_removal() {
+        let fixture = cross_volume_fixture();
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = run_cross_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::MovedAcrossVolumes(moved) = &report.rows[0].state else {
+            panic!(
+                "expected cross-volume success, got {:?}, receipts {:?}",
+                report.rows[0], journal.accepted
+            );
+        };
+        assert_eq!(moved.effect.source_state, CrossMoveSourceState::Removed);
+        assert_eq!(moved.effect.source, fixture.source);
+        assert_eq!(moved.effect.output.path, fixture.target);
+        assert!(matches!(
+            moved.effect.verification,
+            CopyVerification::Verified {
+                zone_sha256: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(moved.bytes, 192 * 1024);
+        assert!(!fixture.source.exists());
+        assert!(!moved.effect.recovery.as_ref().unwrap().exists());
+        assert_eq!(fs::read(&fixture.target).unwrap(), vec![29; 192 * 1024]);
+        assert_eq!(
+            fs::read(alternate_stream_path(
+                &fixture.target,
+                ":Zone.Identifier:$DATA"
+            ))
+            .unwrap(),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n"
+        );
+        assert_eq!(
+            inspect_source(&fixture.target, &ScanCancellation::new())
+                .unwrap()
+                .identity(),
+            moved.effect.output.identity
+        );
+        assert!(matches!(
+            journal.accepted.as_slice(),
+            [
+                JournalEvent::StageIntent { .. },
+                JournalEvent::StageCreated { .. },
+                JournalEvent::PublishIntent { .. },
+                JournalEvent::PublicationObserved { .. },
+                JournalEvent::Verified {
+                    verification: CopyVerification::Verified { .. },
+                    ..
+                },
+                JournalEvent::CrossSourceIntent {
+                    action: CrossSourceAction::Relocate,
+                    ..
+                },
+                JournalEvent::CrossSourceObserved {
+                    action: CrossSourceAction::Relocate,
+                    ..
+                },
+                JournalEvent::CrossSourceIntent {
+                    action: CrossSourceAction::Dispose,
+                    ..
+                },
+                JournalEvent::CrossSourceObserved {
+                    action: CrossSourceAction::Dispose,
+                    ..
+                },
+            ]
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires two distinct local fixture volumes set by the harness"]
+    fn transfer_cross_native_cancel_before_source_relocation_retains_both() {
+        let fixture = cross_volume_fixture();
+        let control = CopyControl::default();
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::Verified { .. }) {
+                    control.cancel();
+                }
+                Ok(())
+            },
+        };
+        let report = run_cross_volume_move(&fixture, &control, &mut journal);
+        let ExecutionState::Cancelled(Some(error)) = &report.rows[0].state else {
+            panic!(
+                "expected partial cancellation, got {:?}, receipts {:?}",
+                report.rows[0], journal.accepted
+            );
+        };
+        let Some(CopyRecoveryArtifact::CrossVolume(effect)) = &error.artifact else {
+            panic!("expected verified destination and retained source");
+        };
+        assert_eq!(effect.source_state, CrossMoveSourceState::Original);
+        assert!(effect.recovery.is_none());
+        assert_eq!(
+            fs::read(&fixture.source).unwrap(),
+            fs::read(&fixture.target).unwrap()
+        );
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::Verified { .. })
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires two distinct local fixture volumes set by the harness"]
+    fn transfer_cross_native_foreign_original_survives_late_cancel() {
+        let fixture = cross_volume_fixture();
+        let control = CopyControl::default();
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(
+                    event,
+                    JournalEvent::CrossSourceObserved {
+                        action: CrossSourceAction::Relocate,
+                        ..
+                    }
+                ) {
+                    fs::write(&fixture.source, b"foreign original-name occupant").unwrap();
+                    control.cancel();
+                }
+                Ok(())
+            },
+        };
+        let report = run_cross_volume_move(&fixture, &control, &mut journal);
+        let ExecutionState::Cancelled(Some(error)) = &report.rows[0].state else {
+            panic!(
+                "expected cancelled source retirement, got {:?}, receipts {:?}",
+                report.rows[0], journal.accepted
+            );
+        };
+        let Some(CopyRecoveryArtifact::CrossVolume(effect)) = &error.artifact else {
+            panic!("expected verified destination and quarantined original");
+        };
+        assert_eq!(effect.source_state, CrossMoveSourceState::Quarantined);
+        assert_eq!(
+            fs::read(&fixture.source).unwrap(),
+            b"foreign original-name occupant"
+        );
+        let retained = effect.recovery.as_ref().unwrap();
+        assert_eq!(
+            fs::read(retained).unwrap(),
+            fs::read(&fixture.target).unwrap()
+        );
+        assert_eq!(
+            inspect_source(retained, &ScanCancellation::new())
+                .unwrap()
+                .identity(),
+            effect.source_identity
+        );
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::CrossSourceObserved {
+                action: CrossSourceAction::Relocate,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires two distinct local fixture volumes set by the harness"]
+    fn transfer_cross_native_verification_receipt_refusal_blocks_source_intent() {
+        let fixture = cross_volume_fixture();
+        let original = fixture.plan.entries()[0].source().identity();
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::Verified { .. }) {
+                    return Err(io::Error::other("fixture refused verification receipt"));
+                }
+                Ok(())
+            },
+        };
+        let report = run_cross_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!("expected receipt refusal, got {:?}", report.rows[0]);
+        };
+        assert!(
+            matches!(error.failure, CopyFailure::Journal(_)),
+            "{error:?}"
+        );
+        let Some(CopyRecoveryArtifact::Owned(artifact)) = &error.artifact else {
+            panic!("expected the retained destination");
+        };
+        assert_eq!(artifact.path, fixture.target);
+        assert_eq!(artifact.state, CopyArtifactState::Published);
+        assert_eq!(
+            inspect_source(&fixture.source, &ScanCancellation::new())
+                .unwrap()
+                .identity(),
+            original
+        );
+        assert_eq!(
+            fs::read(&fixture.source).unwrap(),
+            fs::read(&fixture.target).unwrap()
+        );
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::PublicationObserved { .. })
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires two distinct local fixture volumes set by the harness"]
+    fn transfer_cross_native_keeps_a_metadata_edit_during_publication_receipt() {
+        let fixture = cross_volume_fixture();
+        let edited_time = 130_000_000_000_000_000;
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if let JournalEvent::PublicationObserved { target, .. } = event {
+                    edit_held_file_creation_for_fixture(target, edited_time)?;
+                }
+                Ok(())
+            },
+        };
+        let report = run_cross_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!("expected stale output revision, got {:?}", report.rows[0]);
+        };
+        assert!(
+            matches!(
+                error.failure,
+                CopyFailure::Admission(AdmissionError::StaleEntry)
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            inspect_source(&fixture.target, &ScanCancellation::new())
+                .unwrap()
+                .metadata()
+                .created,
+            edited_time
+        );
+        assert_eq!(
+            fs::read(&fixture.source).unwrap(),
+            fs::read(&fixture.target).unwrap()
+        );
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::PublicationObserved { .. })
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires two distinct local fixture volumes set by the harness"]
+    fn transfer_cross_native_changed_verified_destination_does_not_retire_source() {
+        let fixture = cross_volume_fixture();
+        let edited_time = 130_000_000_000_000_000;
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if let JournalEvent::Verified { target, .. } = event {
+                    edit_held_file_creation_for_fixture(target, edited_time)?;
+                }
+                Ok(())
+            },
+        };
+        let report = run_cross_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!(
+                "expected edited output failure, got {:?}, receipts {:?}",
+                report.rows[0], journal.accepted
+            );
+        };
+        let Some(CopyRecoveryArtifact::CrossVolume(effect)) = &error.artifact else {
+            panic!("expected output and retained source");
+        };
+        assert!(
+            matches!(
+                error.failure,
+                CopyFailure::Admission(AdmissionError::StaleTarget)
+            ),
+            "{error:?}"
+        );
+        assert_eq!(effect.source_state, CrossMoveSourceState::Original);
+        assert_eq!(
+            inspect_source(&fixture.target, &ScanCancellation::new())
+                .unwrap()
+                .metadata()
+                .created,
+            edited_time
+        );
+        assert_eq!(
+            fs::read(&fixture.source).unwrap(),
+            fs::read(&fixture.target).unwrap()
+        );
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::Verified { .. })
+        ));
     }
 
     #[test]
