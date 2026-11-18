@@ -71,7 +71,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-C1B1 | complete |
 | M9-C1B2 | complete |
 | M9-C1B3 | complete |
-| M9-C2, M9-D | pending |
+| M9-C2A | complete |
+| M9-C2B, M9-C2C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -541,3 +542,8 @@ The store is read-only until explicit admission and pins the exact physical prof
 ### M9-C1B3 applied receipts and transfer worker
 
 The app-owned worker opens its profile receipt store after an explicit Start and durably records the applied engine effects for ordinary Copy/Duplicate, directory finalization, verified Move and reviewed Replace. The 87-test Windows union passed (`7e54ff8c-4255-4347-b101-838767ca03fa`), with actual distinct-volume regressions, a fully finished case-differing Merge, staged source restoration after its disposal intent, retained exact Replace backup and live Copy reopened from disk. The final 14 checks passed (`ff7fe291-58a3-40f6-a384-7996f76c69c0`) after adding actual worker Activity Partial and Confirmed retirement with a sanitized diagnostic on terminal receipt refusal, and truthful cancelled directory metadata rows. Queued-only durability, interruption reconciliation, Retry and eligible Undo follow; cleanup without a durable exact observation remains conservative.
+
+
+### M9-C2A read-only restart reconciliation
+
+The receipt history reports Interrupted from a clean unfinished prefix and retains valid evidence before a corrupt tail. Selected details use an exact held receipt and recheck recorded artifact identities, revisions and patched parent creation stamps, with no replay. A generated name without assigned identity never confers ownership. Inaccessible and unsafe entries stay visible without hiding other jobs. Verified atomic Move reversal evidence requires clean completed rows, historical and current original vacancy, and unchanged output together with both historical parent proofs and the stored digest. The 19-test worker/store/recovery union passed (`d100a10a-70c5-4987-8b75-732070d275bd`). The final 12 recovery and store checks passed (`9e95d2e6-010d-4cd5-bde7-20eae80b9704`) including real case-renamed and unsafe sibling receipt fixtures. User-facing Retry, Undo and unstarted queue persistence follow.

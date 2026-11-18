@@ -465,6 +465,35 @@ impl SemanticPrefix {
             }
         }
     }
+    pub(super) fn parent_snapshot(
+        &self,
+        mut id: ParentId,
+    ) -> Result<crate::file_transfer::ParentSnapshot, SemanticProblem> {
+        use std::sync::Arc;
+        let path = std::path::PathBuf::from(OsString::from_wide(&self.parent_path(id)?));
+        let mut chain = Vec::new();
+        loop {
+            let proof = self.parent(id)?;
+            chain.push(crate::file_transfer::DirectoryStamp {
+                identity: proof.identity,
+                created: proof.created,
+            });
+            match &proof.origin {
+                ParentOrigin::Root(_) => break,
+                ParentOrigin::Child(place) => id = place.parent,
+            }
+        }
+        chain.reverse();
+        Ok(crate::file_transfer::ParentSnapshot {
+            path: Arc::from(path),
+            chain: chain.into(),
+        })
+    }
+    pub(super) fn pending(&self, node: NodeId) -> bool {
+        self.states
+            .get(node.0 as usize)
+            .is_none_or(|s| s.pending.is_some() || s.source_unsettled)
+    }
     fn place(&self, place: &Place) -> Result<(), SemanticProblem> {
         self.parent(place.parent)?;
         let index = place.parent.0 as usize;

@@ -97,6 +97,7 @@ pub(super) struct ReceiptCatalog {
     pub entries: Vec<CatalogEntry>,
     pub charged_bytes: u64,
     pub admission_blocked: bool,
+    pub unavailable: Vec<OsString>,
 }
 pub(in crate::file_transfer) struct ReceiptStore {
     root: PathBuf,
@@ -121,6 +122,7 @@ impl ReceiptStore {
                 entries: Vec::new(),
                 charged_bytes: 0,
                 admission_blocked: false,
+                unavailable: Vec::new(),
             });
         };
         self.scan_location(&location)
@@ -149,19 +151,40 @@ impl ReceiptStore {
             entries: Vec::new(),
             charged_bytes: 0,
             admission_blocked: false,
+            unavailable: Vec::new(),
         };
         let mut decoded_bytes = 0u64;
         for entry in names {
             if !matches!(entry.kind, TransferDirectoryEntryKind::Ordinary) {
-                return Err(ReceiptStoreError::UnsafeNamespace);
+                catalog.admission_blocked = true;
+                catalog.unavailable.push(entry.name);
+                continue;
             }
-            let mut file = held
-                .directory()
-                .open_receipt_read(&entry.name)
-                .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
-            file.validate()
-                .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
-            let metadata = file.file().metadata()?;
+            let mut file = match held.directory().open_receipt_read(&entry.name) {
+                Ok(file) => file,
+                Err(_) => {
+                    held.check_chain(&cancel)
+                        .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+                    catalog.admission_blocked = true;
+                    catalog.unavailable.push(entry.name);
+                    continue;
+                }
+            };
+            if file.validate().is_err() {
+                held.check_chain(&cancel)
+                    .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+                catalog.admission_blocked = true;
+                catalog.unavailable.push(entry.name);
+                continue;
+            }
+            let metadata = match file.file().metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    catalog.admission_blocked = true;
+                    catalog.unavailable.push(entry.name);
+                    continue;
+                }
+            };
             let bytes = metadata.len();
             catalog.charged_bytes = catalog
                 .charged_bytes
@@ -176,12 +199,25 @@ impl ReceiptStore {
                 (SemanticPrefix::default(), ReceiptDiagnostic::DecodeBudget)
             } else {
                 decoded_bytes += bytes;
-                parse(&mut file)?
+                match parse(&mut file) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        held.check_chain(&cancel)
+                            .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+                        catalog.admission_blocked = true;
+                        catalog.unavailable.push(entry.name);
+                        continue;
+                    }
+                }
             };
-            file.validate()
-                .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
-            if file.file().metadata()?.len() != bytes {
-                return Err(ReceiptStoreError::IncompleteScan);
+            if file.validate().is_err()
+                || file.file().metadata().map(|m| m.len()).ok() != Some(bytes)
+            {
+                held.check_chain(&cancel)
+                    .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+                catalog.admission_blocked = true;
+                catalog.unavailable.push(entry.name);
+                continue;
             }
             let expected = parse_name(&entry.name);
             let actual = match prefix.records.first() {
@@ -214,6 +250,60 @@ impl ReceiptStore {
             .check_chain(&cancel)
             .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
         Ok(catalog)
+    }
+    pub(super) fn read_selected(
+        &self,
+        id: ReceiptId,
+    ) -> Result<Option<CatalogEntry>, ReceiptStoreError> {
+        let Some(location) = self.locate(false)? else {
+            return Ok(None);
+        };
+        let name = receipt_name(id);
+        let mut file = match location.held.directory().open_receipt_read(&name) {
+            Ok(file) => file,
+            Err(error) if is_missing_relative_leaf(&error) => return Ok(None),
+            Err(_) => return Err(ReceiptStoreError::UnsafeNamespace),
+        };
+        file.validate()
+            .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+        let actual_path = crate::file_operations::final_path_for_handle(file.file())?;
+        if actual_path.file_name() != Some(name.as_os_str()) {
+            return Err(ReceiptStoreError::UnsafeNamespace);
+        }
+        let metadata = file.file().metadata()?;
+        let bytes = metadata.len();
+        let (prefix, mut diagnostic) = if bytes > MAX_RECEIPT_BYTES {
+            (SemanticPrefix::default(), ReceiptDiagnostic::Oversized)
+        } else {
+            parse(&mut file)?
+        };
+        file.validate()
+            .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+        if file.file().metadata()?.len() != bytes {
+            return Err(ReceiptStoreError::IncompleteScan);
+        }
+        location
+            .held
+            .check_chain(&ScanCancellation::new())
+            .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+        let actual = match prefix.records.first() {
+            Some(Record::Header { id, .. }) => Some(*id),
+            _ => None,
+        };
+        if actual.is_some() && actual != Some(id) {
+            diagnostic = ReceiptDiagnostic::NameMismatch;
+        }
+        let settled = matches!(diagnostic, ReceiptDiagnostic::Clean) && prefix.settled();
+        Ok(Some(CatalogEntry {
+            leaf: name,
+            id: actual,
+            identity: file.identity(),
+            bytes,
+            created: metadata.creation_time(),
+            prefix,
+            diagnostic,
+            settled,
+        }))
     }
     fn locate(&self, create: bool) -> Result<Option<ReceiptLocation>, ReceiptStoreError> {
         let mut path = match std::fs::canonicalize(&self.root) {
@@ -560,7 +650,7 @@ fn receipt_name(id: ReceiptId) -> OsString {
     name.push_str(".receipt");
     name.into()
 }
-fn parse_name(name: &OsStr) -> Option<ReceiptId> {
+pub(super) fn parse_name(name: &OsStr) -> Option<ReceiptId> {
     let name = name.to_str()?;
     let hex = name.strip_suffix(".receipt")?;
     if hex.len() != 32

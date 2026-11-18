@@ -14,6 +14,12 @@ mod receipts;
 mod relocate;
 mod tree;
 
+pub use receipts::{
+    ReceiptDetail, ReceiptEntryDetail, ReceiptEntryStatus, ReceiptEvidence, ReceiptEvidenceRole,
+    ReceiptHealth, ReceiptHistory, ReceiptHistoryError, ReceiptObservation, ReceiptSummary,
+    ReceiptTarget, ReceiptTargetChoice, VerifiedMoveEvidence,
+};
+
 pub use copy::{
     CopiedFile, CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure,
     CopyRecoveryArtifact, CopyVerification, ReplacementBackup, ReplacementState, StagedMoveEffect,
