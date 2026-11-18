@@ -13525,6 +13525,7 @@ impl LauncherApp {
                 crate::activity::ActivityOwner::FileSearch => Some(super::Panel::FileSearchDialog),
                 crate::activity::ActivityOwner::FolderSize => Some(super::Panel::FolderSizeDialog),
                 crate::activity::ActivityOwner::Recording => Some(super::Panel::RecordingDialog),
+                crate::activity::ActivityOwner::FileTransfer => None,
                 crate::activity::ActivityOwner::Table => Some(super::Panel::TableUtilityDialog),
                 crate::activity::ActivityOwner::DuplicateFinder => {
                     Some(super::Panel::DuplicateFinderDialog)
@@ -16220,6 +16221,8 @@ impl eframe::App for LauncherApp {
         self.xml_toolkit_dialog.shutdown();
         #[cfg(windows)]
         self.archive_session.shutdown();
+        #[cfg(windows)]
+        self.transfer_jobs.shutdown();
         #[cfg(windows)]
         self.zip_creation_session.shutdown();
         self.table_utility_dialog.shutdown();

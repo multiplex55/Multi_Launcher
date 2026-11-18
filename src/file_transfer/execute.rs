@@ -10,7 +10,9 @@ use crate::archive::transfer_native::{
 };
 use crate::file_operations::set_replace_basic_info;
 
-use super::copy::{copy_to_created_parent, require_no_directory_streams};
+use super::copy::{
+    copy_to_created_parent, copy_to_vacancy_reporting, require_no_directory_streams,
+};
 use super::{
     AdmissionError, ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, CopiedFile,
     CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure, CopyRecoveryArtifact,
@@ -27,6 +29,15 @@ pub enum ExecutionProgress {
         staged_bytes: u64,
     },
     DirectoryCreated(SourceNodeId),
+    Finalizing(SourceNodeId),
+    Verifying {
+        entry: SourceNodeId,
+        verification_requested: bool,
+    },
+    FileCompleted {
+        entry: SourceNodeId,
+        bytes: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -142,7 +153,7 @@ fn execute_copy_with_hooks(
             progress(ExecutionProgress::DirectoryCreated(id));
         }
     }
-    finalize_directory_times(plan, control, &mut rows);
+    finalize_directory_times(plan, control, &mut rows, &mut progress);
     Ok(CopyExecution {
         rows,
         cancelled: control.is_cancelled(),
@@ -181,19 +192,32 @@ fn execute_entry(
         create_directory(entry.source(), &target, control, before_directory_create)
             .map(ExecutionState::CreatedDirectory)
     } else {
+        let callback = std::cell::RefCell::new(progress);
         let report = |staged_bytes| {
-            progress(ExecutionProgress::Copying {
+            (callback.borrow_mut())(ExecutionProgress::Copying {
                 entry: id,
                 staged_bytes,
             })
         };
+        let verify = |verification_requested| {
+            (callback.borrow_mut())(ExecutionProgress::Verifying {
+                entry: id,
+                verification_requested,
+            })
+        };
         let copied = match entry.destination() {
-            ApprovedTarget::CreateAt(_) => copy_to_vacancy(entry, control, report)?,
+            ApprovedTarget::CreateAt(_) => {
+                copy_to_vacancy_reporting(entry, control, report, verify)?
+            }
             ApprovedTarget::CreateIn { .. } => {
-                copy_to_created_parent(entry, &target, control, report)?
+                copy_to_created_parent(entry, &target, control, report, verify)?
             }
             _ => return Err(CopyFailure::UnsupportedPlan.into()),
         };
+        (callback.borrow_mut())(ExecutionProgress::FileCompleted {
+            entry: id,
+            bytes: copied.bytes,
+        });
         Ok(ExecutionState::Copied(copied))
     }
 }
@@ -286,14 +310,24 @@ fn create_directory(
         .path()
         .join(target.requested_leaf().as_os_str());
     before_creation(&expected_path);
-    check_source_directory(&source_directory, source, control)?;
-    target_parent
-        .check_chain(control.cancellation())
-        .map_err(CopyFailure::from)?;
-    let created = target_parent
+    let claim = loop {
+        control.check()?;
+        let Some(epoch) = control.admission_epoch()? else {
+            continue;
+        };
+        check_source_directory(&source_directory, source, control)?;
+        target_parent
+            .check_chain(control.cancellation())
+            .map_err(CopyFailure::from)?;
+        if let Some(claim) = control.try_claim(epoch)? {
+            break claim;
+        }
+    };
+    let created_result = target_parent
         .directory()
-        .create_directory(target.requested_leaf().as_os_str())
-        .map_err(|error| directory_create_error(target, error))?;
+        .create_directory(target.requested_leaf().as_os_str());
+    drop(claim);
+    let created = created_result.map_err(|error| directory_create_error(target, error))?;
     let output = CopyArtifact {
         path: expected_path,
         parent: target_parent.snapshot.identity(),
@@ -302,6 +336,7 @@ fn create_directory(
     };
 
     let result = (|| {
+        control.check()?;
         target_parent.check_chain(control.cancellation())?;
         let stamp = directory_stamp(&created, output.parent.volume_serial_number())?;
         let path = checked_final_path(created.file(), &output.path)?;
@@ -362,6 +397,7 @@ fn finalize_directory_times(
     plan: &ApprovedTransferPlan,
     control: &CopyControl,
     rows: &mut [ExecutionRow],
+    progress: &mut impl FnMut(ExecutionProgress),
 ) {
     let mut incomplete = vec![false; rows.len()];
     for entry in plan.entries().iter().rev() {
@@ -373,14 +409,17 @@ fn finalize_directory_times(
                 created.times = if incomplete[index] || control.is_cancelled() {
                     DirectoryTimes::Incomplete
                 } else {
+                    progress(ExecutionProgress::Finalizing(entry.id()));
                     match set_directory_times(entry.source(), created, control) {
                         Ok(()) => DirectoryTimes::Preserved,
+                        Err(CopyFailure::Cancelled) => DirectoryTimes::Incomplete,
                         Err(failure) => DirectoryTimes::Failed(failure),
                     }
                 };
                 matches!(created.times, DirectoryTimes::Preserved)
             }
             ExecutionState::MergedDirectory(directory) if !incomplete[index] => {
+                progress(ExecutionProgress::Finalizing(entry.id()));
                 let decision = open_source_directory(entry.source(), control).and_then(|_held| {
                     let destination = HeldParent::open(directory.path(), control.cancellation())?;
                     if destination.snapshot != *directory {
@@ -417,30 +456,42 @@ fn set_directory_times(
     created: &DirectoryCopy,
     control: &CopyControl,
 ) -> Result<(), CopyFailure> {
-    let _source = open_source_directory(source, control)?;
+    let held_source = open_source_directory(source, control)?;
     let held = HeldParent::open_with_access(
         created.snapshot.path(),
         control.cancellation(),
         DirectoryAccess::WriteDirectoryMetadata,
     )?;
-    if held.snapshot != created.snapshot {
-        return Err(AdmissionError::StaleParent.into());
-    }
     let file = held.directory().file();
-    if observe_entry_metadata(file)?.attributes != FILE_ATTRIBUTE_DIRECTORY.0 {
-        return Err(CopyFailure::UnsupportedMetadata);
-    }
-    require_no_directory_streams(file)?;
-    control.check()?;
+    let claim = loop {
+        control.check()?;
+        let Some(epoch) = control.admission_epoch()? else {
+            continue;
+        };
+        check_source_directory(&held_source, source, control)?;
+        held.check_chain(control.cancellation())?;
+        if held.snapshot != created.snapshot {
+            return Err(AdmissionError::StaleParent.into());
+        }
+        if observe_entry_metadata(file)?.attributes != FILE_ATTRIBUTE_DIRECTORY.0 {
+            return Err(CopyFailure::UnsupportedMetadata);
+        }
+        require_no_directory_streams(file)?;
+        if let Some(claim) = control.try_claim(epoch)? {
+            break claim;
+        }
+    };
     let metadata = source.metadata();
-    set_replace_basic_info(
+    let result = set_replace_basic_info(
         file,
         FILE_BASIC_INFO {
             CreationTime: metadata.created,
             LastWriteTime: metadata.modified,
             ..Default::default()
         },
-    )?;
+    );
+    drop(claim);
+    result?;
     let dates = observe_entry_metadata(file)?;
     if dates.created != metadata.created || dates.modified != metadata.modified {
         return Err(CopyFailure::UnsupportedMetadata);
@@ -478,6 +529,71 @@ mod tests {
         review
             .approve(review.generation(), &ScanCancellation::new())
             .unwrap()
+    }
+
+    #[test]
+    fn transfer_execute_native_reports_verification_before_completed_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("input.txt");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"abc").unwrap();
+        fs::create_dir(&destination).unwrap();
+        let plan = approve(&review(&[source], TransferAction::CopyTo(destination)));
+        let mut events = Vec::new();
+        let execution =
+            execute_copy_plan(&plan, &CopyControl::default(), |event| events.push(event)).unwrap();
+        assert!(matches!(execution.rows[0].state, ExecutionState::Copied(_)));
+        let verify = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ExecutionProgress::Verifying {
+                        verification_requested: true,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let done = events
+            .iter()
+            .position(|event| matches!(event, ExecutionProgress::FileCompleted { bytes: 3, .. }))
+            .unwrap();
+        assert!(verify < done);
+    }
+
+    #[test]
+    fn transfer_execute_native_cancel_at_directory_finalization_retains_copied_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("input");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("child.txt"), b"copied").unwrap();
+        let plan = approve(&review(
+            &[source],
+            TransferAction::CopyTo(destination.clone()),
+        ));
+        let control = CopyControl::default();
+        let report = execute_copy_plan(&plan, &control, |event| {
+            if matches!(event, ExecutionProgress::Finalizing(entry) if entry.index() == 0) {
+                control.cancel();
+            }
+        })
+        .unwrap();
+        assert!(report.cancelled);
+        assert!(matches!(
+            &report.rows[0].state,
+            ExecutionState::CreatedDirectory(DirectoryCopy {
+                times: DirectoryTimes::Incomplete,
+                ..
+            })
+        ));
+        assert!(matches!(&report.rows[1].state, ExecutionState::Copied(_)));
+        assert_eq!(
+            fs::read(destination.join("input/child.txt")).unwrap(),
+            b"copied"
+        );
     }
 
     #[test]

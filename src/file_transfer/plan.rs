@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     },
 };
 
@@ -162,6 +162,7 @@ impl ReviewRow {
 #[derive(Debug)]
 pub struct TransferReview {
     generation: ReviewGeneration,
+    queued: Arc<AtomicBool>,
     draft: TransferDraft,
     source: Arc<SourceTree>,
     rows: Vec<ReviewRow>,
@@ -575,6 +576,7 @@ fn build_review(
         .map_err(|_| ReviewError::GenerationExhausted)?;
     Ok(TransferReview {
         generation: ReviewGeneration(generation),
+        queued: Arc::new(AtomicBool::new(false)),
         draft,
         source,
         rows,
@@ -682,6 +684,7 @@ impl ApprovedTransferEntry {
 #[derive(Debug)]
 pub struct ApprovedTransferPlan {
     generation: ReviewGeneration,
+    queued: Arc<AtomicBool>,
     draft: TransferDraft,
     source: Arc<SourceTree>,
     entries: Vec<ApprovedTransferEntry>,
@@ -689,6 +692,11 @@ pub struct ApprovedTransferPlan {
 }
 
 impl ApprovedTransferPlan {
+    // All approvals sealed from this review share one queue admission.
+    pub(super) fn claim_for_queue(&self) -> bool {
+        !self.queued.swap(true, AtomicOrdering::AcqRel)
+    }
+
     pub fn generation(&self) -> ReviewGeneration {
         self.generation
     }
@@ -1001,6 +1009,7 @@ impl TransferReview {
         }
         Ok(ApprovedTransferPlan {
             generation: self.generation,
+            queued: self.queued.clone(),
             draft: self.draft.clone(),
             source: self.source.clone(),
             entries,

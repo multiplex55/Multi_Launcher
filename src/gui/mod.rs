@@ -1377,6 +1377,8 @@ pub struct LauncherApp {
     #[cfg(windows)]
     pub(crate) archive_session: crate::archive::ArchiveSession,
     #[cfg(windows)]
+    pub(crate) transfer_jobs: crate::file_transfer::TransferJobs,
+    #[cfg(windows)]
     pub(crate) zip_creation_session: crate::archive::CreationSession,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
@@ -4274,6 +4276,8 @@ impl LauncherApp {
             zip_extractor_dialog: ZipExtractorDialog::default(),
             #[cfg(windows)]
             archive_session,
+            #[cfg(windows)]
+            transfer_jobs: crate::file_transfer::TransferJobs::new(activity_center.clone()),
             #[cfg(windows)]
             zip_creation_session,
             regex_tester_dialog,

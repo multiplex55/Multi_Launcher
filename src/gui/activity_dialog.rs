@@ -228,7 +228,9 @@ impl ActivityDialogState {
                                                 && !screenshot_editor_available
                                             {
                                                 ui.label("No screenshot editor is open");
-                                            } else if ui.button("Open owner tool").clicked() {
+                                            } else if row.key.owner() != ActivityOwner::FileTransfer
+                                                && ui.button("Open owner tool").clicked()
+                                            {
                                                 actions.push(ActivityDialogAction::Navigate(
                                                     row.key.owner(),
                                                 ));

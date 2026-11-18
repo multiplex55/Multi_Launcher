@@ -34,6 +34,7 @@ const SUPPORTED_ATTRIBUTES: u32 = FILE_ATTRIBUTE_ARCHIVE.0 | FILE_ATTRIBUTE_NORM
 pub struct CopyControl {
     cancellation: ScanCancellation,
     io: TransferIo,
+    pause: std::sync::Arc<super::control::PauseGate>,
 }
 
 impl Default for CopyControl {
@@ -42,12 +43,14 @@ impl Default for CopyControl {
         Self {
             io: TransferIo::new(cancellation.clone()),
             cancellation,
+            pause: std::sync::Arc::new(super::control::PauseGate::default()),
         }
     }
 }
 
 impl CopyControl {
     pub fn cancel(&self) {
+        self.pause.cancel();
         self.io.cancel();
     }
 
@@ -59,11 +62,26 @@ impl CopyControl {
         &self.cancellation
     }
 
+    pub fn request_pause(&self) -> bool {
+        self.pause.request_pause()
+    }
+    pub fn resume(&self) -> bool {
+        self.pause.resume()
+    }
+    pub fn pause_state(&self) -> super::control::CopyPauseState {
+        self.pause.state()
+    }
+    pub(super) fn admission_epoch(&self) -> Result<Option<u64>, CopyFailure> {
+        self.pause.epoch()
+    }
+    pub(super) fn try_claim(
+        &self,
+        epoch: u64,
+    ) -> Result<Option<super::control::MutationClaim>, CopyFailure> {
+        self.pause.try_claim(epoch)
+    }
     pub(super) fn check(&self) -> Result<(), CopyFailure> {
-        if self.is_cancelled() {
-            return Err(CopyFailure::Cancelled);
-        }
-        Ok(())
+        self.pause.checkpoint()
     }
 }
 
@@ -559,7 +577,9 @@ fn fill_stage(
         .as_ref()
         .map(|source| copy_zone(stage, source, control))
         .transpose()?;
+    control.check()?;
     apply_metadata(stage, copy.source.metadata())?;
+    control.check()?;
     stage.flush()?;
     check_output(stage.file(), copy.source.metadata(), copy.streams())?;
     copy.check_source(control)?;
@@ -575,7 +595,18 @@ fn copy_zone(
     source: &HeldZone,
     control: &CopyControl,
 ) -> Result<StagedZone, CopyFailure> {
-    let output = stage.create_zone()?;
+    let claim = loop {
+        control.check()?;
+        let Some(epoch) = control.admission_epoch()? else {
+            continue;
+        };
+        if let Some(claim) = control.try_claim(epoch)? {
+            break claim;
+        }
+    };
+    let output_result = stage.create_zone();
+    drop(claim);
+    let output = output_result?;
     let mut hash = Sha256::new();
     read_chunks(&source.file, source.length, control, |offset, bytes| {
         write_chunk(control, offset, bytes, |at, chunk| {
@@ -587,6 +618,7 @@ fn copy_zone(
         hash.update(bytes);
         Ok(())
     })?;
+    control.check()?;
     output.flush()?;
     let expected: [u8; 32] = hash.finalize().into();
     if hash_file(&output, source.length, control)? != expected {
@@ -626,6 +658,27 @@ fn copy_with_publication_hooks(
         control,
         progress,
         (before_publication, after_publication),
+        |_| {},
+    )
+}
+
+pub(super) fn copy_to_vacancy_reporting(
+    entry: &ApprovedTransferEntry,
+    control: &CopyControl,
+    progress: impl FnMut(u64),
+    verification: impl FnOnce(bool),
+) -> Result<CopiedFile, CopyError> {
+    let ApprovedTarget::CreateAt(target) = entry.destination() else {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    };
+    copy_file_bound(
+        entry.source(),
+        target,
+        entry.verify_content(),
+        control,
+        progress,
+        (|_| {}, || {}),
+        verification,
     )
 }
 
@@ -634,6 +687,7 @@ pub(super) fn copy_to_created_parent(
     target: &TargetSnapshot,
     control: &CopyControl,
     progress: impl FnMut(u64),
+    verification: impl FnOnce(bool),
 ) -> Result<CopiedFile, CopyError> {
     copy_file_bound(
         entry.source(),
@@ -642,6 +696,7 @@ pub(super) fn copy_to_created_parent(
         control,
         progress,
         (|_| {}, || {}),
+        verification,
     )
 }
 
@@ -652,14 +707,27 @@ fn copy_file_bound(
     control: &CopyControl,
     progress: impl FnMut(u64),
     hooks: (impl FnOnce(&Path), impl FnOnce()),
+    verification_progress: impl FnOnce(bool),
 ) -> Result<CopiedFile, CopyError> {
     let (before_publication, after_publication) = hooks;
     let copy = GuardedCopy::open(source, target, control)?;
-    let stage = copy
+    let claim = loop {
+        control.check()?;
+        let Some(epoch) = control.admission_epoch()? else {
+            continue;
+        };
+        copy.check_source(control)?;
+        copy.check_vacancy(control)?;
+        if let Some(claim) = control.try_claim(epoch)? {
+            break claim;
+        }
+    };
+    let stage_result = copy
         .target_parent
         .directory()
-        .create_stage(copy.target.requested_leaf().as_os_str())
-        .map_err(|error| stage_create_error(copy.target, error))?;
+        .create_stage(copy.target.requested_leaf().as_os_str());
+    drop(claim);
+    let stage = stage_result.map_err(|error| stage_create_error(copy.target, error))?;
     let stage_artifact = CopyArtifact {
         path: copy.target.parent().path().join(stage.leaf()),
         parent: copy.target.parent().identity(),
@@ -680,35 +748,45 @@ fn copy_file_bound(
         },
     };
     let mut refused = None;
-    let published = stage
-        .publish(copy.target.requested_leaf().as_os_str(), || {
-            before_publication(&stage_artifact.path);
-            let recheck = copy.check_source(control).and_then(|()| {
-                copy.target_parent
-                    .check_chain(&control.cancellation)
-                    .map_err(CopyFailure::from)
-            });
-            refused = recheck.err();
-            refused.is_none()
-        })
-        .map_err(|error| {
-            let artifact = error
-                .cleanup_failed()
-                .then_some(CopyRecoveryArtifact::Owned(stage_artifact));
-            let recovery_error = artifact.as_ref().map(|_| error.to_string());
-            let failure = refused.unwrap_or_else(|| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    CopyFailure::DestinationOccupied
-                } else {
-                    error.into()
-                }
-            });
-            CopyError {
-                failure,
-                artifact,
-                recovery_error,
+    let mut claim = None;
+    let published_result = stage.publish(copy.target.requested_leaf().as_os_str(), || {
+        before_publication(&stage_artifact.path);
+        let recheck = (|| loop {
+            control.check()?;
+            let Some(epoch) = control.admission_epoch()? else {
+                continue;
+            };
+            copy.check_source(control)?;
+            copy.target_parent
+                .check_chain(&control.cancellation)
+                .map_err(CopyFailure::from)?;
+            if let Some(acquired) = control.try_claim(epoch)? {
+                claim = Some(acquired);
+                return Ok(());
             }
-        })?;
+        })();
+        refused = recheck.err();
+        refused.is_none()
+    });
+    drop(claim);
+    let published = published_result.map_err(|error| {
+        let artifact = error
+            .cleanup_failed()
+            .then_some(CopyRecoveryArtifact::Owned(stage_artifact));
+        let recovery_error = artifact.as_ref().map(|_| error.to_string());
+        let failure = refused.unwrap_or_else(|| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                CopyFailure::DestinationOccupied
+            } else {
+                error.into()
+            }
+        });
+        CopyError {
+            failure,
+            artifact,
+            recovery_error,
+        }
+    })?;
 
     let artifact = CopyArtifact {
         path: copy
@@ -721,6 +799,7 @@ fn copy_file_bound(
         state: CopyArtifactState::Published,
     };
     after_publication();
+    verification_progress(staged.data_hash.is_some() || staged.zone.is_some());
     let verification =
         finish_publication(&copy, &published, &artifact, staged, control).map_err(|failure| {
             CopyError {

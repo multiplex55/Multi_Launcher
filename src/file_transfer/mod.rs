@@ -3,8 +3,11 @@
 //! Snapshots carry observations, with handles reacquired before use. A vacant
 //! leaf is evidence from a single anchored open, never permission to write.
 
+mod control;
 mod copy;
+pub use control::CopyPauseState;
 mod execute;
+mod jobs;
 mod plan;
 mod tree;
 
@@ -15,6 +18,10 @@ pub use copy::{
 pub use execute::{
     CopyExecution, DirectoryCopy, DirectoryTimes, ExecutionProgress, ExecutionRow, ExecutionState,
     execute_copy_plan,
+};
+pub use jobs::{
+    TRANSFER_QUEUE_LIMIT, TransferJobError, TransferJobId, TransferJobInfo, TransferJobPhase,
+    TransferJobProgress, TransferJobResult, TransferJobStatus, TransferJobs, TransferQueueSnapshot,
 };
 pub use plan::{
     ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, GroupChoice, ReviewBlock,

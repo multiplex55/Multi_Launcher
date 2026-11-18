@@ -61,7 +61,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B1A | complete |
 | M9-B1B | complete |
 | M9-B2A | complete |
-| M9-B2B, M9-B3+, M9-C, M9-D | pending |
+| M9-B2B | complete |
+| M9-B3+, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -493,3 +494,6 @@ All 14 focused native-copy and shared archive checks passed with the M9-B1A filt
 
 
 M9-B2A verified on Windows with 21 targeted Nextest passes. Copy and Duplicate create guarded directories and apply directory timestamps after completing children. Explicit Merge preserves unrelated contents and reports late source changes. Native fixtures verified late competing directories, replaced parents, named stream refusal, definite no-effect preflight, and existing archive destination behavior.
+
+
+M9-B2B passed 40 focused Windows Nextest tests after independent review. A single app-owned worker serves an explicit Start batch in visible order, bounded to 32 queued and active approvals, and projects actual pause, cancellation, progress and retirement to Activity. Native fixtures proved safe pause before cancellation, exact queue and Activity identity, directory finalization and late-cancel preservation of a published file. Guarded Replace, Move, durable receipts and the user-facing center belong to subsequent checkpoints.
