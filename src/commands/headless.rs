@@ -289,6 +289,20 @@ mod activity_headless_tests {
     use super::*;
 
     #[test]
+    fn downloads_triage_headless_requires_gui_without_external_fallback() {
+        let original = Action { label: "Downloads Triage".into(), desc: String::new(), action: "downloads_triage:open".into(), args: None };
+        let command = crate::commands::parse_action(&original).unwrap();
+        assert_eq!(command, Command::Dialog(DialogCommand::DownloadsTriage));
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            external_calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        }).unwrap_err();
+        assert!(error.to_string().contains("Downloads Triage requires the launcher interface"));
+        assert!(external_calls.is_empty());
+    }
+
+    #[test]
     fn file_operations_headless_requires_gui_without_external_fallback() {
         let original = Action {
             label: "Open File Operations Center".into(),
@@ -442,6 +456,9 @@ fn execute_with_external(
         }
         Command::Dialog(DialogCommand::FileLock { .. }) => {
             anyhow::bail!("File Lock Inspector requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::DownloadsTriage) => {
+            anyhow::bail!("Downloads Triage requires the launcher interface")
         }
         Command::Dialog(DialogCommand::FileOperationsCenter) => {
             anyhow::bail!("File Operations Center requires the launcher interface")

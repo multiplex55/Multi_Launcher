@@ -2,6 +2,9 @@
 use super::*;
 use crate::file_operations::{TransferEnumerationError, enumerate_transfer_directory_visit};
 
+mod recycle;
+pub(crate) use recycle::{MAX_RECYCLE_SELECTION, recycle_downloads};
+
 const MAX_ROWS: usize = 10_000;
 const MAX_NAME_BYTES: usize = MAX_ROWS * 512;
 const MAX_ZONE_BYTES: usize = 16 * 1024;
@@ -261,3 +264,258 @@ mod tests {
         ));
     }
 }
+
+mod guarded {
+    //! Guarded actions on explicitly selected Downloads entries.
+    use super::super::{
+        AdmissionError, DirectoryAccess, EntryKind, EntrySnapshot, HeldParent, TargetOccupancy,
+        TransferLeaf, check_cancel, check_target_bounds,
+    };
+    use crate::archive::transfer_native::{TransferFile, TransferIo};
+    use crate::file_operations::ScanCancellation;
+    use anyhow::{Context, bail};
+    use sha2::{Digest, Sha256};
+    use std::path::{Path, PathBuf};
+
+    const MAX_COMPARE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    const CHUNK: usize = 256 * 1024;
+
+    fn parent(
+        entry: &EntrySnapshot,
+        cancel: &ScanCancellation,
+        access: DirectoryAccess,
+    ) -> anyhow::Result<HeldParent> {
+        let parent = HeldParent::open_with_access(entry.parent().path(), cancel, access)?;
+        if parent.snapshot != *entry.parent() {
+            return Err(AdmissionError::StaleParent.into());
+        }
+        Ok(parent)
+    }
+    fn checked(
+        parent: &HeldParent,
+        file: &std::fs::File,
+        entry: &EntrySnapshot,
+        cancel: &ScanCancellation,
+    ) -> anyhow::Result<()> {
+        parent.check_chain(cancel)?;
+        if parent.capture_entry(file, entry.leaf())? != *entry {
+            return Err(AdmissionError::StaleEntry.into());
+        }
+        Ok(())
+    }
+
+    /// Holds the exact entry and its ancestor chain against deletion during the callback.
+    pub fn with_downloads_entry_path<T>(
+        entry: &EntrySnapshot,
+        cancel: &ScanCancellation,
+        action: impl FnOnce(&Path) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let parent = parent(entry, cancel, DirectoryAccess::Observe)?;
+        match entry.metadata().kind {
+            EntryKind::File => {
+                let file = parent
+                    .directory()
+                    .open_read(entry.leaf().as_os_str())
+                    .map_err(AdmissionError::from)?;
+                checked(&parent, file.file(), entry, cancel)?;
+                action(&entry.path())
+            }
+            EntryKind::Directory => {
+                let dir = parent
+                    .directory()
+                    .open_child(entry.leaf().as_os_str())
+                    .map_err(AdmissionError::from)?;
+                checked(&parent, dir.file(), entry, cancel)?;
+                action(&entry.path())
+            }
+        }
+    }
+
+    /// Renames the held exact entry into a vacant sibling without replacing a name.
+    pub fn rename_downloads_entry(
+        entry: &EntrySnapshot,
+        name: &TransferLeaf,
+        cancel: &ScanCancellation,
+    ) -> anyhow::Result<PathBuf> {
+        let access = match entry.metadata().kind {
+            EntryKind::File => DirectoryAccess::CreateFile,
+            EntryKind::Directory => DirectoryAccess::CreateDirectory,
+        };
+        let parent = parent(entry, cancel, access)?;
+        check_target_bounds(&parent.snapshot, name)?;
+        if !matches!(parent.inspect_leaf(name, cancel)?, TargetOccupancy::Vacant) {
+            bail!("The new name is already occupied.");
+        }
+        let destination = parent.snapshot.path().join(name.as_os_str());
+        match entry.metadata().kind {
+            EntryKind::File => {
+                let held = parent
+                    .directory()
+                    .open_relocation(entry.leaf().as_os_str(), entry.identity())
+                    .map_err(AdmissionError::from)?;
+                checked(&parent, held.file(), entry, cancel)?;
+                check_cancel(cancel)?;
+                held.rename_no_replace(parent.directory(), name.as_os_str())
+                    .map_err(AdmissionError::from)
+                    .context("Rename could not be confirmed; inspect both names before retrying")?;
+                let result = parent.capture_entry(held.file(), name)?;
+                if result.identity() != entry.identity()
+                    || result.leaf().as_os_str() != name.as_os_str()
+                {
+                    bail!(
+                        "Rename destination could not be confirmed: {}",
+                        destination.display()
+                    );
+                }
+            }
+            EntryKind::Directory => {
+                let held = parent
+                    .directory()
+                    .open_removable_directory_child(entry.leaf().as_os_str(), entry.identity())
+                    .map_err(AdmissionError::from)?;
+                checked(&parent, held.file(), entry, cancel)?;
+                check_cancel(cancel)?;
+                held.rename_no_replace(parent.directory(), name.as_os_str())
+                    .map_err(AdmissionError::from)
+                    .context("Rename could not be confirmed; inspect both names before retrying")?;
+                let result = parent.capture_entry(held.file(), name)?;
+                if result.identity() != entry.identity()
+                    || result.leaf().as_os_str() != name.as_os_str()
+                {
+                    bail!(
+                        "Rename destination could not be confirmed: {}",
+                        destination.display()
+                    );
+                }
+            }
+        }
+        parent.check_chain(&ScanCancellation::new())?;
+        Ok(destination)
+    }
+
+    fn digest(
+        file: &TransferFile,
+        len: u64,
+        io: &TransferIo,
+        cancel: &ScanCancellation,
+    ) -> anyhow::Result<[u8; 32]> {
+        let mut hash = Sha256::new();
+        let mut offset = 0u64;
+        while offset < len {
+            check_cancel(cancel)?;
+            let size = (len - offset).min(CHUNK as u64) as usize;
+            let (bytes, read) = io.read_at(file, offset, size)?;
+            if read == 0 || read > size {
+                bail!("File changed during comparison.");
+            }
+            hash.update(&bytes[..read]);
+            offset = offset
+                .checked_add(read as u64)
+                .context("File length overflow")?;
+        }
+        Ok(hash.finalize().into())
+    }
+    /// Compares only the selected files' main streams, under exact held read guards.
+    pub fn compare_downloads_pair(
+        first: &EntrySnapshot,
+        second: &EntrySnapshot,
+        cancel: &ScanCancellation,
+    ) -> anyhow::Result<bool> {
+        if first.metadata().kind != EntryKind::File
+            || second.metadata().kind != EntryKind::File
+            || first.identity() == second.identity()
+        {
+            bail!("Choose two distinct regular files.");
+        }
+        let length = first.metadata().byte_len.context("Missing file length")?;
+        if second.metadata().byte_len != Some(length) {
+            bail!("Files must have equal lengths.");
+        }
+        if length > MAX_COMPARE_BYTES {
+            bail!("File exceeds the 2 GiB comparison limit.");
+        }
+        let a = parent(first, cancel, DirectoryAccess::Observe)?;
+        let b = parent(second, cancel, DirectoryAccess::Observe)?;
+        let fa = a
+            .directory()
+            .open_read(first.leaf().as_os_str())
+            .map_err(AdmissionError::from)?;
+        let fb = b
+            .directory()
+            .open_read(second.leaf().as_os_str())
+            .map_err(AdmissionError::from)?;
+        checked(&a, fa.file(), first, cancel)?;
+        checked(&b, fb.file(), second, cancel)?;
+        let io = TransferIo::new(cancel.clone());
+        let equal = digest(&fa, length, &io, cancel)? == digest(&fb, length, &io, cancel)?;
+        checked(&a, fa.file(), first, cancel)?;
+        checked(&b, fb.file(), second, cancel)?;
+        Ok(equal)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::file_transfer::inspect_source;
+        use std::{ffi::OsStr, fs};
+        #[test]
+        fn downloads_triage_compare_and_stale_selection() {
+            let tmp = tempfile::tempdir().unwrap();
+            let a = tmp.path().join("a");
+            let b = tmp.path().join("b");
+            let c = tmp.path().join("c");
+            fs::write(&a, b"abc").unwrap();
+            fs::write(&b, b"abc").unwrap();
+            fs::write(&c, b"xyz").unwrap();
+            let cancel = ScanCancellation::new();
+            let sa = inspect_source(&a, &cancel).unwrap();
+            let sb = inspect_source(&b, &cancel).unwrap();
+            let sc = inspect_source(&c, &cancel).unwrap();
+            assert_eq!(
+                with_downloads_entry_path(&sa, &cancel, |path| Ok(path.to_owned())).unwrap(),
+                sa.path()
+            );
+            assert!(compare_downloads_pair(&sa, &sb, &cancel).unwrap());
+            assert!(!compare_downloads_pair(&sa, &sc, &cancel).unwrap());
+            fs::write(&b, b"changed").unwrap();
+            assert!(compare_downloads_pair(&sa, &sb, &cancel).is_err());
+        }
+        #[test]
+        fn downloads_triage_rename_never_replaces_and_moves_directory() {
+            let tmp = tempfile::tempdir().unwrap();
+            let a = tmp.path().join("a");
+            let b = tmp.path().join("b");
+            let dir = tmp.path().join("dir");
+            fs::write(&a, b"a").unwrap();
+            fs::write(&b, b"b").unwrap();
+            fs::create_dir(&dir).unwrap();
+            let cancel = ScanCancellation::new();
+            let a_snapshot = inspect_source(&a, &cancel).unwrap();
+            assert!(
+                rename_downloads_entry(
+                    &a_snapshot,
+                    &TransferLeaf::new(OsStr::new("b")).unwrap(),
+                    &cancel
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&b).unwrap(), b"b");
+            let renamed = rename_downloads_entry(
+                &a_snapshot,
+                &TransferLeaf::new(OsStr::new("c")).unwrap(),
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(fs::read(renamed).unwrap(), b"a");
+            let dir_snapshot = inspect_source(&dir, &cancel).unwrap();
+            let renamed = rename_downloads_entry(
+                &dir_snapshot,
+                &TransferLeaf::new(OsStr::new("dir2")).unwrap(),
+                &cancel,
+            )
+            .unwrap();
+            assert!(renamed.is_dir());
+        }
+    }
+}
+pub use guarded::{compare_downloads_pair, rename_downloads_entry, with_downloads_entry_path};

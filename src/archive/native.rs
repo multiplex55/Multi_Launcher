@@ -1148,6 +1148,188 @@ fn open_ordinary_file(path: &Path) -> Result<OrdinaryFileAdmission, NativeArchiv
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ArchiveSourceStamp {
+    pub identity: NativeFileIdentity,
+    pub length: u64,
+    pub created: i64,
+    pub modified: i64,
+    pub changed: i64,
+    pub attributes: u32,
+}
+fn archive_source_stamp(file: &File) -> Result<ArchiveSourceStamp, NativeArchiveError> {
+    let identity = native_file_identity(file)
+        .map_err(|e| NativeArchiveError::from_io("FILE_ID_INFO(archive source stamp)", e, None))?;
+    let basic = crate::file_operations::query_replace_basic_info(file).map_err(|e| {
+        NativeArchiveError::from_io("FILE_BASIC_INFO(archive source stamp)", e, Some(identity))
+    })?;
+    let meta = file.metadata().map_err(|e| {
+        NativeArchiveError::from_io("metadata(archive source stamp)", e, Some(identity))
+    })?;
+    if !meta.is_file() || meta.file_attributes() != basic.FileAttributes {
+        return Err(NativeArchiveError::validation(
+            "archive source is not an ordinary file",
+            io::ErrorKind::InvalidData,
+            Some(identity),
+        ));
+    }
+    Ok(ArchiveSourceStamp {
+        identity,
+        length: meta.len(),
+        created: basic.CreationTime,
+        modified: basic.LastWriteTime,
+        changed: basic.ChangeTime,
+        attributes: basic.FileAttributes,
+    })
+}
+fn exact_stamp_matches(
+    stamp: ArchiveSourceStamp,
+    expected: &crate::file_transfer::EntrySnapshot,
+) -> bool {
+    let meta = expected.metadata();
+    meta.kind == crate::file_transfer::EntryKind::File
+        && meta.byte_len == Some(stamp.length)
+        && expected.identity() == stamp.identity
+        && meta.created == stamp.created
+        && meta.modified == stamp.modified
+        && meta.changed == stamp.changed
+        && meta.attributes == stamp.attributes
+        && stamp.attributes & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+            == 0
+        && !crate::file_operations::has_cloud_placeholder_attributes(stamp.attributes)
+}
+fn open_exact_archive(
+    expected: &crate::file_transfer::EntrySnapshot,
+) -> Result<OrdinaryFileAdmission, NativeArchiveError> {
+    use windows::Wdk::Storage::FileSystem::{
+        FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, SYNCHRONIZE,
+    };
+    let parent_path = expected.parent().path();
+    let (root, parts) = split_local_absolute_path(parent_path)?;
+    let mut parent = open_volume_root_with_options(&root, false, false, true, false)?;
+    let mut ids = vec![parent.identity];
+    for part in &parts {
+        parent = parent.open_child_with_options(part, false, false, true, false, false)?;
+        ids.push(parent.identity);
+    }
+    if !ids.into_iter().eq(expected.parent().ancestor_identities()) {
+        return Err(NativeArchiveError::validation(
+            "archive source parent identity changed",
+            io::ErrorKind::InvalidData,
+            Some(parent.identity),
+        ));
+    }
+    let check_parent = || -> Result<(), NativeArchiveError> {
+        let current = crate::file_transfer::inspect_parent(parent_path, &ScanCancellation::new())
+            .map_err(|error| {
+            NativeArchiveError::from_io(
+                "archive source parent proof",
+                io::Error::other(error),
+                Some(parent.identity),
+            )
+        })?;
+        if &current != expected.parent() {
+            return Err(NativeArchiveError::validation(
+                "archive source parent changed",
+                io::ErrorKind::InvalidData,
+                Some(parent.identity),
+            ));
+        }
+        Ok(())
+    };
+    check_parent()?;
+    let leaf = expected.leaf().as_os_str();
+    validate_single_component(leaf, "exact archive source leaf")?;
+    let (metadata_file, _) = open_relative(
+        &parent,
+        leaf,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        shared_directory_access(),
+        FILE_OPEN,
+        FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        FILE_ATTRIBUTE_NORMAL,
+        "NtCreateFile(exact archive metadata)",
+        || Ok(()),
+    )?;
+    let metadata_stamp = archive_source_stamp(&metadata_file)?;
+    if !exact_stamp_matches(metadata_stamp, expected) {
+        return Err(NativeArchiveError::validation(
+            "exact archive source changed",
+            io::ErrorKind::InvalidData,
+            Some(metadata_stamp.identity),
+        ));
+    }
+    let actual_path =
+        crate::file_operations::final_path_for_handle(&metadata_file).map_err(|e| {
+            NativeArchiveError::from_io(
+                "exact archive source path",
+                e,
+                Some(metadata_stamp.identity),
+            )
+        })?;
+    if actual_path.file_name() != Some(leaf)
+        || !crate::batch_rename::compare_paths_windows_ordinal(&actual_path, &expected.path())
+            .is_eq()
+    {
+        return Err(NativeArchiveError::validation(
+            "exact archive source name changed",
+            io::ErrorKind::InvalidData,
+            Some(metadata_stamp.identity),
+        ));
+    }
+    let (file, _) = open_relative(
+        &parent,
+        leaf,
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ,
+        FILE_OPEN,
+        FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT,
+        FILE_ATTRIBUTE_NORMAL,
+        "NtCreateFile(exact archive source)",
+        || Ok(()),
+    )?;
+    let stamp = archive_source_stamp(&file)?;
+    if stamp != metadata_stamp || !exact_stamp_matches(stamp, expected) {
+        return Err(NativeArchiveError::validation(
+            "exact archive source changed while opening",
+            io::ErrorKind::InvalidData,
+            Some(stamp.identity),
+        ));
+    }
+    let actual_path = crate::file_operations::final_path_for_handle(&file).map_err(|e| {
+        NativeArchiveError::from_io("exact archive held path", e, Some(stamp.identity))
+    })?;
+    if actual_path.file_name() != Some(leaf)
+        || !crate::batch_rename::compare_paths_windows_ordinal(&actual_path, &expected.path())
+            .is_eq()
+    {
+        return Err(NativeArchiveError::validation(
+            "exact archive held name changed",
+            io::ErrorKind::InvalidData,
+            Some(stamp.identity),
+        ));
+    }
+    check_parent()?;
+    let file = VerifiedOverlappedFile::verify(file).map_err(|_| {
+        NativeArchiveError::validation(
+            "exact archive source is not overlapped",
+            io::ErrorKind::InvalidData,
+            Some(stamp.identity),
+        )
+    })?;
+    Ok(OrdinaryFileAdmission {
+        file,
+        ancestors: parent,
+        identity: stamp.identity,
+        len: stamp.length,
+        modified: stamp.modified as u64,
+        created: stamp.created as u64,
+    })
+}
+
 /// One opened archive source. Catalog verification reads through an
 /// explicit-offset adapter over this held handle; it never reopens the path.
 pub(crate) struct NativeArchiveSource {
@@ -1155,6 +1337,7 @@ pub(crate) struct NativeArchiveSource {
     _ancestors: Arc<HeldDirectory>,
     identity: NativeFileIdentity,
     archive_len: u64,
+    source_stamp: ArchiveSourceStamp,
     revision: ArchiveRevision,
     limits: ArchiveLimits,
     catalog_source: Option<ArchiveSource>,
@@ -1167,6 +1350,18 @@ impl NativeArchiveSource {
         limits: ArchiveLimits,
     ) -> Result<Self, NativeArchiveError> {
         let admitted = open_ordinary_file(path)?;
+        Self::from_admission(admitted, revision, limits)
+    }
+    pub(crate) fn open_exact(expected: &crate::file_transfer::EntrySnapshot, revision: ArchiveRevision, limits: ArchiveLimits) -> Result<Self, NativeArchiveError> {
+        let admitted = open_exact_archive(expected)?;
+        let source = Self::from_admission(admitted, revision, limits)?;
+        if !exact_stamp_matches(source.source_stamp, expected) {
+            return Err(NativeArchiveError::validation("exact archive source revision changed", io::ErrorKind::InvalidData, Some(source.identity)));
+        }
+        Ok(source)
+    }
+    fn from_admission(admitted: OrdinaryFileAdmission, revision: ArchiveRevision, limits: ArchiveLimits) -> Result<Self, NativeArchiveError> {
+        let source_stamp = archive_source_stamp(admitted.file.as_file())?;
         let OrdinaryFileAdmission {
             file,
             ancestors,
@@ -1179,6 +1374,7 @@ impl NativeArchiveSource {
             _ancestors: ancestors,
             identity,
             archive_len,
+            source_stamp,
             revision,
             limits,
             catalog_source: None,
@@ -1187,6 +1383,13 @@ impl NativeArchiveSource {
 
     pub(crate) fn identity(&self) -> NativeFileIdentity {
         self.identity
+    }
+
+    pub(crate) fn source_stamp(&self) -> ArchiveSourceStamp { self.source_stamp }
+    pub(crate) fn recheck_source_stamp(&self) -> Result<ArchiveSourceStamp, NativeArchiveError> {
+        let stamp = archive_source_stamp(self.file.as_file())?;
+        if stamp != self.source_stamp { return Err(NativeArchiveError::validation("held archive source revision changed", io::ErrorKind::InvalidData, Some(stamp.identity))); }
+        Ok(stamp)
     }
 
     pub(crate) fn archive_source(&self) -> Option<ArchiveSource> {
@@ -1217,6 +1420,7 @@ impl NativeArchiveSource {
         cancellation: &ScanCancellation,
         io_control: &ArchiveIoControl,
     ) -> Result<ArchiveCatalog, NativeArchiveError> {
+        self.recheck_source_stamp()?;
         let file = self.file.as_file();
         let before = native_file_identity(file).map_err(|error| {
             NativeArchiveError::from_io(
@@ -1274,6 +1478,7 @@ impl NativeArchiveSource {
                 Some(after),
             ));
         }
+        self.recheck_source_stamp()?;
         self.catalog_source = Some(catalog.source());
         Ok(catalog)
     }
@@ -4257,6 +4462,19 @@ pub(crate) mod transfer_native {
         pub(crate) fn require_no_extended_attributes(&self) -> Result<(), NativeArchiveError> {
             self.validate()?;
             require_no_extended_attributes(&self.file, self.identity)
+        }
+        /// Rename this exact held directory within a verified parent, without replacing a name.
+        pub(crate) fn rename_no_replace(&self, target: &TransferDirectory, leaf: &OsStr) -> Result<(), NativeArchiveError> {
+            validate_single_component(leaf, "transfer directory rename target")?;
+            self.validate()?;
+            target.0.verify_identity()?;
+            if self.identity.volume_serial_number() != target.0.identity.volume_serial_number() {
+                return Err(NativeArchiveError::validation("transfer directory rename crosses volumes", io::ErrorKind::InvalidInput, Some(self.identity)));
+            }
+            rename_open_file_relative_no_replace(&self.file, &target.0, leaf, self.identity).map_err(|primary| {
+                let collision = primary.nt_status == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION.0);
+                NativeArchiveError { primary, cleanup_attempted: false, cleanup_failure: None, cleanup_failed: false, unconfirmed_name_effect: !collision }
+            })
         }
         /// Nonrecursive disposition; caller verifies emptiness and eventual absence.
         pub(crate) fn mark_delete_pending(&self) -> Result<(), NativeArchiveError> {

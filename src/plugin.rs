@@ -6,6 +6,8 @@ use crate::common::query::{
 use crate::plugins::activity::ActivityPlugin;
 #[cfg(windows)]
 use crate::plugins::file_operations::FileOperationsPlugin;
+#[cfg(windows)]
+use crate::plugins::downloads_triage::DownloadsTriagePlugin;
 use crate::plugins::asciiart::AsciiArtPlugin;
 use crate::plugins::base_convert::BaseConvertPlugin;
 use crate::plugins::batch_rename::BatchRenamePlugin;
@@ -999,6 +1001,8 @@ impl PluginManager {
         self.register_with_settings(ActivityPlugin, plugin_settings);
         #[cfg(windows)]
         self.register_with_settings(FileOperationsPlugin, plugin_settings);
+        #[cfg(windows)]
+        self.register_with_settings(DownloadsTriagePlugin, plugin_settings);
         self.register_with_settings(TableUtilityPlugin, plugin_settings);
         self.register_with_settings(CsvPlugin, plugin_settings);
         self.register_with_settings(BatchRenamePlugin, plugin_settings);

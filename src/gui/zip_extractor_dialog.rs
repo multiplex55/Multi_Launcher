@@ -162,6 +162,7 @@ struct WriteReportSummary {
     actual_bytes_written: u64,
     failure: Option<crate::archive::ArchiveWriteFailureKind>,
     cleanup_failed: bool,
+    provenance_warning: bool,
     created_destination_root: bool,
 }
 
@@ -174,6 +175,7 @@ fn summarize_write_report(report: &crate::archive::ArchiveWriteReport) -> WriteR
         actual_bytes_written: report.actual_bytes_written,
         failure: report.failure.as_ref().map(|(kind, _)| *kind),
         cleanup_failed: report.cleanup_failed,
+        provenance_warning: report.provenance_warning.is_some(),
         created_destination_root: report.created_destination_root,
     }
 }
@@ -865,6 +867,9 @@ impl ZipExtractorDialog {
                         }
                         if let Some(failure) = report.failure {
                             ui.colored_label(ui.visuals().error_fg_color, write_failure_label(failure));
+                        }
+                        if report.provenance_warning {
+                            ui.colored_label(ui.visuals().warn_fg_color, "Extraction completed, but its history could not be recorded.");
                         }
                         if report.cleanup_failed {
                             ui.colored_label(
@@ -1904,6 +1909,34 @@ impl ZipExtractorDialog {
         ctx.request_repaint();
     }
 
+    /// Accepted companion entry point; the archive worker revalidates the
+    /// exact snapshot before reading any catalog bytes.
+    #[cfg(windows)]
+    pub(super) fn load_exact_archive(
+        &mut self,
+        expected: crate::file_transfer::EntrySnapshot,
+        suggested_destination: Option<PathBuf>,
+        session: &mut crate::archive::ArchiveSession,
+    ) {
+        let path = expected.path();
+        match session.request_open_exact(expected) {
+            Ok(()) => {
+                let destination = suggested_destination.or_else(|| suggested_extract_destination(&path).ok());
+                self.last_suggested_source = Some(path.clone());
+                self.source_path = Some(path);
+                self.confirmed_token = None;
+                self.status_message = None;
+                if let Some(destination) = destination {
+                    self.select_destination_path(destination, session);
+                } else {
+                    self.set_destination_text(String::new(), session);
+                }
+                self.update_session_snapshot(session.snapshot(), Instant::now());
+            }
+            Err(error) => self.status_message = Some(request_error_label(error).into()),
+        }
+    }
+
     #[cfg(windows)]
     fn load_archive_path(&mut self, path: PathBuf, session: &mut crate::archive::ArchiveSession) {
         let changed = self.last_suggested_source.as_ref() != Some(&path);
@@ -2747,6 +2780,7 @@ mod tests {
                     message.to_owned(),
                 )),
                 cleanup_failed,
+                provenance_warning: None,
             }
         }
 

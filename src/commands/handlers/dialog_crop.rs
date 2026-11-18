@@ -32,6 +32,7 @@ where
         Command::Dialog(DialogCommand::FileLock { path }) => {
             host.open_file_lock_dialog(path.as_deref())
         }
+        Command::Dialog(DialogCommand::DownloadsTriage) => host.open_downloads_triage_dialog(),
         Command::Dialog(DialogCommand::Activity) => host.open_activity_dialog(),
         Command::Dialog(DialogCommand::FileOperationsCenter) => {
             host.open_file_operations_center_dialog()

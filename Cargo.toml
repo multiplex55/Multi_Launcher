@@ -110,7 +110,9 @@ hashlink = "0.8"
 siphasher = "0.3"
 urlencoding = "2"
 url = "2"
+windows-core = "0.58"
 windows = { version = "0.58", features = [
+    "implement",
     "Globalization",
     "Graphics_Imaging",
     "Media_Ocr",

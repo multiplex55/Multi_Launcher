@@ -211,8 +211,34 @@ pub fn inspect_source_tree(
     )
 }
 
+/// Admit the reviewed roots before opening any of their descendants.
+pub(crate) fn inspect_exact_source_tree(
+    expected: &[EntrySnapshot],
+    cancellation: &ScanCancellation,
+) -> Result<SourceTree, SourceTreeError> {
+    let paths: Vec<_> = expected.iter().map(EntrySnapshot::path).collect();
+    inspect_expected_with_budget(
+        &paths,
+        Some(expected),
+        cancellation,
+        Budget {
+            entries: MAX_ENTRIES,
+            bytes: MAX_METADATA_BYTES,
+        },
+    )
+}
+
 fn inspect_with_budget(
     paths: &[PathBuf],
+    cancellation: &ScanCancellation,
+    budget: Budget,
+) -> Result<SourceTree, SourceTreeError> {
+    inspect_expected_with_budget(paths, None, cancellation, budget)
+}
+
+fn inspect_expected_with_budget(
+    paths: &[PathBuf],
+    expected: Option<&[EntrySnapshot]>,
     cancellation: &ScanCancellation,
     mut budget: Budget,
 ) -> Result<SourceTree, SourceTreeError> {
@@ -225,9 +251,14 @@ fn inspect_with_budget(
 
     let mut pending = Vec::with_capacity(paths.len());
     let mut roots = HashSet::new();
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
         check_cancel(cancellation).map_err(|_| SourceTreeError::Cancelled)?;
         let entry = observed(path, inspect_source(path, cancellation))?;
+        if let Some(expected) = expected
+            && !matches!(&entry, SourceObservation::Ready(actual) if expected.get(index) == Some(actual))
+        {
+            return Err(SourceTreeError::Changed(path.clone()));
+        }
         if let SourceObservation::Ready(entry) = &entry
             && !roots.insert(entry.identity())
         {
@@ -297,6 +328,29 @@ fn inspect_with_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downloads_triage_transfer_rejects_replaced_root_before_enumerating_children() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let cancellation = ScanCancellation::new();
+        let expected = inspect_source(&selected, &cancellation).unwrap();
+        std::fs::rename(&selected, root.path().join("old")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::write(selected.join("unrelated.txt"), b"foreign").unwrap();
+        let result = inspect_expected_with_budget(
+            std::slice::from_ref(&selected),
+            Some(std::slice::from_ref(&expected)),
+            &cancellation,
+            Budget {
+                entries: 1,
+                bytes: MAX_METADATA_BYTES,
+            },
+        );
+        assert!(matches!(result, Err(SourceTreeError::Changed(path)) if path == selected));
+    }
+
     use std::fs;
 
     #[test]

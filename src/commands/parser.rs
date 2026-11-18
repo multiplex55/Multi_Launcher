@@ -625,6 +625,14 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         )
         .with_gui_failure_policy());
     }
+    if s.starts_with("downloads_triage:") {
+        if s == "downloads_triage:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::DownloadsTriage));
+        }
+        return Err(CommandError::new("downloads_triage", if action.args.is_some() {
+            "Downloads Triage does not accept a path or content payload"
+        } else { "unknown Downloads Triage command" }).with_gui_failure_policy());
+    }
     if s.starts_with("file_operations:") {
         if s == "file_operations:open" && action.args.is_none() {
             return Ok(Command::Dialog(DialogCommand::FileOperationsCenter));

@@ -2224,6 +2224,7 @@ impl LauncherApp {
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer(),
             Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer(),
             Panel::FileOperationsCenterDialog => self.file_operations_center_root_layer(),
+            Panel::DownloadsTriageDialog => self.downloads_triage_root_layer(),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
             Panel::MkMacroDialog => self
                 .mkmacro_dialog
@@ -4945,6 +4946,8 @@ impl LauncherApp {
             .prepare_open(ctx, &self.hash_generator_dialog);
         self.password_generator_host
             .prepare_open(ctx, &self.password_generator_dialog);
+        #[cfg(windows)]
+        self.downloads_triage_host.prepare_open(ctx, &self.downloads_triage_dialog);
         self.todo_view_host
             .prepare_open(ctx, &self.todo_view_dialog);
         self.file_preview_host
@@ -5065,6 +5068,7 @@ impl LauncherApp {
                 || self.markdown_print_dialog.output.busy()
                 || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
                 || self.file_operations_center_needs_root_ui()
+                || self.downloads_triage_needs_root_ui()
                 || self.calculation_sensitivity_host.needs_root_ui_when_hidden(self.calculation_sensitivity_dialog.open)
                 || self
                     .file_preview_host
@@ -6199,6 +6203,136 @@ impl LauncherApp {
             },
         );
     }
+    pub(super) fn downloads_triage_is_open(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.downloads_triage_dialog.open
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn downloads_triage_root_layer(&self) -> Option<egui::LayerId> {
+        #[cfg(windows)]
+        {
+            self.downloads_triage_host.root_layer()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    fn downloads_triage_needs_root_ui(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.downloads_triage_runtime.needs_poll()
+                || self.downloads_triage_host.needs_root_ui_when_hidden(self.downloads_triage_dialog.open)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    #[cfg(windows)]
+    fn show_downloads_triage(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+
+        if first {
+            self.downloads_triage_runtime.poll(&mut self.downloads_triage_dialog);
+        }
+        if self.downloads_triage_runtime.needs_poll() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let open = self.downloads_triage_dialog.open;
+        if !open || (!root_visible && !self.downloads_triage_host.needs_root_ui_when_hidden(open)) {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.downloads_triage_host.root_layer();
+        let parent_owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx);
+        let keyboard_owner = parent_owner && focused_response_layer(ctx)
+            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::DownloadsTriage, instance } if keyboard_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("downloads-triage", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "downloads-triage/form",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let pinned = self.pinned_panels.contains(&super::Panel::DownloadsTriageDialog);
+        self.downloads_triage_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        let runtime = self.downloads_triage_runtime.snapshot();
+        self.downloads_triage_host.show(
+            ctx,
+            &mut self.downloads_triage_dialog,
+            runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: navigation_owner,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned && (layer.is_none() || keyboard_owner),
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+        );
+    }
+
+
+    #[cfg(windows)]
+    fn complete_downloads_triage(&mut self, ctx: &egui::Context) {
+        use super::downloads_triage_dialog::Command;
+
+        let Some(completion) = self.downloads_triage_host
+            .complete(ctx, &mut self.downloads_triage_dialog)
+        else {
+            return;
+        };
+        for command in completion.commands {
+            if matches!(command, Command::Closed) {
+                self.close_downloads_triage();
+            } else if completion.origin.as_ref().is_some_and(|origin| {
+                self.downloads_triage_host
+                    .accepts_origin(&self.downloads_triage_dialog, origin)
+            }) {
+                if let Some(origin) = completion.origin.as_ref() {
+                    self.dispatch_downloads_triage(ctx, command, origin);
+                }
+                ctx.request_repaint_of(completion.owner_viewport);
+            }
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+    }
+
     pub(super) fn file_operations_center_is_open(&self) -> bool {
         #[cfg(windows)]
         {
@@ -10332,6 +10466,7 @@ impl LauncherApp {
                         | super::Panel::JsonUtilityDialog
                         | super::Panel::CalculationChartDialog
                         | super::Panel::PasswordGeneratorDialog
+                        | super::Panel::DownloadsTriageDialog
                         | super::Panel::FileOperationsCenterDialog
                         | super::Panel::ZipExtractorDialog
                         | super::Panel::RegexTesterDialog
@@ -10419,6 +10554,8 @@ impl LauncherApp {
                 crate::gui::jump_mode::ui::NavigationDialogKind::FileOperations,
                 self.file_operations_center_is_open() && self.file_operations_center_root_layer().is_some(),
             ),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::DownloadsTriage,
+                self.downloads_triage_is_open() && self.downloads_triage_root_layer().is_some()),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MarkdownPrint,
                 self.markdown_print_dialog.current_stamp().is_some() && self.markdown_print_host.root_layer().is_some(),
@@ -10557,6 +10694,7 @@ impl LauncherApp {
                     NavigationDialogKind::MarkdownPrint => self.markdown_print_host.root_layer(),
                     NavigationDialogKind::PasswordGenerator => self.password_generator_host.root_layer(),
                     NavigationDialogKind::FileOperations => self.file_operations_center_root_layer(),
+                    NavigationDialogKind::DownloadsTriage => self.downloads_triage_root_layer(),
                     NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
                     _ => None,
                 }),
@@ -10596,6 +10734,8 @@ impl LauncherApp {
                         self.json_utility_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::PasswordGenerator {
                         self.password_generator_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::DownloadsTriage {
+                        self.downloads_triage_root_layer().and(current)
                     } else if kind == NavigationDialogKind::FileOperations {
                         self.file_operations_center_root_layer().and(current)
                     } else if kind == NavigationDialogKind::MarkdownPrint {
@@ -11316,6 +11456,8 @@ impl LauncherApp {
             self.show_password_generator(&ctx, first_ui_pass, false);
             #[cfg(windows)]
             self.show_file_operations_center(&ctx, first_ui_pass, false);
+            #[cfg(windows)]
+            self.show_downloads_triage(&ctx, first_ui_pass, false);
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
             self.show_note_panels(&ctx, first_ui_pass, false, None);
             self.show_mkmacro_editor(&ctx, first_ui_pass, false);
@@ -13746,6 +13888,8 @@ impl LauncherApp {
         self.show_password_generator(&ctx, first_ui_pass, frame_logic.should_be_visible);
         #[cfg(windows)]
         self.show_file_operations_center(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        #[cfg(windows)]
+        self.show_downloads_triage(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
             &ctx,
             first_ui_pass,
@@ -15860,7 +16004,7 @@ impl LauncherApp {
                 }
                 super::FileSearchUiCommand::OpenFolderSize(path) => {
                     self.folder_size_dialog
-                        .open_from_file_search(ctx, path, origin);
+                        .open_from_parent(ctx, path, origin);
                     folder_focus = true;
                 }
                 super::FileSearchUiCommand::InspectFileUsers(path) => {
@@ -16288,6 +16432,7 @@ impl eframe::App for LauncherApp {
             || self.markdown_print_dialog.output.busy()
             || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
                 || self.file_operations_center_needs_root_ui()
+                || self.downloads_triage_needs_root_ui()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.recording_dialog.needs_setup_root_ui_when_hidden()
@@ -16398,6 +16543,7 @@ impl eframe::App for LauncherApp {
         #[cfg(windows)]
         {
             self.complete_file_operations_center(_ctx);
+            self.complete_downloads_triage(_ctx);
             self.complete_transfer_activity_navigation(_ctx);
         }
         self.complete_quick_notes_dialog(_ctx);
@@ -16648,6 +16794,8 @@ impl LauncherApp {
         self.complete_password_generator(ctx);
         #[cfg(windows)]
         self.complete_file_operations_center(ctx);
+        #[cfg(windows)]
+        self.complete_downloads_triage(ctx);
         self.complete_quick_notes_dialog(ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(ctx);

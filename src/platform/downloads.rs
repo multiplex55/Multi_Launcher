@@ -19,8 +19,19 @@ unsafe extern "system" {
     ) -> HRESULT;
 }
 
-struct Apartment;
-impl Drop for Apartment {
+pub(crate) struct StaApartment(std::marker::PhantomData<std::rc::Rc<()>>);
+
+impl StaApartment {
+    pub(crate) fn initialize() -> io::Result<Self> {
+        // Balance either success result on this same thread.
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .map_err(io::Error::other)?;
+        Ok(Self(std::marker::PhantomData))
+    }
+}
+
+impl Drop for StaApartment {
     fn drop(&mut self) {
         unsafe { CoUninitialize() }
     }
@@ -37,10 +48,7 @@ impl Drop for TaskPath {
 pub(crate) fn downloads_known_folder() -> io::Result<PathBuf> {
     // This function runs on the caller's thread; an incompatible apartment is
     // reported instead of silently changing or borrowing its COM ownership.
-    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
-        .ok()
-        .map_err(io::Error::other)?;
-    let _apartment = Apartment;
+    let _apartment = StaApartment::initialize()?;
     let mut path = TaskPath(PWSTR(std::ptr::null_mut()));
     // SAFETY: COM is initialized and the RAII owner supplies a writable out pointer.
     unsafe {

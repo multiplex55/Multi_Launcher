@@ -59,6 +59,7 @@ pub(super) enum Command {
     Review {
         ticket: DraftTicket,
         sources: Vec<PathBuf>,
+        expected: Option<Arc<[crate::file_transfer::EntrySnapshot]>>,
         draft: TransferDraft,
     },
     Choice {
@@ -134,6 +135,7 @@ pub(super) struct FileOperationsCenterDialog {
     session: u64,
     revision: u64,
     sources: Vec<PathBuf>,
+    expected_sources: Option<Arc<[crate::file_transfer::EntrySnapshot]>>,
     destination: Option<PathBuf>,
     edit: Edit,
     review: Option<Arc<TransferReview>>,
@@ -166,9 +168,26 @@ impl FileOperationsCenterDialog {
         self.open();
         if self.open {
             self.sources = sources;
+            self.expected_sources = None;
             self.changed();
         }
     }
+    pub(super) fn open_with_reviewed_sources(
+        &mut self,
+        entries: Vec<crate::file_transfer::EntrySnapshot>,
+        action: ActionKind,
+        destination: Option<PathBuf>,
+    ) {
+        self.open();
+        if self.open {
+            self.sources = entries.iter().map(|entry| entry.path()).collect();
+            self.expected_sources = Some(entries.into());
+            self.edit.action = action;
+            self.destination = destination;
+            self.changed();
+        }
+    }
+
     fn changed(&mut self) {
         if let Some(next) = self.revision.checked_add(1) {
             self.revision = next;
@@ -268,8 +287,14 @@ impl FileOperationsCenterDialog {
             return false;
         }
         match kind {
-            PickerKind::Files => self.sources = paths,
-            PickerKind::Folder => self.sources = vec![paths[0].clone()],
+            PickerKind::Files => {
+                self.sources = paths;
+                self.expected_sources = None;
+            }
+            PickerKind::Folder => {
+                self.sources = vec![paths[0].clone()];
+                self.expected_sources = None;
+            }
             PickerKind::Destination => self.destination = Some(paths[0].clone()),
         }
         self.changed();
@@ -427,6 +452,7 @@ impl HostedUtilityDialog for FileOperationsCenterDialog {
                 Some(draft) if !self.sources.is_empty() => Command::Review {
                     ticket,
                     sources: self.sources.clone(),
+                    expected: self.expected_sources.clone(),
                     draft,
                 },
                 _ => return Vec::new(),

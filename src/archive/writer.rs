@@ -95,6 +95,7 @@ pub(crate) struct ArchiveWriteReport {
     pub actual_bytes_written: u64,
     pub failure: Option<(ArchiveWriteFailureKind, String)>,
     pub cleanup_failed: bool,
+    pub provenance_warning: Option<String>,
 }
 
 #[derive(Clone)]
@@ -336,7 +337,16 @@ impl ArchiveWriteJob {
             destination,
             ArchiveIoControl::new(cancellation),
             WriterTestHooks::default(),
+            None,
         )
+    }
+    pub(crate) fn start_shared_with_provenance(
+        source: NativeArchiveSource, catalog: Arc<ArchiveCatalog>, plan: ExtractionPlan,
+        destination: NativeArchiveTarget, cancellation: ScanCancellation,
+        profile: Option<crate::platform::app_data::AppDataRoot>,
+    ) -> io::Result<Self> {
+        Self::start_with_shared_control_and_hooks(source, catalog, plan, destination,
+            ArchiveIoControl::new(cancellation), WriterTestHooks::default(), profile)
     }
 
     #[cfg(test)]
@@ -347,6 +357,7 @@ impl ArchiveWriteJob {
         destination: NativeArchiveTarget,
         cancellation: ScanCancellation,
         gate: Arc<WriterTestGate>,
+        profile: Option<crate::platform::app_data::AppDataRoot>,
     ) -> io::Result<Self> {
         Self::start_with_shared_control_and_hooks(
             source,
@@ -358,6 +369,7 @@ impl ArchiveWriteJob {
                 before_flush: Some(gate),
                 ..WriterTestHooks::default()
             },
+            profile,
         )
     }
 
@@ -393,6 +405,7 @@ impl ArchiveWriteJob {
             destination.into(),
             io,
             test_hooks,
+            None,
         )
     }
 
@@ -403,6 +416,7 @@ impl ArchiveWriteJob {
         destination: NativeArchiveTarget,
         io: ArchiveIoControl,
         test_hooks: WriterTestHooks,
+        provenance_root: Option<crate::platform::app_data::AppDataRoot>,
     ) -> io::Result<Self> {
         let run_id = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
         let revision = plan.source().revision;
@@ -421,9 +435,13 @@ impl ArchiveWriteJob {
             .name(format!("archive-write-{run_id}"))
             .spawn(move || {
                 let mut report = ArchiveWriteReport::empty(run_id, revision);
+                let mut source = source;
+                let selected: std::collections::HashSet<_> = plan.outputs().iter().filter_map(|output| output.source_entry()).collect();
+                let expected_files: std::collections::HashSet<_> = plan.files().filter_map(|output| output.source_entry()).collect();
+                let full = !catalog.entries().is_empty() && catalog.entries().iter().all(|entry| selected.contains(&entry.id()));
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     execute_pipeline(
-                        source,
+                        &mut source,
                         &catalog,
                         plan,
                         destination,
@@ -449,6 +467,18 @@ impl ArchiveWriteJob {
                     } else {
                         ArchiveWriteStatus::Partial
                     };
+                }
+                if let Some(profile) = provenance_root {
+                    let actual: std::collections::HashSet<_> = report.published_entries.iter().copied().collect();
+                    if report.status == ArchiveWriteStatus::Completed && report.failure.is_none()
+                        && !report.cleanup_failed && report.unstarted_entries.is_empty() && actual == expected_files {
+                        let coverage = if full { super::provenance::ArchiveCoverage::Full } else { super::provenance::ArchiveCoverage::Selection };
+                        let saved = source.recheck_source_stamp().map_err(|e| e.to_string()).and_then(|stamp|
+                            super::provenance::ArchiveProvenance::record(&profile, stamp, coverage, run_id).map_err(|e| e.to_string()));
+                        if let Err(error) = saved {
+                            report.provenance_warning = Some(format!("Extraction completed, but its history could not be recorded: {error}"));
+                        }
+                    }
                 }
                 let progress = worker_control.progress();
                 report.phase = progress.phase;
@@ -547,6 +577,7 @@ impl ArchiveWriteJob {
                         "archive writer worker panicked".to_owned(),
                     )),
                     cleanup_failed: false,
+                    provenance_warning: None,
                 }
             }
         };
@@ -585,6 +616,7 @@ impl ArchiveWriteReport {
             actual_bytes_written: 0,
             failure: None,
             cleanup_failed: false,
+            provenance_warning: None,
         }
     }
 }
@@ -620,7 +652,7 @@ impl PipelineFailure {
 }
 
 fn execute_pipeline(
-    mut source: NativeArchiveSource,
+    source: &mut NativeArchiveSource,
     catalog: &ArchiveCatalog,
     plan: ExtractionPlan,
     destination: NativeArchiveTarget,

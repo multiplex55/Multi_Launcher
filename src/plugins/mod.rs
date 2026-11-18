@@ -1,6 +1,8 @@
 pub mod activity;
 #[cfg(windows)]
 pub mod file_operations;
+#[cfg(windows)]
+pub mod downloads_triage;
 pub mod asciiart;
 pub mod base_convert;
 pub mod batch_rename;

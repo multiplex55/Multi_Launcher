@@ -341,6 +341,10 @@ impl DialogCommandHost for LauncherApp {
             .request_open(&self.egui_ctx, path.map(std::path::Path::to_path_buf));
     }
 
+    fn open_downloads_triage_dialog(&mut self) {
+        self.focus_panel(super::Panel::DownloadsTriageDialog);
+    }
+
     fn open_file_operations_center_dialog(&mut self) {
         self.focus_panel(super::Panel::FileOperationsCenterDialog);
     }

@@ -53,6 +53,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "favorites",
     "file-preview",
     "file-operations-center",
+    "downloads-triage",
     "file-lock",
     "file-search",
     "folder-alias",

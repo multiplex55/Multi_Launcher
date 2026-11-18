@@ -7,8 +7,8 @@ use super::file_operations_center_dialog::{
 use crate::file_operations::ScanCancellation;
 use crate::file_transfer::{
     ApprovedTransferPlan, PreparedReceiptRetry, PreparedReceiptUndo, ReceiptDetail, ReceiptSummary,
-    TransferHistoryError, TransferHistoryQuery, TransferHistoryValue, TransferJobs, TransferReview,
-    inspect_source_tree, review_transfer,
+    SourceObservation, TransferHistoryError, TransferHistoryQuery, TransferHistoryValue,
+    TransferJobs, TransferReview, inspect_exact_source_tree, inspect_source_tree, review_transfer,
 };
 use eframe::egui;
 use std::num::NonZeroIsize;
@@ -257,12 +257,33 @@ impl FileOperationsCenterRuntime {
             Command::Review {
                 ticket,
                 sources,
+                expected,
                 draft,
             } if ticket == current => {
                 self.run(ctx, dialog, None, move |cancel| {
-                    let result = inspect_source_tree(&sources, cancel)
+                    let observation = match expected.as_deref() {
+                        Some(entries) => inspect_exact_source_tree(entries, cancel),
+                        None => inspect_source_tree(&sources, cancel),
+                    };
+                    let result = observation
                         .map_err(|error| error.to_string())
                         .and_then(|tree| {
+                            if let Some(expected) = expected {
+                                let observed = tree
+                                    .entries()
+                                    .iter()
+                                    .filter(|entry| entry.parent().is_none())
+                                    .map(|entry| match entry.observation() {
+                                        SourceObservation::Ready(source) => Some(source),
+                                        SourceObservation::Unavailable(_) => None,
+                                    });
+                                if !observed.eq(expected.iter().map(Some)) {
+                                    return Err(
+                                        "A selected Downloads item changed. Refresh its review."
+                                            .into(),
+                                    );
+                                }
+                            }
                             review_transfer(Arc::new(tree), draft, cancel)
                                 .map_err(|error| error.to_string())
                         });
@@ -425,6 +446,7 @@ mod tests {
         let review_first = Command::Review {
             ticket: dialog.ticket(),
             sources: vec![first],
+            expected: None,
             draft: dialog.draft().unwrap(),
         };
         controller.dispatch(&ctx, &mut dialog, &mut jobs, review_first);
@@ -443,6 +465,7 @@ mod tests {
         let review_second = Command::Review {
             ticket: dialog.ticket(),
             sources: vec![second],
+            expected: None,
             draft: dialog.draft().unwrap(),
         };
         controller.dispatch(&ctx, &mut dialog, &mut jobs, review_second);

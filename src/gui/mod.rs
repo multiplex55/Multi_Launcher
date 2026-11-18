@@ -46,6 +46,10 @@ mod password_generator_dialog;
 #[cfg(windows)]
 mod file_operations_center_dialog;
 #[cfg(windows)]
+mod downloads_triage_dialog;
+#[cfg(windows)]
+mod downloads_triage_runtime;
+#[cfg(windows)]
 mod file_operations_center_runtime;
 pub(crate) mod hotfolder_dialog;
 pub(crate) mod hotfolder_dispatch;
@@ -759,6 +763,7 @@ pub enum Panel {
     HashGeneratorDialog,
     PasswordGeneratorDialog,
     FileOperationsCenterDialog,
+    DownloadsTriageDialog,
     SnippetPromptDialog,
     MacroDialog,
     MkMacroDialog,
@@ -839,6 +844,7 @@ impl Panel {
             Self::HashGeneratorDialog => "Hash Generator",
             Self::PasswordGeneratorDialog => "Password Generator",
             Self::FileOperationsCenterDialog => "File Operations Center",
+            Self::DownloadsTriageDialog => "Downloads Triage",
             Self::SnippetPromptDialog => "Snippet Prompt",
             Self::MacroDialog => "Macros",
             Self::MkMacroDialog => "MKMacro",
@@ -920,6 +926,7 @@ struct PanelStates {
     hash_generator_dialog: bool,
     password_generator_dialog: bool,
     file_operations_center_dialog: bool,
+    downloads_triage_dialog: bool,
     snippet_prompt_dialog: bool,
     macro_dialog: bool,
     mkmacro_dialog: bool,
@@ -1300,6 +1307,12 @@ pub struct LauncherApp {
     file_operations_center_host: utility_window_host::UtilityWindowHost<file_operations_center_dialog::FileOperationsCenterDialog>,
     #[cfg(windows)]
     file_operations_center_runtime: file_operations_center_runtime::FileOperationsCenterRuntime,
+    #[cfg(windows)]
+    downloads_triage_dialog: downloads_triage_dialog::DownloadsTriageDialog,
+    #[cfg(windows)]
+    downloads_triage_host: utility_window_host::UtilityWindowHost<downloads_triage_dialog::DownloadsTriageDialog>,
+    #[cfg(windows)]
+    downloads_triage_runtime: downloads_triage_runtime::DownloadsTriageRuntime,
     file_preview_host: utility_window_host::FilePreviewWindowHost,
     note_templates_host: utility_window_host::NoteTemplatesWindowHost,
     unused_assets_host: utility_window_host::UnusedAssetsWindowHost,
@@ -3017,6 +3030,14 @@ impl LauncherApp {
     }
 
     #[cfg(windows)]
+    fn close_downloads_triage(&mut self) {
+        self.downloads_triage_runtime.close_view();
+        self.downloads_triage_dialog.close();
+        self.downloads_triage_host.close_from_app(&self.egui_ctx);
+        self.panel_stack.retain(|panel| *panel != Panel::DownloadsTriageDialog);
+    }
+
+    #[cfg(windows)]
     fn close_file_operations_center(&mut self) {
         self.file_operations_center_runtime.close_view();
         self.file_operations_center_dialog.close();
@@ -4017,7 +4038,7 @@ impl LauncherApp {
         utility_presentation_manager.install_in_context(ctx);
         #[cfg(windows)]
         let archive_session =
-            crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+            crate::archive::ArchiveSession::with_data_root(crate::archive::ArchiveLimits::default(), data_root.clone());
         #[cfg(windows)]
         let zip_creation_session =
             crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
@@ -4249,6 +4270,12 @@ impl LauncherApp {
             file_operations_center_host: Default::default(),
             #[cfg(windows)]
             file_operations_center_runtime: Default::default(),
+            #[cfg(windows)]
+            downloads_triage_dialog: Default::default(),
+            #[cfg(windows)]
+            downloads_triage_host: Default::default(),
+            #[cfg(windows)]
+            downloads_triage_runtime: Default::default(),
             file_preview_host: Default::default(),
             note_templates_host: Default::default(),
             unused_assets_host: Default::default(),
@@ -5089,7 +5116,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 75] = [
+    const TRACKED_PANELS: [Panel; 76] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -5105,6 +5132,7 @@ impl LauncherApp {
         Panel::HashGeneratorDialog,
         Panel::PasswordGeneratorDialog,
         Panel::FileOperationsCenterDialog,
+        Panel::DownloadsTriageDialog,
         Panel::SnippetPromptDialog,
         Panel::MacroDialog,
         Panel::MkMacroDialog,
@@ -5184,6 +5212,7 @@ impl LauncherApp {
             Panel::HashGeneratorDialog => self.hash_generator_dialog.open,
             Panel::PasswordGeneratorDialog => self.password_generator_dialog.open,
             Panel::FileOperationsCenterDialog => self.file_operations_center_is_open(),
+            Panel::DownloadsTriageDialog => self.downloads_triage_is_open(),
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.is_open(),
             Panel::MacroDialog => self.macro_dialog.open,
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
@@ -5272,6 +5301,7 @@ impl LauncherApp {
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer().is_some(),
             Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer().is_some(),
             Panel::FileOperationsCenterDialog => self.file_operations_center_root_layer().is_some(),
+            Panel::DownloadsTriageDialog => self.downloads_triage_root_layer().is_some(),
             Panel::TodoViewDialog => self.todo_view_host.root_layer().is_some(),
             Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer().is_some(),
             Panel::ImagePanel => self
@@ -5676,6 +5706,10 @@ impl LauncherApp {
                 #[cfg(windows)]
                 self.close_file_operations_center();
             }
+            Panel::DownloadsTriageDialog => {
+                #[cfg(windows)]
+                self.close_downloads_triage();
+            }
             Panel::FileSearchPreviewDialog => {
                 self.file_search_dialog.preview_dialog.request_close();
             }
@@ -6038,6 +6072,10 @@ impl LauncherApp {
                 #[cfg(windows)]
                 self.close_file_operations_center();
             }
+            Panel::DownloadsTriageDialog => {
+                #[cfg(windows)]
+                self.close_downloads_triage();
+            }
             Panel::FileSearchPreviewDialog => {
                 self.file_search_dialog.preview_dialog.request_close();
             }
@@ -6381,6 +6419,7 @@ impl LauncherApp {
                 #[cfg(windows)]
                 self.file_operations_center_dialog.ensure_open();
             }
+            Panel::DownloadsTriageDialog => {}
             Panel::FileSearchPreviewDialog => {}
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
@@ -6838,6 +6877,23 @@ impl LauncherApp {
             self.open_unused_assets_from_origin(&utility_host::ChildOpenOrigin::<()>::Root);
         } else if panel == Panel::TodoViewDialog {
             self.open_todo_view_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
+        } else if panel == Panel::DownloadsTriageDialog {
+            #[cfg(windows)]
+            {
+                let was_open = self.downloads_triage_dialog.open;
+                self.downloads_triage_dialog.ensure_open();
+                if !was_open && self.downloads_triage_dialog.open {
+                    let session = self.downloads_triage_dialog.session();
+                    match crate::platform::app_data::AppDataRoot::from_settings_path(&self.settings_path) {
+                        Ok(root) => self.downloads_triage_runtime.open_view(&self.egui_ctx, session, root),
+                        Err(error) => {
+                            self.downloads_triage_dialog.set_notice(session, format!("Could not resolve Downloads profile ({error})."));
+                        }
+                    }
+                }
+                let presentation = self.downloads_triage_host.open_from_origin(&self.egui_ctx, &self.downloads_triage_dialog, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
+                if presentation == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+            }
         } else if panel == Panel::FileOperationsCenterDialog {
             #[cfg(windows)]
             self.open_file_operations_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
@@ -7064,6 +7120,8 @@ impl LauncherApp {
         check!(password_generator_dialog, Panel::PasswordGeneratorDialog);
         #[cfg(windows)]
         check!(file_operations_center_dialog, Panel::FileOperationsCenterDialog);
+        #[cfg(windows)]
+        check!(downloads_triage_dialog, Panel::DownloadsTriageDialog);
         check!(snippet_prompt_dialog, Panel::SnippetPromptDialog);
         check!(macro_dialog, Panel::MacroDialog);
         check!(mkmacro_dialog, Panel::MkMacroDialog);

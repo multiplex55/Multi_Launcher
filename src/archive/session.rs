@@ -118,6 +118,7 @@ pub(crate) struct ArchiveSession {
     session_id: u64,
     session_generation: u64,
     limits: ArchiveLimits,
+    provenance_root: Option<crate::platform::app_data::AppDataRoot>,
     next_source_revision: u64,
     source_revision: Option<ArchiveRevision>,
     source: Option<NativeArchiveSource>,
@@ -206,6 +207,11 @@ impl Drop for PreparationGateRelease {
     }
 }
 
+enum OpenSource {
+    Path(PathBuf),
+    Exact(crate::file_transfer::EntrySnapshot),
+}
+
 enum ActiveWorker {
     Preparation(PreparationJob),
     Extraction {
@@ -272,6 +278,7 @@ impl ArchiveSession {
             session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             session_generation: 0,
             limits,
+            provenance_root: None,
             next_source_revision: 0,
             source_revision: None,
             source: None,
@@ -301,7 +308,19 @@ impl ArchiveSession {
         }
     }
 
+    pub(crate) fn with_data_root(limits: ArchiveLimits, profile: crate::platform::app_data::AppDataRoot) -> Self {
+        let mut session = Self::new(limits);
+        session.provenance_root = Some(profile);
+        session
+    }
+
     pub(crate) fn request_open(&mut self, path: PathBuf) -> Result<(), ArchiveSessionRequestError> {
+        self.request_open_source(OpenSource::Path(path))
+    }
+    pub(crate) fn request_open_exact(&mut self, expected: crate::file_transfer::EntrySnapshot) -> Result<(), ArchiveSessionRequestError> {
+        self.request_open_source(OpenSource::Exact(expected))
+    }
+    fn request_open_source(&mut self, requested: OpenSource) -> Result<(), ArchiveSessionRequestError> {
         if self.active.is_some() {
             return Err(ArchiveSessionRequestError::Busy);
         }
@@ -347,7 +366,11 @@ impl ArchiveSession {
                 let result = if worker_cancellation.is_cancelled() {
                     Err(ArchiveSessionFailure::Cancelled)
                 } else {
-                    match NativeArchiveSource::open(&path, source_revision, limits) {
+                    let admission = match requested {
+                        OpenSource::Path(path) => NativeArchiveSource::open(&path, source_revision, limits),
+                        OpenSource::Exact(expected) => NativeArchiveSource::open_exact(&expected, source_revision, limits),
+                    };
+                    match admission {
                         Err(_) if worker_cancellation.is_cancelled() => {
                             Err(ArchiveSessionFailure::Cancelled)
                         }
@@ -626,13 +649,14 @@ impl ArchiveSession {
                 destination,
                 cancellation,
                 gate,
+                self.provenance_root.clone(),
             )
         } else {
-            ArchiveWriteJob::start_shared(source, catalog, preview.plan, destination, cancellation)
+            ArchiveWriteJob::start_shared_with_provenance(source, catalog, preview.plan, destination, cancellation, self.provenance_root.clone())
         };
         #[cfg(not(test))]
         let job =
-            ArchiveWriteJob::start_shared(source, catalog, preview.plan, destination, cancellation);
+            ArchiveWriteJob::start_shared_with_provenance(source, catalog, preview.plan, destination, cancellation, self.provenance_root.clone());
         match job {
             Ok(job) => {
                 self.active = Some(ActiveWorker::Extraction {
@@ -1225,6 +1249,73 @@ mod tests {
             .request_open(fixture.archive.clone())
             .expect("start asynchronous held-source admission and catalog");
         settle(session)
+    }
+
+    #[test]
+    fn archive_provenance_writer_records_full_after_success() {
+        let fixture = Fixture::new(&[("one.txt", b"one"), ("two.txt", b"two")]);
+        let profile = crate::platform::app_data::AppDataRoot::from_path(fixture._temp.path());
+        let expected = crate::file_transfer::inspect_source(&fixture.archive, &ScanCancellation::new()).unwrap();
+        let mut session = ArchiveSession::with_data_root(ArchiveLimits::default(), profile.clone());
+        session.request_open_exact(expected.clone()).unwrap();
+        assert_eq!(settle(&mut session).phase, ArchiveSessionPhase::Ready);
+        session.select_destination(fixture.destination.clone()).unwrap();
+        session.select_all().unwrap();
+        session.request_preview().unwrap();
+        let preview = settle(&mut session).preview.unwrap();
+        session.confirm(preview.token).unwrap();
+        let completed = settle(&mut session);
+        assert_eq!(completed.write_report.unwrap().status, super::super::writer::ArchiveWriteStatus::Completed);
+        assert_eq!(super::super::provenance::ArchiveProvenance::read(&profile).unwrap().coverage_for(&expected), Some(super::super::provenance::ArchiveCoverage::Full));
+    }
+
+    #[test]
+    fn archive_provenance_writer_records_only_actual_selection() {
+        let fixture = Fixture::new(&[("one.txt", b"one"), ("two.txt", b"two")]);
+        let profile = crate::platform::app_data::AppDataRoot::from_path(fixture._temp.path());
+        let expected = crate::file_transfer::inspect_source(&fixture.archive, &ScanCancellation::new()).unwrap();
+        let mut session = ArchiveSession::with_data_root(ArchiveLimits::default(), profile.clone());
+        session.request_open_exact(expected.clone()).unwrap();
+        let opened = settle(&mut session);
+        session.select_destination(fixture.destination.clone()).unwrap();
+        session.set_selection(selected(opened.catalog.as_ref().unwrap(), &[0])).unwrap();
+        session.request_preview().unwrap();
+        let preview = settle(&mut session).preview.unwrap();
+        assert_eq!(super::super::provenance::ArchiveProvenance::read(&profile).unwrap().coverage_for(&expected), None);
+        session.confirm(preview.token).unwrap();
+        let completed = settle(&mut session);
+        assert_eq!(completed.write_report.unwrap().status, super::super::writer::ArchiveWriteStatus::Completed);
+        assert_eq!(super::super::provenance::ArchiveProvenance::read(&profile).unwrap().coverage_for(&expected), Some(super::super::provenance::ArchiveCoverage::Selection));
+    }
+
+    #[test]
+    fn session_exact_archive_stale_snapshot_is_rejected_before_catalog() {
+        let fixture = Fixture::new(&[("payload.txt", b"original")]);
+        let expected = crate::file_transfer::inspect_source(&fixture.archive, &ScanCancellation::new()).unwrap();
+        fs::write(&fixture.archive, b"different bytes and length").unwrap();
+        let mut session = ArchiveSession::new(ArchiveLimits::default());
+        session.request_open_exact(expected).unwrap();
+        let result = settle(&mut session);
+        assert_eq!(result.phase, ArchiveSessionPhase::Failed);
+        assert_eq!(result.failure, Some(ArchiveSessionFailure::SourceAdmission));
+        assert!(result.catalog.is_none());
+    }
+
+    #[test]
+    fn session_exact_archive_prepares_without_extracting() {
+        let fixture = Fixture::new(&[("payload.txt", b"original")]);
+        let expected = crate::file_transfer::inspect_source(&fixture.archive, &ScanCancellation::new()).unwrap();
+        let mut session = ArchiveSession::new(ArchiveLimits::default());
+        session.request_open_exact(expected).unwrap();
+        let opened = settle(&mut session);
+        assert_eq!(opened.phase, ArchiveSessionPhase::Ready);
+        assert!(session.source.as_ref().unwrap().recheck_source_stamp().is_ok());
+        session.select_destination(fixture.destination.clone()).unwrap();
+        session.set_selection(selected(opened.catalog.as_ref().unwrap(), &[0])).unwrap();
+        session.request_preview().unwrap();
+        let preview = settle(&mut session);
+        assert_eq!(preview.phase, ArchiveSessionPhase::PreviewReady);
+        assert!(!fixture.destination.join("payload.txt").exists());
     }
 
     #[test]

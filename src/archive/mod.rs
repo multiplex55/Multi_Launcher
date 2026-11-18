@@ -17,6 +17,10 @@ pub(crate) use native::print_publication;
 pub(crate) use native::transfer_native;
 #[cfg(windows)]
 mod native_io;
+#[cfg(windows)]
+mod provenance;
+#[cfg(windows)]
+pub(crate) use provenance::{ArchiveCoverage, ArchiveProvenance};
 mod plan;
 #[cfg(windows)]
 mod session;

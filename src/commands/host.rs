@@ -77,6 +77,7 @@ pub trait DialogCommandHost {
     fn open_hash_generator_dialog(&mut self) {}
     fn open_activity_dialog(&mut self) {}
     fn open_file_operations_center_dialog(&mut self) {}
+    fn open_downloads_triage_dialog(&mut self) {}
     fn open_file_lock_dialog(&mut self, _path: Option<&std::path::Path>) {}
     fn run_paste_sequence(
         &mut self,

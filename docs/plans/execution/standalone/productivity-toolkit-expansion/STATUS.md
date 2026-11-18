@@ -78,7 +78,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-D1 | complete |
 | M9-D2 | complete |
 | M10-A | complete |
-| M10-B | pending |
+| M10-B | complete |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
 | M13-A | pending |
@@ -588,3 +588,14 @@ The current Windows Downloads known-folder resolver honors redirection, retrieve
 The scan captures native Created and Modified fields, type, size, conventional unfinished names, older installers and same-size suspected peers. At most 512 guarded Zone probes read up to 16 KiB each and 512 KiB total; valid Internet/Restricted attachment metadata can show a web host. Other origins are Unknown. The profile store atomically saves the selected root, destination preference and at most 10,000 review marks. An exact leaf, ancestor identities and creation stamps, item identity and full observed revision bind each mark. Read-only open leaves an absent store absent and retains malformed data for diagnosis.
 
 The initial six native enumeration checks passed (`697e6fbd-a3a2-4266-ab6b-e90d2be21810`). The final 12 checks passed (`699a639a-3acb-4370-8d2a-009c40f2535b`), including real disposable Zone.Identifier input, shallow native cap, strict wrapper parity, explicit missing root, durable review reopening and rejection after edit/replacement. The complete slice received independent source review. No user's Downloads directory was scanned for verification. M10-B will wire the view and explicit actions.
+
+
+### M10-B hosted Downloads Triage and selected actions
+
+The Windows `downloads` command opens one dockable utility. Open or explicit Refresh alone scans the proposed root. The view shows partial and skipped observations, Created and Modified metadata, search, independent sort and grouping, review states, and incomplete, large, installer, archive and duplicate views. Choosing a different root or saved destination is explicit. The runtime publishes scan generations and rejects stale or broadened action selections. Hidden work retires without an idle repaint loop.
+
+Open and Reveal use the current guarded item. Rename uses a held no-replace file or directory operation. Compare independently verifies the two selected regular primary streams and earns only the main-data duplicate label. Copy/Move reuse File Operations with exact reviewed native roots admitted before descendant enumeration and a separate Review, Queue and Start. ZIP intake compares held source and parent evidence before catalog reads, and extraction retains the existing Preview and Confirm. Only completed writer output with rechecked archive revision can record full or selected physical coverage. The profile store retains both count and byte bounds and uses a distinct warning if the output succeeds and history could not be saved.
+
+Recycle requires confirmation of the exact entries, the owning window, and the Shell recycle-only and no-connected-elements flags. The adapter rechecks the item immediately in the Shell pre-delete callback and requires returned Recycle Bin evidence for success. The supported Shell path/PIDL handoff has no documented atomic identity fence between its callback and deletion. The adapter keeps native Restore semantics and reports uncertain or partial outcomes.
+
+The 30 targeted tests passed (`e07a5af5-2716-412a-b147-750bae8cefd0`). The final six checks passed (`a698d911-3780-4f8a-a0b8-5c4da3b6679f`), including the byte-cap continuation and an actual exact HTML fixture sent to the Windows Recycle Bin, with its unselected companion folder preserved. A separately cancelled request attempted zero items. The ordinary fast-dev desktop executable built. It opened in an isolated fixture profile with both Paste Sequences shortcuts disabled. Native automation reached the launcher query but the foreground process check prevented command entry, so the reviewed-to-move, ZIP, Reveal and Recycle-confirmation window sequence remains unverified. The four fixture files remained present and the destination remained empty. No user's Downloads directory was read or used.

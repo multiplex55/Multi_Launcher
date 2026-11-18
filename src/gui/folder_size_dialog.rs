@@ -613,11 +613,11 @@ impl FolderSizeDialogState {
     #[cfg(test)]
     pub(super) fn test_host_focus_pending(&self) -> bool { self.host_focus }
 
-    pub(super) fn open_from_file_search(
+    pub(super) fn open_from_parent<S: PartialEq>(
         &mut self,
         ctx: &egui::Context,
         path: PathBuf,
-        receipt: super::file_search_window_host::FileSearchOpenReceipt,
+        receipt: super::utility_host::AcceptedParentOpen<S>,
     ) {
         let was_open = self.open;
         self.open();
@@ -645,7 +645,7 @@ impl FolderSizeDialogState {
             }
             Ok(_) => {}
             Err(error) => {
-                self.notice = Some(format!("The File Search folder is not usable: {error:?}."))
+                self.notice = Some(format!("The selected folder is not usable: {error:?}."))
             }
         }
     }
