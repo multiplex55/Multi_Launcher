@@ -32,6 +32,8 @@ const COLORS: [[u8; 4]; 8] = [
     [90, 95, 110, 255],
 ];
 
+pub(crate) fn default_series_color(index: usize) -> [u8; 4] { COLORS[index % COLORS.len()] }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ChartKind {
@@ -623,6 +625,21 @@ mod tests {
         assert_eq!(left[2], right[0]);
         assert_eq!(scene.hit([right[0], left[3]], 0.0).unwrap().row, 1);
         assert_eq!(scene.hit([right[2], right[3]], 0.0).unwrap().row, 1);
+    }
+
+    #[test]
+    fn histogram_distribution_style_is_independent_of_ordinary_series_style() {
+        use distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        let mut definition = chart_definition_for(ChartKind::Histogram);
+        let vector = ChartVectorReference::Named { name: "values".into() };
+        let spec = DistributionDefinition { vector: vector.clone(), bins: DistributionBins::Count { count: 2 }, scale: DistributionScale::Count };
+        definition.distribution = Some(spec.clone());
+        let style = |key, color| options::SeriesStyle { key, color, line: options::LineStyle::Solid, marker: options::MarkerStyle::Auto, thickness: options::FiniteValue::try_from(2.0).unwrap() };
+        definition.options.styles.push(style(options::SeriesKey::Vector(vector.clone()), [0, 0, 255, 255]));
+        definition.options.styles.push(style(options::SeriesKey::Distribution(vector), [255, 0, 0, 255]));
+        let dataset = ChartDataset::from_histogram("values", &[1.0, 2.0], &spec).unwrap();
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(scene.primitives.iter().any(|primitive| matches!(primitive, ScenePrimitive::Rect { color, .. } if *color == [255, 0, 0, 255])));
     }
 
     #[test]
@@ -1488,7 +1505,7 @@ impl ChartDataset {
         width: u32,
         height: u32,
     ) -> Result<Option<ChartScene>, String> {
-        definition.options.validate(&definition.source)?;
+        definition.options.validate(&definition.source, definition.distribution.as_ref().map(|distribution| &distribution.vector))?;
         definition.validate_distribution()?;
         if definition.options.is_default() && !matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
             return self.scene(definition.kind, view, width, height);
@@ -1842,7 +1859,7 @@ impl ChartDataset {
             .enumerate()
         {
             let key = definition.and_then(|definition| if matches!(kind, ChartKind::Histogram | ChartKind::Cumulative) {
-                definition.distribution.as_ref().map(|distribution| options::SeriesKey::Vector(distribution.vector.clone()))
+                definition.distribution.as_ref().map(|distribution| options::SeriesKey::Distribution(distribution.vector.clone()))
             } else { match &definition.source {
                 ChartSource::Vectors { y, .. } => y.get(series_index).cloned().map(options::SeriesKey::Vector),
                 ChartSource::Sensitivity { outputs } => outputs.get(series_index).cloned().map(options::SeriesKey::Sensitivity),

@@ -1,7 +1,7 @@
 //! Read-only chart companion; actions are committed by its retained utility host.
 use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use super::utility_host::UtilityPresentation;
-use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, ChartReferenceValue, ChartFiniteValue, ChartAxisBounds, ChartAxisOptions, ChartAxisScale, ChartAxisTicks, ChartOptions, ChartLegendPlacement, DistributionBins, DistributionData, DistributionDefinition, DistributionScale, ResolvedReferenceLine, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
+use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, ChartReferenceValue, ChartReferenceAxis, ChartReferenceLine, ChartSeriesKey, ChartSeriesStyle, ChartLineStyle, ChartMarkerStyle, ChartFiniteValue, ChartAxisBounds, ChartAxisOptions, ChartAxisScale, ChartAxisTicks, ChartOptions, ChartLegendPlacement, DistributionBins, DistributionData, DistributionDefinition, DistributionScale, ResolvedReferenceLine, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
 use eframe::egui;
 use std::sync::Arc;
 
@@ -61,6 +61,116 @@ fn axis_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::JumpMod
     });
 }
 
+fn reference_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::JumpModeScope>, draft: &mut ChartOptionsDraft, runtime: &ChartRuntime, order: &mut u64, actions: &mut ChartActions, active: bool) {
+    use super::jump_mode::TargetKind;
+    let choices = scalar_choices(runtime);
+    ui.label("Reference lines");
+    let mut remove = None;
+    for reference in &mut draft.references {
+        ui.push_id(("chart-reference", reference.id), |ui| ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (axis, label) in [(ChartReferenceAxis::X, "Vertical X"), (ChartReferenceAxis::Y, "Horizontal Y")] {
+                    let response = ui.selectable_value(&mut reference.axis, axis, label);
+                    chart_target(scope, ui, &response, &format!("options/reference/{}/axis/{label}", reference.id), label, TargetKind::Selectable, order);
+                }
+                for (named, label) in [(false, "Literal"), (true, "Named scalar")] {
+                    let response = ui.selectable_value(&mut reference.named, named, label);
+                    chart_target(scope, ui, &response, &format!("options/reference/{}/kind/{label}", reference.id), label, TargetKind::Selectable, order);
+                    #[cfg(test)] actions.controls.push((format!("reference/{}/kind/{label}", reference.id), response.rect));
+                    if response.changed() { reference.value = if named { choices.first().map_or_else(String::new, |choice| choice.0.clone()) } else { "0".into() }; }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Label");
+                let response = ui.add(egui::TextEdit::singleline(&mut reference.label).char_limit(128).desired_width(120.0));
+                chart_target(scope, ui, &response, &format!("options/reference/{}/label", reference.id), "Reference label", TargetKind::TextEntry, order);
+                #[cfg(test)] actions.controls.push((format!("reference/{}/label", reference.id), response.rect));
+                let response = ui.button("Remove"); chart_target(scope, ui, &response, &format!("options/reference/{}/remove", reference.id), "Remove reference", TargetKind::Button, order);
+                #[cfg(test)] actions.controls.push((format!("reference/{}/remove", reference.id), response.rect));
+                if active && response.clicked() { remove = Some(reference.id); }
+            });
+            if reference.named {
+                ui.label("Choose a current scalar:");
+                let search = ui.add(egui::TextEdit::singleline(&mut reference.search).hint_text("Search scalar names").char_limit(128));
+                chart_target(scope, ui, &search, &format!("options/reference/{}/search", reference.id), "Search scalar names", TargetKind::TextEntry, order);
+                #[cfg(test)] actions.controls.push((format!("reference/{}/search", reference.id), search.rect));
+                let query = reference.search.to_lowercase();
+                let filtered: Vec<_> = choices.iter().filter(|(name, _)| name.to_lowercase().contains(&query)).collect();
+                egui::ScrollArea::vertical().id_salt(("reference-scalars", reference.id)).max_height(100.0).show_rows(ui, 20.0, filtered.len(), |ui, visible| {
+                    for index in visible {
+                        let (name, value) = filtered[index];
+                        let token = egui::Id::new(name).value();
+                        let response = ui.push_id(("scalar", token), |ui| ui.add_sized([ui.available_width(), 20.0], egui::Button::new(format!("{name} = {value}")).selected(reference.value == *name).truncate())).inner;
+                        chart_target(scope, ui, &response, &format!("options/reference/{}/scalar/{token:x}", reference.id), &format!("Reference scalar {name}"), TargetKind::Selectable, order);
+                        #[cfg(test)] actions.controls.push((format!("reference/{}/scalar/{name}", reference.id), response.rect));
+                        if active && response.clicked() { reference.value.clone_from(name); }
+                    }
+                });
+                if let Some((_, value)) = choices.iter().find(|(name, _)| name == &reference.value) { ui.label(format!("Current value: {value}")); }
+                else { ui.colored_label(ui.visuals().warn_fg_color, "Named scalar is unavailable, invalid, or outdated."); }
+            } else {
+                let response = ui.add(egui::TextEdit::singleline(&mut reference.value).char_limit(40).desired_width(120.0));
+                chart_target(scope, ui, &response, &format!("options/reference/{}/literal", reference.id), "Reference value", TargetKind::TextEntry, order);
+                #[cfg(test)] actions.controls.push((format!("reference/{}/literal", reference.id), response.rect));
+            }
+        }));
+    }
+    if let Some(id) = remove { draft.references.retain(|reference| reference.id != id); }
+    let response = ui.add_enabled(draft.references.len() < 16, egui::Button::new("Add reference"));
+    chart_target(scope, ui, &response, "options/reference/add", "Add reference", TargetKind::Button, order);
+    #[cfg(test)] actions.controls.push(("reference/add".into(), response.rect));
+    if active && response.clicked() {
+        match draft.options.allocate_reference_id() {
+            Ok(id) => draft.references.push(ReferenceDraft { id, axis: ChartReferenceAxis::Y, named: false, value: "0".into(), label: String::new(), search: String::new() }),
+            Err(error) => draft.error = Some(error.into()),
+        }
+    }
+}
+
+fn style_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::JumpModeScope>, draft: &mut ChartOptionsDraft, definition: &ChartDefinition, order: &mut u64, actions: &mut ChartActions, active: bool) {
+    use super::jump_mode::TargetKind;
+    ui.label("Series appearance");
+    for (index, (key, label)) in style_sources(definition).into_iter().enumerate() {
+        let token = egui::Id::new(format!("{key:?}")).value();
+        let distribution_style = matches!(key, ChartSeriesKey::Distribution(_));
+        let distribution_active = matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative);
+        let active_role = distribution_style == distribution_active;
+        let line_enabled = active_role && matches!(definition.kind, ChartKind::Line | ChartKind::Cumulative);
+        let marker_enabled = active_role && matches!(definition.kind, ChartKind::Line | ChartKind::Scatter | ChartKind::Cumulative);
+        let existing = draft.options.styles.iter().position(|style| style.key == key);
+        let mut enabled = existing.is_some();
+        let response = ui.checkbox(&mut enabled, format!("Customize {label}"));
+        chart_target(scope, ui, &response, &format!("options/style/{token:x}/enabled"), &format!("Customize {label}"), TargetKind::Checkbox, order);
+        #[cfg(test)] actions.controls.push((format!("style/{index}/enabled"), response.rect));
+        if active && response.changed() {
+            if let Some(index) = existing { draft.options.styles.remove(index); }
+            else { draft.options.styles.push(ChartSeriesStyle { key: key.clone(), color: crate::calculation_pad::default_series_color(if distribution_style { 0 } else { index }), line: ChartLineStyle::Solid, marker: ChartMarkerStyle::Auto, thickness: ChartFiniteValue::try_from(2.0).unwrap() }); }
+        }
+        let Some(style) = draft.options.styles.iter_mut().find(|style| style.key == key) else { continue; };
+        ui.indent(("chart-style", token), |ui| {
+            if !active_role { ui.label("This series is dormant in the current chart mode."); }
+            else if matches!(definition.kind, ChartKind::Bar | ChartKind::Histogram) { ui.label("Filled bars use the selected color."); }
+            else if definition.kind == ChartKind::Scatter { ui.label("Scatter uses color and marker."); }
+            ui.horizontal_wrapped(|ui| for (channel, name) in ["R", "G", "B", "Alpha"].into_iter().enumerate() {
+                ui.label(name); let response = ui.add(egui::DragValue::new(&mut style.color[channel]).range(0..=255));
+                chart_target(scope, ui, &response, &format!("options/style/{token:x}/color/{name}"), &format!("{label} {name}"), TargetKind::Slider, order);
+                #[cfg(test)] actions.controls.push((format!("style/{index}/color/{name}"), response.rect));
+            });
+            ui.add_enabled_ui(line_enabled, |ui| ui.horizontal_wrapped(|ui| for (line, name) in [(ChartLineStyle::Solid, "Solid"), (ChartLineStyle::Dashed, "Dashed"), (ChartLineStyle::Dotted, "Dotted")] {
+                let response = ui.selectable_value(&mut style.line, line, name); chart_target(scope, ui, &response, &format!("options/style/{token:x}/line/{name}"), &format!("{label} {name}"), TargetKind::Selectable, order);
+                #[cfg(test)] actions.controls.push((format!("style/{index}/line/{name}"), response.rect));
+            }));
+            ui.add_enabled_ui(marker_enabled, |ui| ui.horizontal_wrapped(|ui| for (marker, name) in [(ChartMarkerStyle::Auto, "Auto"), (ChartMarkerStyle::None, "None"), (ChartMarkerStyle::Circle, "Circle"), (ChartMarkerStyle::Square, "Square"), (ChartMarkerStyle::Cross, "Cross")] {
+                let response = ui.selectable_value(&mut style.marker, marker, name); chart_target(scope, ui, &response, &format!("options/style/{token:x}/marker/{name}"), &format!("{label} marker {name}"), TargetKind::Selectable, order);
+                #[cfg(test)] actions.controls.push((format!("style/{index}/marker/{name}"), response.rect));
+            }));
+            let mut width = style.thickness.get();
+            ui.add_enabled_ui(line_enabled || (marker_enabled && definition.kind == ChartKind::Scatter && style.marker == ChartMarkerStyle::Cross), |ui| ui.horizontal(|ui| { ui.label("Thickness"); let response = ui.add(egui::DragValue::new(&mut width).range(0.5..=8.0).speed(0.1)); chart_target(scope, ui, &response, &format!("options/style/{token:x}/width"), &format!("{label} thickness"), TargetKind::Slider, order); #[cfg(test)] actions.controls.push((format!("style/{index}/width"), response.rect)); }));
+            if let Ok(value) = ChartFiniteValue::try_from(width) { style.thickness = value; }
+        });
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BinMode { Auto, Count, Width }
 
@@ -116,14 +226,41 @@ impl AxisDraft {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct ChartOptionsDraft { basis: ChartOptions, options: ChartOptions, x: AxisDraft, y: AxisDraft, error: Option<String> }
+struct ReferenceDraft { id: u64, axis: ChartReferenceAxis, named: bool, value: String, label: String, search: String }
+
+#[derive(Clone, PartialEq, Eq)]
+struct ChartOptionsDraft { basis: ChartOptions, options: ChartOptions, x: AxisDraft, y: AxisDraft, references: Vec<ReferenceDraft>, error: Option<String> }
 impl ChartOptionsDraft {
-    fn new(definition: &ChartDefinition) -> Self { Self { basis: definition.options.clone(), options: definition.options.clone(), x: AxisDraft::new(&definition.options.x), y: AxisDraft::new(&definition.options.y), error: None } }
+    fn new(definition: &ChartDefinition) -> Self {
+        let references = definition.options.references.iter().map(|reference| {
+            let (named, value) = match &reference.value { ChartReferenceValue::Literal(value) => (false, value.get().to_string()), ChartReferenceValue::Named(name) => (true, name.clone()) };
+            ReferenceDraft { id: reference.id, axis: reference.axis, named, value, label: reference.label.clone(), search: String::new() }
+        }).collect();
+        Self { basis: definition.options.clone(), options: definition.options.clone(), x: AxisDraft::new(&definition.options.x), y: AxisDraft::new(&definition.options.y), references, error: None }
+    }
     fn options(&self) -> Result<ChartOptions, String> {
         let mut options = self.options.clone(); options.x = self.x.axis()?; options.y = self.y.axis()?;
         options.x.validate().map_err(str::to_owned)?; options.y.validate().map_err(str::to_owned)?;
+        options.references = self.references.iter().map(|reference| {
+            let value = if reference.named { ChartReferenceValue::Named(reference.value.clone()) } else {
+                let number = reference.value.trim().parse::<f64>().ok().and_then(|value| ChartFiniteValue::try_from(value).ok()).ok_or("Enter a finite reference value.")?;
+                ChartReferenceValue::Literal(number)
+            };
+            Ok(ChartReferenceLine { id: reference.id, axis: reference.axis, value, label: reference.label.clone() })
+        }).collect::<Result<Vec<_>, String>>()?;
         Ok(options)
     }
+}
+
+fn rebase_options_draft(draft: &ChartOptionsDraft, definition: &ChartDefinition) -> Option<ChartOptionsDraft> {
+    let distribution = definition.distribution.as_ref().map(|distribution| &distribution.vector);
+    let mut expected = draft.basis.clone();
+    expected.retain_selected_styles(&definition.source, distribution);
+    if expected != definition.options { return None; }
+    let mut rebased = draft.clone();
+    rebased.basis = definition.options.clone();
+    rebased.options.retain_selected_styles(&definition.source, distribution);
+    Some(rebased)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,7 +392,8 @@ impl CalculationChartDialog {
             let mut definition = runtime.definition.clone().unwrap_or_else(|| ChartDefinition { source: ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0.clone()]).unwrap_or_default() }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new(), distribution: None, options: Default::default() });
             let original = definition.clone();
             let mut pending_bin_draft = false;
-            let mut pending_options = self.bound == runtime.identity && self.options_draft.as_ref().filter(|draft| draft.basis == original.options).is_some_and(|draft| draft.options().map_or(true, |options| options != original.options));
+            let rebased_options = if self.bound == runtime.identity { self.options_draft.as_ref().and_then(|draft| rebase_options_draft(draft, &original)) } else { None };
+            let mut pending_options = rebased_options.as_ref().is_some_and(|draft| draft.options().map_or(true, |options| options != original.options));
             ui.add_enabled_ui(owner, |ui| {
                 ui.horizontal(|ui| {
                     for (kind, name) in [(ChartKind::Line, "Line"), (ChartKind::Bar, "Bar"), (ChartKind::Scatter, "Scatter"), (ChartKind::Histogram, "Histogram"), (ChartKind::Cumulative, "Cumulative")] {
@@ -368,7 +506,7 @@ impl CalculationChartDialog {
             });
             ui.add_enabled_ui(owner, |ui| {
                 let header = egui::CollapsingHeader::new("Chart Options").id_salt("chart-options").show(ui, |ui| {
-                    let mut draft = self.options_draft.as_ref().filter(|draft| self.bound == runtime.identity && draft.basis == original.options).cloned().unwrap_or_else(|| ChartOptionsDraft::new(&original));
+                    let mut draft = rebased_options.clone().unwrap_or_else(|| ChartOptionsDraft::new(&original));
                     let previous = draft.clone();
                     axis_controls(ui, scope, &mut draft.x, "X", &mut order, &mut actions);
                     axis_controls(ui, scope, &mut draft.y, "Y", &mut order, &mut actions);
@@ -386,19 +524,40 @@ impl CalculationChartDialog {
                             #[cfg(test)] actions.controls.push((format!("options/legend/{label}"), response.rect));
                         }
                     });
-                    if draft.x != previous.x || draft.y != previous.y || draft.options != previous.options { draft.error = None; }
+                    let references = egui::CollapsingHeader::new("Reference lines").id_salt("chart-option-references").show(ui, |ui| reference_controls(ui, scope, &mut draft, runtime, &mut order, &mut actions, active));
+                    chart_target(scope, ui, &references.header_response, "options/references", "Reference lines", TargetKind::Button, &mut order);
+                    #[cfg(test)] actions.controls.push(("reference/header".into(), references.header_response.rect));
+                    let styles = egui::CollapsingHeader::new("Series appearance").id_salt("chart-option-styles").show(ui, |ui| style_controls(ui, scope, &mut draft, &definition, &mut order, &mut actions, active));
+                    chart_target(scope, ui, &styles.header_response, "options/styles", "Series appearance", TargetKind::Button, &mut order);
+                    #[cfg(test)] actions.controls.push(("style/header".into(), styles.header_response.rect));
+                    if draft.x != previous.x || draft.y != previous.y || draft.options != previous.options || draft.references != previous.references { draft.error = None; }
                     let mut finished = false;
                     ui.horizontal(|ui| {
                         let response = ui.button("Apply options"); chart_target(scope, ui, &response, "options/apply", "Apply chart options", TargetKind::Button, &mut order);
                         #[cfg(test)] actions.controls.push(("options/apply".into(), response.rect));
                         if active && response.clicked() {
-                            let result = draft.options().and_then(|options| {
+                            let result = draft.options().and_then(|mut options| {
+                                options.retain_selected_styles(&definition.source, definition.distribution.as_ref().map(|distribution| &distribution.vector));
                                 let mut candidate = definition.clone(); candidate.options = options;
-                                candidate.options.validate(&candidate.source).map_err(str::to_owned)?;
+                                candidate.options.validate(&candidate.source, candidate.distribution.as_ref().map(|distribution| &distribution.vector)).map_err(str::to_owned)?;
                                 let axes_changed = candidate.options.x != original.options.x || candidate.options.y != original.options.y;
                                 if axes_changed && matches!(candidate.kind, ChartKind::Line | ChartKind::Scatter | ChartKind::Bar) && matches!(&candidate.source, ChartSource::Vectors { x: None, .. }) && candidate.options.x.scale == ChartAxisScale::Log10 { return Err("Logarithmic X requires an explicit positive X vector; index X includes zero.".into()); }
                                 if axes_changed && matches!(candidate.kind, ChartKind::Bar | ChartKind::Histogram | ChartKind::Cumulative) && candidate.options.y.scale == ChartAxisScale::Log10 { return Err("This chart requires a linear Y axis for the zero baseline.".into()); }
-                                if axes_changed && let Ok((_, dataset)) = chart_data(runtime, &candidate) && let Ok(references) = resolve_references(runtime, &candidate) {
+                                let current_scalars = scalar_choices(runtime);
+                                for reference in &candidate.options.references {
+                                    let previous = original.options.references.iter().find(|old| old.id == reference.id);
+                                    if let ChartReferenceValue::Named(name) = &reference.value && !previous.is_some_and(|old| old.value == reference.value) && !current_scalars.iter().any(|(current, _)| current == name) {
+                                        return Err(format!("Reference '{name}' must resolve to a current scalar."));
+                                    }
+                                    let scale = if reference.axis == ChartReferenceAxis::X { candidate.options.x.scale } else { candidate.options.y.scale };
+                                    let axis_changed = if reference.axis == ChartReferenceAxis::X { candidate.options.x.scale != original.options.x.scale } else { candidate.options.y.scale != original.options.y.scale };
+                                    if (axis_changed || !previous.is_some_and(|old| old.axis == reference.axis && old.value == reference.value)) && scale == ChartAxisScale::Log10 {
+                                        let value = match &reference.value { ChartReferenceValue::Literal(value) => Some(value.get()), ChartReferenceValue::Named(name) => current_scalars.iter().find(|(current, _)| current == name).map(|(_, value)| *value) };
+                                        if value.is_some_and(|value| value <= 0.0) { return Err("Logarithmic chart reference values must be positive.".into()); }
+                                    }
+                                }
+                                let references_changed = candidate.options.references != original.options.references;
+                                if (axes_changed || references_changed) && let Ok((_, dataset)) = chart_data(runtime, &candidate) && let Ok(references) = resolve_references(runtime, &candidate) {
                                     dataset.scene_for_definition_with_references(&candidate, &references, ChartView::default(), 640, 400)?;
                                 }
                                 Ok(candidate.options)
@@ -424,7 +583,10 @@ impl CalculationChartDialog {
                 let old = series_keys(&original.source);
                 let new = series_keys(&definition.source);
                 definition.hidden = definition.hidden.iter().filter_map(|index| old.get(*index)).filter_map(|key| new.iter().position(|candidate| candidate == key)).collect();
-                definition.options.retain_selected_styles(&definition.source);
+                definition.options.retain_selected_styles(&definition.source, definition.distribution.as_ref().map(|distribution| &distribution.vector));
+            }
+            if definition.distribution.as_ref().map(|distribution| &distribution.vector) != original.distribution.as_ref().map(|distribution| &distribution.vector) {
+                definition.options.retain_selected_styles(&definition.source, definition.distribution.as_ref().map(|distribution| &distribution.vector));
             }
             if definition != original && active { actions.definition = Some(definition.clone()); }
             let Some(stamp) = chart_stamp(runtime, &definition) else { ui.colored_label(ui.visuals().warn_fg_color, "Chart data is unavailable or outdated. Calculate or generate the current source."); return; };
@@ -697,6 +859,27 @@ fn series_keys(source: &ChartSource) -> Vec<String> {
     match source { ChartSource::Vectors { y, .. } => y.iter().map(|reference| match reference { ChartVectorReference::Physical(id) => format!("line:{}", id.get()), ChartVectorReference::Named { name } => format!("name:{name}") }).collect(), ChartSource::Sensitivity { outputs } => outputs.iter().map(|name| format!("output:{name}")).collect() }
 }
 
+fn style_sources(definition: &ChartDefinition) -> Vec<(ChartSeriesKey, String)> {
+    let mut sources = match &definition.source {
+        ChartSource::Vectors { y, .. } => y.iter().map(|reference| (ChartSeriesKey::Vector(reference.clone()), reference_label(reference))).collect::<Vec<_>>(),
+        ChartSource::Sensitivity { outputs } => outputs.iter().map(|name| (ChartSeriesKey::Sensitivity(name.clone()), name.clone())).collect::<Vec<_>>(),
+    };
+    if let Some(distribution) = &definition.distribution {
+        let key = ChartSeriesKey::Distribution(distribution.vector.clone());
+        sources.push((key, format!("Distribution: {}", reference_label(&distribution.vector))));
+    }
+    sources
+}
+
+fn scalar_choices(runtime: &ChartRuntime) -> Vec<(String, f64)> {
+    let Some(evaluation) = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis && evaluation.diagnostic.is_none()) else { return Vec::new(); };
+    let mut choices = evaluation.final_bindings.iter().filter_map(|(name, binding)| {
+        let LineOutcome::Value(value) = &binding.outcome else { return None; };
+        crate::calculation_pad::scalar_reference_coordinate(value).ok().map(|value| (name.clone(), value))
+    }).collect::<Vec<_>>();
+    choices.sort_by(|a, b| a.0.cmp(&b.0)); choices
+}
+
 fn series_target_id(source: &ChartSource, index: usize) -> String {
     let keys = series_keys(source);
     keys.get(index).map_or_else(|| format!("series/missing/{index}"), |key| format!("series/{:x}", egui::Id::new(key).value()))
@@ -725,6 +908,17 @@ mod tests {
         let reordered = ChartSource::Vectors { x: None, y: vec![reference("beta"), reference("alpha")] };
         assert_eq!(series_target_id(&first, 0), series_target_id(&reordered, 1));
         assert_ne!(series_target_id(&first, 0), series_target_id(&reordered, 0));
+    }
+
+    #[test]
+    fn chart_options_draft_rebases_removed_staged_style() {
+        let named = |name: &str| ChartVectorReference::Named { name: name.into() };
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("v"), named("w")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+        let mut draft = ChartOptionsDraft::new(&definition); draft.options.grid = true;
+        draft.options.styles.push(ChartSeriesStyle { key: ChartSeriesKey::Vector(named("w")), color: [1, 2, 3, 255], line: ChartLineStyle::Solid, marker: ChartMarkerStyle::Auto, thickness: ChartFiniteValue::try_from(2.0).unwrap() });
+        definition.source = ChartSource::Vectors { x: None, y: vec![named("v")] };
+        let rebased = rebase_options_draft(&draft, &definition).unwrap();
+        assert!(rebased.options.grid); assert!(rebased.options.styles.is_empty());
     }
 
     #[test]
@@ -958,6 +1152,8 @@ mod tests {
         session.replace_source("v = [1, 2]").unwrap(); session.evaluation();
         let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "v".into() }] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
         definition.options.x.bounds = ChartAxisBounds::Fixed { min: ChartFiniteValue::try_from(0.0).unwrap(), max: ChartFiniteValue::try_from(2.0).unwrap() };
+        definition.options.references.push(ChartReferenceLine { id: 1, axis: ChartReferenceAxis::Y, value: ChartReferenceValue::Named("unavailable".into()), label: "Saved".into() });
+        definition.options.next_reference_id = 2;
         let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: None, table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
         let ctx = egui::Context::default(); let mut dialog = CalculationChartDialog::default(); dialog.open();
         ctx.all_styles_mut(|style| style.animation_time = 0.0);
@@ -985,9 +1181,74 @@ mod tests {
         chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/apply"));
         let saved = &runtime.definition.as_ref().unwrap().options;
         assert!(saved.grid); assert_eq!(saved.x.bounds, ChartAxisBounds::Auto);
+        assert_eq!(saved.references[0].value, ChartReferenceValue::Named("unavailable".into()));
         assert_eq!(dialog.view.zoom_x, 2.0); assert_eq!(dialog.view.pan_x, 0.1);
         let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         assert!(actions.copy.is_none());
+    }
+
+    #[test]
+    fn chart_options_reference_and_style_widgets_apply_and_keep_ids() {
+        let directory = tempfile::tempdir().unwrap(); let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("v = [1, 2]\nlimit = 2\nother = 3").unwrap(); session.evaluation();
+        let definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "v".into() }] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
+        let ctx = egui::Context::default(); ctx.all_styles_mut(|style| style.animation_time = 0.0); let mut dialog = CalculationChartDialog::default(); dialog.open();
+        let control = |actions: &ChartActions, name: &str| actions.controls.iter().find(|(key, _)| key == name).unwrap_or_else(|| panic!("missing {name}: {:?}", actions.controls)).1.center();
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/header"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/header"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/add"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/1/kind/Named scalar"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/1/search"));
+        chart_frame(&ctx, &mut dialog, &mut runtime, vec![egui::Event::Text("other".into())]);
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/1/scalar/other"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/1/label"));
+        chart_frame(&ctx, &mut dialog, &mut runtime, vec![egui::Event::Text("Limit".into())]);
+        runtime.evaluation = None;
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/apply"));
+        assert!(dialog.options_draft.as_ref().unwrap().error.as_deref().is_some_and(|error| error.contains("current scalar")));
+        assert!(runtime.definition.as_ref().unwrap().options.references.is_empty());
+        runtime.evaluation = session.shared_evaluation();
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/header"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "style/header"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "style/0/enabled"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "style/0/line/Dashed"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "style/0/marker/Cross"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "options/apply"));
+        let options = &runtime.definition.as_ref().unwrap().options;
+        assert_eq!(options.references.len(), 1); assert_eq!(options.references[0].id, 1); assert_eq!(options.references[0].label, "Limit");
+        assert_eq!(options.references[0].value, ChartReferenceValue::Named("other".into()));
+        assert_eq!(options.styles[0].line, ChartLineStyle::Dashed); assert_eq!(options.styles[0].marker, ChartMarkerStyle::Cross);
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "style/header"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/header"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/1/remove"));
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()); chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "reference/add"));
+        assert_eq!(dialog.options_draft.as_ref().unwrap().references[0].id, 2);
+    }
+
+    #[test]
+    fn chart_options_reject_new_nonpositive_named_log_reference_with_unresolved_retained_reference() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("v = [1, 2]\nnegative = -1").unwrap(); session.evaluation();
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "v".into() }] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+        let first_id = definition.options.allocate_reference_id().unwrap();
+        definition.options.references.push(ChartReferenceLine { id: first_id, axis: ChartReferenceAxis::Y, value: ChartReferenceValue::Named("missing".into()), label: String::new() });
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
+        let ctx = egui::Context::default(); ctx.all_styles_mut(|style| style.animation_time = 0.0); let mut dialog = CalculationChartDialog::default(); dialog.open();
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        let header = actions.controls.iter().find(|(name, _)| name == "options/header").unwrap().1.center(); chart_click(&ctx, &mut dialog, &mut runtime, header);
+        let mut draft = ChartOptionsDraft::new(runtime.definition.as_ref().unwrap());
+        let next_id = draft.options.allocate_reference_id().unwrap();
+        draft.y.scale = ChartAxisScale::Log10;
+        draft.references.push(ReferenceDraft { id: next_id, axis: ChartReferenceAxis::Y, named: true, value: "negative".into(), label: String::new(), search: String::new() });
+        dialog.options_draft = Some(draft);
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        let apply = actions.controls.iter().find(|(name, _)| name == "options/apply").unwrap().1.center(); chart_click(&ctx, &mut dialog, &mut runtime, apply);
+        assert!(dialog.options_draft.as_ref().unwrap().error.as_deref().is_some_and(|error| error.contains("positive")));
+        assert_eq!(runtime.definition.as_ref().unwrap().options.references.len(), 1);
     }
 
     #[test]

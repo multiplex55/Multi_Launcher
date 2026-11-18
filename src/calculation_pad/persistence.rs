@@ -1234,7 +1234,7 @@ pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'sta
         { return Err("invalid sensitivity definition"); }
     }
     if let Some(chart) = &view.chart {
-        chart.options.validate(&chart.source)?;
+        chart.options.validate(&chart.source, chart.distribution.as_ref().map(|distribution| &distribution.vector))?;
         chart.validate_distribution()?;
         if chart.x_label.len() > 128 || chart.y_label.len() > 128 || chart.bar_labels.len() > super::vector::MAX_VECTOR_COMPONENTS || chart.bar_labels.iter().any(|label| label.len() > 128 || label.chars().any(char::is_control))
             || chart.x_label.chars().any(char::is_control) || chart.y_label.chars().any(char::is_control)
@@ -1546,6 +1546,21 @@ mod tests {
         assert!(decoded.distribution.is_some());
         decoded.distribution.as_mut().unwrap().bins = DistributionBins::Count { count: 0 };
         assert!(super::validate_view_metadata(&view(decoded)).is_err());
+    }
+
+    #[test]
+    fn distribution_style_roundtrip_is_distinct_from_ordinary_series() {
+        use super::super::chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference};
+        let vector = ChartVectorReference::Named { name: "v".into() };
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![vector.clone()] }, kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: vector.clone(), bins: DistributionBins::Auto, scale: DistributionScale::Count }), options: Default::default() };
+        let style = |key, color| SeriesStyle { key, color, line: LineStyle::Solid, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() };
+        chart.options.styles.push(style(SeriesKey::Vector(vector.clone()), [0, 0, 255, 255]));
+        chart.options.styles.push(style(SeriesKey::Distribution(vector), [255, 0, 0, 255]));
+        let decoded: ChartDefinition = serde_json::from_value(serde_json::to_value(&chart).unwrap()).unwrap();
+        assert_eq!(decoded, chart);
+        assert!(super::validate_view_metadata(&super::PadViewMetadata { chart: Some(decoded), ..Default::default() }).is_ok());
     }
 
     #[test]

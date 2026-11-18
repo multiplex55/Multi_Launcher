@@ -32,7 +32,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-C2A1 | complete |
 | M4-C2A2 | complete |
 | M4-C2B1 | complete |
-| M4-C2B2 | pending |
+| M4-C2B2 | complete, with interactive smoke pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -228,3 +228,10 @@ Initial Nextest passed 5 of 5. Final focused cargo nextest run --config-file tar
 M4-C2A2 was pushed at a39bd1561ed7e3b4d5755425f4a9e6ede31b8497. Chart Options exposes separately staged axes, log scales, bounds, ticks, grid, title and legend. Reset Axes leaves the transient view intact. Unrelated chart changes preserve the staged draft. Definition-only restrictions remain enforceable with a stale evaluation. Summary collapse or owner loss retires queued focus before the animation, and the selected row has a wrapping detail.
 
 The first build exposed a test-only Context borrow error. The next run passed seven cases, then its animated panel click failed and two cases were canceled. Stabilizing the fixture preserved its behavioral assertions. Final cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::calculation_chart_dialog::tests::chart_options_are_staged_) | test(gui::calculation_chart_dialog::tests::chart_distribution_) | test(gui::calculation_chart_dialog::tests::histogram_width_change_) | test(gui::calculation_chart_dialog::tests::chart_owned_popup_menus_) | test(calculation_pad::chart::tests::chart_options_)' passed 10 of 10. Independent recheck confirmed all three fixes. Diff whitespace verification passed.
+
+
+## M4-C2B2 chart references and series appearance
+
+M4-C2B1 was pushed at e29ddef9628e956d48c694bce12f228738310797. Chart Options now stages labeled literal and current named reference lines, and per-series color, line/marker style and applicable thickness. Stable reference IDs and keyboard-accessible scalar search are owner-bound. New named lines require an actual current scalar and positive log coordinates; old unavailable bindings remain editable. Distribution styles use an independent typed identity, including across rename/undo collisions. Dormant styles survive compatible mode switches. This closes M4-C implementation; interactive Windows evidence is still pending.
+
+The focused run passed 12 of 12 after substantive review. The final narrow correction rerun passed 2 of 2 using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::calculation_chart_dialog::tests::chart_options_reference_and_style_widgets_apply_and_keep_ids) | test(gui::calculation_chart_dialog::tests::chart_options_reject_new_nonpositive_named_log_reference_with_unresolved_retained_reference)'. Diff whitespace verification passed.

@@ -117,6 +117,7 @@ pub(crate) struct ReferenceLine {
 pub(crate) enum SeriesKey {
     Vector(ChartVectorReference),
     Sensitivity(String),
+    Distribution(ChartVectorReference),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,9 +176,10 @@ impl Default for ChartOptions {
 impl ChartOptions {
     pub(crate) fn is_default(&self) -> bool { self == &Self::default() }
 
-    pub(crate) fn retain_selected_styles(&mut self, source: &ChartSource) {
+    pub(crate) fn retain_selected_styles(&mut self, source: &ChartSource, distribution: Option<&ChartVectorReference>) {
         self.styles.retain(|style| match (&style.key, source) {
             (SeriesKey::Vector(reference), ChartSource::Vectors { y, .. }) => y.contains(reference),
+            (SeriesKey::Distribution(reference), _) => distribution == Some(reference),
             (SeriesKey::Sensitivity(name), ChartSource::Sensitivity { outputs }) => outputs.contains(name),
             _ => false,
         });
@@ -190,13 +192,13 @@ impl ChartOptions {
         Ok(id)
     }
 
-    pub(crate) fn validate(&self, source: &ChartSource) -> Result<(), &'static str> {
+    pub(crate) fn validate(&self, source: &ChartSource, distribution: Option<&ChartVectorReference>) -> Result<(), &'static str> {
         self.x.validate()?;
         self.y.validate()?;
         if self.title.len() > 128 || self.title.chars().any(char::is_control) {
             return Err("invalid chart title");
         }
-        if self.references.len() > 16 || self.next_reference_id == 0 || self.styles.len() > 8 {
+        if self.references.len() > 16 || self.next_reference_id == 0 || self.styles.len() > 9 {
             return Err("chart options exceed their limits");
         }
         let valid_name = |name: &str| super::super::document::watch_name(&format!("{{{name}}}")).as_deref() == Some(name);
@@ -212,6 +214,7 @@ impl ChartOptions {
         for (index, style) in self.styles.iter().enumerate() {
             let selected = match (&style.key, source) {
                 (SeriesKey::Vector(reference), ChartSource::Vectors { y, .. }) => y.contains(reference),
+                (SeriesKey::Distribution(reference), _) => distribution == Some(reference),
                 (SeriesKey::Sensitivity(name), ChartSource::Sensitivity { outputs }) => outputs.contains(name),
                 _ => false,
             };
