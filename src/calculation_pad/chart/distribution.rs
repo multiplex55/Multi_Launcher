@@ -101,6 +101,33 @@ impl BinBounds {
             ),
         }
     }
+
+    /// Membership among representable finite Pad values, without rounding an
+    /// exact edge in the wrong direction.
+    pub(crate) fn membership_label(&self) -> String {
+        fn cutoff(edge: &BigRational, upward: bool) -> Option<f64> {
+            let max = BigRational::from_float(f64::MAX).unwrap();
+            if edge > &max { return if upward { None } else { Some(f64::MAX) }; }
+            if edge < &-max { return if upward { Some(-f64::MAX) } else { None }; }
+            let value = edge.to_f64()?;
+            let exact = BigRational::from_float(value)?;
+            Some(if upward && &exact < edge { value.next_up() }
+                else if !upward && &exact > edge { value.next_down() }
+                else { value })
+        }
+        match self {
+            Self::Value(value) => format!("Value {value:.17e}"),
+            Self::Interval { lower, upper, upper_inclusive } => {
+                let Some(first) = cutoff(lower, true) else { return "No representable values in bin".into(); };
+                let last = cutoff(upper, !*upper_inclusive);
+                if let Some(last) = last {
+                    if if *upper_inclusive { first > last } else { first >= last } { return "No representable values in bin".into(); }
+                    format!("Finite values [{first:.17e}, {last:.17e}{}", if *upper_inclusive { "]" } else { ")" })
+                } else if *upper_inclusive { "No representable values in bin".into() }
+                else { format!("Finite values [{first:.17e}, f64::MAX]") }
+            }
+        }
+    }
 }
 
 fn edge_label(edge: &BigRational) -> String {

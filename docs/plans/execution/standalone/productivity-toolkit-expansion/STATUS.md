@@ -28,7 +28,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-B3B | complete |
 | M4-C1A | complete |
 | M4-C1B | complete |
-| M4-C1C, M4-C2 | pending |
+| M4-C1C | complete |
+| M4-C2 | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -192,3 +193,10 @@ cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P prod
 M4-C1A was pushed at 5b8ef82e544697c35495c4ab588cddd80b6dd425. The cumulative distribution scene uses the real current vector, groups duplicate thresholds, renders the zero and one plateaus and exact empirical jumps, and shares raster output and evaluation freshness with Charts. Plot hits expose group and cumulative counts. Histogram rendering and controls remain subsequent slices. Style admission for a distribution source separate from the ordinary source still needs integration in controls.
 
 cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::chart::tests::cumulative_scene_) | test(gui::calculation_chart_dialog::tests::cumulative_adapter_) | test(calculation_pad::chart::tests::chart_options_) | test(gui::calculation_chart_dialog::tests::chart_named_)' passed 9 of 9. Independent review found no substantive cumulative scene, evaluated data or copy issue. Diff whitespace verification passed.
+
+
+## M4-C1C exact histogram scene
+
+M4-C1B was pushed at 2f2e08bbc1122c4f0fc1b0ae304b15986ea1ba3e. Exact interval endpoints drive the shared scene, including the nominal final edge above the finite scalar range. The current-vector adapter selects Count or Percentage. Fixed display bounds clip geometry while retaining complete counts and interval membership. The reviewed fixes extend hover across the clipped bar, show exact representable-value membership, render valid log ticks over the finite portion of its exact domain, and exclude offscreen constant anchors. An interior shared-pixel-edge right-bin tie-break remains a small C2 follow-up.
+
+The initial frozen run exposed an assertion that treated zero-count-bin hover as unexpected. It was corrected to check the two nonempty bins and bounded zero-bin behavior. The final frozen-source command cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::chart::tests::histogram_scene_) | test(gui::calculation_chart_dialog::tests::histogram_adapter_) | test(calculation_pad::chart::tests::cumulative_scene_) | test(calculation_pad::chart::tests::chart_options_) | test(calculation_pad::chart::distribution::tests::)' passed 14 of 14. Diff whitespace verification passed. Companion controls remain pending.

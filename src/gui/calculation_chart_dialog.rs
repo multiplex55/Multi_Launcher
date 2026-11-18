@@ -209,7 +209,7 @@ impl CalculationChartDialog {
                     ui.painter().rect_filled(rect, 0.0, egui::Color32::WHITE);
                     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| { ui.set_clip_rect(rect.intersect(ui.clip_rect())); paint_scene(ui, rect.min, &scene); });
                     if response.dragged() && active { let delta = response.drag_delta(); let _ = view.set(view.zoom_x, view.zoom_y, view.pan_x - f64::from(delta.x) / f64::from(width), view.pan_y + f64::from(delta.y) / f64::from(height)); }
-                    if let Some(pointer) = response.hover_pos() && let Some(hit) = scene.hit([(pointer.x - rect.min.x), (pointer.y - rect.min.y)], 8.0) { response.on_hover_text(format!("{} · {}{}", hit.raw_x, hit.raw_y, if hit.approximate { " (approximate)" } else { "" })); }
+                    if let Some(pointer) = response.hover_pos() && let Some(hit) = scene.hit([(pointer.x - rect.min.x), (pointer.y - rect.min.y)], 8.0) { let x = hit.bin_bounds.as_ref().map_or_else(|| hit.raw_x.clone(), |bounds| bounds.membership_label()); response.on_hover_text(format!("{} · {}{}", x, hit.raw_y, if hit.approximate { " (approximate)" } else { "" })); }
                     if scene.approximate || scene.coordinate_collisions { ui.label("Plot coordinates are approximate; exact values remain in tooltips."); }
                     if ui.add_enabled(active && actions.definition.is_none(), egui::Button::new("Copy Chart as Image")).clicked() { actions.copy = Some((stamp, definition.clone(), (*scene).clone())); }
                 }
@@ -276,8 +276,9 @@ pub(super) fn chart_data(runtime: &ChartRuntime, definition: &ChartDefinition) -
         let LineOutcome::Value(crate::calculation_pad::CalculationValue::Vector(vector)) = outcome else {
             return Err(format!("{} is not a numeric vector.", reference_label(&distribution.vector)));
         };
-        if definition.kind == ChartKind::Histogram { return Err("Histogram chart rendering is unavailable.".into()); }
-        ChartDataset::from_cumulative(label, vector.components())?
+        if definition.kind == ChartKind::Histogram {
+            ChartDataset::from_histogram(label, vector.components(), distribution)?
+        } else { ChartDataset::from_cumulative(label, vector.components())? }
     } else { match &definition.source {
         ChartSource::Vectors { x, y } => {
             let evaluation = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis).ok_or("Current vector results are unavailable or outdated.")?;
@@ -388,6 +389,25 @@ mod tests {
         assert!(chart_data(&runtime, &definition).unwrap_err().contains("not a numeric vector"));
         definition.distribution.as_mut().unwrap().vector = ChartVectorReference::Named { name: "samples".into() };
         session.replace_source("samples = [2, 3]\nother = 3").unwrap(); runtime.basis = session.evaluation_basis();
+        assert!(chart_stamp(&runtime, &definition).is_none());
+        assert!(chart_data(&runtime, &definition).is_err());
+    }
+
+    #[test]
+    fn histogram_adapter_uses_current_vector_and_configured_scale() {
+        use crate::calculation_pad::{DistributionBins, DistributionDefinition, DistributionScale};
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("samples = [1, 2, 2, 4]").unwrap(); session.evaluation();
+        let definition = ChartDefinition { source: ChartSource::Sensitivity { outputs: vec![] }, kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: ChartVectorReference::Named { name: "samples".into() }, bins: DistributionBins::Count { count: 2 }, scale: DistributionScale::Percentage }), options: Default::default() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: None, pinned: false };
+        let (stamp, dataset) = chart_data(&runtime, &definition).unwrap();
+        assert!(matches!(stamp, ChartStamp::Evaluation(_)));
+        assert_eq!(dataset.distribution.as_ref().unwrap().bins.iter().map(|bin| bin.count).collect::<Vec<_>>(), [3, 1]);
+        assert_eq!(dataset.y_label, "Percentage");
+        assert!(dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap().rasterize().is_ok());
+        session.replace_source("samples = [5]").unwrap(); runtime.basis = session.evaluation_basis();
         assert!(chart_stamp(&runtime, &definition).is_none());
         assert!(chart_data(&runtime, &definition).is_err());
     }

@@ -8,7 +8,7 @@ mod axes;
 pub(crate) mod distribution;
 pub(crate) mod options;
 
-use axes::{AxisTransform, PlotAxes};
+use axes::{AxisTransform, ExactAxis, PlotAxes};
 
 use super::document::CalculationValue;
 use super::input::{InputKind, SampleNumber};
@@ -115,6 +115,7 @@ pub(crate) struct ChartDataset {
     pub series: Vec<ChartSeries>,
     pub approximate: bool,
     pub coordinate_collisions: bool,
+    pub distribution: Option<distribution::DistributionData>,
 }
 
 fn bounded_label(value: &str) -> String {
@@ -234,6 +235,25 @@ fn record_collision(seen: &mut HashMap<u64, BigRational>, value: &Numeric) -> bo
 }
 
 impl ChartDataset {
+    pub(crate) fn from_histogram(label: &str, values: &[f64], spec: &distribution::DistributionDefinition) -> Result<Self, String> {
+        let data = distribution::DistributionData::build(values, spec.bins.histogram_bins(), spec.scale.into())?;
+        let x = data.bins.iter().map(|bin| match &bin.bounds {
+            distribution::BinBounds::Value(value) => *value,
+            distribution::BinBounds::Interval { lower, .. } => lower.to_f64().unwrap_or(0.0),
+        }).collect::<Vec<_>>();
+        let y = data.bins.iter().map(|bin| bin.height(data.total, data.scale)).collect::<Vec<_>>();
+        let mut dataset = Self::from_vectors(Some(&x), &[(label, &y)])?;
+        dataset.x_label = bounded_label(label);
+        dataset.y_label = match data.scale { distribution::HistogramScale::Count => "Count", distribution::HistogramScale::Percentage => "Percentage" }.into();
+        for (point, bin) in dataset.series[0].points.iter_mut().zip(&data.bins) {
+            if let Some(point) = point {
+                point.raw_x = bin.bounds.label();
+                point.raw_y = format!("{} of {} ({:.4}%; cumulative {})", bin.count, data.total, bin.percentage(data.total), bin.cumulative_count);
+            }
+        }
+        dataset.distribution = Some(data);
+        Ok(dataset)
+    }
     pub(crate) fn from_cumulative(label: &str, values: &[f64]) -> Result<Self, String> {
         let data = distribution::DistributionData::cumulative(values)?;
         let x = data.ecdf.iter().map(|step| step.threshold).collect::<Vec<_>>();
@@ -301,6 +321,7 @@ impl ChartDataset {
             series,
             approximate: false,
             coordinate_collisions: false,
+            distribution: None,
         })
     }
 
@@ -436,6 +457,7 @@ impl ChartDataset {
             series,
             approximate: approximate || coordinate_collisions,
             coordinate_collisions,
+            distribution: None,
         })
     }
 }
@@ -524,6 +546,67 @@ mod tests {
         assert!(invalid.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap_err().contains("positive"));
         let empty = ChartDataset::from_cumulative("values", &[]).unwrap();
         assert!(empty.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().is_none());
+    }
+
+    #[test]
+    fn histogram_scene_uses_exact_edges_and_clips_without_changing_counts() {
+        use distribution::{DistributionBins, DistributionDefinition, DistributionScale, BinBounds};
+        let mut definition = chart_definition_for(ChartKind::Histogram);
+        let spec = DistributionDefinition { vector: ChartVectorReference::Named { name: "values".into() }, bins: DistributionBins::Width { width: options::FiniteValue::try_from(f64::MAX).unwrap() }, scale: DistributionScale::Count };
+        definition.distribution = Some(spec.clone());
+        let dataset = ChartDataset::from_histogram("values", &[f64::MAX / 2.0, f64::MAX], &spec).unwrap();
+        let data = dataset.distribution.as_ref().unwrap();
+        assert!(matches!(&data.bins[0].bounds, BinBounds::Interval { upper, .. } if upper > &BigRational::from_float(f64::MAX).unwrap()));
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Rect { min, max, color } if *color == COLORS[0] && (max[0] - min[0]) > 500.0)));
+        assert!(scene.rasterize().is_ok());
+        assert!(scene.hits[0].raw_y.contains("2 of 2"));
+        let area = scene.hits[0].region.unwrap();
+        assert_eq!(scene.hit([(area[0] + area[2]) * 0.5, (area[1] + area[3]) * 0.5], 0.0).unwrap().row, 0);
+        definition.options.x.scale = options::AxisScale::Log10;
+        definition.options.x.ticks = options::AxisTicks::LogDecades;
+        let logged = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(logged.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text { text, .. } if text.contains("1e308"))));
+        definition.options.x = options::AxisOptions::default();
+        definition.options.x.bounds = fixed_bounds(f64::MAX / 2.0, f64::MAX);
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(scene.rasterize().is_ok());
+        assert_eq!(dataset.distribution.as_ref().unwrap().bins[0].count, 2);
+        definition.options.y.scale = options::AxisScale::Log10;
+        assert!(dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap_err().contains("zero baseline"));
+    }
+
+    #[test]
+    fn histogram_scene_supports_adjacent_values_percentage_constant_and_empty() {
+        use distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        let mut definition = chart_definition_for(ChartKind::Histogram);
+        let mut spec = DistributionDefinition { vector: ChartVectorReference::Named { name: "values".into() }, bins: DistributionBins::Count { count: 4 }, scale: DistributionScale::Percentage };
+        definition.distribution = Some(spec.clone());
+        let next = f64::from_bits(1.0_f64.to_bits() + 1);
+        let dataset = ChartDataset::from_histogram("values", &[1.0, next], &spec).unwrap();
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        let bars = scene.primitives.iter().filter_map(|p| match p { ScenePrimitive::Rect { min, max, color } if *color == COLORS[0] => Some((min, max)), _ => None }).collect::<Vec<_>>();
+        assert_eq!(bars.len(), 2);
+        assert!(bars[0].1[0] < bars[1].0[0]);
+        assert_eq!(scene.hits.iter().filter(|hit| hit.raw_y.contains("50.0000%")).count(), 2);
+        let empty_bin = scene.hits.iter().find(|hit| hit.row == 1).unwrap();
+        assert_eq!(empty_bin.bin_bounds.as_ref().unwrap().membership_label(), "No representable values in bin");
+        let area = empty_bin.region.unwrap();
+        assert_eq!(scene.hit([(area[0] + area[2]) * 0.5, area[1] + 1.0], 0.0).unwrap().row, 1);
+        definition.options.x.scale = options::AxisScale::Log10;
+        assert!(dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().is_some());
+        spec.bins = DistributionBins::Auto;
+        let constant = ChartDataset::from_histogram("values", &[2.0, 2.0], &spec).unwrap();
+        let scene = constant.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text { text, .. } if text.starts_with("Value "))));
+        definition.options.x.bounds = fixed_bounds(2.001, 4.0);
+        let scene = constant.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(!scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Rect { color, .. } if *color == COLORS[0])));
+        definition.options.x.bounds = options::AxisBounds::Auto;
+        let empty = ChartDataset::from_histogram("values", &[], &spec).unwrap();
+        assert!(empty.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().is_none());
+        let zero = ChartDataset::from_histogram("values", &[0.0, 2.0], &spec).unwrap();
+        assert!(zero.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap_err().contains("positive"));
     }
 
     #[test]
@@ -1040,6 +1123,8 @@ pub(crate) struct ChartHit {
     pub raw_x: String,
     pub raw_y: String,
     pub approximate: bool,
+    pub region: Option<[f32; 4]>,
+    pub bin_bounds: Option<distribution::BinBounds>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ChartScene {
@@ -1058,13 +1143,15 @@ impl ChartScene {
         self.hits
             .iter()
             .filter_map(|hit| {
-                let dx = hit.position[0] - position[0];
-                let dy = hit.position[1] - position[1];
+                let (dx, dy) = if let Some([left, top, right, bottom]) = hit.region {
+                    ((position[0] - position[0].clamp(left, right)), (position[1] - position[1].clamp(top, bottom)))
+                } else { (hit.position[0] - position[0], hit.position[1] - position[1]) };
                 let distance = dx * dx + dy * dy;
-                (distance <= radius * radius).then_some((distance, hit))
+                let tie = (hit.position[0] - position[0]).abs();
+                (distance <= radius * radius).then_some((distance, tie, hit))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, hit)| hit)
+            .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)))
+            .map(|(_, _, hit)| hit)
     }
 
     pub(crate) fn rasterize(&self) -> Result<image::RgbaImage, String> {
@@ -1400,11 +1487,8 @@ impl ChartDataset {
         width: u32,
         height: u32,
     ) -> Result<Option<ChartScene>, String> {
-        if kind == ChartKind::Histogram {
-            return Err("Distribution chart rendering is unavailable.".into());
-        }
-        if kind == ChartKind::Cumulative && definition.is_none() {
-            return Err("A cumulative chart requires a distribution definition.".into());
+        if matches!(kind, ChartKind::Histogram | ChartKind::Cumulative) && definition.is_none() {
+            return Err("A distribution chart requires a definition.".into());
         }
         validate_dimensions(width, height)?;
         let options = definition.map(|definition| &definition.options);
@@ -1488,22 +1572,46 @@ impl ChartDataset {
         let plot_width = bounds[2] - bounds[0];
         let bar_width = (plot_width / expected.max(1) as f32 * 0.75 / visible.len() as f32).min(32.0);
         let default_axis = options::AxisOptions::default();
-        let custom_axes = options.filter(|options| kind == ChartKind::Cumulative || options.x != default_axis || options.y != default_axis || options.grid || !references.is_empty());
+        let custom_axes = options.filter(|options| matches!(kind, ChartKind::Histogram | ChartKind::Cumulative) || options.x != default_axis || options.y != default_axis || options.grid || !references.is_empty());
+        let exact_x = if kind == ChartKind::Histogram {
+            let data = self.distribution.as_ref().ok_or("Histogram data is unavailable.")?;
+            let axis = &options.ok_or("Histogram options are unavailable.")?.x;
+            let interval = match (&data.bins[0].bounds, &data.bins[data.bins.len() - 1].bounds) {
+                (distribution::BinBounds::Interval { lower, .. }, distribution::BinBounds::Interval { upper, .. }) => Some((lower.clone(), upper.clone())),
+                _ => None,
+            };
+            if axis.scale == options::AxisScale::Log10 && data.bins.iter().any(|bin| match &bin.bounds {
+                distribution::BinBounds::Value(value) => *value <= 0.0,
+                distribution::BinBounds::Interval { lower, upper, .. } => lower <= &BigRational::from_integer(0.into()) || upper <= &BigRational::from_integer(0.into()),
+            }) { return Err("Logarithmic histogram boundaries must be positive.".into()); }
+            let domain = match axis.bounds {
+                options::AxisBounds::Fixed { min, max } => Some((BigRational::from_float(min.get()).unwrap(), BigRational::from_float(max.get()).unwrap())),
+                options::AxisBounds::Auto => interval.map(|(mut low, mut high)| {
+                    for (_, value, _) in references.iter().filter(|(axis, _, _)| *axis == 0) {
+                        let value = BigRational::from_float(*value).unwrap();
+                        low = low.min(value.clone()); high = high.max(value);
+                    }
+                    (low, high)
+                }),
+            };
+            domain.map(|(min, max)| ExactAxis { min, max, scale: axis.scale })
+        } else { None };
         let inset = if kind == ChartKind::Bar && custom_axes.is_none_or(|options| matches!(options.x.bounds, options::AxisBounds::Auto)) {
             f64::from(bar_width * visible.len() as f32 / (2.0 * plot_width))
         } else {
             0.0
         };
         let axes = custom_axes.map(|options| -> Result<PlotAxes, &'static str> {
-            if matches!(kind, ChartKind::Bar | ChartKind::Cumulative) && options.y.scale == options::AxisScale::Log10 {
+            if matches!(kind, ChartKind::Bar | ChartKind::Cumulative | ChartKind::Histogram) && options.y.scale == options::AxisScale::Log10 {
                 return Err("This chart requires a linear Y axis for the zero baseline.");
             }
             let x = AxisTransform::new(&options.x, points.iter().map(|point| point.x).chain(references.iter().filter(|(axis, _, _)| *axis == 0).map(|(_, value, _)| *value)))?;
             let y = AxisTransform::new(
                 &options.y,
-                points.iter().map(|point| point.y).chain(matches!(kind, ChartKind::Bar | ChartKind::Cumulative).then_some(0.0)).chain((kind == ChartKind::Cumulative).then_some(1.0)).chain(references.iter().filter(|(axis, _, _)| *axis == 1).map(|(_, value, _)| *value)),
+                points.iter().map(|point| point.y).chain(matches!(kind, ChartKind::Bar | ChartKind::Cumulative | ChartKind::Histogram).then_some(0.0)).chain((kind == ChartKind::Cumulative).then_some(1.0)).chain(references.iter().filter(|(axis, _, _)| *axis == 1).map(|(_, value, _)| *value)),
             )?;
-            Ok(PlotAxes::new([x, y], checked, inset))
+            let axes = PlotAxes::new([x, y], checked, inset);
+            Ok(if let Some(exact) = &exact_x { axes.with_exact_x(exact) } else { axes })
         }).transpose()?;
         let pixels = |[x, y]: [f64; 2]| {
             [
@@ -1715,7 +1823,7 @@ impl ChartDataset {
             .filter(|(_, series)| series.visible)
             .enumerate()
         {
-            let key = definition.and_then(|definition| if kind == ChartKind::Cumulative {
+            let key = definition.and_then(|definition| if matches!(kind, ChartKind::Histogram | ChartKind::Cumulative) {
                 definition.distribution.as_ref().map(|distribution| options::SeriesKey::Vector(distribution.vector.clone()))
             } else { match &definition.source {
                 ChartSource::Vectors { y, .. } => y.get(series_index).cloned().map(options::SeriesKey::Vector),
@@ -1739,8 +1847,41 @@ impl ChartDataset {
                     return Err("Chart transform is outside the finite range.".into());
                 }
                 let mut hit_position = position;
+                let mut hit_region = None;
+                let mut hit_bin_bounds = None;
                 match kind {
-                    ChartKind::Histogram => unreachable!("histograms are rejected before rendering"),
+                    ChartKind::Histogram => {
+                        let axes = axes.ok_or("Histogram axes are unavailable.")?;
+                        let data = self.distribution.as_ref().ok_or("Histogram data is unavailable.")?;
+                        let bin = data.bins.get(row).ok_or("Histogram data does not match its scene.")?;
+                        let y = axes.position(1, point.y);
+                        let baseline = axes.position(1, 0.0);
+                        let (left, right) = match &bin.bounds {
+                            distribution::BinBounds::Interval { lower, upper, .. } => (axes.position_rational(lower), axes.position_rational(upper)),
+                            distribution::BinBounds::Value(value) => {
+                                let center = axes.position(0, *value);
+                                let radius = (7.0 / plot_width) as f64;
+                                if (0.0..=1.0).contains(&center) { (center - radius, center + radius) } else { (f64::NEG_INFINITY, f64::NEG_INFINITY) }
+                            }
+                        };
+                        if right >= 0.0 && left <= 1.0 && y.max(baseline) >= 0.0 && y.min(baseline) <= 1.0 {
+                            let left = left.clamp(0.0, 1.0);
+                            let right = right.clamp(0.0, 1.0);
+                            let top = y.max(baseline).clamp(0.0, 1.0);
+                            let bottom = y.min(baseline).clamp(0.0, 1.0);
+                            let min = pixels([left, top]);
+                            let max = pixels([right, bottom]);
+                            hit_position = [(min[0] + max[0]) * 0.5, min[1]];
+                            hit_region = Some([min[0].max(bounds[0]), (min[1] - 3.0).max(bounds[1]), max[0].min(bounds[2]), (max[1] + 3.0).min(bounds[3])]);
+                            hit_bin_bounds = Some(bin.bounds.clone());
+                            if min[0] < max[0] && min[1] < max[1] {
+                                primitives.push(ScenePrimitive::Rect { min, max, color });
+                            }
+                            if matches!(bin.bounds, distribution::BinBounds::Value(_)) {
+                                primitives.push(ScenePrimitive::Text { position: [min[0].max(bounds[0]), bounds[3] + 15.0], text: bounded_label(&bin.bounds.label()), color: black, size: 10.0 });
+                            }
+                        } else { hit_position = [f32::NEG_INFINITY, f32::NEG_INFINITY]; }
+                    }
                     ChartKind::Cumulative => {
                         let axes = axes.ok_or("Cumulative axes are unavailable.")?;
                         let x = axes.position(0, point.x);
@@ -1818,6 +1959,8 @@ impl ChartDataset {
                         raw_x: point.raw_x.clone(),
                         raw_y: point.raw_y.clone(),
                         approximate: point.approximate,
+                        region: hit_region,
+                        bin_bounds: hit_bin_bounds,
                     });
                 }
                 if kind == ChartKind::Bar

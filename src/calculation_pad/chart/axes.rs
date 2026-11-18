@@ -126,28 +126,80 @@ impl AxisTransform {
     }
 }
 
+pub(super) struct ExactAxis {
+    pub min: BigRational,
+    pub max: BigRational,
+    pub scale: AxisScale,
+}
+
+impl ExactAxis {
+    fn log_value(value: &BigRational) -> f64 {
+        fn log_integer(value: &num_bigint::BigInt) -> f64 {
+            let shift = value.bits().saturating_sub(53) as usize;
+            (value >> shift).to_f64().unwrap_or(f64::INFINITY).ln() + shift as f64 * std::f64::consts::LN_2
+        }
+        log_integer(value.numer()) - log_integer(value.denom())
+    }
+
+    fn distance(&self, value: &BigRational) -> f64 {
+        let ratio = ((value - &self.min) / &self.min).to_f64().unwrap_or(f64::INFINITY);
+        if ratio.is_finite() && ratio > -0.5 { ratio.ln_1p() }
+        else { Self::log_value(value) - Self::log_value(&self.min) }
+    }
+
+    fn position(&self, value: &BigRational) -> f64 {
+        if self.min == self.max { return 0.5; }
+        match self.scale {
+            AxisScale::Linear => ((value - &self.min) / (&self.max - &self.min)).to_f64().unwrap_or_else(|| if value < &self.min { f64::NEG_INFINITY } else { f64::INFINITY }),
+            AxisScale::Log10 => self.distance(value) / self.distance(&self.max),
+        }
+    }
+
+    fn value_at(&self, position: f64) -> f64 {
+        if position == 0.0 { return self.min.to_f64().unwrap_or(f64::NEG_INFINITY); }
+        if position == 1.0 { return self.max.to_f64().unwrap_or(f64::INFINITY); }
+        match self.scale {
+            AxisScale::Linear => BigRational::from_float(position).and_then(|p| (&self.min + (&self.max - &self.min) * p).to_f64()).unwrap_or(f64::INFINITY),
+            AxisScale::Log10 => (Self::log_value(&self.min) + position * self.distance(&self.max)).exp(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
-pub(super) struct PlotAxes {
+pub(super) struct PlotAxes<'a> {
     transforms: [AxisTransform; 2],
     zoom: [f64; 2],
     pan: [f64; 2],
+    exact_x: Option<&'a ExactAxis>,
 }
 
-impl PlotAxes {
+impl<'a> PlotAxes<'a> {
     pub(super) fn new(transforms: [AxisTransform; 2], view: ChartView, inset: f64) -> Self {
         Self {
             transforms,
             zoom: [view.zoom_x * (1.0 - 2.0 * inset), view.zoom_y],
             pan: [view.pan_x, view.pan_y],
+            exact_x: None,
         }
     }
 
+    pub(super) fn with_exact_x(mut self, axis: &'a ExactAxis) -> Self { self.exact_x = Some(axis); self }
+
+    pub(super) fn position_rational(self, value: &BigRational) -> f64 {
+        let position = self.exact_x.map_or_else(|| value.to_f64().map_or(f64::INFINITY, |v| self.transforms[0].position(v)), |axis| axis.position(value));
+        (position - 0.5) * self.zoom[0] + 0.5 + self.pan[0]
+    }
+
     pub(super) fn position(self, axis: usize, value: f64) -> f64 {
+        if axis == 0 && self.exact_x.is_some() {
+            return BigRational::from_float(value).map_or(value, |value| self.position_rational(&value));
+        }
         (self.transforms[axis].position(value) - 0.5) * self.zoom[axis] + 0.5 + self.pan[axis]
     }
 
     fn value_at(self, axis: usize, screen: f64) -> f64 {
-        self.transforms[axis].value_at((screen - 0.5 - self.pan[axis]) / self.zoom[axis] + 0.5)
+        let position = (screen - 0.5 - self.pan[axis]) / self.zoom[axis] + 0.5;
+        if axis == 0 && let Some(exact) = self.exact_x { exact.value_at(position) } else { self.transforms[axis].value_at(position) }
     }
 
     fn point_exact(self, axis: usize, value: f64) -> Option<BigRational> {
@@ -244,7 +296,7 @@ impl PlotAxes {
     ) -> Result<Vec<(f64, f64)>, &'static str> {
         const MAX_TICKS: usize = 64;
         let at = |position| (position, self.value_at(axis, position));
-        if self.transforms[axis].min == self.transforms[axis].max {
+        if self.transforms[axis].min == self.transforms[axis].max && !(axis == 0 && self.exact_x.is_some()) {
             return Ok(vec![at(self.position(axis, self.transforms[axis].min))]);
         }
         let (low, high) = (self.value_at(axis, 0.0), self.value_at(axis, 1.0));
@@ -280,7 +332,10 @@ impl PlotAxes {
                 }
             }
             AxisTicks::LogDecades | AxisTicks::LogSubdivisions { .. } => {
-                if low <= 0.0 || !low.is_finite() || !high.is_finite() {
+                let (low, high) = if axis == 0 && self.exact_x.is_some() {
+                    (low.max(f64::from_bits(1)), high.min(f64::MAX))
+                } else { (low, high) };
+                if low <= 0.0 || !low.is_finite() || !high.is_finite() || low > high {
                     return Err("Logarithmic ticks are outside the finite display range.");
                 }
                 let first = low.log10().floor() as i32;
