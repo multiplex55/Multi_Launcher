@@ -12,6 +12,8 @@ mod model;
 #[cfg(windows)]
 mod native;
 #[cfg(windows)]
+pub(crate) use native::print_publication;
+#[cfg(windows)]
 mod native_io;
 mod plan;
 #[cfg(windows)]

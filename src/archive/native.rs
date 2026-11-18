@@ -321,10 +321,12 @@ impl HeldDirectory {
         Ok(current)
     }
 
-    fn open_child(
-        self: &Arc<Self>,
-        component: &OsStr,
-        require_add_file: bool,
+    fn open_child(self: &Arc<Self>, component: &OsStr, require_add_file: bool) -> Result<Arc<Self>, NativeArchiveError> {
+        self.open_child_with_access(component, require_add_file, require_add_file)
+    }
+
+    fn open_child_with_access(
+        self: &Arc<Self>, component: &OsStr, require_add_file: bool, require_add_subdirectory: bool,
     ) -> Result<Arc<Self>, NativeArchiveError> {
         validate_single_component(component, "relative directory component")?;
         let access = windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
@@ -332,10 +334,8 @@ impl HeldDirectory {
             | windows::Win32::Storage::FileSystem::SYNCHRONIZE
             | if require_add_file {
                 windows::Win32::Storage::FileSystem::FILE_ADD_FILE
-                    | windows::Win32::Storage::FileSystem::FILE_ADD_SUBDIRECTORY
-            } else {
-                windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0)
-            };
+            } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) }
+            | if require_add_subdirectory { windows::Win32::Storage::FileSystem::FILE_ADD_SUBDIRECTORY } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) };
         let (file, _) = open_relative(
             self,
             component,
@@ -1382,9 +1382,12 @@ fn open_directory_parts(
     Ok(current)
 }
 
-fn open_volume_root(
-    path: &Path,
-    require_add_file: bool,
+fn open_volume_root(path: &Path, require_add_file: bool) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
+    open_volume_root_with_access(path, require_add_file, require_add_file)
+}
+
+fn open_volume_root_with_access(
+    path: &Path, require_add_file: bool, require_add_subdirectory: bool,
 ) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
@@ -1410,8 +1413,9 @@ fn open_volume_root(
     }
     let mut access = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
     if require_add_file {
-        access |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+        access |= FILE_ADD_FILE;
     }
+    if require_add_subdirectory { access |= FILE_ADD_SUBDIRECTORY; }
     // SAFETY: `wide` is an absolute, local, NUL-terminated root path. The
     // handle is opened as the reparse point itself and immediately owned by a
     // `File`. Directory handles intentionally do not share delete access.
@@ -1864,9 +1868,11 @@ impl OwnedStage {
         })
     }
 
-    fn create_after_parent_validation(
-        parent: Arc<HeldDirectory>,
-        before_native_create: impl FnOnce() -> Result<(), NativeArchiveError>,
+    fn create_after_parent_validation(parent: Arc<HeldDirectory>, before_native_create: impl FnOnce() -> Result<(), NativeArchiveError>) -> Result<Self, NativeArchiveError> {
+        Self::create_after_parent_validation_with_access(parent, before_native_create, windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0), windows::Win32::Storage::FileSystem::FILE_SHARE_READ)
+    }
+    fn create_after_parent_validation_with_access(
+        parent: Arc<HeldDirectory>, before_native_create: impl FnOnce() -> Result<(), NativeArchiveError>, extra: windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS, sharing: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE,
     ) -> Result<Self, NativeArchiveError> {
         let mut before_native_create = Some(before_native_create);
         let mut last_collision = None;
@@ -1884,8 +1890,8 @@ impl OwnedStage {
                     | windows::Win32::Storage::FileSystem::FILE_WRITE_DATA
                     | windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
                     | windows::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES
-                    | windows::Win32::Storage::FileSystem::SYNCHRONIZE,
-                windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
+                    | windows::Win32::Storage::FileSystem::SYNCHRONIZE | extra,
+                sharing,
                 windows::Wdk::Storage::FileSystem::FILE_CREATE,
                 windows::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
                     | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT,
@@ -3066,5 +3072,336 @@ mod tests {
                 && child_cleanup_ok,
             "reparse admission or owned cleanup failed: destination={destination_failure:?}, source={source_failure:?}, descendant={descendant_failure:?}, root_names={root_names:?}, child_names={child_names:?}, sentinels={root_sentinel:?}/{child_sentinel:?}, cleanup={root_cleanup_ok}/{child_cleanup_ok}"
         );
+    }
+}
+
+/// Narrow handle-relative primitives for guarded PDF publication.
+pub(crate) mod print_publication {
+    use super::*;
+    use windows::Wdk::Storage::FileSystem::{
+        FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+
+    fn error(error: NativeArchiveError) -> io::Error {
+        io::Error::new(error.kind(), error.to_string())
+    }
+    fn failure(error: NativeFailure) -> io::Error {
+        io::Error::new(error.kind, format!("{error:?}"))
+    }
+    pub(crate) struct Directory(Arc<HeldDirectory>);
+    pub(crate) struct Leaf {
+        file: File,
+        identity: NativeFileIdentity,
+    }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct Revision {
+        pub identity: NativeFileIdentity,
+        pub size: u64,
+        pub creation: i64,
+        pub modified: i64,
+        pub changed: i64,
+        pub attributes: u32,
+    }
+    pub(crate) fn validate_pdf_attributes(attributes: u32) -> io::Result<()> {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_SYSTEM,
+        };
+        crate::file_operations::validate_replace_basic_attributes(attributes)?;
+        if attributes
+            & (FILE_ATTRIBUTE_HIDDEN.0
+                | FILE_ATTRIBUTE_SYSTEM.0
+                | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED.0)
+            != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PDF replacement refuses special file attributes",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) struct Stage(OwnedStage);
+    impl Directory {
+        pub(crate) fn open(path: &Path, writable: bool) -> io::Result<Self> {
+            {
+                let (root, parts) = split_local_absolute_path(path).map_err(error)?;
+                let mut current =
+                    open_volume_root_with_access(&root, writable && parts.is_empty(), false)
+                        .map_err(error)?;
+                for (index, part) in parts.iter().enumerate() {
+                    current = current
+                        .open_child_with_access(part, writable && index + 1 == parts.len(), false)
+                        .map_err(error)?;
+                }
+                Ok(Self(current))
+            }
+        }
+        pub(crate) fn identity(&self) -> io::Result<NativeFileIdentity> {
+            self.0.verify_identity().map_err(error)
+        }
+        pub(crate) fn leaf(&self, name: &OsStr, guard: bool) -> io::Result<Option<Leaf>> {
+            let access = FILE_READ_ATTRIBUTES
+                | windows::Win32::Storage::FileSystem::FILE_READ_DATA
+                | SYNCHRONIZE
+                | if guard {
+                    DELETE | windows::Win32::Storage::FileSystem::READ_CONTROL
+                } else {
+                    windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0)
+                };
+            let sharing = if guard {
+                FILE_SHARE_READ
+            } else {
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+            };
+            let file = match open_relative(
+                &self.0,
+                name,
+                access,
+                sharing,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "open PDF destination",
+                || Ok(()),
+            ) {
+                Ok((file, _)) => file,
+                Err(e) if e.primary.nt_status == Some(0xc000_0034u32 as i32) => return Ok(None),
+                Err(e) => return Err(error(e)),
+            };
+            let metadata = file.metadata()?;
+            let attrs = metadata.file_attributes();
+            if !metadata.is_file()
+                || attrs & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0) != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PDF destination is not an ordinary file",
+                ));
+            }
+            let actual = crate::file_operations::final_path_for_handle(&file)?;
+            let actual_leaf = actual.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "destination has no final name")
+            })?;
+            if !crate::batch_rename::compare_paths_windows_ordinal(
+                Path::new(actual_leaf),
+                Path::new(name),
+            )
+            .is_eq()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "destination leaf is an alternate name",
+                ));
+            }
+            let identity = native_file_identity(&file)?;
+            Ok(Some(Leaf { file, identity }))
+        }
+        pub(crate) fn source_leaf(&self, name: &OsStr, guard: bool) -> io::Result<Option<Leaf>> {
+            let file = match open_relative(
+                &self.0,
+                name,
+                FILE_READ_ATTRIBUTES
+                    | SYNCHRONIZE
+                    | if guard {
+                        windows::Win32::Storage::FileSystem::FILE_READ_DATA
+                    } else {
+                        windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0)
+                    },
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "open PDF active source",
+                || Ok(()),
+            ) {
+                Ok((file, _)) => file,
+                Err(e) if e.primary.nt_status == Some(0xc000_0034u32 as i32) => return Ok(None),
+                Err(e) => return Err(error(e)),
+            };
+            let meta = file.metadata()?;
+            if !meta.is_file()
+                || meta.file_attributes()
+                    & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0)
+                    != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "active source is not an ordinary file",
+                ));
+            }
+            let identity = native_file_identity(&file)?;
+            Ok(Some(Leaf { file, identity }))
+        }
+        pub(crate) fn stage(&self, security: bool) -> io::Result<Stage> {
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ACCESS_RIGHTS, FILE_SHARE_MODE, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+            };
+            let extra = if security {
+                READ_CONTROL | WRITE_DAC | WRITE_OWNER
+            } else {
+                FILE_ACCESS_RIGHTS(0)
+            };
+            self.0.verify_identity().map_err(error)?;
+            OwnedStage::create_after_parent_validation_with_access(
+                self.0.clone(),
+                || Ok(()),
+                extra,
+                FILE_SHARE_MODE(0),
+            )
+            .map(Stage)
+            .map_err(error)
+        }
+        pub(crate) fn rename(&self, leaf: &Leaf, name: &OsStr) -> io::Result<()> {
+            self.identity()?;
+            rename_open_file_relative_no_replace(&leaf.file, &self.0, name, leaf.identity)
+                .map_err(failure)
+        }
+    }
+    impl Leaf {
+        pub(crate) fn revision(&self) -> io::Result<Revision> {
+            if native_file_identity(&self.file)? != self.identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "held PDF destination identity changed",
+                ));
+            }
+            let info = crate::file_operations::query_replace_basic_info(&self.file)?;
+            let metadata = self.file.metadata()?;
+            if !metadata.is_file()
+                || info.FileAttributes
+                    & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0)
+                    != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PDF destination is not an ordinary file",
+                ));
+            }
+            Ok(Revision {
+                identity: self.identity,
+                size: metadata.len(),
+                creation: info.CreationTime,
+                modified: info.LastWriteTime,
+                changed: info.ChangeTime,
+                attributes: info.FileAttributes,
+            })
+        }
+        pub(crate) fn fingerprint(
+            &self,
+            cancel: &mut impl FnMut() -> bool,
+        ) -> io::Result<(Revision, [u8; 32])> {
+            use sha2::{Digest, Sha256};
+            use std::io::{Read, Seek, SeekFrom};
+            let before = self.revision()?;
+            if before.size > crate::notes_markdown::print_layout::MAX_OUTPUT_BYTES as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "existing PDF exceeds the review size limit",
+                ));
+            }
+            let mut input = self.file.try_clone()?;
+            input.seek(SeekFrom::Start(0))?;
+            let mut hash = Sha256::new();
+            let mut total = 0u64;
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                if cancel() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "PDF review cancelled",
+                    ));
+                }
+                let n = input.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                total += n as u64;
+                if total > crate::notes_markdown::print_layout::MAX_OUTPUT_BYTES as u64 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "existing PDF exceeds the review size limit",
+                    ));
+                }
+                hash.update(&buffer[..n]);
+            }
+            if self.revision()? != before || total != before.size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "existing PDF changed while reviewed",
+                ));
+            }
+            Ok((before, hash.finalize().into()))
+        }
+        pub(crate) fn validate_security(&self) -> io::Result<()> {
+            let attributes =
+                crate::file_operations::query_replace_basic_info(&self.file)?.FileAttributes;
+            validate_pdf_attributes(attributes)?;
+            crate::file_operations::ensure_unnamed_stream_only(&self.file)
+        }
+        pub(crate) fn dispose(self) -> io::Result<()> {
+            delete_open_file(&self.file, self.identity).map_err(failure)
+        }
+    }
+    impl Stage {
+        pub(crate) fn copy_security(&self, original: &Leaf) -> io::Result<()> {
+            crate::file_operations::copy_replace_security(&original.file, self.0.file.as_file())
+        }
+        pub(crate) fn write(
+            &self,
+            bytes: &[u8],
+            cancel: &mut impl FnMut() -> bool,
+        ) -> io::Result<()> {
+            let io = ArchiveIoControl::new(ScanCancellation::new());
+            let mut offset = 0u64;
+            for chunk in bytes.chunks(64 * 1024) {
+                let mut done = 0;
+                while done < chunk.len() {
+                    if cancel() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "PDF publication cancelled",
+                        ));
+                    }
+                    let n = self
+                        .0
+                        .write_chunk(&io, offset + done as u64, &chunk[done..])
+                        .map_err(error)?;
+                    if n == 0 || n > chunk.len() - done {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "invalid PDF stage write",
+                        ));
+                    }
+                    done += n;
+                }
+                offset += chunk.len() as u64;
+            }
+            self.0.flush_final().map_err(error)
+        }
+        pub(crate) fn name(&self) -> OsString {
+            self.0.leaf.clone()
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.0.identity()
+        }
+        pub(crate) fn publish(
+            self,
+            name: &OsStr,
+        ) -> Result<NativeFileIdentity, (io::Error, Option<(OsString, NativeFileIdentity)>)>
+        {
+            let leaf = self.0.leaf.clone();
+            let identity = self.0.identity();
+            self.0.publish(name).map_err(|e| {
+                let retained = e.cleanup_failed().then_some((leaf, identity));
+                (error(e), retained)
+            })
+        }
+        pub(crate) fn abort(self) -> io::Result<()> {
+            self.0.abort().map_err(error)
+        }
     }
 }

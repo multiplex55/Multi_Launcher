@@ -1,9 +1,11 @@
 //! Bounded point geometry and reusable, embedded-font shaping for print output.
 mod markdown;
+mod publication;
 mod assets;
 mod document;
 pub mod pdf;
 pub use assets::PrintRaster;
+pub use publication::{review_pdf_destination, publish_pdf, PdfDestinationReview, PdfPublishError, PdfPublishOutcome, PdfPublishPermit, PdfTargetKind};
 pub use document::{paginate_with_assets, paginate, Drawable, LinkDestination, Page, PaginatedDocument, PrintError, PrintWarning, TextStyle};
 
 use std::ops::Range;

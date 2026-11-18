@@ -4525,7 +4525,7 @@ fn prepare_guarded_replace_file_native(
 }
 
 #[cfg(windows)]
-fn ensure_unnamed_stream_only(file: &std::fs::File) -> std::io::Result<()> {
+pub(crate) fn ensure_unnamed_stream_only(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
@@ -8706,7 +8706,7 @@ fn initialize_replace_stage(
 }
 
 #[cfg(windows)]
-fn validate_replace_basic_attributes(attributes: u32) -> std::io::Result<()> {
+pub(crate) fn validate_replace_basic_attributes(attributes: u32) -> std::io::Result<()> {
     use windows::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_SYSTEM,
@@ -8728,7 +8728,7 @@ fn validate_replace_basic_attributes(attributes: u32) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-fn query_replace_basic_info(
+pub(crate) fn query_replace_basic_info(
     file: &std::fs::File,
 ) -> std::io::Result<windows::Win32::Storage::FileSystem::FILE_BASIC_INFO> {
     use std::os::windows::io::AsRawHandle;
@@ -8898,7 +8898,7 @@ fn query_replace_security(
 }
 
 #[cfg(windows)]
-fn copy_replace_security(source: &std::fs::File, output: &std::fs::File) -> std::io::Result<()> {
+pub(crate) fn copy_replace_security(source: &std::fs::File, output: &std::fs::File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
@@ -9758,7 +9758,7 @@ pub(crate) fn native_file_identity(file: &std::fs::File) -> std::io::Result<Nati
 }
 
 #[cfg(windows)]
-fn final_path_for_handle(file: &std::fs::File) -> std::io::Result<PathBuf> {
+pub(crate) fn final_path_for_handle(file: &std::fs::File) -> std::io::Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
