@@ -127,6 +127,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B4d2 | complete |
 | M12-B4e | complete |
 | M12-B5a | complete |
+| M12-B5b1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -942,3 +943,10 @@ The focused gate passed 4/4 (7467c08d-8da1-4857-affa-3afc75e27dea). The docked f
 The main Studio registers the actual docked, embedded and detached owner with current document, view and decision generation. Its real source, action strip, presentation, menu openers and Save, Discard and Cancel are focusable by hint. The existing document effects still accept fresh user actions. Embedded keyboard admission now checks the current root layer and leaves Escape with the launcher query when query focus just cleared. Menu choices, ordinary visual property controls and the separate Viewer follow in B5b.
 
 The first gate passed 5/7 (05cdb29b-704e-46bb-b2f8-bb729b694cfd). The older native picker fixture failed at its first expected Open picker invocation (0 vs 1), identically on the cached pre-Diagram-Jump binary e89eab36dc2be6a8 in `m12-b5a-pre-diagram-jump-picker.txt`. The new native registry was empty until its existing panel lifecycle received finish_ui_pass. Run a97a9d48-0cd6-4a8e-a3e6-883f7c3e43e5 then passed docked and detached source focus, Unicode and newline input, dirty cancellation and the three older companion checks. Its embedded setup needed to reobserve the actual embedded layer after exposing the launcher. The final exact embedded check passed (365769d0-ec44-4ad2-b5c9-4ce937e97433), showing a query-owned Escape leaves the draft and decision intact and an owned Escape cancels the decision.
+
+
+### M12-B5b1 Diagram Studio menu choices
+
+The existing File, Edit, View, Templates and Help choices publish their actual enabled responses in their exact docked or detached popup. The two source handoff buttons keep the parent scope and existing document intents. Established menu focus preserves a completed hint and its ordinary key routing. The custom background color opener is a current File item, and the built-in graphical picker child remains fenced as a separate popup.
+
+The initial 5/6 run (321c0b4e-dc74-46db-8a74-7977fa3724c7) passed actual docked and detached File → Close hints, fresh Enter, source preservation and first hint Escape in the docked menu. The Visual Template helper failed on the cached pre-Jump binary from its Mermaid-only source assertion. It now checks the exact draft when present, Visual revision and document identity. Review also corrected idle focus on the actual color opener. The final scoped gate passed 7/7 (c59505a5-61ef-4d0e-952d-fb94ffc934bf), including Visual template ordinary activation and custom color idle focus.

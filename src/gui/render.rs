@@ -11290,9 +11290,12 @@ impl LauncherApp {
             } else { (owner, combo_popup) };
             let diagram_layer = self.diagram_studio_dialog.owner_layer_if_root();
             let (owner, combo_popup) = if diagram_layer.is_some() && diagram_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
-                let allowed = !egui::Popup::is_any_open(ctx)
-                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| Some(focus) == diagram_layer || focus.order == egui::Order::Background);
-                (if allowed { NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramStudio, instance: self.diagram_studio_dialog.jump_instance() } } else { NavigationOwner::Blocked }, None)
+                let diagram_owner = NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramStudio, instance: self.diagram_studio_dialog.jump_instance() };
+                let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, diagram_owner);
+                let allowed = if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
+                    super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| Some(focus) == diagram_layer || focus.order == egui::Order::Background)
+                };
+                if allowed { (diagram_owner, popup) } else { (NavigationOwner::Blocked, None) }
             } else { (owner, combo_popup) };
             let foreground_layer = super::jump_mode::ui::visible_top_middle_layer(ctx);
             let (owner, combo_popup) = if let Some((panel, prompt)) = self.note_panels.iter().find_map(|panel|
@@ -27027,7 +27030,56 @@ mod tests {
             root(&mut app, Vec::new());
         }
 
-        app.diagram_studio_dialog.request_close();
+        let root_key = |app: &mut LauncherApp, key| {
+            root(app, vec![key_press(key, egui::Modifiers::NONE)]);
+            root(app, vec![key_release(key, egui::Modifiers::NONE)]);
+        };
+        let close_label = "Close";
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, "File");
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        root_key(&mut app, egui::Key::Enter);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == label)
+        );
+        arm_root(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        root_key(&mut app, egui::Key::Escape);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+
+        let close = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == close_label)
+            .expect("docked File Close response")
+            .response_id();
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, close_label);
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(close));
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+        root_key(&mut app, egui::Key::Enter);
         for _ in 0..4 {
             root(&mut app, Vec::new());
         }
@@ -27151,9 +27203,82 @@ mod tests {
             vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
         );
         native(&mut app, vec![egui::Event::Text("π".into())]);
-        let draft = app.diagram_studio_dialog.test_session().draft();
+        let draft = app.diagram_studio_dialog.test_session().draft().to_owned();
         assert!(draft.contains('λ'));
         assert!(draft.contains("π") && draft.matches('\n').count() > docked.matches('\n').count());
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+
+        let focus_native = |app: &mut LauncherApp, label| {
+            native(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            native(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = app
+                .diagram_studio_dialog
+                .test_native_jump()
+                .active_session()
+                .expect("native Diagram menu hints")
+                .hint_map()
+                .assignments()
+                .iter()
+                .find(|assignment| assignment.target().label() == label)
+                .expect("current native menu action hint")
+                .hint()
+                .as_str()
+                .to_owned();
+            native(app, vec![egui::Event::Text(hint)]);
+        };
+        let native_enter = |app: &mut LauncherApp| {
+            native(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            native(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+        };
+        focus_native(&mut app, "File");
+        native_enter(&mut app);
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let close = app
+            .diagram_studio_dialog
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == close_label)
+            .expect("native File Close response")
+            .response_id();
+        focus_native(&mut app, close_label);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(close)))
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        native_enter(&mut app);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
     }
 
     #[test]

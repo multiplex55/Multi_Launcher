@@ -2255,10 +2255,12 @@ impl DiagramStudioDialog {
                     owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DiagramStudio, instance: self.jump_instance() },
                     base_layer: egui::LayerId::background(),
                 };
+                let popup = self.native_jump.resolve_combo_popup_owner_for_viewport(&child_context, binding);
                 let allowed = surface_input_allowed && focused && !modal_open
-                    && !egui::Popup::is_any_open(&child_context)
                     && super::jump_mode::ui::visible_top_middle_layer(&child_context).is_none()
-                    && super::jump_mode::ui::focused_response_layer(&child_context).is_none_or(|layer| layer == egui::LayerId::background());
+                    && if egui::Popup::is_any_open(&child_context) { popup.is_some() } else {
+                        super::jump_mode::ui::focused_response_layer(&child_context).is_none_or(|layer| layer == egui::LayerId::background())
+                    };
                 let frame = child_context.cumulative_frame_nr();
                 if self.native_jump_frame != Some(frame) { self.native_jump.begin_frame(); self.native_jump_frame = Some(frame); }
                 let owner = self.native_jump.update_navigation_owner_for_viewport(&child_context, binding, allowed && self.jump_enabled);
@@ -7772,8 +7774,10 @@ impl DiagramStudioDialog {
                     ui.heading("Diagram Studio");
                     let mut file_item_ids = Vec::new();
                     let mut file_sizing = false;
+                    let file_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("menu/file"));
                     let file_menu = ui.menu_button("File ▾", |menu_ui| {
                         file_sizing = menu_ui.is_sizing_pass();
+                        let mut popup_order = 0;
                         egui::ScrollArea::vertical()
                             .max_height((menu_ui.ctx().content_rect().height() - 80.0).max(120.0))
                             .show(menu_ui, |menu_ui| {
@@ -7802,6 +7806,7 @@ impl DiagramStudioDialog {
                                     let enabled = menu_actions_allowed
                                         && (_name != "drawio_import" || drawio_controls_available);
                                     let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
+                                    diagram_menu_target(file_scope.as_ref(), menu_ui, &response, &format!("item/{_name}"), label, &mut popup_order);
                                     if response.enabled() {
                                         file_item_ids.push(response.id);
                                     }
@@ -7832,6 +7837,7 @@ impl DiagramStudioDialog {
                                     let enabled = menu_actions_allowed
                                         && (format == DiagramExportFormat::Mermaid || image_export_available);
                                     let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
+                                    diagram_menu_target(file_scope.as_ref(), menu_ui, &response, &format!("item/{_name}"), label, &mut popup_order);
                                     if response.enabled() {
                                         file_item_ids.push(response.id);
                                     }
@@ -7858,6 +7864,7 @@ impl DiagramStudioDialog {
                                             menu_actions_allowed,
                                             egui::Button::selectable(*export_scale == scale, label),
                                         );
+                                        diagram_menu_target(file_scope.as_ref(), menu_ui, &response, &format!("scale/{_name}"), label, &mut popup_order);
                                         if response.enabled() {
                                             file_item_ids.push(response.id);
                                         }
@@ -7906,6 +7913,10 @@ impl DiagramStudioDialog {
                             response.rect,
                             ui.clip_rect(),
                         ));
+                        super::jump_mode::ui::register_and_apply_target(
+                            jump_scope.as_ref(), ui, &response, "use-source-in-markdown",
+                            "Use source in Markdown", super::jump_mode::TargetKind::Button, &mut jump_order,
+                        );
                         if response.clicked() && document_intent.is_none() {
                             *document_intent = Some(DocumentIntent::UseSourceInMarkdown(origin));
                         }
@@ -7926,18 +7937,25 @@ impl DiagramStudioDialog {
                             document_actions_allowed && can_convert_visual,
                         ));
                     }
+                    super::jump_mode::ui::register_and_apply_target(
+                        jump_scope.as_ref(), ui, &convert, "copy-as-visual", "Copy as Visual…",
+                        super::jump_mode::TargetKind::Button, &mut jump_order,
+                    );
                     if convert.clicked() && document_intent.is_none() {
                         *document_intent = Some(DocumentIntent::ConvertMermaidCopy);
                     }
                     let mut template_item_ids = Vec::new();
                     let mut templates_sizing_pass = false;
+                    let templates_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("menu/templates"));
                     let _templates_menu = ui.menu_button("Templates ▾", |menu_ui| {
                         templates_sizing_pass = menu_ui.is_sizing_pass();
+                        let mut popup_order = 0;
                         for template in DiagramTemplate::ALL {
                             let response = menu_ui.add_enabled(
                                 menu_actions_allowed,
                                 egui::Button::new(template.name()),
                             );
+                            diagram_menu_target(templates_scope.as_ref(), menu_ui, &response, &format!("template/{:?}", template), template.name(), &mut popup_order);
                             if response.enabled() {
                                 template_item_ids.push(response.id);
                             }
@@ -7962,6 +7980,7 @@ impl DiagramStudioDialog {
                         let mut preset_candidate = *template_preset;
                         for (preset, label) in [(None, "App default"), (Some(crate::diagram::MermaidTheme::Default), "Mermaid default"), (Some(crate::diagram::MermaidTheme::Dark), "Dark"), (Some(crate::diagram::MermaidTheme::Forest), "Forest"), (Some(crate::diagram::MermaidTheme::Neutral), "Neutral")] {
                             let response = menu_ui.selectable_value(&mut preset_candidate, preset, label);
+                            diagram_menu_target(templates_scope.as_ref(), menu_ui, &response, &format!("preset/{label}"), label, &mut popup_order);
                             if response.changed() { draw_effects.template_preset_requested = Some(preset_candidate); }
                             #[cfg(test)] test_action_rects.push((format!("template_preset_{}", label.to_lowercase().replace(' ', "_")), response.rect, menu_ui.clip_rect()));
                             if response.enabled() { template_item_ids.push(response.id); }
@@ -7988,7 +8007,7 @@ impl DiagramStudioDialog {
                         });
                     }
 
-                    let (help, help_items, help_sizing) = studio_help_menu(ui, menu_actions_allowed, pending, document_intent, render_document, *template_preset, #[cfg(test)] test_action_rects);
+                    let (help, help_items, help_sizing) = studio_help_menu(ui, menu_actions_allowed, pending, document_intent, render_document, *template_preset, jump_scope.as_ref(), #[cfg(test)] test_action_rects);
                     #[cfg(test)] {
                         test_action_rects.push(("menu_help".into(), help.rect, ui.clip_rect()));
                         test_action_focus_ids.push(("menu_help".into(), help.id));
@@ -8000,12 +8019,15 @@ impl DiagramStudioDialog {
                     }
                     let mut view_items = Vec::new();
                     let mut view_sizing = false;
+                    let view_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("menu/view"));
                     let view = ui.menu_button("View ▾", |menu_ui| {
                         view_sizing = menu_ui.is_sizing_pass();
+                        let mut popup_order = 0;
                         let source = menu_ui.add_enabled(
                             menu_actions_allowed,
                             egui::Button::selectable(view_mode.is_source(), "Source"),
                         );
+                        diagram_menu_target(view_scope.as_ref(), menu_ui, &source, "source", "Source", &mut popup_order);
                         if source.enabled() {
                             view_items.push(source.id);
                         }
@@ -8025,6 +8047,7 @@ impl DiagramStudioDialog {
                                 menu_actions_allowed,
                                 egui::Button::selectable(selected, label),
                             );
+                            diagram_menu_target(view_scope.as_ref(), menu_ui, &response, &format!("mode/{label}"), label, &mut popup_order);
                             if response.enabled() {
                                 view_items.push(response.id);
                             }
@@ -8042,6 +8065,7 @@ impl DiagramStudioDialog {
                         if view_mode.is_source() {
                             let response =
                                 menu_ui.add_enabled(menu_actions_allowed, egui::Button::new("Show preview"));
+                            diagram_menu_target(view_scope.as_ref(), menu_ui, &response, "show-preview", "Show preview", &mut popup_order);
                             if response.enabled() {
                                 view_items.push(response.id);
                             }
@@ -8070,14 +8094,17 @@ impl DiagramStudioDialog {
                     }
                     let mut edit_items = Vec::new();
                     let mut edit_sizing = false;
+                    let edit_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("menu/edit"));
                     let edit = ui.menu_button("Edit ▾", |menu_ui| {
                         edit_sizing = menu_ui.is_sizing_pass();
+                        let mut popup_order = 0;
                         for (label, enabled, mutation) in [
                             ("Undo", can_undo, PendingMutation::Undo),
                             ("Redo", can_redo, PendingMutation::Redo),
                         ] {
                             let response =
                                 menu_ui.add_enabled(menu_actions_allowed && enabled, egui::Button::new(label));
+                            diagram_menu_target(edit_scope.as_ref(), menu_ui, &response, label, label, &mut popup_order);
                             if response.enabled() {
                                 edit_items.push(response.id);
                             }
@@ -8726,6 +8753,7 @@ impl DiagramStudioDialog {
             self.test_body_rendered = true;
         }
 
+        let jump_scope = self.jump_scope.clone().filter(|_| self.documents.pending_transition().is_none());
         let pending_transition = self.documents.pending_transition().cloned();
         let path = self.documents.path().map(Path::to_path_buf);
         let visual_presentation = self.visual_projection();
@@ -8844,6 +8872,7 @@ impl DiagramStudioDialog {
                     ui.separator();
                     let mut file_items = Vec::new();
                     let mut file_sizing = false;
+                    let file_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("menu/file"));
                     let (file_response, _) = egui::containers::menu::MenuButton::new("File ▾")
                         .config(
                             egui::containers::menu::MenuConfig::new()
@@ -8851,6 +8880,7 @@ impl DiagramStudioDialog {
                         )
                         .ui(ui, |menu_ui| {
                             file_sizing = menu_ui.is_sizing_pass();
+                            let mut popup_order = 0;
                             egui::ScrollArea::vertical()
                                 .max_height((menu_ui.ctx().content_rect().height() - 80.0).max(120.0))
                                 .show(menu_ui, |menu_ui| {
@@ -8895,6 +8925,7 @@ impl DiagramStudioDialog {
                                         ),
                                     ] {
                                         let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
+                                        diagram_menu_target(file_scope.as_ref(), menu_ui, &response, &format!("item/{_name}"), label, &mut popup_order);
                                         if response.enabled() {
                                             file_items.push(response.id);
                                         }
@@ -8926,6 +8957,7 @@ impl DiagramStudioDialog {
                                                 export_allowed,
                                                 egui::Button::selectable(self.export_scale == scale, label),
                                             );
+                                            diagram_menu_target(file_scope.as_ref(), menu_ui, &response, &format!("scale/{_name}"), label, &mut popup_order);
                                             if response.enabled() {
                                                 file_items.push(response.id);
                                             }
@@ -8971,6 +9003,7 @@ impl DiagramStudioDialog {
                                                     label,
                                                 ),
                                             );
+                                            diagram_menu_target(file_scope.as_ref(), menu_ui, &response, &format!("background/{_name}"), label, &mut popup_order);
                                             if response.enabled() {
                                                 file_items.push(response.id);
                                             }
@@ -9003,6 +9036,12 @@ impl DiagramStudioDialog {
                                             ui.color_edit_button_srgba_unmultiplied(&mut rgba)
                                         })
                                         .inner;
+                                    diagram_menu_target(file_scope.as_ref(), menu_ui, &color_response, "background/color", "Custom background color", &mut popup_order);
+                                    if color_response.enabled() {
+                                        file_items.push(color_response.id);
+                                    }
+                                    #[cfg(test)]
+                                    self.test_action_focus_ids.push(("visual_export_custom_color".into(), color_response.id));
                                     if color_response.changed() {
                                         effects.visual_export_background_requested =
                                             Some(Some(VisualColor::rgba(rgba[0], rgba[1], rgba[2], rgba[3])));
@@ -9013,6 +9052,7 @@ impl DiagramStudioDialog {
                                     ] {
                                         let response = menu_ui
                                             .add_enabled(export_allowed && !export_busy, egui::Button::new(label));
+                                        diagram_menu_target(file_scope.as_ref(), menu_ui, &response, &format!("item/{_name}"), label, &mut popup_order);
                                         if response.enabled() {
                                             file_items.push(response.id);
                                         }
@@ -9057,8 +9097,10 @@ impl DiagramStudioDialog {
                     }
                     let mut edit_items = Vec::new();
                     let mut edit_sizing = false;
+                    let edit_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("menu/edit"));
                     let edit = ui.menu_button("Edit ▾", |menu_ui| {
                         edit_sizing = menu_ui.is_sizing_pass();
+                        let mut popup_order = 0;
                         let allowed =
                             file_allowed && pending.is_none() && !visual_draft_active && inline_label.is_none();
                         for (_name, label, redo, enabled) in [
@@ -9066,6 +9108,7 @@ impl DiagramStudioDialog {
                             ("visual_redo", "Redo", true, self.documents.can_redo()),
                         ] {
                             let response = menu_ui.add_enabled(allowed && enabled, egui::Button::new(label));
+                            diagram_menu_target(edit_scope.as_ref(), menu_ui, &response, _name, label, &mut popup_order);
                             if response.enabled() {
                                 edit_items.push(response.id);
                             }
@@ -9100,16 +9143,13 @@ impl DiagramStudioDialog {
                     }
                     let mut view_items = Vec::new();
                     let mut view_sizing = false;
+                    let view_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("menu/view"));
                     let view = ui.menu_button("View ▾", |menu_ui| {
                         view_sizing = menu_ui.is_sizing_pass();
-                        let response = menu_ui.add_enabled(
-                            file_allowed,
-                            egui::Button::new(if self.viewer_open {
-                                "Focus viewer"
-                            } else {
-                                "Open viewer"
-                            }),
-                        );
+                        let mut popup_order = 0;
+                        let label = if self.viewer_open { "Focus viewer" } else { "Open viewer" };
+                        let response = menu_ui.add_enabled(file_allowed, egui::Button::new(label));
+                        diagram_menu_target(view_scope.as_ref(), menu_ui, &response, "viewer", label, &mut popup_order);
                         if response.enabled() {
                             view_items.push(response.id);
                         }
@@ -9139,10 +9179,13 @@ impl DiagramStudioDialog {
                     let template_allowed = actions_allowed && !closing_requested && pending_transition.is_none() && pending.is_none() && !visual_draft_active;
                     let mut template_item_ids = Vec::new();
                     let mut template_sizing_pass = false;
+                    let templates_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("menu/templates"));
                     let templates = ui.add_enabled_ui(template_allowed, |ui| ui.menu_button("Visual templates ▾", |menu_ui| {
                         template_sizing_pass = menu_ui.is_sizing_pass();
+                        let mut popup_order = 0;
                         for template in crate::diagram::VisualAuthoringTemplate::ALL {
                             let response = menu_ui.add_enabled(template_allowed, egui::Button::new(template.name()));
+                            diagram_menu_target(templates_scope.as_ref(), menu_ui, &response, template.slug(), template.name(), &mut popup_order);
                             if response.enabled() { template_item_ids.push(response.id); }
                             #[cfg(test)] {
                                 let action = format!("visual_authoring_template_{}", template.slug());
@@ -9165,7 +9208,7 @@ impl DiagramStudioDialog {
                     if egui::Popup::is_id_open(ui.ctx(), template_popup_id) {
                         effects.active_menu_scope = Some(MenuFocusScope { popup_id: template_popup_id, trigger_id: templates.response.id, item_ids: template_item_ids, sizing_pass: template_sizing_pass });
                     }
-                    let (help, help_items, help_sizing) = studio_help_menu(ui, file_allowed, pending, document_intent, &self.render_document, self.template_preset, #[cfg(test)] &mut self.test_action_rects);
+                    let (help, help_items, help_sizing) = studio_help_menu(ui, file_allowed, pending, document_intent, &self.render_document, self.template_preset, jump_scope.as_ref(), #[cfg(test)] &mut self.test_action_rects);
                     #[cfg(test)] {
                         self.test_action_rects.push(("menu_help".into(), help.rect, ui.clip_rect()));
                         self.test_action_focus_ids.push(("menu_help".into(), help.id));
@@ -15246,6 +15289,9 @@ fn menu_focus_request_for_ui(
         if navigation.is_some() {
             ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
         }
+        if navigation.is_none() && ui.memory(|memory| memory.focused()) != focused_at_start {
+            return None;
+        }
         let focused_index = scope
             .item_ids
             .iter()
@@ -15275,18 +15321,27 @@ fn menu_focus_request_for_ui(
     }
 }
 
+fn diagram_menu_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, order: &mut u64) {
+    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, super::jump_mode::TargetKind::Button, order);
+    if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass()
+        && !ui.ctx().will_discard() && !ui.clip_rect().contains_rect(response.rect) { response.scroll_to_me(None); }
+}
+
 const HELP_COLOR_EXAMPLE: &str = "%%{init: {\"theme\":\"dark\",\"themeVariables\":{\"primaryColor\":\"#234567\"}}}%%\nflowchart TD\nA[\"Start\"] --> B[\"Finish\"]\nstyle A fill:#123456,stroke:#abcdef,color:#ffffff\n";
 
 fn studio_help_menu(
     ui: &mut egui::Ui, enabled: bool, pending: &mut Option<PendingMutation>,
     intent: &mut Option<DocumentIntent>, document: &RenderDocumentIdentity,
     preset: Option<crate::diagram::MermaidTheme>,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) -> (egui::Response, Vec<egui::Id>, bool) {
     let mut items = Vec::new();
     let mut sizing = false;
+    let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope("menu/help"));
     let menu = ui.add_enabled_ui(enabled, |ui| ui.menu_button("Help ▾", |ui| {
         sizing = ui.is_sizing_pass();
+        let mut popup_order = 0;
         let help_scroll = egui::ScrollArea::vertical().max_height((ui.ctx().content_rect().height() - 100.0).max(160.0)).show(ui, |ui| {
             ui.set_max_width(480.0);
             ui.strong("Diagram Studio — Mermaid guide");
@@ -15302,6 +15357,7 @@ fn studio_help_menu(
             ui.label("Mindmap indentation defines hierarchy. Branch palettes have up to eight colors; global edge overrides branch edges. Renderer-specific keys: mindmapRootFill, mindmapRootText, mindmapEdgeColor, mindmapSectionColors, mindmapSectionLabelColors, mindmapSectionLineColors, timelineEventColors, pieColors, gitColors, gitInvColors and gitBranchLabelColors.");
             ui.monospace(HELP_COLOR_EXAMPLE);
             let copy_color = ui.button("Copy color example");
+            diagram_menu_target(popup_scope.as_ref(), ui, &copy_color, "copy-color", "Copy color example", &mut popup_order);
             if copy_color.enabled() { items.push(copy_color.id); }
             #[cfg(test)] test_action_rects.push(("help_copy_color".into(), copy_color.rect, ui.clip_rect()));
             if copy_color.clicked() && pending.is_none() {
@@ -15330,6 +15386,7 @@ fn studio_help_menu(
                 ui.monospace(template.source());
                 ui.horizontal(|ui| {
                     let copy = ui.button("Copy example");
+                    diagram_menu_target(popup_scope.as_ref(), ui, &copy, &format!("copy/{template:?}"), &format!("Copy {} example", template.name()), &mut popup_order);
                     if copy.enabled() { items.push(copy.id); }
                     #[cfg(test)] test_action_rects.push((format!("help_copy_{}", template.name().to_lowercase()), copy.rect, ui.clip_rect()));
                     if copy.clicked() && pending.is_none() {
@@ -15337,6 +15394,7 @@ fn studio_help_menu(
                         ui.close();
                     }
                     let open = ui.button("Open example");
+                    diagram_menu_target(popup_scope.as_ref(), ui, &open, &format!("open/{template:?}"), &format!("Open {} example", template.name()), &mut popup_order);
                     if open.enabled() { items.push(open.id); }
                     #[cfg(test)] test_action_rects.push((format!("help_open_{}", template.name().to_lowercase()), open.rect, ui.clip_rect()));
                     if open.clicked() && intent.is_none() {
@@ -15346,6 +15404,7 @@ fn studio_help_menu(
                 });
             }
             let close = ui.button("Close help");
+            diagram_menu_target(popup_scope.as_ref(), ui, &close, "close", "Close help", &mut popup_order);
             if close.enabled() { items.push(close.id); }
             if close.clicked() { ui.close(); }
         });
@@ -19271,9 +19330,16 @@ mod tests {
         trigger: &str,
         first_item: &str,
     ) {
-        let before = dialog.test_session().draft().to_owned();
+        let source = dialog.documents.session().map(|session| session.draft().to_owned());
+        let visual_revision = dialog.documents.visual_revision();
+        let render_document = dialog.render_document.clone();
+        let assert_document_unchanged = |dialog: &DiagramStudioDialog| {
+            assert_eq!(dialog.documents.session().map(DiagramSession::draft), source.as_deref());
+            assert_eq!(dialog.documents.visual_revision(), visual_revision);
+            assert_eq!(dialog.render_document, render_document);
+        };
         focus_action_with_keyboard(dialog, ctx, trigger);
-        assert_eq!(dialog.test_session().draft(), before, "focusing menu trigger changed source");
+        assert_document_unchanged(dialog);
         send_child_key(dialog, ctx, egui::Key::Space, egui::Modifiers::NONE);
         for _ in 0..4 {
             frame(dialog, ctx);
@@ -19281,7 +19347,7 @@ mod tests {
         for _ in 0..32 {
             if dialog.test_action_has_focus(first_item) { return; }
             send_child_key(dialog, ctx, egui::Key::Tab, egui::Modifiers::NONE);
-            assert_eq!(dialog.test_session().draft(), before, "menu traversal changed source; scope {:?}", dialog.active_menu_scope);
+            assert_document_unchanged(dialog);
         }
         assert!(dialog.test_action_has_focus(first_item), "menu should focus {first_item}");
     }
@@ -22849,6 +22915,32 @@ mod tests {
         let bounds = project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap().bounds.unwrap();
         let projected = world_rect_to_screen(bounds, canvas, dialog.viewer_camera);
         assert!(canvas.contains_rect(projected), "new template should fit a narrow viewer: {projected:?} in {canvas:?}");
+    }
+
+    #[test]
+    fn diagram_visual_file_menu_keeps_custom_color_focus_on_idle() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(true);
+        for _ in 0..4 {
+            embedded_frame_with_events(&mut dialog, &ctx, Vec::new(), true);
+        }
+        click_action_in_embedded_fallback(&mut dialog, &ctx, "menu_file");
+        for _ in 0..3 {
+            embedded_frame_with_events(&mut dialog, &ctx, Vec::new(), true);
+        }
+        let color = dialog
+            .test_action_focus_ids
+            .iter()
+            .find(|(action, _)| action == "visual_export_custom_color")
+            .expect("actual custom color opener")
+            .1;
+        assert!(dialog.active_menu_scope.as_ref().unwrap().item_ids.contains(&color));
+        let previous = dialog.visual_export_background;
+        ctx.memory_mut(|memory| memory.request_focus(color));
+        embedded_frame_with_events(&mut dialog, &ctx, Vec::new(), true);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(color));
+        assert_eq!(dialog.visual_export_background, previous);
     }
 
     #[test]
