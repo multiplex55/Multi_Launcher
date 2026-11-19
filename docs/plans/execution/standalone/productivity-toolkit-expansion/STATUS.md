@@ -99,6 +99,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B1b | complete |
 | M12-B2a1 | complete |
 | M12-B2a2 | complete |
+| M12-B2b | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -758,3 +759,8 @@ Current document, incarnation, evaluation basis and LineId bind the docked and n
 ### M12-B2a2 Sensitivity navigation
 
 The docked and native Sensitivity companion registers its current definition, input and watched-output popup choices, table and export controls. Current Pad identity, evaluation and settings fence the targets and retained actions. Hints focus an exact input without selecting it, changing settings or running a table. The initial targeted gate passed 3/3 (`d41cd518-ad66-4c69-a39d-71ee13fe9e57`). Review identified ordinary focus reveal. The corrected gate passed 2/2 (`6ab8ad1f-d7ff-49c0-b13f-ba1d1bc11f08`), including actual Tab reveal of clipped Generate in both short bodies without starting work.
+
+
+### M12-B2b Programmer Inspector navigation
+
+The current Inspector source and host bind docked and native targets for bit operations, labels, comparison and formatting. Exact bit indices and annotation ranges have stable widget identities. A hint focuses a bit without toggling it, and fresh Enter activates the exact control. The label identity regression preserves focus through removal of a preceding row. Inner scrolling reveals the focused bit, and outer scrolling reveals the bit viewport. The initial reviewed gate passed the deep-bit, layout, retained comparison/preferences, label-file guard and layer inventory tests (`2b899e18-436b-4f59-91f9-810c97c1818e`). The corrected exact gate passed all three focus and reveal regressions (`1edc0a65-683e-49a3-9735-b98408382d3f`). Native picker acceptance was not exercised.

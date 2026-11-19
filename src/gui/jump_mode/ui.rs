@@ -82,10 +82,11 @@ pub(crate) enum NavigationDialogKind {
     ImageViewer,
     CalculationDependencies,
     CalculationSensitivity,
+    ProgrammerInspector,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 46] = [
+    pub(crate) const ALL: [Self; 47] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -132,6 +133,7 @@ impl NavigationDialogKind {
         Self::ImageViewer,
         Self::CalculationDependencies,
         Self::CalculationSensitivity,
+        Self::ProgrammerInspector,
     ];
 
     const fn index(self) -> usize {
@@ -182,6 +184,7 @@ impl NavigationDialogKind {
             Self::ImageViewer => 43,
             Self::CalculationDependencies => 44,
             Self::CalculationSensitivity => 45,
+            Self::ProgrammerInspector => 46,
         }
     }
 
@@ -233,6 +236,7 @@ impl NavigationDialogKind {
             Self::ImageViewer => "image-viewer",
             Self::CalculationDependencies => "calculation-dependencies",
             Self::CalculationSensitivity => "calculation-sensitivity",
+            Self::ProgrammerInspector => "programmer-inspector",
         }
     }
 
@@ -287,6 +291,7 @@ impl NavigationDialogKind {
             Self::ImageViewer => return None,
             Self::CalculationDependencies => egui::Id::new("calculation-dependencies-window"),
             Self::CalculationSensitivity => egui::Id::new("calculation-sensitivity-window"),
+            Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -575,6 +580,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::UnusedNoteAssets
                     | NavigationDialogKind::NoteTemplates
                     | NavigationDialogKind::TemplateDelete
+                    | NavigationDialogKind::ProgrammerInspector
                     | NavigationDialogKind::CalculationSensitivity
                     | NavigationDialogKind::CalculationDependencies
                     | NavigationDialogKind::HashGenerator
@@ -649,6 +655,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::UnusedNoteAssets
                     | NavigationDialogKind::NoteTemplates
                     | NavigationDialogKind::TemplateDelete
+                    | NavigationDialogKind::ProgrammerInspector
                     | NavigationDialogKind::CalculationSensitivity
                     | NavigationDialogKind::CalculationDependencies
                     | NavigationDialogKind::HashGenerator
@@ -4561,6 +4568,7 @@ mod tests {
                     NavigationDialogKind::TemplateDelete => { egui::Window::new("Delete Template?").show(ctx, |_| {}); }
                     NavigationDialogKind::DataRecoveryConfirmation => { egui::Window::new("Confirm destructive action").id(egui::Id::new("data-recovery-confirmation")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationSensitivity => { egui::Window::new("Sensitivity Tables").id(egui::Id::new("calculation-sensitivity-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ImageViewer => {}
                     NavigationDialogKind::CalendarEditor => {

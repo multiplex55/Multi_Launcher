@@ -2086,6 +2086,7 @@ pub(super) enum ProgrammerInspectorHostCommand {
     ),
 }
 impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspectorDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::ProgrammerInspector);
     const KEY: &'static str = "programmer-inspector";
     const REGISTER_TARGETS_ON_REPLAY: bool = true;
     const TITLE: &'static str = "Programmer Inspector";
@@ -2102,9 +2103,7 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
             egui::Id::new("programmer-inspector-window"),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
+    fn target_generation(&self) -> TargetGeneration { TargetGeneration(self.jump_generation()) }
     fn is_open(&self) -> bool {
         self.open
     }
@@ -2112,7 +2111,7 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
         self.epoch()
     }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2147,7 +2146,7 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -2157,7 +2156,7 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, parent, first, child, presentation)
+        self.render_host(ctx, runtime, parent, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
