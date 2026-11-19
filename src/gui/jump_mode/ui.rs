@@ -95,10 +95,11 @@ pub(crate) enum NavigationDialogKind {
     CalculationReference,
     DiagramStudio,
     DiagramViewer,
+    PluginSettings,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 59] = [
+    pub(crate) const ALL: [Self; 60] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -158,6 +159,7 @@ impl NavigationDialogKind {
         Self::CalculationReference,
         Self::DiagramStudio,
         Self::DiagramViewer,
+        Self::PluginSettings,
     ];
 
     const fn index(self) -> usize {
@@ -221,6 +223,7 @@ impl NavigationDialogKind {
             Self::CalculationReference => 56,
             Self::DiagramStudio => 57,
             Self::DiagramViewer => 58,
+            Self::PluginSettings => 59,
         }
     }
 
@@ -285,6 +288,7 @@ impl NavigationDialogKind {
             Self::CalculationReference => "calculation-reference",
             Self::DiagramStudio => "diagram-studio",
             Self::DiagramViewer => "diagram-viewer",
+            Self::PluginSettings => "plugin-settings",
         }
     }
 
@@ -344,6 +348,7 @@ impl NavigationDialogKind {
             Self::CalculationReference => egui::Id::new("calculation-pad-examples-window"),
             Self::DiagramStudio => egui::Id::new("diagram-studio"),
             Self::DiagramViewer => egui::Id::new("diagram-viewer"),
+            Self::PluginSettings => egui::Id::new("Plugin Settings"),
             Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
@@ -669,6 +674,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::MarkdownStudio
                     | NavigationDialogKind::DiagramStudio
                     | NavigationDialogKind::DiagramViewer
+                    | NavigationDialogKind::PluginSettings
                     | NavigationDialogKind::NotePanel
                     | NavigationDialogKind::ImageViewer
                     | NavigationDialogKind::DashboardEditor
@@ -784,6 +790,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::NotificationInbox
                     | NavigationDialogKind::FileOperations
                     | NavigationDialogKind::JsonUtility
+                    | NavigationDialogKind::PluginSettings
                     | NavigationDialogKind::Snippets),
                 ..
             } => {
@@ -5020,6 +5027,7 @@ mod tests {
                     NavigationDialogKind::CalculationReference => { egui::Window::new("Calculation Pad Examples & Reference").id(egui::Id::new("calculation-pad-examples-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::DiagramStudio => { egui::Window::new("Diagram Studio").id(egui::Id::new("diagram-studio")).show(ctx, |_| {}); }
                     NavigationDialogKind::DiagramViewer => { egui::Window::new("Diagram Viewer").id(egui::Id::new("diagram-viewer")).show(ctx, |_| {}); }
+                    NavigationDialogKind::PluginSettings => { egui::Window::new("Plugin Settings").id(egui::Id::new("Plugin Settings")).show(ctx, |_| {}); }
                     NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt => {}

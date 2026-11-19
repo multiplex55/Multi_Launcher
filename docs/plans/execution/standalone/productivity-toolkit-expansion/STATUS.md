@@ -130,6 +130,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B5b1 | complete |
 | M12-B5b2 | complete |
 | M12-B5b3 | complete |
+| M12-B5c | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -966,3 +967,10 @@ The initial gate passed 6/7 (de15f321-54b6-46ee-a259-af522a434215), including th
 The Viewer owns a separate docked, embedded or detached Jump scope tied to the actual Viewer layer or viewport, host, Viewer lifetime and active Studio document. The current Zoom, Fit, 100%, presentation and Close controls register their real responses. Viewer pass completion observes the existing discard boundary. Current foreground Viewer ownership excludes the studio source and leaves its document effects with the Studio.
 
 The initial focused gate passed 5/5 (6d09313e-642b-40d0-a143-3d94f23521d2), including existing canvas focus and docked close ownership. The final discard/embedded/actual docked-to-detached fixture gate passed 3/3 (501b042f-9047-421a-aa4c-948a82ccfc62). The actual Open viewer, Pop Out and native Close required separate activation, leaving Studio and source intact. Independent review found no ownership or retained effect defect.
+
+
+### M12-B5c Plugin Settings
+
+Plugin Settings publishes its real docked, embedded and detached owner. Filter, presentation and enabled plugin/capability checkboxes use the actual responses and current catalog identity, including origin, epoch, and capability. The existing Settings Search observer and retained autosave and close commands remain authoritative. Pending writes keep the existing input restrictions.
+
+The targeted gate passed 4/4 (7159fb45-e1e9-4919-aac4-c09298e1c03a). The actual docked and detached Filter hints preserve the draft, discarded detached input and toggles produce no save, and fresh Enter on the hinted exact checkbox follows the normal autosave path. Existing Settings Search direct focus, stale/ambiguous catalog and committed-candidate refusal also passed. Independent review found no source defects.

@@ -8564,6 +8564,7 @@ impl LauncherApp {
                 catalog: self.plugin_settings_catalog.clone(),
                 navigation: plugin_navigation,
             };
+            self.plugin_settings_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
             self.plugin_settings_host.show(
                 ctx,
                 &mut self.plugin_editor,
@@ -11085,6 +11086,7 @@ impl LauncherApp {
                     }
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
+                    NavigationDialogKind::PluginSettings => self.plugin_settings_host.root_layer(),
                     NavigationDialogKind::DiagramStudio => self.diagram_studio_dialog.owner_layer_if_root(),
                     NavigationDialogKind::DiagramViewer => self.diagram_studio_dialog.embedded_viewer_layer_if_root(),
                     NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
@@ -11166,6 +11168,8 @@ impl LauncherApp {
                         self.markdown_print_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::CalculationChart {
                         self.calculation_chart_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::PluginSettings {
+                        self.plugin_settings_host.root_layer().map(|_| self.plugin_editor.host_session())
                     } else if kind == NavigationDialogKind::DiagramStudio {
                         self.diagram_studio_dialog.owner_layer_if_root().map(|_| self.diagram_studio_dialog.jump_instance())
                     } else if kind == NavigationDialogKind::DiagramViewer {
@@ -14060,6 +14064,12 @@ impl LauncherApp {
                 catalog: self.plugin_settings_catalog.clone(),
                 navigation: navigation_observer.clone(),
             };
+            let navigation_owner = self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+            let instance = self.plugin_editor.host_session();
+            let jump_scope = if navigation_owner == (super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::PluginSettings, instance }) {
+                self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("plugin-settings", instance), self.plugin_editor.jump_generation(&runtime), "plugin-settings/form", ctx.viewport_id(), navigation_owner, false)
+            } else { None };
+            self.plugin_settings_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
             let root_input = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible);
             let native_input = self.native_ui_application_input_allowed(&ctx);
             let can_close = !self.pinned_panels.contains(&super::Panel::Plugins);
@@ -14072,14 +14082,14 @@ impl LauncherApp {
                     root_visible: frame_logic.should_be_visible,
                     root_input,
                     native_input,
-                    root_owner: super::jump_mode::ui::NavigationOwner::Blocked,
+                    root_owner: navigation_owner,
                     parent_owner: owner_current,
                     root_jump_active: self.jump_mode_ui.active_session().is_some(),
                     close_shortcut: can_close,
                     allow_os_close: can_close,
                     confirmation_owner: super::jump_mode::ui::NavigationOwner::Blocked,
-                    parent_instance: 0,
-                    root_scopes: (None, None),
+                    parent_instance: instance,
+                    root_scopes: (jump_scope.as_ref(), None),
                 },
             );
         }
@@ -84294,8 +84304,8 @@ mod tests {
         };
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let (wake, _wake_rx) = std::sync::mpsc::channel();
-        let owner = crate::hotkey::reconfiguration::install_main_runtime(wake)
-            .expect("isolated hotkey owner");
+        let owner =
+            crate::hotkey::reconfiguration::install_main_runtime(wake).expect("isolated hotkey owner");
         let ctx = egui::Context::default();
         ctx.all_styles_mut(|style| style.animation_time = 0.0);
         let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
@@ -84311,12 +84321,56 @@ mod tests {
             .sync_enabled_plugins(app.enabled_plugins.as_ref());
         let infos = app.plugins.plugin_infos();
         app.plugin_editor.sync_committed_settings(&settings, infos);
+        app.set_jump_mode_enabled(true);
         prepare_actual_query_frame(&ctx, &mut app);
         app.focus_panel(super::super::Panel::Plugins);
         app.plugin_editor.set_test_filter("draft");
         for _ in 0..4 {
             run_dialog_frame(&ctx, &mut app);
         }
+        let layer = app
+            .plugin_settings_host
+            .root_layer()
+            .expect("docked Plugin Settings");
+        ctx.move_to_top(layer);
+        let (filter, rect) = app
+            .plugin_editor
+            .test_filter_response()
+            .expect("docked Filter");
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(rect, pressed));
+        }
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        let label = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.response_id() == filter)
+            .expect("actual docked Filter target")
+            .metadata()
+            .label()
+            .to_owned();
+        root(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        root(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, &label);
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(filter));
+        assert_eq!(app.plugin_editor.test_filter(), "draft");
         let (button, clip, enabled) = app
             .plugin_settings_host
             .test_button
@@ -84349,21 +84403,57 @@ mod tests {
                     .drop_without_applying_deltas();
             });
         }
-        let (_, filter) = app
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let (filter, _) = app
             .plugin_editor
             .test_filter_response()
             .expect("native filter");
-        for pressed in [true, false] {
-            super::with_immediate_viewport_test_events_for(
-                viewport,
-                tool_dialog_pointer_events(filter, pressed),
-                || {
-                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
-                        .0
-                        .drop_without_applying_deltas();
-                },
-            );
-        }
+        let label = app
+            .plugin_settings_host
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.response_id() == filter)
+            .expect("actual native Filter target")
+            .metadata()
+            .label()
+            .to_owned();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .plugin_settings_host
+            .test_native_jump()
+            .active_session()
+            .expect("Plugin Settings hints in their viewport")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("native Filter hint")
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(filter)))
+        );
+        assert_eq!(app.plugin_editor.test_filter(), "draft");
         super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
         super::with_immediate_viewport_test_events_for(
             viewport,
@@ -84451,22 +84541,61 @@ mod tests {
                 .0
                 .drop_without_applying_deltas();
         });
-        let (_, checkbox, clip, enabled) = app
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let (label, checkbox, clip, enabled) = app
             .plugin_editor
             .test_plugin_checkbox()
             .expect("current plugin checkbox");
         assert!(enabled && clip.contains_rect(checkbox));
-        for pressed in [true, false] {
-            super::with_immediate_viewport_test_events_for(
-                viewport,
-                tool_dialog_pointer_events(checkbox, pressed),
-                || {
-                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
-                        .0
-                        .drop_without_applying_deltas();
-                },
-            );
-        }
+        let checkbox_id = app
+            .plugin_settings_host
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label && target.rect() == checkbox)
+            .expect("exact native plugin row target")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .plugin_settings_host
+            .test_native_jump()
+            .active_session()
+            .expect("current native Plugin Settings hints")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("exact native plugin row hint")
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(checkbox_id)))
+        );
+        assert!(!app.settings_save_pending());
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
         assert!(app.settings_save_pending());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.settings_save_pending() {

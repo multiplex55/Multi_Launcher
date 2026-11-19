@@ -2518,7 +2518,9 @@ pub(super) enum PluginHostCommand {
     Navigation(crate::settings_editor::render::SettingsNavigationFrameObserver),
 }
 impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::PluginSettings);
     const KEY: &'static str = "plugin-settings";
+    const SURFACE_KIND: &'static str = "plugin-settings";
     const TITLE: &'static str = "Plugin Settings";
     const SIZE: egui::Vec2 = egui::vec2(540.0, 440.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
@@ -2531,17 +2533,17 @@ impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new("Plugin Settings"))
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.host_open
     }
     fn session(&self) -> u64 {
         self.host_session()
     }
+    fn target_generation_for_runtime(&self, runtime: &Self::Runtime) -> TargetGeneration {
+        self.jump_generation(runtime)
+    }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2580,7 +2582,7 @@ impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2590,7 +2592,7 @@ impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, allowed, first, child, presentation)
+        self.render_host(ctx, runtime, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.presentation_request
