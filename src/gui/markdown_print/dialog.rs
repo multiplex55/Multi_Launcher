@@ -1117,7 +1117,7 @@ impl PrintDialog {
                     if let Some(receipt) = &self.receipt
                         && !receipt.scene.warnings.is_empty()
                     {
-                        ui.collapsing(
+                        let warnings = ui.collapsing(
                             format!("Warnings ({})", receipt.scene.warnings.len()),
                             |ui| {
                                 egui::ScrollArea::vertical()
@@ -1129,6 +1129,8 @@ impl PrintDialog {
                                     });
                             },
                         );
+                        let header = warnings.header_response;
+                        target!(ui, header, "warnings", "Preview warnings", TargetKind::Button);
                     }
                     if let Some(error) = &self.error {
                         ui.colored_label(ui.visuals().error_fg_color, error);

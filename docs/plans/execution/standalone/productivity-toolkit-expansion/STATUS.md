@@ -131,6 +131,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B5b2 | complete |
 | M12-B5b3 | complete |
 | M12-B5c | complete |
+| M12-B6 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -974,3 +975,8 @@ The initial focused gate passed 5/5 (6d09313e-642b-40d0-a143-3d94f23521d2), incl
 Plugin Settings publishes its real docked, embedded and detached owner. Filter, presentation and enabled plugin/capability checkboxes use the actual responses and current catalog identity, including origin, epoch, and capability. The existing Settings Search observer and retained autosave and close commands remain authoritative. Pending writes keep the existing input restrictions.
 
 The targeted gate passed 4/4 (7159fb45-e1e9-4919-aac4-c09298e1c03a). The actual docked and detached Filter hints preserve the draft, discarded detached input and toggles produce no save, and fresh Enter on the hinted exact checkbox follows the normal autosave path. Existing Settings Search direct focus, stale/ambiguous catalog and committed-candidate refusal also passed. Independent review found no source defects.
+
+
+### M12-B6 Remaining utility disclosure controls
+
+Print Preview now registers the real Warnings disclosure in its current preview scope. File Operations registers the actual All sources disclosure for the exact queued job. Both remain focus-only until ordinary activation, and their existing content and retained actions remain authoritative. The two scoped companion tests passed (dbcd5e21-de46-4a33-84e1-7d286c5b5615). The batched final verification and native main-query → pop-out smoke are tracked in M13-A.

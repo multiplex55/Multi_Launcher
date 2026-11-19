@@ -996,11 +996,24 @@ impl FileOperationsCenterDialog {
                             ui.label(format!("Source: {}", path.display()));
                         }
                         if job.roots.len() > 1 {
-                            ui.collapsing(format!("All {} sources", job.roots.len()), |ui| {
+                            let sources = egui::CollapsingHeader::new(format!(
+                                "All {} sources",
+                                job.roots.len()
+                            ))
+                            .id_salt(("job-sources", job.id.get()))
+                            .show(ui, |ui| {
                                 for path in job.roots.iter() {
                                     ui.label(path.display().to_string());
                                 }
                             });
+                            let header = sources.header_response;
+                            target!(
+                                ui,
+                                header,
+                                &format!("job/{}/sources", job.id.get()),
+                                "All queued job sources",
+                                TargetKind::Button
+                            );
                         }
                         if index > 0 {
                             let response = ui.button("Move up");
