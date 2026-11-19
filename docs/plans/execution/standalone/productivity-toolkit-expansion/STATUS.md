@@ -107,6 +107,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3b2 | complete |
 | M12-B3c | complete |
 | M12-B3b3 | complete |
+| M12-B3d1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -792,3 +793,6 @@ M12-B3c binds Table, Link and New Note forms to their exact docked or detached s
 
 
 M12-B3b3 registers direct task-inline Wiki, HTTP and Todo links and visible note image open controls using exact source-occurrence IDs. The existing viewport test observed the exact detached Todo link focus without opening it, then exercised discarded and fresh ordinary activation with the correct owned hosts. The focused gate passed 4/4 in d14cfbca-4c2e-4d8e-aa94-48112e221c88. CommonMark-rendered links continue to use the library's ordinary keyboard controls. Its interface exposes an aggregate response; Note Details also provides current link targets. The image sizing context menu remains in the later popup slice.
+
+
+M12-B3d1 gives a live dirty-close question its own exact panel and opening generation. Discard, Save and Keep Editing hints focus their real controls. The initial scoped gate passed 5/5 in a0e7ec01-1e77-42a3-878e-869439ff39f5. Review added exact prior-editor focus admission in the detached viewport and recognized the embedded fallback for Escape. The final three checks passed in 913f6a89-7ba1-49c0-9831-63435e790814. Retained root and native cases preserve the dirty draft across hint Escape and fresh Keep Editing, including with Jump disabled for the latter.

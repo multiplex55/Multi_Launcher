@@ -1131,6 +1131,8 @@ pub struct NotePanel {
     saved_content_baseline: String,
     pending_close_after_save: bool,
     discard_unsaved_prompt: bool,
+    close_prompt_epoch: u64,
+    close_prompt_scope: Option<super::jump_mode::ui::JumpModeScope>,
     link_search: String,
     link_menu_targets: Vec<LinkMenuResult>,
     link_menu_targets_version: Option<u64>,
@@ -1835,6 +1837,8 @@ impl NotePanel {
             saved_content_baseline,
             pending_close_after_save: false,
             discard_unsaved_prompt: false,
+            close_prompt_epoch: 0,
+            close_prompt_scope: None,
             link_search: String::new(),
             link_menu_targets: Vec::new(),
             link_menu_targets_version: None,
@@ -2819,7 +2823,9 @@ impl NotePanel {
     }
 
     pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
-        if self.root_form_navigation(ctx).is_some() {
+        if self.root_form_navigation(ctx).is_some()
+            || (self.host_layer_if_root().is_some() && self.close_prompt_current(ctx))
+        {
             return true;
         }
         if self.host_state.presentation() != UtilityPresentation::Popout
@@ -5551,6 +5557,49 @@ impl NotePanel {
         egui::Id::new(("note-panel-prompt", kind, self.prompt_identity))
     }
 
+    fn show_close_prompt(&mut self) {
+        if !self.discard_unsaved_prompt {
+            self.close_prompt_epoch = self.close_prompt_epoch.wrapping_add(1);
+        }
+        self.discard_unsaved_prompt = true;
+    }
+
+    pub(super) fn close_prompt_current(&self, ctx: &egui::Context) -> bool {
+        let layer = egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("close"));
+        self.open
+            && self.discard_unsaved_prompt
+            && ctx.input(|input| input.focused)
+            && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            && ctx
+                .memory(|memory| memory.top_modal_layer())
+                .is_none_or(|modal| modal == layer)
+            && !egui::Popup::is_any_open(ctx)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focused| {
+                focused == layer
+                    || focused.order == egui::Order::Background
+                    || Some(focused) == self.host_layer_if_root()
+            })
+    }
+
+    pub(super) fn close_prompt_generation(&self) -> super::jump_mode::TargetGeneration {
+        super::jump_mode::TargetGeneration(
+            egui::Id::new((
+                self.prompt_identity,
+                self.host_state.identity().generation,
+                self.close_prompt_epoch,
+                self.note_find.content_revision(),
+            ))
+            .value(),
+        )
+    }
+
+    pub(super) fn set_close_prompt_scope(
+        &mut self,
+        scope: Option<super::jump_mode::ui::JumpModeScope>,
+    ) {
+        self.close_prompt_scope = scope;
+    }
+
     fn close_after_successful_save(&mut self, app: &mut LauncherApp) {
         if !self.pending_close_after_save {
             return;
@@ -5588,7 +5637,7 @@ impl NotePanel {
                 NoteSaveOutcome::AwaitingDecision => self.open = true,
                 NoteSaveOutcome::Failed => {
                     self.open = true;
-                    self.discard_unsaved_prompt = true;
+                    self.show_close_prompt();
                 }
             }
         } else if !self.has_unsaved_changes() {
@@ -5597,7 +5646,7 @@ impl NotePanel {
             self.close_panel_and_release_focus(app);
         } else {
             self.open = true;
-            self.discard_unsaved_prompt = true;
+            self.show_close_prompt();
         }
     }
 
@@ -5818,6 +5867,12 @@ impl NotePanel {
             UtilityPresentation::Docked => {
                 self.native_jump.cancel_all();
                 self.native_jump_frame = None;
+                if pass_authorized && root_input_allowed && self.close_prompt_current(ctx)
+                    && app.jump_mode_ui.active_session().is_none()
+                    && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
+                {
+                    self.pending_host_actions.keep_editing_requested = true;
+                }
                 callback_observed = true;
                 owner_pass_accepted = pass_authorized;
                 self.active_host_layer = Some(self.show_query_focus_layer());
@@ -5877,13 +5932,22 @@ impl NotePanel {
                             && (independent || fallback_keyboard_owner);
                         let mut native_binding = None;
                         let mut native_jump_owned_escape = false;
+                        let close_current = (independent || fallback_keyboard_owner)
+                            && self.close_prompt_current(&child_ctx);
                         let native_jump_allowed = independent
                             && keyboard_input_allowed
                             && !own_modal_open
                             && !egui::Popup::is_any_open(&child_ctx)
-                            && super::jump_mode::ui::visible_top_middle_layer(&child_ctx).is_none()
-                            && super::jump_mode::ui::focused_response_layer(&child_ctx)
-                                .is_none_or(|layer| layer == egui::LayerId::background());
+                            && (close_current
+                                || super::jump_mode::ui::visible_top_middle_layer(&child_ctx)
+                                    .is_none())
+                            && super::jump_mode::ui::focused_response_layer(&child_ctx).is_none_or(
+                                |layer| {
+                                    layer == egui::LayerId::background()
+                                        || (close_current
+                                            && layer.id == self.note_prompt_id("close"))
+                                },
+                            );
                         if independent {
                             let (chord, alphabet) = app.jump_mode_ui.configuration();
                             self.native_jump.set_configuration(chord, alphabet);
@@ -5897,10 +5961,21 @@ impl NotePanel {
                             let binding = super::jump_mode::ui::NavigationViewportBinding {
                                 viewport: viewport_id,
                                 owner: super::jump_mode::ui::NavigationOwner::Dialog {
-                                    kind: super::jump_mode::ui::NavigationDialogKind::NotePanel,
+                                    kind: if close_current {
+                                        super::jump_mode::ui::NavigationDialogKind::NoteClosePrompt
+                                    } else {
+                                        super::jump_mode::ui::NavigationDialogKind::NotePanel
+                                    },
                                     instance: self.prompt_identity,
                                 },
-                                base_layer: egui::LayerId::background(),
+                                base_layer: if close_current {
+                                    egui::LayerId::new(
+                                        egui::Order::Middle,
+                                        self.note_prompt_id("close"),
+                                    )
+                                } else {
+                                    egui::LayerId::background()
+                                },
                             };
                             let native_navigation =
                                 self.native_jump.update_navigation_owner_for_viewport(
@@ -5921,10 +5996,18 @@ impl NotePanel {
                                 .then(|| {
                                     self.native_jump.scope_for_viewport_binding(
                                         super::jump_mode::SurfaceId::dialog(
-                                            "note-panel",
+                                            if close_current {
+                                                "note-close-prompt"
+                                            } else {
+                                                "note-panel"
+                                            },
                                             self.prompt_identity,
                                         ),
-                                        self.jump_generation(),
+                                        if close_current {
+                                            self.close_prompt_generation()
+                                        } else {
+                                            self.jump_generation()
+                                        },
                                         "note-panel",
                                         binding,
                                     )
@@ -5937,7 +6020,11 @@ impl NotePanel {
                                         scope.registration_only()
                                     }
                                 });
-                            self.set_jump_scope(scope);
+                            if close_current {
+                                self.set_close_prompt_scope(scope);
+                            } else {
+                                self.set_jump_scope(scope);
+                            }
                             native_binding = Some(binding);
                         }
                         let shortcuts_allowed = accepted
@@ -5945,7 +6032,16 @@ impl NotePanel {
                             && !native_jump_owned_escape
                             && !own_modal_open
                             && !egui::Popup::is_any_open(&child_ctx);
-                        if shortcuts_allowed && independent {
+                        if close_current
+                            && shortcuts_allowed
+                            && (independent || app.jump_mode_ui.active_session().is_none())
+                            && child_ctx.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, Key::Escape)
+                            })
+                        {
+                            self.pending_host_actions.keep_editing_requested = true;
+                        }
+                        if shortcuts_allowed && independent && !close_current {
                             let find = child_ctx.input_mut(|input| {
                                 input.consume_key(egui::Modifiers::COMMAND, Key::F)
                             });
@@ -5960,6 +6056,7 @@ impl NotePanel {
                             }
                         }
                         let keyboard_close = shortcuts_allowed
+                            && !close_current
                             && child_ctx.input_mut(|input| {
                                 input.consume_key(egui::Modifiers::NONE, Key::Escape)
                                     || input.consume_key(egui::Modifiers::COMMAND, Key::W)
@@ -5969,9 +6066,7 @@ impl NotePanel {
                         }
                         if independent {
                             owner_pass = Some(child_pass);
-                            native_viewport = Some(
-                                child.input(|input| input.viewport().clone()),
-                            );
+                            native_viewport = Some(child.input(|input| input.viewport().clone()));
                             self.active_host_pass = Some((host, child_pass));
                             self.active_host_layer = Some(egui::LayerId::background());
                             let native_input_allowed = application_input_allowed
@@ -6002,8 +6097,7 @@ impl NotePanel {
                                     && !keyboard_close,
                             );
                             embedded_root_layer = Some(child.layer_id());
-                            embedded_root_focused_id =
-                                child_ctx.memory(|memory| memory.focused());
+                            embedded_root_focused_id = child_ctx.memory(|memory| memory.focused());
                         }
                         if let Some(binding) = native_binding {
                             self.native_jump.finish_ui_pass();
@@ -6029,6 +6123,7 @@ impl NotePanel {
                                 );
                             }
                             self.set_jump_scope(None);
+                            self.set_close_prompt_scope(None);
                         }
                         owner_modal_layer =
                             child_ctx.memory(|memory| memory.top_modal_layer());
@@ -6313,6 +6408,7 @@ impl NotePanel {
             let mut save_changes = false;
             let mut discard = false;
             let mut keep_editing = false;
+            let mut prompt_order = 0;
             egui::Window::new("Discard unsaved changes?")
                 .id(self.note_prompt_id("close"))
                 .collapsible(false)
@@ -6329,6 +6425,15 @@ impl NotePanel {
                     ui.horizontal(|ui| {
                         let save = ui.button("Save Changes");
                         let save = widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.close_prompt_scope.as_ref(),
+                            ui,
+                            &save,
+                            "save",
+                            "Save Changes",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
                         #[cfg(test)]
                         if ui.is_visible() && !ui.is_sizing_pass() {
                             self.test_save_changes_rect = Some(save.rect);
@@ -6339,6 +6444,15 @@ impl NotePanel {
                             ui,
                             response,
                             ButtonEmphasis::Destructive,
+                        );
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.close_prompt_scope.as_ref(),
+                            ui,
+                            &response,
+                            "discard",
+                            "Discard Changes",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
                         );
                         if let Some(observed) = observed_discard {
                             *observed = super::query_observation::observe_note_discard_response(
@@ -6358,6 +6472,15 @@ impl NotePanel {
                             ui,
                             keep_editing_button,
                             ButtonEmphasis::Primary,
+                        );
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.close_prompt_scope.as_ref(),
+                            ui,
+                            &keep_editing_response,
+                            "keep",
+                            "Keep Editing",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
                         );
                         #[cfg(feature = "qa-framebuffer-capture")]
                         self.record_note_replace_control(

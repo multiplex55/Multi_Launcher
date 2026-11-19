@@ -87,10 +87,11 @@ pub(crate) enum NavigationDialogKind {
     NoteFormTable,
     NoteFormLink,
     NoteFormNewNote,
+    NoteClosePrompt,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 51] = [
+    pub(crate) const ALL: [Self; 52] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -142,6 +143,7 @@ impl NavigationDialogKind {
         Self::NoteFormTable,
         Self::NoteFormLink,
         Self::NoteFormNewNote,
+        Self::NoteClosePrompt,
     ];
 
     const fn index(self) -> usize {
@@ -197,6 +199,7 @@ impl NavigationDialogKind {
             Self::NoteFormTable => 48,
             Self::NoteFormLink => 49,
             Self::NoteFormNewNote => 50,
+            Self::NoteClosePrompt => 51,
         }
     }
 
@@ -253,6 +256,7 @@ impl NavigationDialogKind {
             Self::NoteFormTable => "note-custom-table-builder",
             Self::NoteFormLink => "note-insert-link",
             Self::NoteFormNewNote => "note-link-new",
+            Self::NoteClosePrompt => "note-close-prompt",
         }
     }
 
@@ -304,7 +308,7 @@ impl NavigationDialogKind {
             Self::NoteTemplates => egui::Id::new(Some("Note Templates")),
             Self::TemplateDelete => egui::Id::new(Some("Delete Template?")),
             Self::UnusedNoteAssets => egui::Id::new(Some("Unused Note Assets")),
-            Self::ImageViewer | Self::NotePanel | Self::NoteFormTable | Self::NoteFormLink | Self::NoteFormNewNote => return None,
+            Self::ImageViewer | Self::NotePanel | Self::NoteFormTable | Self::NoteFormLink | Self::NoteFormNewNote | Self::NoteClosePrompt => return None,
             Self::CalculationDependencies => egui::Id::new("calculation-dependencies-window"),
             Self::CalculationSensitivity => egui::Id::new("calculation-sensitivity-window"),
             Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
@@ -624,6 +628,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::NoteFormTable
                     | NavigationDialogKind::NoteFormLink
                     | NavigationDialogKind::NoteFormNewNote
+                    | NavigationDialogKind::NoteClosePrompt
                     | NavigationDialogKind::NotePanel
                     | NavigationDialogKind::ImageViewer
                     | NavigationDialogKind::DashboardEditor
@@ -660,6 +665,14 @@ impl NavigationViewportBinding {
                 let key = kind.surface_kind();
                 self.viewport == egui::ViewportId::from_hash_of((key, instance))
                     && self.base_layer == egui::LayerId::new(egui::Order::Middle, egui::Id::new((key, instance)))
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::NoteClosePrompt,
+                instance,
+            } => {
+                self.viewport == egui::ViewportId::from_hash_of(("note-panel-editor", instance))
+                    && self.base_layer == egui::LayerId::new(egui::Order::Middle, egui::Id::new(("note-panel-prompt", "close", instance)))
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::Dialog {
@@ -810,8 +823,10 @@ impl NavigationViewportBinding {
         focused_response_layer(ctx).is_none_or(|layer| {
             layer == self.base_layer
                 || Some(layer) == popup_layer
-                || (matches!(self.owner, NavigationOwner::Dialog { kind: NavigationDialogKind::TemplateDelete, .. })
-                    && layer == egui::LayerId::background())
+                || (matches!(self.owner, NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::TemplateDelete | NavigationDialogKind::NoteClosePrompt,
+                    ..
+                }) && layer == egui::LayerId::background())
                 || (matches!(self.owner, NavigationOwner::SnippetPrompt { .. })
                     && (Some(layer) == NavigationDialogKind::Snippets.layer_id()
                         || layer.order != egui::Order::Middle))
@@ -4607,7 +4622,7 @@ mod tests {
                     NavigationDialogKind::CalculationSensitivity => { egui::Window::new("Sensitivity Tables").id(egui::Id::new("calculation-sensitivity-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
-                    NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote => {}
+                    NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt => {}
                     NavigationDialogKind::CalendarEditor => {
                         egui::Window::new("Calendar Event").show(ctx, |_| {});
                     }
@@ -4809,7 +4824,7 @@ mod tests {
             let Some(expected_layer) = kind.layer_id() else {
                 assert!(matches!(
                     kind,
-                    NavigationDialogKind::RadialDesigner | NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote
+                    NavigationDialogKind::RadialDesigner | NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt
                 ));
                 continue;
             };
