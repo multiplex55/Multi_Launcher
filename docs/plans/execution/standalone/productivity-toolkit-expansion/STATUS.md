@@ -83,6 +83,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M11-B | complete |
 | M11-C | blocked |
 | M11-D | blocked |
+| M11-DR | complete |
 | M12-A1 | complete |
 | M12-A2 | complete |
 | M12-A3 | complete |
@@ -776,3 +777,6 @@ M12-B3a2 binds each detached NotePanel to its exact native viewport and foregrou
 
 
 M12-B3b1 registers the current outline width, filter, headings and enabled Move buttons under the existing NotePanel owner. Stable heading IDs use the source offset and revision. Filter, collapse and selected-subject changes retire the Jump generation. Existing scope and Undo checks passed 4/4 in 0776c3ad-d1e8-4609-b697-ba64f4975f93. The retained hint case passed in 501d71b7-8350-48e0-a92d-6c619af3c541 after initializing the synthetic note through its normal content revision and showing both headings in the fixture window. The hint focused the exact row. Enter then selected it with the draft unchanged.
+
+
+M11-DR resolves Windows **Open source app** availability on the existing worker using exact AppInfo package identity for each observed app. The bounded view publishes only current validated toast identities. GUI focus targets and the live action checks use the exact selected toast. The seven Windows-path tests passed in 05316949-0bce-4c54-8537-7d32dc4d7bf0, including changed creation time, source removal and revoked eligibility. Independent review was clear. The real deployment and consent evidence remains blocked as recorded above.

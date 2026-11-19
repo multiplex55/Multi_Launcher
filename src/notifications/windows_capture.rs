@@ -1,12 +1,21 @@
 //! An opt-in listener owned by the existing Inbox worker.
 use super::{FactId, InboxStore, Record, Status, WindowsAccess};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct WindowsCaptureView {
     pub access: WindowsAccess,
     pub started_at: Option<i64>,
     pub incomplete: bool,
+    openable: Arc<HashSet<FactId>>,
+}
+
+impl WindowsCaptureView {
+    pub(crate) fn can_open_source(&self, record: &Record) -> bool {
+        self.access == WindowsAccess::Active
+            && record.status == Status::Current
+            && self.openable.contains(&record.id)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,6 +37,7 @@ mod native {
         },
     };
     use std::{
+        collections::HashMap,
         sync::atomic::{AtomicBool, Ordering},
         time::Instant,
     };
@@ -168,13 +178,15 @@ mod native {
             &self,
             snapshot: IVectorView<UserNotification>,
             settings: &Settings,
-        ) -> windows::core::Result<ToastObservation> {
+        ) -> windows::core::Result<(ToastObservation, HashSet<FactId>)> {
             let size = snapshot.Size()?;
             let mut observation = ToastObservation {
                 toasts: Vec::with_capacity(size.min(MAX_TOASTS) as usize),
                 complete: size <= MAX_TOASTS,
             };
             let mut bytes = 0;
+            let mut supported_apps = HashMap::new();
+            let mut openable = HashSet::new();
             for index in 0..size.min(MAX_TOASTS) {
                 if index % 16 == 0 && self.permission() != WindowsAccess::Allowed {
                     return Err(windows::core::Error::from(
@@ -217,11 +229,17 @@ mod native {
                     observation.complete = false;
                     break;
                 }
+                let app_openable = *supported_apps
+                    .entry(app.clone())
+                    .or_insert_with(|| packaged_app_is_resolvable(&app));
                 let id = FactId::Windows {
                     app,
                     notification: notification_id,
                     created,
                 };
+                if app_openable {
+                    openable.insert(id.clone());
+                }
                 observation.toasts.push(ObservedToast {
                     id,
                     occurred_at,
@@ -229,7 +247,7 @@ mod native {
                     body,
                 });
             }
-            Ok(observation)
+            Ok((observation, openable))
         }
     }
 
@@ -258,7 +276,7 @@ mod native {
 
     impl WindowsCapture {
         pub(crate) fn view(&self) -> WindowsCaptureView {
-            self.view
+            self.view.clone()
         }
 
         pub(crate) fn wait(&self) -> Option<Duration> {
@@ -364,7 +382,7 @@ mod native {
                             };
                             return Ok(false);
                         }
-                        let Ok(observation) = result else {
+                        let Ok((observation, openable)) = result else {
                             self.disconnect(now);
                             return Ok(false);
                         };
@@ -377,6 +395,9 @@ mod native {
                             projection.apply(inbox, observation, wall, |app| binding.includes(app))
                         })?;
                         self.projection = projection;
+                        if self.view.openable.as_ref() != &openable {
+                            self.view.openable = Arc::new(openable);
+                        }
                         return Ok(changed);
                     }
                     _ => {
@@ -419,6 +440,7 @@ mod native {
             };
             if self.view.access != WindowsAccess::Active
                 || record.status != Status::Current
+                || (action == WindowsSourceAction::Open && !self.view.can_open_source(record))
                 || !binding.includes(app)
                 || binding.permission() != WindowsAccess::Allowed
             {
@@ -467,6 +489,7 @@ mod native {
             self.cancel_read();
             self.binding = None;
             self.view.access = WindowsAccess::Disconnected;
+            self.view.openable = Arc::default();
             self.check_at = Some(now + RETRY_INTERVAL);
             self.read_at = None;
         }
@@ -549,6 +572,53 @@ mod native {
         use super::*;
 
         #[test]
+        fn notification_inbox_windows_open_availability_requires_exact_current_validation() {
+            use crate::notifications::{Category, Inbox};
+
+            let mut inbox = Inbox::default();
+            let mut settings = inbox.settings().clone();
+            settings.external_enabled = true;
+            inbox.set_settings(settings, 30).unwrap();
+            let app = "Fake_Family!Example";
+            let id = FactId::Windows {
+                app: app.into(),
+                notification: 5,
+                created: 20,
+            };
+            inbox.ingest_windows(
+                id.clone(),
+                1,
+                20,
+                Category::Information,
+                Status::Current,
+                None,
+                None,
+                30,
+            );
+            let mut record = inbox.records()[0].clone();
+            let mut capture = WindowsCaptureView {
+                access: WindowsAccess::Active,
+                ..Default::default()
+            };
+
+            assert!(!capture.can_open_source(&record));
+            capture.openable = Arc::new(HashSet::from([id.clone()]));
+            assert!(capture.can_open_source(&record));
+            record.id = FactId::Windows {
+                app: app.into(),
+                notification: 5,
+                created: 21,
+            };
+            assert!(!capture.can_open_source(&record));
+            record.id = id;
+            record.status = Status::SourceRemoved;
+            assert!(!capture.can_open_source(&record));
+            record.status = Status::Current;
+            capture.access = WindowsAccess::Denied;
+            assert!(!capture.can_open_source(&record));
+        }
+
+        #[test]
         fn notification_inbox_windows_dismiss_refuses_changed_or_unavailable_text() {
             use crate::notifications::{Category, Inbox};
 
@@ -596,16 +666,19 @@ mod native {
         }
     }
 
-    fn open_packaged_app(app: &str) -> bool {
+    fn packaged_app_is_resolvable(app: &str) -> bool {
         let Some((family, _)) = app.split_once('!') else {
             return false;
         };
         let Ok(info) = AppInfo::GetFromAppUserModelId(&HSTRING::from(app)) else {
             return false;
         };
-        if !info.AppUserModelId().is_ok_and(|value| value == app)
-            || !info.PackageFamilyName().is_ok_and(|value| value == family)
-        {
+        info.AppUserModelId().is_ok_and(|value| value == app)
+            && info.PackageFamilyName().is_ok_and(|value| value == family)
+    }
+
+    fn open_packaged_app(app: &str) -> bool {
+        if !packaged_app_is_resolvable(app) {
             return false;
         }
         // Windows activates the exact validated packaging identity with no launch arguments.
@@ -631,7 +704,7 @@ pub(crate) struct WindowsCapture {
 #[cfg(not(windows))]
 impl WindowsCapture {
     pub(crate) fn view(&self) -> WindowsCaptureView {
-        self.view
+        self.view.clone()
     }
     pub(crate) fn wait(&self) -> Option<Duration> {
         None

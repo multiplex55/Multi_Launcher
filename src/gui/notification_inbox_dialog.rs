@@ -472,21 +472,22 @@ impl NotificationInboxDialog {
                     }
                     let b=ui.add_enabled(!runtime.busy && record.related.is_some() && record.status!=Status::SourceRemoved,egui::Button::new("Open related")); target!(ui,b,"related","Open related",TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::OpenRelated);}
                 });
-                if let Some(app_id) = app(record) {
+                if app(record).is_some() {
+                    let source_target = egui::Id::new(&record.id).value();
                     if record.status == Status::SourceRemoved {
                         ui.weak("Removed from Windows.");
                     }
                     if runtime.windows_capture.access == WindowsAccess::Active && record.status == Status::Current {
                         ui.horizontal_wrapped(|ui| {
-                            if app_id.contains('!') {
+                            if runtime.windows_capture.can_open_source(record) {
                                 let open = ui.add_enabled(!runtime.busy, egui::Button::new("Open source app"));
-                                target!(ui, open, "windows/open", "Open source app", TargetKind::Button);
+                                target!(ui, open, &format!("windows/{source_target}/open"), "Open source app", TargetKind::Button);
                                 if open.clicked() {
                                     actions.intent = Some(Intent::WindowsAction(WindowsSourceAction::Open));
                                 }
                             }
                             let dismiss = ui.add_enabled(!runtime.busy, egui::Button::new("Dismiss from Windows"));
-                            target!(ui, dismiss, "windows/dismiss", "Dismiss from Windows", TargetKind::Button);
+                            target!(ui, dismiss, &format!("windows/{source_target}/dismiss"), "Dismiss from Windows", TargetKind::Button);
                             if dismiss.clicked() {
                                 actions.intent = Some(Intent::WindowsAction(WindowsSourceAction::Dismiss));
                             }

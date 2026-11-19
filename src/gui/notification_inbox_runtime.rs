@@ -125,7 +125,7 @@ impl LauncherApp {
 
         let mut windows_capture = snapshot
             .as_ref()
-            .map_or_else(Default::default, |view| view.windows_capture);
+            .map_or_else(Default::default, |view| view.windows_capture.clone());
         if windows_capture.access == WindowsAccess::PermissionNotGranted {
             let consent = self.notification_windows_consent.access();
             if matches!(consent, WindowsAccess::Requesting | WindowsAccess::Denied) {
