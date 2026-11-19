@@ -11238,7 +11238,9 @@ impl LauncherApp {
                 let studio_owner = NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownStudio, instance: self.markdown_studio_dialog.jump_instance() };
                 let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, studio_owner);
                 let allowed = self.markdown_studio_dialog.jump_parent_available()
-                    && if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
+                    && if self.markdown_studio_dialog.has_pending_decision() {
+                        self.markdown_studio_dialog.pending_decision_owns_root(ctx)
+                    } else if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
                         super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
                             Some(focus) == studio_layer || focus.order == egui::Order::Background)
                     };
@@ -12872,6 +12874,7 @@ impl LauncherApp {
                     && !self
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
+                    && !self.markdown_studio_dialog.pending_decision_owns_root(&ctx)
                     && !self.notes_dialog.owns_root_input(&ctx)
                     && !self.mkmacro_dialog.owns_root_input(&ctx)
                     && !self.dashboard_editor.owns_root_input(&ctx)
@@ -35845,6 +35848,113 @@ mod tests {
         hint_focus(&mut app, "Undo");
         enter(&mut app);
         assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
+    }
+
+
+    #[test]
+    fn markdown_studio_transition_hints_and_escape_preserve_the_dirty_draft() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+        let original = "# Unsaved résumé\n\nBody";
+        app.markdown_studio_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 980.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.markdown_studio_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let outline = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Outline")
+            .expect("actual Studio outline header")
+            .response_id();
+        ctx.memory_mut(|memory| memory.request_focus(outline));
+        frame(&mut app, Vec::new());
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Heading Unsaved résumé")
+        );
+        app.markdown_studio_dialog.request_close();
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        let discard = app
+            .markdown_studio_dialog
+            .test_discard_id()
+            .expect("current dirty decision");
+        let registry = app.jump_mode_ui.retained_registry();
+        assert!(registry.targets().iter().any(|target| {
+            target.response_id() == discard && target.metadata().label() == "Discard changes"
+        }));
+        assert_eq!(registry.len(), 3);
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        let escape = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Discard changes");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(discard));
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
+        assert!(app.markdown_studio_dialog.test_is_dirty());
+        arm(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        escape(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.markdown_studio_dialog.test_discard_id().is_some());
+        app.set_jump_mode_enabled(false);
+        escape(&mut app);
+        frame(&mut app, Vec::new());
+        assert!(app.markdown_studio_dialog.open);
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
+        assert!(app.markdown_studio_dialog.test_is_dirty());
+        assert!(app.markdown_studio_dialog.test_discard_id().is_none());
+        assert!(app.visible_flag_state());
     }
 
     #[test]

@@ -116,6 +116,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3f | complete |
 | M12-B3g1 | complete |
 | M12-B3g2 | complete |
+| M12-B3g3 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -854,3 +855,10 @@ The 5/5 gate (5212b59f-2a68-4938-94af-cd710d336e7b) covers root and detached sou
 Existing Export, Format, Insert and Table menu openers and actual available choices use exact popup scopes in docked and detached Studio. Selection participates in the target generation so choices tied to an older source selection retire. Hinting focuses only the live menu response. Ordinary activation still uses the existing edit, export and output paths.
 
 The focused gate passed 5/5 (d0ae036b-028f-4736-8cf6-df5fb6def37b). The actual Insert and Heading 2 hint flow requires separate Enter presses to open the menu and apply one edit. One subsequent ordinary Undo restores the same draft. Unicode selection, ordinary export navigation, detached multiline source and rejected source/save tests also passed. Scoped review found no actionable issue.
+
+
+### M12-B3g3 Markdown Studio decisions, outline and Preview actions
+
+The inline dirty decision binds the actual New, Open path or Close request to Studio's source and host generation. While it is pending, the editor, outline, Preview and header controls remain visible and inactive. The only hint targets are the three decision responses. Escape cancels an active hint session first. A fresh ordinary Escape cancels the pending decision and preserves the draft.
+
+Normal navigation now includes the real Outline header, source-offset headings, move and review buttons, and current Open Diagram responses. Their existing prepared edit and accepted handoff paths still govern activation. The initial focused gate passed 5/5 (23a7d50f-6a74-4381-8da5-ed7304961730). After review exposed enabled outline rows behind the decision, the final gate passed 4/4 (40c0dce8-45f7-48eb-8610-141e7fca6375). The expanded outline fixture proves it exposes only the decision, that focus on Discard leaves the Unicode draft unchanged, and that Escape preserves the Studio and root windows.

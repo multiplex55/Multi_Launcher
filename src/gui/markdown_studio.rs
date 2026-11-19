@@ -231,7 +231,10 @@ impl MarkdownStudioDialog {
         self.host_epoch
     }
     pub(super) fn jump_parent_available(&self) -> bool {
-        self.open && self.document.pending_transition().is_none()
+        self.open
+    }
+    pub(super) fn has_pending_decision(&self) -> bool {
+        self.document.pending_transition().is_some()
     }
     pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
         super::jump_mode::TargetGeneration(
@@ -243,7 +246,16 @@ impl MarkdownStudioDialog {
                 self.mode as u8,
                 self.selection.start,
                 self.selection.end,
-                self.document.pending_transition().is_some(),
+                self.document.pending_transition().map(|pending| match pending {
+                    PendingMarkdownTransition::New => (0_u8, None),
+                    PendingMarkdownTransition::Open(file) => (1, Some(file.path())),
+                    PendingMarkdownTransition::Close => (2, None),
+                }),
+                self.outline_moves.review_request().map(|request| (
+                    request.stamp.document, request.stamp.revision, request.stamp.host.host as u8,
+                    request.stamp.host.generation, request.stamp.viewport, request.selected,
+                    request.destination, request.placement as u8,
+                )),
             ))
             .value(),
         )
@@ -277,6 +289,7 @@ impl MarkdownStudioDialog {
         label: &str,
         kind: super::jump_mode::TargetKind,
     ) {
+        if self.document.pending_transition().is_some() { return; }
         super::jump_mode::ui::register_and_apply_target(
             self.jump_scope.as_ref(),
             ui,
@@ -452,6 +465,15 @@ impl MarkdownStudioDialog {
             ctx.layer_id_at(position)
                 .is_some_and(|hit_layer| hit_layer != layer)
         })
+    }
+
+    pub(super) fn pending_decision_owns_root(&self, ctx: &egui::Context) -> bool {
+        self.open && self.document.pending_transition().is_some()
+            && ctx.viewport_id() == egui::ViewportId::ROOT && ctx.input(|input| input.focused)
+            && !egui::Popup::is_any_open(ctx)
+            && self.host_layer_if_root().is_some_and(|layer|
+                super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focused| focused == layer))
     }
 
     pub(crate) fn take_show_root_after_host_change(&mut self) -> bool {
@@ -784,6 +806,13 @@ impl MarkdownStudioDialog {
                     let close_by_os = independent
                         && child_context.input(|input| input.viewport().close_requested());
                     os_close_requested = close_by_os;
+                    if pass_authorized && self.document.pending_transition().is_some()
+                        && (keyboard_allowed || (!independent && surface_input_allowed && self.pending_decision_owns_root(&child_context)))
+                        && !native_jump_owns_escape && (independent || !self.root_jump_active)
+                        && !egui::Popup::is_any_open(&child_context)
+                        && child_context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                        intent = Some(StudioIntent::Decision(MarkdownTransitionDecision::Cancel));
+                    }
                     if pass_authorized && self.document.pending_transition().is_none() {
                         if close_by_os || self.close_requested {
                             intent = Some(StudioIntent::Close);
@@ -922,6 +951,11 @@ impl MarkdownStudioDialog {
                             && visible_body;
                         let keyboard_allowed =
                             actions_allowed && focused_on_layer(ui.ctx(), ui.layer_id());
+                        if pass_authorized && self.document.pending_transition().is_some()
+                            && (keyboard_allowed || self.pending_decision_owns_root(ui.ctx())) && !self.root_jump_active && !egui::Popup::is_any_open(ui.ctx())
+                            && ui.ctx().input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                            intent = Some(StudioIntent::Decision(MarkdownTransitionDecision::Cancel));
+                        }
                         if pass_authorized && self.document.pending_transition().is_none() {
                             if self.close_requested {
                                 intent = Some(StudioIntent::Close);
@@ -1213,6 +1247,9 @@ impl MarkdownStudioDialog {
                             self.transition_ui(ui, intent);
                             ui.separator();
                             let pending = self.document.pending_transition().is_some();
+                            if pending {
+                                ui.disable();
+                            }
                             let current_mode = next_mode.unwrap_or(self.mode);
                             let width = ui.available_width();
                             if current_mode == ViewMode::Source {
@@ -1289,6 +1326,9 @@ impl MarkdownStudioDialog {
     ) {
         let pending = self.document.pending_transition().is_some();
         ui.horizontal_wrapped(|ui| {
+            if pending {
+                ui.disable();
+            }
             for (label, action) in [
                 ("New", StudioIntent::New),
                 ("Open…", StudioIntent::Open),
@@ -1320,6 +1360,7 @@ impl MarkdownStudioDialog {
             let export_scope = self
                 .jump_scope
                 .as_ref()
+                .filter(|_| !pending)
                 .map(|scope| scope.combo_popup_scope("menu/export"));
             let _export_menu = ui.menu_button("Export", |ui| {
                 let mut order = 0;
@@ -1364,7 +1405,7 @@ impl MarkdownStudioDialog {
                 }
             });
             super::jump_mode::ui::register_and_apply_menu_anchor(
-                self.jump_scope.as_ref(),
+                self.jump_scope.as_ref().filter(|_| !pending),
                 ui,
                 &_export_menu.response,
                 "menu/export",
@@ -1408,6 +1449,9 @@ impl MarkdownStudioDialog {
             }
         });
         ui.horizontal_wrapped(|ui| {
+            if pending {
+                ui.disable();
+            }
             for (view, label) in [
                 (ViewMode::Source, "Edit"),
                 (ViewMode::Preview, "Preview"),
@@ -1892,28 +1936,43 @@ impl MarkdownStudioDialog {
         let Some(analysis) = self.cache.as_ref().filter(|cache| cache.matches(
             stamp.revision, source, self.document.path().and_then(Path::parent),
         )).and_then(MarkdownPreviewCache::analysis).filter(|analysis| !analysis.headings.is_empty()) else { return; };
-        ui.collapsing("Outline", |ui| {
+        let headings = analysis.headings.as_slice();
+        let outline = ui.collapsing("Outline", |ui| {
             let owns_moves = enabled && owns_outline_input(ui);
-            if let Some(action) = self.outline_moves.ui(ui, stamp, &analysis.headings, owns_moves, |_, _, _| {}) {
+            let scope = self.jump_scope.clone();
+            let order = &mut self.jump_order;
+            if let Some(action) = self.outline_moves.ui(ui, stamp, headings, owns_moves, |ui, label, response| {
+                let id = if label == "Confirm section move" { "outline/review/confirm" } else { "outline/review/cancel" };
+                studio_menu_target(scope.as_ref(), ui, response, id, label, order);
+            }) {
                 *intent = Some(StudioIntent::OutlineMove(action));
             }
-            let selected = analysis.headings.iter().position(|heading|
+            let selected = headings.iter().position(|heading|
                 heading.byte_range.contains(&selection.start));
             let allow_moves = owns_moves && !self.outline_moves.has_review(stamp);
             let [up, down] = if allow_moves {
-                sibling_requests(&analysis.headings, selected, stamp).map(|request|
+                sibling_requests(headings, selected, stamp).map(|request|
                     request.filter(|request| self.outline_moves.can_move(*request, source)))
             } else { [None, None] };
-            if let Some(action) = move_buttons(ui, up, down, |_, _, _| {}) {
+            let scope = self.jump_scope.clone();
+            let order = &mut self.jump_order;
+            if let Some(action) = move_buttons(ui, up, down, |ui, label, response| {
+                let id = if label == "Move up" { "outline/up" } else { "outline/down" };
+                studio_menu_target(scope.as_ref(), ui, response, id, label, order);
+            }) {
                 *intent = Some(StudioIntent::OutlineMove(action));
             }
-            for (index, heading) in analysis.headings.iter().enumerate() {
+            for (index, heading) in headings.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.add_space(f32::from(heading.level.saturating_sub(1)) * 12.0);
-                    let (response, action) = outline_row(
-                        ui, &heading.title, selected == Some(index), stamp, index, allow_moves,
-                        |request| self.outline_moves.can_move(request, source),
-                    );
+                    let (response, action) = ui.scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new(("studio-outline-row", stamp.document, stamp.revision, heading.byte_range.start))),
+                        |ui| outline_row(ui, &heading.title, selected == Some(index), stamp, index, allow_moves,
+                            |request| self.outline_moves.can_move(request, source)),
+                    ).inner;
+                    super::jump_mode::ui::register_and_apply_target(self.jump_scope.as_ref(), ui, &response,
+                        format!("outline/heading/{}", heading.byte_range.start), format!("Heading {}", heading.title),
+                        super::jump_mode::TargetKind::Selectable, &mut self.jump_order);
                     if owns_moves { self.outline_moves.reveal_moved_row(stamp, heading.byte_range.start, &response); }
                     if response.clicked() {
                         *selection = heading.byte_range.clone();
@@ -1927,6 +1986,7 @@ impl MarkdownStudioDialog {
                 });
             }
         });
+        self.jump_target(ui, &outline.header_response, "outline/toggle", "Outline", super::jump_mode::TargetKind::Button);
     }
 
     fn preview_panel(
@@ -1945,14 +2005,16 @@ impl MarkdownStudioDialog {
                 source_snapshot,
                 base_directory,
             ) {
+                let scope = self.jump_scope.clone();
+                let order = &mut self.jump_order;
                 for (index, _) in cache.fences().iter().enumerate() {
-                    if ui
+                    let response = ui
                         .add_enabled(
                             enabled,
                             egui::Button::new(format!("Open Diagram {}", index + 1)),
-                        )
-                        .clicked()
-                    {
+                        );
+                    studio_menu_target(scope.as_ref(), ui, &response, format!("preview/diagram/{index}"), format!("Open Diagram {}", index + 1), order);
+                    if response.clicked() {
                         *intent = Some(StudioIntent::CopyDiagram {
                             index,
                             source_snapshot: source_snapshot.to_owned(),
@@ -1974,14 +2036,18 @@ impl MarkdownStudioDialog {
             PendingMarkdownTransition::Open(_) => "Open another document?",
             PendingMarkdownTransition::Close => "Close Markdown Studio?",
         };
+        let scope = self.jump_scope.clone();
         ui.group(|ui| {
             ui.strong("Unsaved changes");
             ui.label(description);
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Save").clicked() {
+                let save = ui.button("Save");
+                studio_menu_target(scope.as_ref(), ui, &save, "decision/save", "Save changes", &mut self.jump_order);
+                if save.clicked() {
                     *intent = Some(StudioIntent::Decision(MarkdownTransitionDecision::Save));
                 }
                 let discard = ui.button("Discard");
+                studio_menu_target(scope.as_ref(), ui, &discard, "decision/discard", "Discard changes", &mut self.jump_order);
                 #[cfg(test)]
                 if ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_discard_id = Some(discard.id);
@@ -1989,7 +2055,9 @@ impl MarkdownStudioDialog {
                 if discard.clicked() {
                     *intent = Some(StudioIntent::Decision(MarkdownTransitionDecision::Discard));
                 }
-                if ui.button("Cancel").clicked() {
+                let cancel = ui.button("Cancel");
+                studio_menu_target(scope.as_ref(), ui, &cancel, "decision/cancel", "Cancel transition", &mut self.jump_order);
+                if cancel.clicked() {
                     *intent = Some(StudioIntent::Decision(MarkdownTransitionDecision::Cancel));
                 }
             });
