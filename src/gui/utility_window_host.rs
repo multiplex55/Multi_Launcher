@@ -2946,6 +2946,8 @@ pub(super) enum CalculationDependencyHostCommand {
     Apply(super::calculation_dependency_dialog::DependencyActions),
 }
 impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDependencyDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::CalculationDependencies);
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     const KEY: &'static str = "calculation-pad-dependencies";
     const TITLE: &'static str = "Dependency Explorer";
     const SIZE: egui::Vec2 = egui::vec2(560.0, 500.0);
@@ -2961,18 +2963,14 @@ impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDe
             egui::Id::new("calculation-dependencies-window"),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
-    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
-    }
+    fn target_generation(&self) -> TargetGeneration { TargetGeneration(self.jump_generation()) }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool { true }
     fn parent_input_allowed(&self) -> bool {
         true
     }
@@ -3006,7 +3004,7 @@ impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDe
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -3016,7 +3014,7 @@ impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDe
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, parent, first, child, presentation)
+        self.render_host(ctx, runtime, parent, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request

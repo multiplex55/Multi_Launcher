@@ -97,6 +97,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B1a1 | complete |
 | M12-B1a2 | complete |
 | M12-B1b | complete |
+| M12-B2a1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -746,3 +747,8 @@ Current checkbox names and the retained inventory generation identify docked and
 ### M12-B1b Image Viewer session ownership
 
 The actual foreground image host and its session determine root Jump targets. The native binding checks the same session's exact viewport and layer. Presentation, Zoom, Open in Default Viewer and Close participate in navigation. Image canvas gestures keep their prior handling. Independent review found no actionable issues. The first gate passed the existing retained-native and layer inventory tests. The new two-image fixture initially clicked before egui had applied the queued foreground raise. It now checks the actual raised layer and current registry before and after switching. The exact rerun passed 1/1 (`10b596ac-4921-4b84-8b47-5d08abd006cf`), with no external viewer activation from a hint.
+
+
+### M12-B2a1 Dependency Explorer navigation
+
+Current document, incarnation, evaluation basis and LineId bind the docked and native scopes for source rows and relationship links. Presentation, the source chooser, Go to source, Close and both direct/transitive relationship section headers register ordinary controls. Hint focus leaves the Pad and selected line unchanged, and a fresh activation takes the established navigation path. The first focused gate passed 4/4 (`113f0eb9-8126-4a3a-a861-e9631fa14a84`). Review found clipped ordinary keyboard focus and missing relationship headers. The corrected gate passed 3/3 (`47196171-40e0-4a96-ad64-fe4d65ac5768`), including Tab reveal in short docked and pop-out bodies.
