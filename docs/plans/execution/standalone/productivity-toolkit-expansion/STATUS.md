@@ -109,6 +109,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3b3 | complete |
 | M12-B3d1 | complete |
 | M12-B3d2 | complete |
+| M12-B3e1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -800,3 +801,10 @@ M12-B3d1 gives a live dirty-close question its own exact panel and opening gener
 
 
 M12-B3d2 shares NotePanel's prompt coordinator with Save Conflict and plain-link review. The current exact prompt binds its own panel, host, opening epoch and source revision. Review now restricts each prompt's widget registration to its actual foreground kind. Plain-link review opening, Convert and Cancel use accepted host actions and retire stale review evidence. The initial gate passed 6/6 in 00d497dd-2cd9-4269-a94e-16309b535afe and the reviewed checks passed 4/4 in 3f0274dc-ae69-4b2d-8f20-6b2e418e4886. The conflict fixture proves that an overlapping dirty-close prompt contributes no hints and remains open after Conflict Escape. The plain-link tests verify refreshed source requires fresh activation and ordinary conversion changes only the draft.
+
+
+### M12-B3e1 Note Markdown toolbar and nested menus
+
+The toolbar registers its real Markdown opener, the current Menu and its exact Block snippet or Table submenu. Jump Mode follows only the visible current popup chain, retaining opener provenance through transitions without retaining old target authority. A hint moves focus, and an ordinary activation performs the existing action. Escape dismisses the innermost toolbar submenu and returns focus to its trigger even with Jump Mode off. A height-bounded menu and focused scrolling preserve access in short windows.
+
+Rejected toolbar edits restore the original source plus the exact editor caret, selection and native Undo state. The final focused run passed 8/8 (03d07712-57f9-480c-8c91-472650ff2806), including ordinary keyboard Bold and Undo/Redo, discarded input and Undo history, short-window access, deepest-surface ownership and the existing ComboBox guards. The new root popup test uses real egui responses. Live detached toolbar smoke and the distinct editor context menus remain pending. Evidence is in `target/productivity-toolkit-expansion-evidence/m12-b3e1-toolbar-undo-final.txt`.

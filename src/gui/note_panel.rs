@@ -1471,12 +1471,19 @@ struct PendingNotePanelHostFrame {
     actions: NotePanelPendingHostActions,
 }
 
+struct NoteToolbarEditorCheckpoint {
+    editor: egui::Id,
+    cursor: Option<egui::text::CCursorRange>,
+    undoer: egui::util::undoer::Undoer<(egui::text::CCursorRange, String)>,
+}
+
 struct NotePanelDraftCheckpoint {
     note: Note,
     content_revision: u64,
     saved_content_baseline: String,
     pending_selection: Option<(usize, usize)>,
     pending_cursor_position: Option<usize>,
+    toolbar_editor: Option<NoteToolbarEditorCheckpoint>,
     selected_outline_heading: Option<NoteOutlinePosition>,
     pending_scroll_target: Option<NoteOutlinePosition>,
     retained_text_edit_history: Option<RetainedTextEditHistory>,
@@ -1486,13 +1493,25 @@ struct NotePanelDraftCheckpoint {
 }
 
 impl NotePanelDraftCheckpoint {
-    fn capture(panel: &NotePanel) -> Self {
+    fn capture(panel: &NotePanel, ctx: &egui::Context) -> Self {
         Self {
             note: panel.note.clone(),
             content_revision: panel.note_find.content_revision(),
             saved_content_baseline: panel.saved_content_baseline.clone(),
             pending_selection: panel.pending_selection,
             pending_cursor_position: panel.pending_cursor_position,
+            toolbar_editor: if panel.markdown_toolbar_popup_was_open {
+                panel.last_textedit_id.and_then(|editor| {
+                    let state = egui::widgets::text_edit::TextEditState::load(ctx, editor)?;
+                    Some(NoteToolbarEditorCheckpoint {
+                        editor,
+                        cursor: state.cursor.char_range(),
+                        undoer: state.undoer(),
+                    })
+                })
+            } else {
+                None
+            },
             selected_outline_heading: panel.selected_outline_heading,
             pending_scroll_target: panel.pending_scroll_target,
             retained_text_edit_history: panel.retained_text_edit_history.clone(),
@@ -1502,7 +1521,17 @@ impl NotePanelDraftCheckpoint {
         }
     }
 
-    fn restore(self, panel: &mut NotePanel) {
+    fn restore(self, panel: &mut NotePanel, ctx: &egui::Context) {
+        if panel.note.content != self.note.content
+            && let Some(checkpoint) = self.toolbar_editor
+            && panel.last_textedit_id == Some(checkpoint.editor)
+            && let Some(mut state) =
+                egui::widgets::text_edit::TextEditState::load(ctx, checkpoint.editor)
+        {
+            state.cursor.set_char_range(checkpoint.cursor);
+            state.set_undoer(checkpoint.undoer);
+            state.store(ctx, checkpoint.editor);
+        }
         panel.note = self.note;
         panel.saved_content_baseline = self.saved_content_baseline;
         panel.pending_selection = self.pending_selection;
@@ -1513,7 +1542,9 @@ impl NotePanelDraftCheckpoint {
         panel.replacement_undo_boundaries = self.replacement_undo_boundaries;
         panel.replacement_redo_boundaries = self.replacement_redo_boundaries;
         panel.replacement_history_mutation = self.replacement_history_mutation;
-        panel.note_find.restore_content_revision(self.content_revision);
+        panel
+            .note_find
+            .restore_content_revision(self.content_revision);
         panel.note_find_preview = None;
         panel.pending_find_navigation = None;
         panel.fast_derived_dirty = true;
@@ -2933,7 +2964,7 @@ impl NotePanel {
         host_request: Option<UtilityPresentation>,
     ) {
         let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
-        let checkpoint = NotePanelDraftCheckpoint::capture(self);
+        let checkpoint = NotePanelDraftCheckpoint::capture(self, ctx);
         if let Some(content) = edit {
             self.replace_content_from_mutation(content.to_owned(), 0.0);
         }
@@ -3094,7 +3125,7 @@ impl NotePanel {
         if !retained {
             self.accepted_host_effect_receipt = None;
             self.accepted_host_modal_layer = None;
-            frame.draft_checkpoint.restore(self);
+            frame.draft_checkpoint.restore(self, ctx);
             if frame.os_close_requested {
                 ctx.send_viewport_cmd_to(
                     note_panel_viewport_id(panel_identity),
@@ -5946,7 +5977,7 @@ impl NotePanel {
         let draft_checkpoint = previous_host_frame
             .filter(|_| !first_ui_pass)
             .map(|frame| frame.draft_checkpoint)
-            .unwrap_or_else(|| NotePanelDraftCheckpoint::capture(self));
+            .unwrap_or_else(|| NotePanelDraftCheckpoint::capture(self, ctx));
         let host = self.host_state.identity();
         let mut owner_context = ctx.clone();
         let mut owner_viewport_id = egui::ViewportId::ROOT;
@@ -6037,19 +6068,7 @@ impl NotePanel {
                         let native_jump_allowed = independent
                             && keyboard_input_allowed
                             && !own_modal_open
-                            && !egui::Popup::is_any_open(&child_ctx)
-                            && (close_current
-                                || super::jump_mode::ui::visible_top_middle_layer(&child_ctx)
-                                    .is_none())
-                            && super::jump_mode::ui::focused_response_layer(&child_ctx).is_none_or(
-                                |layer| {
-                                    layer == egui::LayerId::background()
-                                        || (close_current
-                                            && current_prompt.is_some_and(|prompt| {
-                                                layer.id == self.note_prompt_id(prompt.key())
-                                            }))
-                                },
-                            );
+                            && (!close_current || !egui::Popup::is_any_open(&child_ctx));
                         if independent {
                             let (chord, alphabet) = app.jump_mode_ui.configuration();
                             self.native_jump.set_configuration(chord, alphabet);
@@ -10245,6 +10264,63 @@ impl NotePanel {
         modified
     }
 
+
+    fn reveal_focused_menu_item(ui: &egui::Ui, response: &egui::Response) {
+        if response.enabled()
+            && response.gained_focus()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+            && !ui.clip_rect().contains_rect(response.rect)
+        {
+            response.scroll_to_me(None);
+        }
+    }
+
+    fn dismiss_toolbar_submenu_on_escape(ui: &egui::Ui) -> Option<egui::Id> {
+        let ctx = ui.ctx();
+        let menu = ui.layer_id().id;
+        if !ui.is_enabled()
+            || !ui.is_visible()
+            || ui.is_sizing_pass()
+            || ctx.will_discard()
+            || !ctx.input(|input| input.focused && input.key_pressed(Key::Escape))
+            || !egui::Popup::is_id_open(ctx, menu)
+        {
+            return None;
+        }
+        let child = egui::menu::MenuState::from_id(ctx, menu, |state| state.open_item)?;
+        let layer = egui::LayerId::new(egui::Order::Foreground, child);
+        let bounds = ctx.memory(|memory| memory.area_rect(child))?;
+        if !bounds.is_positive()
+            || ctx.layer_id_at(bounds.center()) != Some(layer)
+            || !ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
+        {
+            return None;
+        }
+        egui::menu::MenuState::from_id(ctx, menu, |state| state.open_item = None);
+        Some(child)
+    }
+
+    fn toolbar_submenu(
+        ui: &mut egui::Ui,
+        label: &'static str,
+        dismissed: Option<egui::Id>,
+        contents: impl FnOnce(&mut egui::Ui),
+    ) -> egui::Response {
+        let button = egui::menu::SubMenuButton::new(label);
+        let Some(dismissed) = dismissed else {
+            return button.ui(ui, contents).0;
+        };
+        let response = ui.add(button.button);
+        if egui::menu::SubMenu::id_from_widget_id(response.id) == dismissed {
+            response.request_focus();
+        } else {
+            button.sub_menu.show(ui, &response, contents);
+        }
+        response
+    }
+
     fn build_textedit_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -10277,8 +10353,48 @@ impl NotePanel {
         if capture_toolbar_widgets {
             self.applying_toolbar_markdown_action = true;
         }
-        let markdown_menu = ui.menu_button("Markdown", |ui| {
-            let add_checkbox = ui.button("Add Checkbox");
+        use super::jump_mode::TargetKind;
+        use super::jump_mode::ui::{
+            MenuAnchorKind, register_and_apply_menu_anchor, register_and_apply_target,
+        };
+
+        let toolbar = capture_toolbar_widgets
+            .then(|| self.jump_scope.clone())
+            .flatten();
+        let menu_scope = toolbar
+            .as_ref()
+            .map(|scope| scope.combo_popup_scope("markdown"));
+        macro_rules! target {
+            ($scope:expr, $ui:expr, $response:expr, $order:expr, $key:expr, $label:expr) => {
+                register_and_apply_target(
+                    $scope.as_ref(),
+                    $ui,
+                    &$response,
+                    $key,
+                    $label,
+                    TargetKind::Button,
+                    &mut $order,
+                );
+                if capture_toolbar_widgets {
+                    Self::reveal_focused_menu_item($ui, &$response);
+                }
+            };
+        }
+        macro_rules! button {
+            ($scope:expr, $ui:expr, $order:expr, $key:expr, $label:expr) => {{
+                let response = $ui.button($label);
+                target!($scope, $ui, response, $order, $key, $label);
+                response
+            }};
+        }
+        let mut draw_items = |ui: &mut egui::Ui| {
+            let mut order = 0;
+            let dismissed = if capture_toolbar_widgets {
+                Self::dismiss_toolbar_submenu_on_escape(ui)
+            } else {
+                None
+            };
+            let add_checkbox = button!(menu_scope, ui, order, "checkbox", "Add Checkbox");
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_markdown_tool_rects.push((
@@ -10309,21 +10425,26 @@ impl NotePanel {
                 self.defer_toolbar_editor_focus();
                 ui.close();
             }
-            if ui.button("Insert Timestamp").clicked() {
+            if button!(menu_scope, ui, order, "timestamp", "Insert Timestamp").clicked() {
                 let timestamp = format_note_editor_timestamp_now();
                 self.insert_text_at_cursor_or_selection(ctx, id, &timestamp);
                 ui.close();
             }
-            let insert_link = ui.button("Insert Link...");
+            let insert_link = button!(menu_scope, ui, order, "link", "Insert Link...");
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
-                self.test_markdown_tool_rects.push(("Insert Link...".into(), insert_link.id, insert_link.rect, ui.clip_rect()));
+                self.test_markdown_tool_rects.push((
+                    "Insert Link...".into(),
+                    insert_link.id,
+                    insert_link.rect,
+                    ui.clip_rect(),
+                ));
             }
             if insert_link.clicked() {
                 self.stage_form_open(ctx, id, super::note_form_dialog::FormKind::Link);
                 ui.close();
             }
-            if ui.button("Convert plain links").clicked() {
+            if button!(menu_scope, ui, order, "plain-links", "Convert plain links").clicked() {
                 if self.defer_host_actions {
                     self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Review);
                 } else if !self.start_plain_link_conversion() {
@@ -10338,6 +10459,14 @@ impl NotePanel {
             let export_allowed = self.can_stage_markdown_export(ctx);
             let export_markdown =
                 ui.add_enabled(export_allowed, egui::Button::new("Export Markdown…"));
+            target!(
+                menu_scope,
+                ui,
+                export_markdown,
+                order,
+                "export-markdown",
+                "Export Markdown…"
+            );
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_markdown_tool_rects.push((
@@ -10352,6 +10481,14 @@ impl NotePanel {
                 ui.close();
             }
             let export_html = ui.add_enabled(export_allowed, egui::Button::new("Export HTML…"));
+            target!(
+                menu_scope,
+                ui,
+                export_html,
+                order,
+                "export-html",
+                "Export HTML…"
+            );
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_markdown_tool_rects.push((
@@ -10366,11 +10503,12 @@ impl NotePanel {
                 ui.close();
             }
             let print = ui.add_enabled(export_allowed, egui::Button::new("Export / Print…"));
+            target!(menu_scope, ui, print, order, "print", "Export / Print…");
             if print.clicked() {
                 self.stage_print_preview(ctx);
                 ui.close();
             }
-            let bold = ui.button("Bold Selection");
+            let bold = button!(menu_scope, ui, order, "bold", "Bold Selection");
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_markdown_tool_rects.push((
@@ -10384,27 +10522,31 @@ impl NotePanel {
                 self.apply_wrapped_markdown_format(ctx, id, app, MarkdownInlineFormat::Strong, 2);
                 ui.close();
             }
-            if ui.button("Italic Selection").clicked() {
+            if button!(menu_scope, ui, order, "italic", "Italic Selection").clicked() {
                 self.apply_wrapped_markdown_format(ctx, id, app, MarkdownInlineFormat::Emphasis, 1);
                 ui.close();
             }
-            if ui.button("Strikethrough Selection").clicked() {
+            if button!(menu_scope, ui, order, "strike", "Strikethrough Selection").clicked() {
                 let range = self.current_editor_byte_range(ctx, id);
                 let prepared =
                     prepare_inline_format(&self.note.content, range, MarkdownInlineFormat::Strike);
                 self.report_markdown_edit_result(ctx, id, app, prepared);
                 ui.close();
             }
-            if ui.button("Inline Code").clicked() {
+            if button!(menu_scope, ui, order, "code", "Inline Code").clicked() {
                 let range = self.current_editor_byte_range(ctx, id);
                 let prepared =
                     prepare_inline_format(&self.note.content, range, MarkdownInlineFormat::Code);
                 self.report_markdown_edit_result(ctx, id, app, prepared);
                 ui.close();
             }
-            ui.menu_button("Block snippet", |ui| {
+            let blocks = menu_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("blocks"));
+            let blocks_button = Self::toolbar_submenu(ui, "Block snippet", dismissed, |ui| {
+                let mut order = 0;
                 for (label, level) in [("Heading 1", 1), ("Heading 2", 2), ("Heading 3", 3)] {
-                    if ui.button(label).clicked() {
+                    if button!(blocks, ui, order, format!("heading/{level}"), label).clicked() {
                         let range = self.current_editor_byte_range(ctx, id);
                         let prepared = prepare_block_snippet(
                             &self.note.content,
@@ -10428,7 +10570,7 @@ impl NotePanel {
                     ),
                     ("Wiki link", MarkdownBlockSnippet::WikiLink),
                 ] {
-                    if ui.button(label).clicked() {
+                    if button!(blocks, ui, order, label, label).clicked() {
                         let range = self.current_editor_byte_range(ctx, id);
                         let prepared = prepare_block_snippet(&self.note.content, range, snippet);
                         self.report_markdown_edit_result(ctx, id, app, prepared);
@@ -10436,14 +10578,39 @@ impl NotePanel {
                     }
                 }
             });
-            ui.menu_button("Table", |ui| {
-                if ui.button("Insert 2-column table").clicked() {
+            register_and_apply_menu_anchor(
+                menu_scope.as_ref(),
+                ui,
+                &blocks_button,
+                "blocks",
+                "Block snippet",
+                MenuAnchorKind::Submenu,
+                &mut order,
+            );
+            if capture_toolbar_widgets {
+                Self::reveal_focused_menu_item(ui, &blocks_button);
+            }
+            let table_scope = menu_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("table"));
+            let table_button = Self::toolbar_submenu(ui, "Table", dismissed, |ui| {
+                let mut order = 0;
+                if button!(
+                    table_scope,
+                    ui,
+                    order,
+                    "two-column",
+                    "Insert 2-column table"
+                )
+                .clicked()
+                {
                     let prepared =
                         self.prepare_current_table_edit(ctx, id, TableEditOperation::InsertTable);
                     self.report_markdown_edit_result(ctx, id, app, prepared);
                     ui.close();
                 }
-                let custom_table = ui.button("Insert custom table…");
+                let custom_table =
+                    button!(table_scope, ui, order, "custom", "Insert custom table…");
                 #[cfg(test)]
                 if ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_custom_table_insert_rect = Some(custom_table.rect);
@@ -10455,7 +10622,7 @@ impl NotePanel {
                 let table_context = self.current_table_context(ctx, id);
                 if let Some((table, row, _column)) = table_context {
                     ui.separator();
-                    if ui.button("Insert row below").clicked() {
+                    if button!(table_scope, ui, order, "insert-row", "Insert row below").clicked() {
                         let prepared = self.prepare_current_table_edit(
                             ctx,
                             id,
@@ -10465,13 +10632,29 @@ impl NotePanel {
                         ui.close();
                     }
                     let remove_row = ui.add_enabled(row > 0, egui::Button::new("Remove row"));
+                    target!(
+                        table_scope,
+                        ui,
+                        remove_row,
+                        order,
+                        "remove-row",
+                        "Remove row"
+                    );
                     if remove_row.clicked() {
                         let prepared =
                             self.prepare_current_table_edit(ctx, id, TableEditOperation::RemoveRow);
                         self.report_markdown_edit_result(ctx, id, app, prepared);
                         ui.close();
                     }
-                    if ui.button("Insert column right").clicked() {
+                    if button!(
+                        table_scope,
+                        ui,
+                        order,
+                        "insert-column",
+                        "Insert column right"
+                    )
+                    .clicked()
+                    {
                         let prepared = self.prepare_current_table_edit(
                             ctx,
                             id,
@@ -10483,6 +10666,14 @@ impl NotePanel {
                     let remove_column = ui.add_enabled(
                         table.alignments().len() > 1,
                         egui::Button::new("Remove column"),
+                    );
+                    target!(
+                        table_scope,
+                        ui,
+                        remove_column,
+                        order,
+                        "remove-column",
+                        "Remove column"
                     );
                     if remove_column.clicked() {
                         let prepared = self.prepare_current_table_edit(
@@ -10499,6 +10690,14 @@ impl NotePanel {
                         has_cell_selection,
                         egui::Button::new("Set current cell from selection"),
                     );
+                    target!(
+                        table_scope,
+                        ui,
+                        replace_cell,
+                        order,
+                        "replace-cell",
+                        "Set current cell from selection"
+                    );
                     if replace_cell.clicked() {
                         let prepared = self.prepare_current_table_edit(
                             ctx,
@@ -10510,22 +10709,62 @@ impl NotePanel {
                     }
                 }
             });
+            register_and_apply_menu_anchor(
+                menu_scope.as_ref(),
+                ui,
+                &table_button,
+                "table",
+                "Table",
+                MenuAnchorKind::Submenu,
+                &mut order,
+            );
+            if capture_toolbar_widgets {
+                Self::reveal_focused_menu_item(ui, &table_button);
+            }
             ui.separator();
-            if ui.button("Insert NOTE callout").clicked() {
+            if button!(menu_scope, ui, order, "callout-note", "Insert NOTE callout").clicked() {
                 self.insert_callout(ctx, id, "note");
                 ui.close();
             }
-            if ui.button("Insert WARNING callout").clicked() {
+            if button!(
+                menu_scope,
+                ui,
+                order,
+                "callout-warning",
+                "Insert WARNING callout"
+            )
+            .clicked()
+            {
                 self.insert_callout(ctx, id, "warning");
                 ui.close();
             }
-            if ui.button("Insert TODO callout").clicked() {
+            if button!(menu_scope, ui, order, "callout-todo", "Insert TODO callout").clicked() {
                 self.insert_callout(ctx, id, "todo");
                 ui.close();
             }
-            if ui.button("Wrap selection in callout").clicked() {
+            if button!(
+                menu_scope,
+                ui,
+                order,
+                "callout-selection",
+                "Wrap selection in callout"
+            )
+            .clicked()
+            {
                 self.wrap_selection_in_callout(ctx, id, "note");
                 ui.close();
+            }
+        };
+        let markdown_menu = ui.menu_button("Markdown", |ui| {
+            if capture_toolbar_widgets {
+                let viewport_height = ui.ctx().content_rect().height();
+                let max_height = (viewport_height - 2.0 * ui.spacing().interact_size.y).max(40.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("note-markdown-toolbar-menu")
+                    .max_height(max_height)
+                    .show(ui, draw_items);
+            } else {
+                draw_items(ui);
             }
         });
         #[cfg(test)]
@@ -10537,6 +10776,15 @@ impl NotePanel {
             ));
         }
         if capture_toolbar_widgets {
+            register_and_apply_menu_anchor(
+                toolbar.as_ref(),
+                ui,
+                &markdown_menu.response,
+                "markdown",
+                "Markdown",
+                MenuAnchorKind::Root,
+                &mut self.jump_order,
+            );
             let popup_id = egui::Popup::default_response_id(&markdown_menu.response);
             let popup_open =
                 markdown_menu.inner.is_some() || egui::Popup::is_id_open(ctx, popup_id);
@@ -10618,27 +10866,29 @@ impl NotePanel {
                     ui.close();
                 } else {
                     match capture(ScreenshotMode::Region, true) {
-                    Ok(path) => {
-                        if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-                            let dest = assets_dir().join(fname);
-                            let result = std::fs::rename(&path, &dest).or_else(|_| {
-                                std::fs::copy(&path, &dest)
-                                    .map(|_| std::fs::remove_file(&path).unwrap_or(()))
-                            });
-                            if let Err(e) = result {
-                                app.report_error(
-                                    "ui operation",
-                                    format!("Failed to save screenshot: {e}"),
-                                );
-                            } else {
-                                let insert = format!("![{0}](assets/{0})", fname);
-                                self.insert_text_at_cursor_or_selection(ctx, id, &insert);
-                                self.image_search.clear();
-                                ui.close();
+                        Ok(path) => {
+                            if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                                let dest = assets_dir().join(fname);
+                                let result = std::fs::rename(&path, &dest).or_else(|_| {
+                                    std::fs::copy(&path, &dest)
+                                        .map(|_| std::fs::remove_file(&path).unwrap_or(()))
+                                });
+                                if let Err(e) = result {
+                                    app.report_error(
+                                        "ui operation",
+                                        format!("Failed to save screenshot: {e}"),
+                                    );
+                                } else {
+                                    let insert = format!("![{0}](assets/{0})", fname);
+                                    self.insert_text_at_cursor_or_selection(ctx, id, &insert);
+                                    self.image_search.clear();
+                                    ui.close();
+                                }
                             }
                         }
-                    }
-                    Err(e) => app.report_error("ui operation", format!("Screenshot failed: {e}")),
+                        Err(e) => {
+                            app.report_error("ui operation", format!("Screenshot failed: {e}"))
+                        }
                     }
                 }
             }

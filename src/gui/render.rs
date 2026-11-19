@@ -11240,21 +11240,19 @@ impl LauncherApp {
                     .host_layer_if_root()
                     .is_some_and(|layer| Some(layer) == foreground_layer)
             }) {
-                let allowed = !egui::Popup::is_any_open(ctx)
-                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                let note_owner = NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::NotePanel,
+                    instance: panel.prompt_identity(),
+                };
+                let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, note_owner);
+                let allowed = if egui::Popup::is_any_open(ctx) {
+                    popup.is_some()
+                } else {
+                    super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
                         Some(layer) == foreground_layer || layer.order == egui::Order::Background
-                    });
-                (
-                    if allowed {
-                        NavigationOwner::Dialog {
-                            kind: NavigationDialogKind::NotePanel,
-                            instance: panel.prompt_identity(),
-                        }
-                    } else {
-                        NavigationOwner::Blocked
-                    },
-                    None,
-                )
+                    })
+                };
+                if allowed { (note_owner, popup) } else { (NavigationOwner::Blocked, None) }
             } else {
                 (owner, combo_popup)
             };
@@ -22335,6 +22333,140 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn note_markdown_toolbar_jump_tracks_only_current_submenu() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (900.0, 680.0);
+        let mut panel = launcher_show_owner_note("jump-markdown-menu");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        let source = panel.note_content().to_owned();
+        app.push_note_panel(panel);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.note_panels[0].host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let (markdown, menu, clip) = app.note_panels[0].test_markdown_toolbar_menu().unwrap();
+        assert!(clip.contains_rect(menu));
+        let menu_id = markdown.with("popup");
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| {
+                    target.response_id() == markdown && target.metadata().label() == "Markdown"
+                }),
+            "the rendered Note toolbar publishes its actual menu opener"
+        );
+        ctx.memory_mut(|memory| memory.request_focus(markdown));
+        frame(&mut app, Vec::new());
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        assert!(egui::Popup::is_id_open(&ctx, menu_id));
+        let registry = app.jump_mode_ui.retained_registry();
+        let anchor = registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Block snippet")
+            .unwrap_or_else(|| {
+                panic!(
+                    "current Block snippet opener; owner {:?}, targets {:?}",
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    registry
+                        .metadata()
+                        .map(|target| target.label())
+                        .collect::<Vec<_>>()
+                )
+            })
+            .response_id();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Block snippet");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(anchor));
+        assert_eq!(app.note_panels[0].note_content(), source);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let registry = app.jump_mode_ui.retained_registry();
+        assert!(
+            !registry
+                .metadata()
+                .any(|target| target.label() == "Add Checkbox")
+        );
+        let heading = registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Heading 2")
+            .expect("current submenu heading")
+            .response_id();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Heading 2");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(heading));
+        assert_eq!(app.note_panels[0].note_content(), source);
+
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(egui::Popup::is_id_open(&ctx, menu_id));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(anchor));
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, menu_id));
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(app.note_panels[0].open);
     }
 
     #[test]
@@ -70927,7 +71059,34 @@ mod tests {
         ];
         let (output, passes) = app.run_root_frame_for_test(&ctx, enter_press, true);
         output.drop_without_applying_deltas();
-        assert!(passes > 1, "the action crossed a discarded ROOT pass");
+        assert!(passes > 1, "egui redraws the discarded ROOT pass");
+        assert_eq!(app.note_panels[0].note_content(), "éclair");
+        let after_discard = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("current source editor state");
+        let selection = after_discard.cursor.char_range().unwrap().as_sorted_char_range();
+        assert_eq!((selection.start.0, selection.end.0), (0, 6));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            false,
+        ).drop_without_applying_deltas();
+        let current = (after_discard.cursor.char_range().unwrap(), "éclair".to_owned());
+        assert!(after_discard.undoer().undo(&current).is_none_or(|(_, source)| source == "éclair"));
+        if !egui::Popup::is_id_open(&ctx, menu_id.with("popup")) {
+            ctx.memory_mut(|memory| memory.request_focus(menu_id));
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+            run_note_panel_key(&ctx, &mut app, egui::Key::Space, egui::Modifiers::NONE);
+        }
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (bold_id, _, _) = app.note_panels[0]
+            .test_markdown_tool_rect("Bold Selection")
+            .expect("the real menu offers a fresh activation");
+        ctx.memory_mut(|memory| memory.request_focus(bold_id));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        run_note_panel_key(&ctx, &mut app, egui::Key::Enter, egui::Modifiers::NONE);
 
         assert_eq!(
             app.note_panels[0].note_content(),
