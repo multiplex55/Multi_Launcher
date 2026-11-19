@@ -8633,10 +8633,28 @@ impl NotePanel {
             let width = parsed.width;
             if app.note_images_as_links {
                 let label = if alt.is_empty() { rel } else { alt };
-                let response = ui.link(label);
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "preview-image",
+                            self.prompt_identity,
+                            range.start,
+                        ))),
+                        |ui| ui.link(label),
+                    )
+                    .inner;
+                self.jump_target(
+                    ui,
+                    &response,
+                    format!("preview/image/{}", range.start),
+                    "Open image",
+                    super::jump_mode::TargetKind::Button,
+                );
                 if response.clicked() {
                     if self.defer_host_actions {
-                        self.pending_host_actions.open_image_paths.push(full.clone());
+                        self.pending_host_actions
+                            .open_image_paths
+                            .push(full.clone());
                     } else {
                         app.open_image_panel(&full);
                     }
@@ -8677,14 +8695,34 @@ impl NotePanel {
                 if display.x > max_preview_width {
                     display *= max_preview_width / display.x;
                 }
-                let response = ui.add(
-                    egui::Image::new(&tex)
-                        .fit_to_exact_size(display)
-                        .sense(egui::Sense::click()),
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "preview-image",
+                            self.prompt_identity,
+                            range.start,
+                        ))),
+                        |ui| {
+                            ui.add(
+                                egui::Image::new(&tex)
+                                    .fit_to_exact_size(display)
+                                    .sense(egui::Sense::click()),
+                            )
+                        },
+                    )
+                    .inner;
+                self.jump_target(
+                    ui,
+                    &response,
+                    format!("preview/image/{}", range.start),
+                    "Open image",
+                    super::jump_mode::TargetKind::Button,
                 );
                 if response.clicked() {
                     if self.defer_host_actions {
-                        self.pending_host_actions.open_image_paths.push(full.clone());
+                        self.pending_host_actions
+                            .open_image_paths
+                            .push(full.clone());
                     } else {
                         app.open_image_panel(&full);
                     }
@@ -9625,7 +9663,13 @@ impl NotePanel {
         }
     }
 
-    fn render_inline_note_text(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, text: &str) {
+    fn render_inline_note_text(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        text: &str,
+        source_start: usize,
+    ) {
         let font = FontId::proportional(effective_note_font_size(ui.ctx(), app.note_font_size));
         #[cfg(test)]
         {
@@ -9665,7 +9709,24 @@ impl NotePanel {
                     .split_once('|')
                     .map(|(target, alias)| (target.trim(), alias.trim()))
                     .unwrap_or_else(|| (link_text.trim(), link_text.trim()));
-                let resp = ui.link(RichText::new(label).font(font.clone()));
+                let offset = source_start + cursor;
+                let resp = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "preview-wiki",
+                            self.prompt_identity,
+                            offset,
+                        ))),
+                        |ui| ui.link(RichText::new(label).font(font.clone())),
+                    )
+                    .inner;
+                self.jump_target(
+                    ui,
+                    &resp,
+                    format!("preview/wiki/{offset}"),
+                    "Open note link",
+                    super::jump_mode::TargetKind::Button,
+                );
                 if resp.clicked() {
                     match resolve_note_query(target) {
                             NoteTarget::Resolved(slug) => self.activate_note_reference(app, &slug),
@@ -9696,11 +9757,29 @@ impl NotePanel {
                     let label = &text[cursor + 1..label_end];
                     let url = &text[url_start..url_end];
                     if url.starts_with("http://") || url.starts_with("https://") {
-                        ui.scope(|ui| {
-                            ui.style_mut().override_font_id = Some(font.clone());
-                            let response = ui.hyperlink_to(label, url);
-                            self.retain_hyperlink(ui, &response);
-                        });
+                        let offset = source_start + cursor;
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((
+                                    "preview-http",
+                                    self.prompt_identity,
+                                    offset,
+                                ))),
+                                |ui| {
+                                    ui.style_mut().override_font_id = Some(font.clone());
+                                    let response = ui.hyperlink_to(label, url);
+                                    self.retain_hyperlink(ui, &response);
+                                    response
+                                },
+                            )
+                            .inner;
+                        self.jump_target(
+                            ui,
+                            &response,
+                            format!("preview/http/{offset}"),
+                            "Open web link",
+                            super::jump_mode::TargetKind::Button,
+                        );
                         cursor = url_end + 1;
                         continue;
                     }
@@ -9714,8 +9793,28 @@ impl NotePanel {
                     .count();
                 if id_len > 0 {
                     let todo_id = &rest[..id_len];
-                    let resp =
-                        ui.link(RichText::new(format!("@todo:{todo_id}")).font(font.clone()));
+                    let offset = source_start + cursor;
+                    let resp = ui
+                        .scope_builder(
+                            egui::UiBuilder::new().id(egui::Id::new((
+                                "preview-todo",
+                                self.prompt_identity,
+                                offset,
+                            ))),
+                            |ui| {
+                                ui.link(
+                                    RichText::new(format!("@todo:{todo_id}")).font(font.clone()),
+                                )
+                            },
+                        )
+                        .inner;
+                    self.jump_target(
+                        ui,
+                        &resp,
+                        format!("preview/todo/{offset}"),
+                        "Open linked todo",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(test)]
                     {
                         self.test_todo_link = Some((resp.rect, ui.clip_rect(), resp.enabled()));
@@ -9770,7 +9869,9 @@ impl NotePanel {
                 modified = self.toggle_rendered_checkbox_marker(task_item, ctx.input(|i| i.time));
             }
             ui.add_space(4.0);
-            self.render_inline_note_text(ui, app, task_display_text(task_item));
+            let source_start = task_text_source_range(&self.note.content, task_item)
+                .map_or(task_item.line_byte_range.start, |range| range.start);
+            self.render_inline_note_text(ui, app, task_display_text(task_item), source_start);
         });
         let visible_ranges = task_text_source_range(&self.note.content, task_item)
             .map(|range| inline_note_visible_ranges(&self.note.content, range))
@@ -16182,7 +16283,7 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        panel.render_inline_note_text(ui, &mut app, "Inline body [[target|label]]");
+                        panel.render_inline_note_text(ui, &mut app, "Inline body [[target|label]]", 0);
                     });
                 },
             )

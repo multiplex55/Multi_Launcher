@@ -106,6 +106,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3b1 | complete |
 | M12-B3b2 | complete |
 | M12-B3c | complete |
+| M12-B3b3 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -788,3 +789,6 @@ M12-B3b2 registers current NotePanel Details fields and actions, Backlink tabs a
 
 
 M12-B3c binds Table, Link and New Note forms to their exact docked or detached session and keeps accepted FormBasis submission and ordinary keyboard input. The docked test verified focus-only Insert and separate hint-versus-form Escape with Jump Off for the latter. The detached Link test typed into the hinted URL field directly, rejected a discarded draft update and preserved the captured Unicode selection. Both and the constrained table test passed after the placement correction in d36f999c-ef18-46bd-ae7e-098686ed689f. The older two-note query fixture reproduced its initial geometry failure on a cached pre-form binary. Restored Table-only default placement removed the overlap. The older fixture now opens through the accepted form path and requires a fresh click after discarded release. Its unchanged content, caret, query and Undo/Redo assertions passed in 7605aa15-7bd9-47a1-a34e-80d093c35325, and the isolated discarded-submit case passed in 3fd2a550-8542-4f11-b326-8d5d6002f8d4.
+
+
+M12-B3b3 registers direct task-inline Wiki, HTTP and Todo links and visible note image open controls using exact source-occurrence IDs. The existing viewport test observed the exact detached Todo link focus without opening it, then exercised discarded and fresh ordinary activation with the correct owned hosts. The focused gate passed 4/4 in d14cfbca-4c2e-4d8e-aa94-48112e221c88. CommonMark-rendered links continue to use the library's ordinary keyboard controls. Its interface exposes an aggregate response; Note Details also provides current link targets. The image sizing context menu remains in the later popup slice.

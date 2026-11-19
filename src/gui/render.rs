@@ -23005,6 +23005,7 @@ mod tests {
         app.open_note_panel("source", None);
         app.note_panels[0].test_set_view_mode(crate::settings::NoteViewMode::Preview);
         app.note_panels[0].test_pop_out();
+        app.set_jump_mode_enabled(true);
         app.request_launcher_visibility(false);
         let source = egui::ViewportId::from_hash_of((
             "note-panel-editor",
@@ -23017,6 +23018,18 @@ mod tests {
             .test_todo_link()
             .expect("rendered todo link");
         assert!(enabled && clip.contains_rect(link));
+        let target = app.note_panels[0].test_native_jump().retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Open linked todo").cloned().expect("todo target");
+        run_host_viewport_frame(&ctx, &mut app, source, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false, false);
+        run_host_viewport_frame(&ctx, &mut app, source, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false, false);
+        let hint = app.note_panels[0].test_native_jump().active_session().unwrap().hint_map().assignments().iter()
+            .find(|assignment| assignment.target().label() == "Open linked todo").unwrap().hint().as_str().to_owned();
+        run_host_viewport_frame(&ctx, &mut app, source, vec![egui::Event::Text(hint)], false, false);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((source, Some(target.response_id())))
+        );
+        assert!(!app.todo_view_dialog.open);
         run_host_viewport_frame(
             &ctx,
             &mut app,
