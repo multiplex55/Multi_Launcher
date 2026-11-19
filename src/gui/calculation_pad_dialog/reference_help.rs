@@ -50,6 +50,18 @@ pub(super) struct ReferenceView {
 }
 
 impl ReferenceView {
+    pub(super) fn jump_identity(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.api_visible.hash(&mut hash);
+        self.query.hash(&mut hash);
+        self.category.map(|category| category as u8).hash(&mut hash);
+        (self.filter as u8).hash(&mut hash);
+        self.last_selected.hash(&mut hash);
+        self.details.len().hash(&mut hash);
+        for detail in &self.details { detail.entry.hash(&mut hash); }
+        hash.finish()
+    }
     pub(super) fn page(&self) -> (bool, Option<ReferenceId>) {
         (self.api_visible, self.details.last().map(|page| page.entry))
     }
@@ -99,6 +111,11 @@ fn click_with_focus_reveal(response: egui::Response) -> bool {
 }
 
 impl CalculationPadDialog {
+    #[cfg(test)]
+    pub(crate) fn test_reference_query(&self) -> &str {
+        &self.reference_view.query
+    }
+
     pub(super) fn reference_contents(
         &mut self,
         ui: &mut egui::Ui,
@@ -155,9 +172,13 @@ impl CalculationPadDialog {
         let mut back = false;
         let mut results = false;
         ui.horizontal_wrapped(|ui| {
-            results = ui.button("Back to results").clicked();
+            let response = ui.button("Back to results");
+            self.reference_target(ui, &response, "api/back-results", "Back to results", super::super::jump_mode::TargetKind::Button);
+            results = response.clicked();
             if view.details.len() > 1 {
-                back = ui.button("Back to previous entry").clicked();
+                let response = ui.button("Back to previous entry");
+                self.reference_target(ui, &response, "api/back-entry", "Back to previous entry", super::super::jump_mode::TargetKind::Button);
+                back = response.clicked();
             }
         });
         if results {
@@ -227,7 +248,9 @@ impl CalculationPadDialog {
                             ui.label(example.result_text());
                         });
                         ui.horizontal_wrapped(|ui| {
-                            if click_with_focus_reveal(ui.button("Copy Example")) {
+                            let copy = ui.button("Copy Example");
+                            self.reference_target(ui, &copy, format!("api/example/{index}/copy"), format!("Copy {title}"), super::super::jump_mode::TargetKind::Button);
+                            if click_with_focus_reveal(copy) {
                                 effects.copy = Some(example.source.to_owned());
                             }
                             let insert = ui.add_enabled(
@@ -253,7 +276,9 @@ impl CalculationPadDialog {
                     ui.strong("Related entries");
                     ui.horizontal_wrapped(|ui| {
                         for &id in entry.related {
-                            if click_with_focus_reveal(ui.button(id.name())) {
+                            let response = ui.push_id(id, |ui| ui.button(id.name())).inner;
+                            self.reference_target(ui, &response, format!("api/related/{:x}", egui::Id::new(id).value()), format!("Related {}", id.name()), super::super::jump_mode::TargetKind::Button);
+                            if click_with_focus_reveal(response) {
                                 related = Some(id);
                             }
                         }
@@ -268,7 +293,7 @@ impl CalculationPadDialog {
         }
     }
 
-    fn reference_results_ui(&self, ui: &mut egui::Ui, view: &mut ReferenceView) {
+    fn reference_results_ui(&mut self, ui: &mut egui::Ui, view: &mut ReferenceView) {
         let old_query = view.query.clone();
         let old_category = view.category;
         let old_filter = view.filter;
@@ -284,8 +309,11 @@ impl CalculationPadDialog {
                     .char_limit(128)
                     .hint_text("Name, type or concept"),
             );
+            self.reference_target(ui, &search, "api/search", "Search API reference", super::super::jump_mode::TargetKind::TextEntry);
             enter &= search.enabled();
-            if ui.button("Clear search").clicked() {
+            let clear = ui.button("Clear search");
+            self.reference_target(ui, &clear, "api/clear", "Clear API search", super::super::jump_mode::TargetKind::Button);
+            if clear.clicked() {
                 view.query.clear();
             }
         });
@@ -341,6 +369,7 @@ impl CalculationPadDialog {
                                 entry.signature(),
                             )
                             .on_hover_text(entry.summary);
+                        self.reference_target(ui, &row, format!("api/result/{:x}", egui::Id::new(entry.id).value()), format!("Open {}", entry.id.name()), super::super::jump_mode::TargetKind::Button);
                         if click_with_focus_reveal(row) {
                             selected = Some(entry.id);
                         }

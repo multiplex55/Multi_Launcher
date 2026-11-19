@@ -233,6 +233,11 @@ pub(crate) struct CalculationPadDialog {
     examples_presentation_prepared: bool,
     examples_raise_root: bool,
     examples_epoch: u64,
+    reference_jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    reference_jump_order: u64,
+    reference_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    reference_jump_frame: Option<u64>,
+    reference_jump_enabled: bool,
     examples_owner: Option<DocumentIncarnation>,
     examples_search: String,
     examples_scroll: f32,
@@ -546,6 +551,78 @@ enum DialogIntent {
 }
 
 impl CalculationPadDialog {
+    pub(super) fn reference_jump_instance(&self) -> u64 {
+        self.examples_epoch
+    }
+    #[cfg(test)]
+    pub(super) fn test_reference_jump(&self) -> &super::jump_mode::ui::JumpModeUi {
+        &self.reference_jump
+    }
+    pub(super) fn reference_jump_available(&self) -> bool {
+        self.open
+            && self.examples_open
+            && self.examples_owner == self.session.document_incarnation()
+            && self.pending_reference_insert.is_none()
+    }
+    pub(super) fn reference_jump_generation(&self) -> super::jump_mode::TargetGeneration {
+        super::jump_mode::TargetGeneration(
+            egui::Id::new((
+                self.examples_epoch,
+                self.examples_host.identity().generation,
+                self.examples_owner,
+                &self.examples_search,
+                self.reference_view.jump_identity(),
+            ))
+            .value(),
+        )
+    }
+    pub(super) fn configure_reference_jump(
+        &mut self,
+        launcher: &super::jump_mode::ui::JumpModeUi,
+        enabled: bool,
+        scope: Option<super::jump_mode::ui::JumpModeScope>,
+        first: bool,
+    ) {
+        let (chord, alphabet) = launcher.configuration();
+        self.reference_jump.set_configuration(chord, alphabet);
+        self.reference_jump.set_enabled(enabled);
+        self.reference_jump_enabled = enabled;
+        self.reference_jump_scope = scope.map(|scope| {
+            if first {
+                scope
+            } else {
+                scope.registration_only()
+            }
+        });
+        self.reference_jump_order = 0;
+    }
+    fn reference_target(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: impl AsRef<str>,
+        label: impl Into<String>,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.reference_jump_scope.as_ref(),
+            ui,
+            response,
+            id,
+            label,
+            kind,
+            &mut self.reference_jump_order,
+        );
+        if response.gained_focus()
+            && response.enabled()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+            && !ui.clip_rect().contains_rect(response.rect)
+        {
+            response.scroll_to_me(None);
+        }
+    }
     pub(super) fn jump_parent_available(&self) -> bool {
         self.open
             && self.session.pending_transition().is_none()
@@ -858,6 +935,11 @@ impl CalculationPadDialog {
             examples_presentation_prepared: false,
             examples_raise_root: false,
             examples_epoch: 0,
+            reference_jump_scope: None,
+            reference_jump_order: 0,
+            reference_jump: Box::default(),
+            reference_jump_frame: None,
+            reference_jump_enabled: false,
             examples_owner: None,
             examples_search: String::new(),
             examples_scroll: 0.0,
@@ -1664,6 +1746,27 @@ impl CalculationPadDialog {
             && !egui::Popup::is_any_open(ctx)
     }
 
+    pub(super) fn reference_owns_root_shortcuts(&self, ctx: &egui::Context) -> bool {
+        use super::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+
+        self.examples_layer_if_root().is_some_and(|layer| {
+            ctx.viewport_id() == egui::ViewportId::ROOT
+                && ctx.input(|input| input.focused)
+                && ctx.memory(|memory| memory.top_modal_layer().is_none())
+                && !egui::Popup::is_any_open(ctx)
+                && visible_top_middle_layer(ctx) == Some(layer)
+                && focused_response_layer(ctx)
+                    .is_none_or(|focus| focus == layer || self.host_layer_if_root() == Some(focus))
+        })
+    }
+
+    fn reference_close_key(ctx: &egui::Context) -> bool {
+        ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+        })
+    }
+
     fn show_examples(
         &mut self,
         ctx: &egui::Context,
@@ -1673,11 +1776,16 @@ impl CalculationPadDialog {
         root_pass: ViewportPassProvenance,
     ) -> Option<HelpEffects> {
         if !self.examples_open {
+            self.reference_jump.cancel_all();
+            self.reference_jump_frame = None;
+            self.reference_jump_scope = None;
             return None;
         }
         let reference_namespace = ("calculation-pad-reference-host", self.examples_epoch);
         match self.examples_host.presentation() {
             PadHost::Docked => {
+                self.reference_jump.cancel_all();
+                self.reference_jump_frame = None;
                 let mut effects = self.empty_examples_effects(egui::ViewportId::ROOT);
                 let mut open = true;
                 let content = ctx.content_rect().size();
@@ -1709,7 +1817,14 @@ impl CalculationPadDialog {
                                 && Self::owns_reference_root_input(ui)
                                 && !ctx.memory(|m| m.top_modal_layer().is_some());
                             effects.input_authorized = allowed;
-                            ui.add_enabled_ui(allowed, |ui| {
+                            effects.close = first
+                                && allowed
+                                && !ctx.will_discard()
+                                && self.reference_owns_root_shortcuts(ctx)
+                                && !self.root_jump_active
+                                && self.pending_reference_insert.is_none()
+                                && Self::reference_close_key(ctx);
+                            ui.add_enabled_ui(allowed && !effects.close, |ui| {
                                 ui.push_id(reference_namespace, |ui| {
                                     self.examples_ui(ui, &mut effects)
                                 });
@@ -1731,9 +1846,10 @@ impl CalculationPadDialog {
                     effects.raise_root = output.as_ref().map(|window| window.response.layer_id);
                 }
                 effects.close = effects.accepted
-                    && root_input_allowed
-                    && !ctx.memory(|memory| memory.top_modal_layer().is_some())
-                    && !open;
+                    && (effects.close
+                        || (root_input_allowed
+                            && !ctx.memory(|memory| memory.top_modal_layer().is_some())
+                            && !open));
                 effects.accepted.then_some(effects)
             }
             PadHost::Popout => {
@@ -1774,8 +1890,42 @@ impl CalculationPadDialog {
                         };
                         let modal = child.memory(|memory| memory.top_modal_layer().is_some());
                         let allowed = surface && !modal && (!independent || focused) && !close;
+                        let jump_allowed = independent && allowed && self.reference_jump_available()
+                            && !egui::Popup::is_any_open(&child_ctx)
+                            && super::jump_mode::ui::visible_top_middle_layer(&child_ctx).is_none()
+                            && super::jump_mode::ui::focused_response_layer(&child_ctx).is_none_or(|layer| layer == egui::LayerId::background());
+                        let mut jump_binding = None;
+                        let mut jump_owns_escape = false;
+                        if independent {
+                            let frame = child_ctx.cumulative_frame_nr();
+                            if self.reference_jump_frame != Some(frame) { self.reference_jump.begin_frame(); self.reference_jump_frame = Some(frame); }
+                            let binding = super::jump_mode::ui::NavigationViewportBinding {
+                                viewport: reference_viewport_id(),
+                                owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationReference, instance: self.examples_epoch },
+                                base_layer: egui::LayerId::background(),
+                            };
+                            let nav = self.reference_jump.update_navigation_owner_for_viewport(&child_ctx, binding, jump_allowed && self.reference_jump_enabled);
+                            jump_owns_escape = self.reference_jump.active_session().is_some();
+                            self.reference_jump.handle_viewport_input(&child_ctx, nav == binding.owner, pass_ok, viewport);
+                            jump_owns_escape |= self.reference_jump.active_session().is_some();
+                            self.reference_jump.begin_ui_pass();
+                            self.reference_jump_scope = (nav == binding.owner).then(|| self.reference_jump.scope_for_viewport_binding(
+                                super::jump_mode::SurfaceId::dialog("calculation-reference", self.examples_epoch), self.reference_jump_generation(), "calculation-reference", binding,
+                            )).flatten().map(|scope| if pass_ok { scope } else { scope.registration_only() });
+                            self.reference_jump_order = 0;
+                            jump_binding = Some(binding);
+                        }
                         effects.native_close = close;
-                        effects.close = pass_ok && close;
+                        let keyboard_owner = if independent {
+                            jump_allowed
+                        } else {
+                            allowed && self.reference_owns_root_shortcuts(&child_ctx)
+                                && !self.root_jump_active
+                        };
+                        effects.close = pass_ok
+                            && (close || (keyboard_owner && !jump_owns_escape
+                                && self.pending_reference_insert.is_none()
+                                && Self::reference_close_key(&child_ctx)));
                         effects.focus_viewport = independent
                             && self.examples_host.focus_pending()
                             && pass_ok
@@ -1784,7 +1934,7 @@ impl CalculationPadDialog {
                         if independent {
                             let _output = egui::CentralPanel::default().show(child, |ui| {
                                 ui.add_enabled_ui(
-                                    allowed && ui.is_visible() && !ui.is_sizing_pass(),
+                                    allowed && !effects.close && ui.is_visible() && !ui.is_sizing_pass(),
                                     |ui| {
                                         effects.input_authorized = ui.is_enabled();
                                         ui.push_id(reference_namespace, |ui| {
@@ -1800,7 +1950,7 @@ impl CalculationPadDialog {
                         } else {
                             let visible = child.is_visible() && !child.is_sizing_pass();
                             let owner = Self::owns_reference_root_input(child);
-                            child.add_enabled_ui(allowed && visible && owner, |ui| {
+                            child.add_enabled_ui(allowed && !effects.close && visible && owner, |ui| {
                                 effects.input_authorized = ui.is_enabled();
                                 ui.push_id(reference_namespace, |ui| {
                                     self.examples_ui(ui, &mut effects)
@@ -1810,6 +1960,13 @@ impl CalculationPadDialog {
                                 effects.embedded_layer = Some(child.layer_id());
                                 effects.embedded_focus = child.memory(|memory| memory.focused());
                             }
+                        }
+                        if let Some(binding) = jump_binding {
+                            self.reference_jump.finish_ui_pass();
+                            let nav = self.reference_jump.update_navigation_owner_for_viewport(&child_ctx, binding, jump_allowed && self.reference_jump_enabled);
+                            if self.reference_jump.prepare_pass_for_viewport(&child_ctx, binding, nav, jump_allowed && self.reference_jump_enabled) { super::jump_mode::paint::paint(&child_ctx, &self.reference_jump); }
+                            if !child_ctx.will_discard() { self.reference_jump.complete_frame_for_viewport(&child_ctx, binding, nav, jump_allowed && self.reference_jump_enabled); }
+                            self.reference_jump_scope = None;
                         }
                         effects.accepted = pass_ok && !ctx.will_discard() && !child.will_discard();
                         effects.pass = effects
@@ -4497,14 +4654,17 @@ impl CalculationPadDialog {
     fn examples_ui(&mut self, ui: &mut egui::Ui, effects: &mut HelpEffects) {
         let mut view = self.reference_view.clone();
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut view.api_visible, false, "Grouped Examples");
-            ui.selectable_value(&mut view.api_visible, true, "API Reference");
+            let grouped = ui.selectable_value(&mut view.api_visible, false, "Grouped Examples");
+            self.reference_target(ui, &grouped, "mode/examples", "Grouped Examples", super::jump_mode::TargetKind::Button);
+            let api = ui.selectable_value(&mut view.api_visible, true, "API Reference");
+            self.reference_target(ui, &api, "mode/api", "API Reference", super::jump_mode::TargetKind::Button);
             if view.api_visible {
                 let (button, requested) = super::utility_host::presentation_button(
                     ui,
                     self.examples_host.presentation(),
                     true,
                 );
+                self.reference_target(ui, &button, "presentation", "Dock or pop out", super::jump_mode::TargetKind::Button);
                 if button.clicked() {
                     effects.host_request = Some(requested);
                 }
@@ -4536,6 +4696,8 @@ impl CalculationPadDialog {
                     .hint_text("Function, keyword, or example"),
             );
             let clear = ui.button("Clear");
+            self.reference_target(ui, &search, "examples/search", "Search examples", super::jump_mode::TargetKind::TextEntry);
+            self.reference_target(ui, &clear, "examples/clear", "Clear examples search", super::jump_mode::TargetKind::Button);
             if clear.clicked() {
                 query.clear();
             }
@@ -4544,6 +4706,7 @@ impl CalculationPadDialog {
                 self.examples_host.presentation(),
                 true,
             );
+            self.reference_target(ui, &button, "presentation", "Dock or pop out", super::jump_mode::TargetKind::Button);
             #[cfg(test)]
             {
                 controls = (search.rect, clear.rect, button.rect);
@@ -4564,16 +4727,17 @@ impl CalculationPadDialog {
             .show(ui, |ui| {
                 let mut matches = 0;
                 for (group_index, group) in EXAMPLE_GROUPS.iter().enumerate() {
-                    let examples = group.examples.iter().filter(|example| example.matches(group.title, &query)).collect::<Vec<_>>();
+                    let examples = group.examples.iter().enumerate().filter(|(_, example)| example.matches(group.title, &query)).collect::<Vec<_>>();
                     if examples.is_empty() { continue; }
                     matches += examples.len();
                     let mut body = |ui: &mut egui::Ui| {
-                        for example in &examples {
+                        for (example_index, example) in &examples {
                             #[cfg(test)] self.test_examples_rendered_sources.push(example.source);
                             ui.group(|ui| {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.strong(example.title);
                                     let copy = ui.small_button("Copy example");
+                                    self.reference_target(ui, &copy, format!("examples/group/{group_index}/copy/{example_index}"), format!("Copy {}", example.title), super::jump_mode::TargetKind::Button);
                                     #[cfg(test)] if self.test_examples_copy_rect.is_none() {
                                         self.test_examples_copy_rect = Some(copy.rect);
                                         self.test_examples_copy_state = Some((copy.enabled(), ui.clip_rect()));
@@ -4589,6 +4753,7 @@ impl CalculationPadDialog {
                     if active { ui.strong(group.title); body(ui); }
                     else {
                         let header = egui::CollapsingHeader::new(group.title).id_salt(("calculation-pad-example-group", group_index)).default_open(true).show(ui, &mut body);
+                        self.reference_target(ui, &header.header_response, format!("examples/group/{group_index}"), group.title, super::jump_mode::TargetKind::Button);
                         #[cfg(test)]
                         if self.test_examples_group.is_none() {
                             self.test_examples_group = Some((header.header_response, header.openness));
@@ -4598,7 +4763,9 @@ impl CalculationPadDialog {
                 }
                 if matches == 0 {
                     ui.label("No matching examples.");
-                    if ui.button("Clear search").clicked() { effects.search = Some(String::new()); }
+                    let clear = ui.button("Clear search");
+                    self.reference_target(ui, &clear, "examples/clear-empty", "Clear examples search", super::jump_mode::TargetKind::Button);
+                    if clear.clicked() { effects.search = Some(String::new()); }
                 }
             });
         effects.scroll = Some(scroll.state.offset.y);

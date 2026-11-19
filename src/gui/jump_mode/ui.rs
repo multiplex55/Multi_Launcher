@@ -92,10 +92,11 @@ pub(crate) enum NavigationDialogKind {
     NotePlainLinkPrompt,
     MarkdownStudio,
     CalculationPad,
+    CalculationReference,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 56] = [
+    pub(crate) const ALL: [Self; 57] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -152,6 +153,7 @@ impl NavigationDialogKind {
         Self::NotePlainLinkPrompt,
         Self::MarkdownStudio,
         Self::CalculationPad,
+        Self::CalculationReference,
     ];
 
     const fn index(self) -> usize {
@@ -212,6 +214,7 @@ impl NavigationDialogKind {
             Self::NotePlainLinkPrompt => 53,
             Self::MarkdownStudio => 54,
             Self::CalculationPad => 55,
+            Self::CalculationReference => 56,
         }
     }
 
@@ -273,6 +276,7 @@ impl NavigationDialogKind {
             Self::NotePlainLinkPrompt => "note-plain-link-prompt",
             Self::MarkdownStudio => "markdown-studio",
             Self::CalculationPad => "calculation-pad",
+            Self::CalculationReference => "calculation-reference",
         }
     }
 
@@ -329,6 +333,7 @@ impl NavigationDialogKind {
             Self::CalculationSensitivity => egui::Id::new("calculation-sensitivity-window"),
             Self::MarkdownStudio => egui::Id::new("markdown-studio-window"),
             Self::CalculationPad => egui::Id::new("calculation-pad-window"),
+            Self::CalculationReference => egui::Id::new("calculation-pad-examples-window"),
             Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
@@ -649,6 +654,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::NoteClosePrompt
                     | NavigationDialogKind::NoteConflictPrompt
                     | NavigationDialogKind::NotePlainLinkPrompt
+                    | NavigationDialogKind::CalculationReference
                     | NavigationDialogKind::CalculationPad
                     | NavigationDialogKind::MarkdownStudio
                     | NavigationDialogKind::NotePanel
@@ -702,6 +708,10 @@ impl NavigationViewportBinding {
                 self.viewport == egui::ViewportId::from_hash_of(("note-panel-editor", instance))
                     && self.base_layer == egui::LayerId::new(egui::Order::Middle, egui::Id::new(("note-panel-prompt", name, instance)))
                     && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationReference, .. } => {
+                self.viewport == egui::ViewportId::from_hash_of("calculation_pad_reference_native_viewport")
+                    && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
             }
             NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationPad, .. } => {
                 self.viewport == egui::ViewportId::from_hash_of("calculation_pad_native_viewport")
@@ -4987,6 +4997,7 @@ mod tests {
                     NavigationDialogKind::CalculationSensitivity => { egui::Window::new("Sensitivity Tables").id(egui::Id::new("calculation-sensitivity-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::MarkdownStudio => { egui::Window::new("Markdown Studio").id(egui::Id::new("markdown-studio-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationPad => { egui::Window::new("Calculation Pad").id(egui::Id::new("calculation-pad-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::CalculationReference => { egui::Window::new("Calculation Pad Examples & Reference").id(egui::Id::new("calculation-pad-examples-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt => {}
