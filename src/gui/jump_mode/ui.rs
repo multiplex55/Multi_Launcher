@@ -90,10 +90,11 @@ pub(crate) enum NavigationDialogKind {
     NoteClosePrompt,
     NoteConflictPrompt,
     NotePlainLinkPrompt,
+    MarkdownStudio,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 54] = [
+    pub(crate) const ALL: [Self; 55] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -148,6 +149,7 @@ impl NavigationDialogKind {
         Self::NoteClosePrompt,
         Self::NoteConflictPrompt,
         Self::NotePlainLinkPrompt,
+        Self::MarkdownStudio,
     ];
 
     const fn index(self) -> usize {
@@ -206,6 +208,7 @@ impl NavigationDialogKind {
             Self::NoteClosePrompt => 51,
             Self::NoteConflictPrompt => 52,
             Self::NotePlainLinkPrompt => 53,
+            Self::MarkdownStudio => 54,
         }
     }
 
@@ -265,6 +268,7 @@ impl NavigationDialogKind {
             Self::NoteClosePrompt => "note-close-prompt",
             Self::NoteConflictPrompt => "note-conflict-prompt",
             Self::NotePlainLinkPrompt => "note-plain-link-prompt",
+            Self::MarkdownStudio => "markdown-studio",
         }
     }
 
@@ -319,6 +323,7 @@ impl NavigationDialogKind {
             Self::ImageViewer | Self::NotePanel | Self::NoteFormTable | Self::NoteFormLink | Self::NoteFormNewNote | Self::NoteClosePrompt | Self::NoteConflictPrompt | Self::NotePlainLinkPrompt => return None,
             Self::CalculationDependencies => egui::Id::new("calculation-dependencies-window"),
             Self::CalculationSensitivity => egui::Id::new("calculation-sensitivity-window"),
+            Self::MarkdownStudio => egui::Id::new("markdown-studio-window"),
             Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
@@ -639,6 +644,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::NoteClosePrompt
                     | NavigationDialogKind::NoteConflictPrompt
                     | NavigationDialogKind::NotePlainLinkPrompt
+                    | NavigationDialogKind::MarkdownStudio
                     | NavigationDialogKind::NotePanel
                     | NavigationDialogKind::ImageViewer
                     | NavigationDialogKind::DashboardEditor
@@ -690,6 +696,10 @@ impl NavigationViewportBinding {
                 self.viewport == egui::ViewportId::from_hash_of(("note-panel-editor", instance))
                     && self.base_layer == egui::LayerId::new(egui::Order::Middle, egui::Id::new(("note-panel-prompt", name, instance)))
                     && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownStudio, .. } => {
+                self.viewport == egui::ViewportId::from_hash_of("markdown_studio_viewport")
+                    && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
             }
             NavigationOwner::Dialog {
                 kind: NavigationDialogKind::NotePanel,
@@ -4965,6 +4975,7 @@ mod tests {
                     NavigationDialogKind::TemplateDelete => { egui::Window::new("Delete Template?").show(ctx, |_| {}); }
                     NavigationDialogKind::DataRecoveryConfirmation => { egui::Window::new("Confirm destructive action").id(egui::Id::new("data-recovery-confirmation")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationSensitivity => { egui::Window::new("Sensitivity Tables").id(egui::Id::new("calculation-sensitivity-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::MarkdownStudio => { egui::Window::new("Markdown Studio").id(egui::Id::new("markdown-studio-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt => {}

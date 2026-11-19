@@ -114,6 +114,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3e3 | complete |
 | M12-B3e4 | complete |
 | M12-B3f | complete |
+| M12-B3g1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -838,3 +839,10 @@ The first gate passed 5/5 (3b054de8-577f-42c9-9d44-ebc3eeabb99c). The reviewed g
 Shift+F10 opens the focused Quick Notes row or editor's existing context menu. Jump Mode registers the actual menu items and Meta submenu. The body stays disabled while the popup owns input. A separate receipt retains the exact rendered source response, even for an offscreen owned row, without exposing it as a hint. The launcher query bridge remains suppressed behind the menu. Escape dismisses the current submenu first or restores the source when the root closes.
 
 The final gate passed 5/5 (7cda5484-262d-49f8-a067-ad2513d2b489), including actual row hint then fresh Edit, the source editor's Insert timestamp focus, ordinary Escape with Jump Mode off, offscreen identity retention, and both existing query bridge guards. The older `jump_mode_notes_rows_use_visible_slug_identity_and_fresh_enter_opens_exact_note` fixture fails its initial two-visible-rows assertion before any input. The same failure was reproduced on the cached pre-context build (evidence `m12-b3f-precontext-rows.txt`). Its assertions and the feature-off row activation behavior were preserved.
+
+
+### M12-B3g1 Markdown Studio main controls and source
+
+Docked and embedded Studio use the actual foreground window. A detached Studio uses its own current viewport and background layer. Both bind target identity to the Studio opening, presentation, document revision and mode. Existing main file, presentation, mode and Undo/Redo controls expose their real responses. The multiline source remains an ordinary TextEdit. Its hint transfers focus and later keys edit the same draft. The existing rejected-pass effect fence remains in place.
+
+The 5/5 gate (5212b59f-2a68-4938-94af-cd710d336e7b) covers root and detached source hints followed by Unicode and newlines, existing Space and export behavior, discarded source/save handling, document Undo, presentation moves and layer inventory. Menus, inline decisions and outline/preview actions are in the next checkpoint.

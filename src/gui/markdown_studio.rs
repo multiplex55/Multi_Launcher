@@ -120,6 +120,12 @@ pub(crate) struct MarkdownStudioDialog {
     host_state: UtilityHostState,
     presentation_prepared: bool,
     host_epoch: u64,
+    jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    jump_order: u64,
+    native_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    native_jump_frame: Option<u64>,
+    jump_enabled: bool,
+    root_jump_active: bool,
     show_root_after_host_change: bool,
     document: MarkdownDocument,
     default_directory: PathBuf,
@@ -194,12 +200,85 @@ fn native_geometry_identity(host: HostIdentity) -> Option<NativeViewportIdentity
 }
 
 impl MarkdownStudioDialog {
+    pub(super) fn jump_instance(&self) -> u64 {
+        self.host_epoch
+    }
+    pub(super) fn jump_parent_available(&self) -> bool {
+        self.open && self.document.pending_transition().is_none()
+    }
+    pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
+        super::jump_mode::TargetGeneration(
+            egui::Id::new((
+                self.host_epoch,
+                self.host_state.identity().generation,
+                self.document.path(),
+                self.document.revision(),
+                self.mode as u8,
+                self.document.pending_transition().is_some(),
+            ))
+            .value(),
+        )
+    }
+    pub(super) fn configure_jump(
+        &mut self,
+        launcher: &super::jump_mode::ui::JumpModeUi,
+        enabled: bool,
+        scope: Option<super::jump_mode::ui::JumpModeScope>,
+        first: bool,
+    ) {
+        let (chord, alphabet) = launcher.configuration();
+        self.native_jump.set_configuration(chord, alphabet);
+        self.native_jump.set_enabled(enabled);
+        self.jump_enabled = enabled;
+        self.root_jump_active = launcher.active_session().is_some();
+        self.jump_scope = scope.map(|scope| {
+            if first {
+                scope
+            } else {
+                scope.registration_only()
+            }
+        });
+        self.jump_order = 0;
+    }
+    fn jump_target(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: &str,
+        label: &str,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.jump_scope.as_ref(),
+            ui,
+            response,
+            id,
+            label,
+            kind,
+            &mut self.jump_order,
+        );
+        if response.gained_focus()
+            && response.enabled()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+            && !ui.clip_rect().contains_rect(response.rect)
+        {
+            response.scroll_to_me(None);
+        }
+    }
     pub(crate) fn new(root: &AppDataRoot) -> Self {
         Self {
             open: false,
             host_state: UtilityHostState::docked(),
             presentation_prepared: false,
             host_epoch: 0,
+            jump_scope: None,
+            jump_order: 0,
+            native_jump: Box::default(),
+            native_jump_frame: None,
+            jump_enabled: false,
+            root_jump_active: false,
             show_root_after_host_change: false,
             document: MarkdownDocument::new(),
             default_directory: root.path().to_path_buf(),
@@ -512,11 +591,18 @@ impl MarkdownStudioDialog {
             self.test_presentation_enabled = None;
         }
         if !self.open {
+            self.native_jump.cancel_all();
+            self.native_jump_frame = None;
+            self.jump_scope = None;
             self.pending_effects = None;
             return;
         }
         let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let host = self.host_state.identity();
+        if host.host == UtilityPresentation::Docked {
+            self.native_jump.cancel_all();
+            self.native_jump_frame = None;
+        }
         let original_source = self.document.source().unwrap_or_default().to_owned();
         let revision = self.document.revision().unwrap_or(0);
         self.ensure_preview(ctx, revision, &original_source);
@@ -595,13 +681,80 @@ impl MarkdownStudioDialog {
                         && visible_body;
                     let keyboard_allowed = actions_allowed
                         && (independent || focused_on_layer(&child_context, ui.layer_id()));
+                    let mut native_binding = None;
+                    let mut native_jump_owns_escape = false;
+                    let jump_allowed = independent
+                        && surface_input_allowed
+                        && focused
+                        && !modal_open
+                        && self.jump_parent_available()
+                        && !egui::Popup::is_any_open(&child_context)
+                        && super::jump_mode::ui::visible_top_middle_layer(&child_context).is_none()
+                        && super::jump_mode::ui::focused_response_layer(&child_context)
+                            .is_none_or(|layer| layer == egui::LayerId::background());
+                    if independent {
+                        let frame = child_context.cumulative_frame_nr();
+                        if self.native_jump_frame != Some(frame) {
+                            self.native_jump.begin_frame();
+                            self.native_jump_frame = Some(frame);
+                        }
+                        let binding = super::jump_mode::ui::NavigationViewportBinding {
+                            viewport: studio_viewport_id(),
+                            owner: super::jump_mode::ui::NavigationOwner::Dialog {
+                                kind: super::jump_mode::ui::NavigationDialogKind::MarkdownStudio,
+                                instance: self.host_epoch,
+                            },
+                            base_layer: egui::LayerId::background(),
+                        };
+                        let navigation = self.native_jump.update_navigation_owner_for_viewport(
+                            &child_context,
+                            binding,
+                            jump_allowed && self.jump_enabled,
+                        );
+                        native_jump_owns_escape = self.native_jump.active_session().is_some();
+                        self.native_jump.handle_viewport_input(
+                            &child_context,
+                            navigation == binding.owner,
+                            pass_authorized,
+                            studio_viewport_id(),
+                        );
+                        native_jump_owns_escape |= self.native_jump.active_session().is_some();
+                        self.native_jump.begin_ui_pass();
+                        self.jump_scope = (navigation == binding.owner)
+                            .then(|| {
+                                self.native_jump.scope_for_viewport_binding(
+                                    super::jump_mode::SurfaceId::dialog(
+                                        "markdown-studio",
+                                        self.host_epoch,
+                                    ),
+                                    self.jump_generation(),
+                                    "markdown-studio",
+                                    binding,
+                                )
+                            })
+                            .flatten()
+                            .map(|scope| {
+                                if pass_authorized {
+                                    scope
+                                } else {
+                                    scope.registration_only()
+                                }
+                            });
+                        self.jump_order = 0;
+                        native_binding = Some(binding);
+                    }
                     let close_by_os = independent
                         && child_context.input(|input| input.viewport().close_requested());
                     os_close_requested = close_by_os;
                     if pass_authorized && self.document.pending_transition().is_none() {
                         if close_by_os || self.close_requested {
                             intent = Some(StudioIntent::Close);
-                        } else if keyboard_close_requested(&child_context, keyboard_allowed) {
+                        } else if keyboard_close_requested(
+                            &child_context,
+                            keyboard_allowed
+                                && !native_jump_owns_escape
+                                && (independent || !self.root_jump_active),
+                        ) {
                             intent = Some(StudioIntent::Close);
                         }
                     }
@@ -644,6 +797,31 @@ impl MarkdownStudioDialog {
                             embedded_root_focused_id =
                                 child_context.memory(|memory| memory.focused());
                         }
+                    }
+                    if let Some(binding) = native_binding {
+                        self.native_jump.finish_ui_pass();
+                        let current = self.native_jump.update_navigation_owner_for_viewport(
+                            &child_context,
+                            binding,
+                            jump_allowed && self.jump_enabled,
+                        );
+                        if self.native_jump.prepare_pass_for_viewport(
+                            &child_context,
+                            binding,
+                            current,
+                            jump_allowed && self.jump_enabled,
+                        ) {
+                            super::jump_mode::paint::paint(&child_context, &self.native_jump);
+                        }
+                        if !child_context.will_discard() {
+                            self.native_jump.complete_frame_for_viewport(
+                                &child_context,
+                                binding,
+                                current,
+                                jump_allowed && self.jump_enabled,
+                            );
+                        }
+                        self.jump_scope = None;
                     }
                     focus_host = self.host_state.focus_pending()
                         && pass_authorized
@@ -709,7 +887,10 @@ impl MarkdownStudioDialog {
                         if pass_authorized && self.document.pending_transition().is_none() {
                             if self.close_requested {
                                 intent = Some(StudioIntent::Close);
-                            } else if keyboard_close_requested(ui.ctx(), keyboard_allowed) {
+                            } else if keyboard_close_requested(
+                                ui.ctx(),
+                                keyboard_allowed && !self.root_jump_active,
+                            ) {
                                 intent = Some(StudioIntent::Close);
                             }
                         }
@@ -739,6 +920,7 @@ impl MarkdownStudioDialog {
             }
         }
 
+        self.jump_scope = None;
         if !callback_observed || !first_ui_pass {
             return;
         }
@@ -1076,6 +1258,18 @@ impl MarkdownStudioDialog {
                 ("Save As…", StudioIntent::SaveAs),
             ] {
                 let response = ui.add_enabled(!pending, egui::Button::new(label));
+                self.jump_target(
+                    ui,
+                    &response,
+                    match label {
+                        "New" => "new",
+                        "Open…" => "open",
+                        "Save" => "save",
+                        _ => "save-as",
+                    },
+                    label,
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(test)]
                 if label == "Save As…" && ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_save_as_id = Some(response.id);
@@ -1116,6 +1310,13 @@ impl MarkdownStudioDialog {
             }
             let (control, requested) =
                 presentation_button(ui, presentation, host_change_allowed && !pending);
+            self.jump_target(
+                ui,
+                &control,
+                "presentation",
+                "Dock or pop out",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(test)]
             if ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_presentation_id = Some(control.id);
@@ -1134,6 +1335,17 @@ impl MarkdownStudioDialog {
                 (ViewMode::Split, "Split"),
             ] {
                 let response = ui.selectable_label(mode.unwrap_or(self.mode) == view, label);
+                self.jump_target(
+                    ui,
+                    &response,
+                    match view {
+                        ViewMode::Source => "mode/edit",
+                        ViewMode::Preview => "mode/preview",
+                        ViewMode::Split => "mode/split",
+                    },
+                    label,
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(test)]
                 if view == ViewMode::Source && ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_edit_id = Some(response.id);
@@ -1143,16 +1355,26 @@ impl MarkdownStudioDialog {
                 }
             }
             ui.separator();
-            if ui
-                .add_enabled(self.document.can_undo(), egui::Button::new("Undo"))
-                .clicked()
-            {
+            let undo = ui.add_enabled(self.document.can_undo(), egui::Button::new("Undo"));
+            self.jump_target(
+                ui,
+                &undo,
+                "undo",
+                "Undo",
+                super::jump_mode::TargetKind::Button,
+            );
+            if undo.clicked() {
                 *intent = Some(StudioIntent::Undo);
             }
-            if ui
-                .add_enabled(self.document.can_redo(), egui::Button::new("Redo"))
-                .clicked()
-            {
+            let redo = ui.add_enabled(self.document.can_redo(), egui::Button::new("Redo"));
+            self.jump_target(
+                ui,
+                &redo,
+                "redo",
+                "Redo",
+                super::jump_mode::TargetKind::Button,
+            );
+            if redo.clicked() {
                 *intent = Some(StudioIntent::Redo);
             }
             ui.separator();
@@ -1433,6 +1655,7 @@ impl MarkdownStudioDialog {
                     .inner
             })
             .inner;
+        self.jump_target(ui, &_response, "source", "Markdown source editor", super::jump_mode::TargetKind::TextEntry);
         #[cfg(test)]
         {
             self.test_editor_id = Some(id);
@@ -1954,6 +2177,11 @@ impl MarkdownStudioDialog {
 
     fn set_error(&mut self, error: String) {
         self.message = Some((true, error));
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_native_jump(&self) -> &super::jump_mode::ui::JumpModeUi {
+        self.native_jump.as_ref()
     }
 
     #[cfg(test)]
