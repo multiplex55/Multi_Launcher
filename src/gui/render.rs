@@ -22222,6 +22222,90 @@ mod tests {
     }
 
     #[test]
+    fn note_panel_preview_task_jump_focus_is_not_activation() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                app.note_settings.task_lists_enabled = true;
+                app.note_settings.interactive_checkboxes_enabled = true;
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let note = crate::plugins::note::Note {
+                    title: "Preview task".into(),
+                    path: std::path::PathBuf::new(),
+                    content: "# Heading\n\n- [ ] item".into(),
+                    tags: Vec::new(),
+                    links: Vec::new(),
+                    slug: "jump-preview-task".into(),
+                    alias: None,
+                    aliases: Vec::new(),
+                    entity_refs: Vec::new(),
+                };
+                let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+                panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+                app.note_panels.push(panel);
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas()
+                };
+                for _ in 0..5 {
+                    frame(&mut app, Vec::new());
+                }
+                let layer = app.note_panels[0].host_layer_if_root().unwrap();
+                ctx.move_to_top(layer);
+                for _ in 0..3 {
+                    frame(&mut app, Vec::new());
+                }
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Task on line 3")
+                    .cloned()
+                    .expect("task checkbox target");
+                let original = app.note_panels[0].note_content().to_owned();
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Task on line 3");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.note_panels[0].note_content(), original);
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Space, egui::Modifiers::NONE)],
+                );
+                assert!(app.note_panels[0].note_content().contains("[x]"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn note_panel_jump_focuses_source_and_preserves_multiline_input() {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)

@@ -2722,6 +2722,19 @@ impl NotePanel {
     pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
         let mut collapsed: Vec<_> = self.collapsed_sections.iter().collect();
         collapsed.sort_unstable();
+        let backlinks = self.show_metadata.then(|| {
+            let rows = self.backlink_rows_for_active_tab();
+            let page = self
+                .backlink_page
+                .min(rows.len().div_ceil(BACKLINK_PAGE_SIZE).saturating_sub(1));
+            let subjects = rows
+                .iter()
+                .skip(page * BACKLINK_PAGE_SIZE)
+                .take(BACKLINK_PAGE_SIZE)
+                .map(|row| (&row.note_slug, &row.todo_id, &row.type_badge))
+                .collect::<Vec<_>>();
+            (self.backlink_tab as u8, page, subjects)
+        });
         super::jump_mode::TargetGeneration(
             egui::Id::new((
                 self.prompt_identity,
@@ -2731,9 +2744,11 @@ impl NotePanel {
                 self.note_find.is_open(),
                 self.show_metadata,
                 self.outline_open,
+                (self.tags_expanded, self.links_expanded, backlinks),
                 &self.outline_filter,
                 collapsed,
-                self.selected_outline_heading.map(|position| (position.revision, position.heading_start)),
+                self.selected_outline_heading
+                    .map(|position| (position.revision, position.heading_start)),
             ))
             .value(),
         )
@@ -7642,9 +7657,28 @@ impl NotePanel {
                 let threshold = app.note_more_limit;
                 let show_all = self.tags_expanded || tag_count <= threshold;
                 let limit = if show_all { tag_count } else { threshold };
-                for t in self.derived.tags.iter().take(limit) {
-                    if ui.link(format!("#{t}")).clicked() {
-                        app.filter_notes_by_tag(t);
+                let tags: Vec<_> = self.derived.tags.iter().take(limit).cloned().collect();
+                for t in tags {
+                    let token = egui::Id::new(("note-tag", &t)).value();
+                    let response = ui
+                        .scope_builder(
+                            egui::UiBuilder::new().id(egui::Id::new((
+                                "note-tag",
+                                self.prompt_identity,
+                                token,
+                            ))),
+                            |ui| ui.link(format!("#{t}")),
+                        )
+                        .inner;
+                    self.jump_target(
+                        ui,
+                        &response,
+                        format!("details/tag/{token:x}"),
+                        format!("Filter tag {t}"),
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if response.clicked() {
+                        app.filter_notes_by_tag(&t);
                     }
                 }
                 if tag_count > threshold {
@@ -7653,7 +7687,15 @@ impl NotePanel {
                     } else {
                         "... (more)"
                     };
-                    if ui.button(label).clicked() {
+                    let response = ui.button(label);
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "details/tags/more",
+                        "Show more or fewer tags",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if response.clicked() {
                         self.tags_expanded = !self.tags_expanded;
                         if was_focused {
                             self.focus_textedit_next_frame = true;
@@ -7670,45 +7712,93 @@ impl NotePanel {
                     ui.small("None");
                 }
                 for alias in self.note.aliases.clone() {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(&alias);
-                            ui.small(format!("{} · {}", self.note.title, self.note.slug));
-                            if ui.small_button("Remove").clicked() {
-                                self.note.content =
-                                    remove_alias_metadata(&self.note.content, &alias);
-                                self.alias_rename_inputs.remove(&alias);
-                                self.save_alias_metadata_change(app);
-                            }
-                        });
-                        let mut input = self
-                            .alias_rename_inputs
-                            .entry(alias.clone())
-                            .or_insert_with(|| alias.clone())
-                            .clone();
-                        let mut rename_to = None;
-                        ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut input);
-                            if ui.small_button("Rename").clicked() {
-                                rename_to = Some(input.trim().to_string());
-                            }
-                        });
-                        if let Some(renamed) = rename_to {
-                            self.warn_alias_collision(app, &renamed);
-                            self.note.content =
-                                rename_alias_metadata(&self.note.content, &alias, &renamed);
-                            self.alias_rename_inputs.remove(&alias);
-                            self.save_alias_metadata_change(app);
-                        } else {
-                            self.alias_rename_inputs.insert(alias.clone(), input);
-                        }
-                    });
+                    let token = egui::Id::new(("note-alias", &alias)).value();
+                    ui.scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "note-alias",
+                            self.prompt_identity,
+                            token,
+                        ))),
+                        |ui| {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(&alias);
+                                    ui.small(format!("{} · {}", self.note.title, self.note.slug));
+                                    let response = ui.small_button("Remove");
+                                    self.jump_target(
+                                        ui,
+                                        &response,
+                                        format!("details/alias/{token:x}/remove"),
+                                        format!("Remove alias {alias}"),
+                                        super::jump_mode::TargetKind::Button,
+                                    );
+                                    if response.clicked() {
+                                        self.note.content =
+                                            remove_alias_metadata(&self.note.content, &alias);
+                                        self.alias_rename_inputs.remove(&alias);
+                                        self.save_alias_metadata_change(app);
+                                    }
+                                });
+                                let mut input = self
+                                    .alias_rename_inputs
+                                    .entry(alias.clone())
+                                    .or_insert_with(|| alias.clone())
+                                    .clone();
+                                let mut rename_to = None;
+                                ui.horizontal(|ui| {
+                                    let field = ui.text_edit_singleline(&mut input);
+                                    self.jump_target(
+                                        ui,
+                                        &field,
+                                        format!("details/alias/{token:x}/input"),
+                                        format!("Rename alias {alias}"),
+                                        super::jump_mode::TargetKind::TextEntry,
+                                    );
+                                    let response = ui.small_button("Rename");
+                                    self.jump_target(
+                                        ui,
+                                        &response,
+                                        format!("details/alias/{token:x}/rename"),
+                                        format!("Apply alias rename {alias}"),
+                                        super::jump_mode::TargetKind::Button,
+                                    );
+                                    if response.clicked() {
+                                        rename_to = Some(input.trim().to_string());
+                                    }
+                                });
+                                if let Some(renamed) = rename_to {
+                                    self.warn_alias_collision(app, &renamed);
+                                    self.note.content =
+                                        rename_alias_metadata(&self.note.content, &alias, &renamed);
+                                    self.alias_rename_inputs.remove(&alias);
+                                    self.save_alias_metadata_change(app);
+                                } else {
+                                    self.alias_rename_inputs.insert(alias.clone(), input);
+                                }
+                            })
+                        },
+                    );
                 }
             });
             ui.horizontal(|ui| {
                 ui.label("Add alias:");
-                ui.text_edit_singleline(&mut self.new_alias);
-                if ui.button("Add").clicked() {
+                let field = ui.text_edit_singleline(&mut self.new_alias);
+                self.jump_target(
+                    ui,
+                    &field,
+                    "details/alias/new",
+                    "New alias",
+                    super::jump_mode::TargetKind::TextEntry,
+                );
+                let response = ui.button("Add");
+                self.jump_target(
+                    ui,
+                    &response,
+                    "details/alias/add",
+                    "Add alias",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if response.clicked() {
                     let alias = self.new_alias.trim().to_string();
                     if !alias.is_empty() {
                         self.warn_alias_collision(app, &alias);
@@ -7753,9 +7843,29 @@ impl NotePanel {
             for l in all_links.iter().take(limit) {
                 match l {
                     LinkKind::Wiki(s) => {
-                        let (response, actions) = show_wiki_link_actions(ui, s);
+                        let token = egui::Id::new(("note-link-wiki", s)).value();
+                        let (response, actions) = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((
+                                    "note-link-wiki",
+                                    self.prompt_identity,
+                                    token,
+                                ))),
+                                |ui| show_wiki_link_actions(ui, s),
+                            )
+                            .inner;
+                        self.jump_target(
+                            ui,
+                            &response,
+                            format!("details/wiki/{token:x}"),
+                            format!("Open note {s}"),
+                            super::jump_mode::TargetKind::Button,
+                        );
                         #[cfg(test)]
-                        { self.test_wiki_open = Some((response.rect, ui.clip_rect(), response.enabled())); }
+                        {
+                            self.test_wiki_open =
+                                Some((response.rect, ui.clip_rect(), response.enabled()));
+                        }
                         let _ = response;
                         for action in actions {
                             match action {
@@ -7770,7 +7880,24 @@ impl NotePanel {
                         }
                     }
                     LinkKind::Url(label, url) => {
-                        let response = ui.hyperlink_to(label, url);
+                        let token = egui::Id::new(("note-link-url", label, url)).value();
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((
+                                    "note-link-url",
+                                    self.prompt_identity,
+                                    token,
+                                ))),
+                                |ui| ui.hyperlink_to(label, url),
+                            )
+                            .inner;
+                        self.jump_target(
+                            ui,
+                            &response,
+                            format!("details/link/{token:x}"),
+                            format!("Open link {label}"),
+                            super::jump_mode::TargetKind::Button,
+                        );
                         self.retain_hyperlink(ui, &response);
                     }
                 }
@@ -7781,7 +7908,15 @@ impl NotePanel {
                 } else {
                     "... (more)"
                 };
-                if ui.button(label).clicked() {
+                let response = ui.button(label);
+                self.jump_target(
+                    ui,
+                    &response,
+                    "details/links/more",
+                    "Show more or fewer links",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if response.clicked() {
                     self.links_expanded = !self.links_expanded;
                     if was_focused {
                         self.focus_textedit_next_frame = true;
@@ -7838,62 +7973,109 @@ impl NotePanel {
                 BacklinkTab::RelatedNotes,
                 BacklinkTab::Mentions,
             ] {
-                if ui
-                    .selectable_label(self.backlink_tab == tab, tab.label())
-                    .clicked()
-                {
+                let response = ui.selectable_label(self.backlink_tab == tab, tab.label());
+                self.jump_target(
+                    ui,
+                    &response,
+                    format!("backlinks/tab/{}", tab as u8),
+                    tab.label(),
+                    super::jump_mode::TargetKind::Button,
+                );
+                if response.clicked() {
                     self.backlink_tab = tab;
                     self.backlink_page = 0;
                 }
             }
         });
+        let total_pages = self
+            .backlink_rows_for_active_tab()
+            .len()
+            .div_ceil(BACKLINK_PAGE_SIZE);
+        self.backlink_page = self.backlink_page.min(total_pages.saturating_sub(1));
         let rows = self.backlink_rows_for_active_tab();
-        let total_pages = rows.len().div_ceil(BACKLINK_PAGE_SIZE);
         let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
         let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
         if rows.is_empty() {
             ui.small("No backlinks in this category.");
         } else {
             let page_rows: Vec<BacklinkRow> = rows[page_start..page_end].to_vec();
-            for (idx, row) in page_rows.iter().enumerate() {
-                ui.push_id(("backlink_row", idx, page_start), |ui| {
-                    let resp = ui.selectable_label(false, &row.title);
-                    if resp.clicked() {
-                        if let Some(slug) = &row.note_slug {
-                            self.activate_note_reference(app, slug);
-                        } else if let Some(todo_id) = &row.todo_id {
-                            self.activate_todo_reference(app, todo_id);
+            for row in &page_rows {
+                let token =
+                    egui::Id::new(("backlink", &row.note_slug, &row.todo_id, &row.type_badge))
+                        .value();
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new((
+                        "backlink_row",
+                        self.prompt_identity,
+                        token,
+                    ))),
+                    |ui| {
+                        let resp = ui.selectable_label(false, &row.title);
+                        self.jump_target(
+                            ui,
+                            &resp,
+                            format!("backlinks/row/{token:x}"),
+                            format!("Backlink {}", row.title),
+                            super::jump_mode::TargetKind::Button,
+                        );
+                        if resp.clicked() {
+                            if let Some(slug) = &row.note_slug {
+                                self.activate_note_reference(app, slug);
+                            } else if let Some(todo_id) = &row.todo_id {
+                                self.activate_todo_reference(app, todo_id);
+                            }
                         }
-                    }
-                    if resp.has_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && let Some(slug) = &row.note_slug
-                    {
-                        self.activate_note_reference(app, slug);
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.small(format!("[{}]", row.type_badge));
-                        ui.small(format!("updated {}", row.updated));
-                        ui.small(format!("reason: {}", row.reason));
-                    });
-                    ui.small(&row.snippet);
-                    if ui.button("Open").clicked() {
-                        if let Some(slug) = &row.note_slug {
-                            self.activate_note_reference(app, slug);
-                        } else if let Some(todo_id) = &row.todo_id {
-                            self.activate_todo_reference(app, todo_id);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.small(format!("[{}]", row.type_badge));
+                            ui.small(format!("updated {}", row.updated));
+                            ui.small(format!("reason: {}", row.reason));
+                        });
+                        ui.small(&row.snippet);
+                        let open = ui.button("Open");
+                        self.jump_target(
+                            ui,
+                            &open,
+                            format!("backlinks/open/{token:x}"),
+                            format!("Open backlink {}", row.title),
+                            super::jump_mode::TargetKind::Button,
+                        );
+                        if open.clicked() {
+                            if let Some(slug) = &row.note_slug {
+                                self.activate_note_reference(app, slug);
+                            } else if let Some(todo_id) = &row.todo_id {
+                                self.activate_todo_reference(app, todo_id);
+                            }
                         }
-                    }
-                });
+                    },
+                );
                 ui.separator();
             }
             if total_pages > 1 {
                 ui.horizontal(|ui| {
-                    if ui.button("Prev").clicked() && self.backlink_page > 0 {
+                    let prev = ui.add_enabled(self.backlink_page > 0, egui::Button::new("Prev"));
+                    self.jump_target(
+                        ui,
+                        &prev,
+                        "backlinks/prev",
+                        "Previous backlinks page",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if prev.clicked() && self.backlink_page > 0 {
                         self.backlink_page -= 1;
                     }
                     ui.small(format!("Page {}/{}", self.backlink_page + 1, total_pages));
-                    if ui.button("Next").clicked() && self.backlink_page + 1 < total_pages {
+                    let next = ui.add_enabled(
+                        self.backlink_page + 1 < total_pages,
+                        egui::Button::new("Next"),
+                    );
+                    self.jump_target(
+                        ui,
+                        &next,
+                        "backlinks/next",
+                        "Next backlinks page",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if next.clicked() && self.backlink_page + 1 < total_pages {
                         self.backlink_page += 1;
                     }
                 });
@@ -8676,7 +8858,28 @@ impl NotePanel {
             .horizontal_top(|ui| {
                 ui.add_space((section.heading.level.saturating_sub(1) as f32) * 10.0);
                 let label = if collapsed { "▶" } else { "▼" };
-                if ui.small_button(label).clicked() {
+                let fold = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "preview-fold",
+                            self.prompt_identity,
+                            section.heading.byte_range.start,
+                        ))),
+                        |ui| ui.small_button(label),
+                    )
+                    .inner;
+                self.jump_target(
+                    ui,
+                    &fold,
+                    format!("preview/fold/{}", section.heading.byte_range.start),
+                    format!(
+                        "{} section {}",
+                        if collapsed { "Expand" } else { "Collapse" },
+                        section.heading.title
+                    ),
+                    super::jump_mode::TargetKind::Button,
+                );
+                if fold.clicked() {
                     if collapsed {
                         self.collapsed_sections.remove(&key);
                     } else {
@@ -9508,7 +9711,26 @@ impl NotePanel {
         let output = ui.horizontal_top(|ui| {
             ui.add_space(task_item.indent as f32 * 8.0);
             let mut state = task_item.checked;
-            let resp = ui.add_enabled(interactive, egui::Checkbox::without_text(&mut state));
+            let resp = ui
+                .scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new((
+                        "preview-task",
+                        self.prompt_identity,
+                        task_item.marker_byte_range.start,
+                    ))),
+                    |ui| ui.add_enabled(interactive, egui::Checkbox::without_text(&mut state)),
+                )
+                .inner;
+            self.jump_target(
+                ui,
+                &resp,
+                format!(
+                    "preview/task/{}/{}",
+                    task_item.marker_byte_range.start, task_item.marker_byte_range.end
+                ),
+                format!("Task on line {}", task_item.line_index + 1),
+                super::jump_mode::TargetKind::Checkbox,
+            );
             if interactive && resp.changed() {
                 modified = self.toggle_rendered_checkbox_marker(task_item, ctx.input(|i| i.time));
             }
@@ -20935,6 +21157,29 @@ link://note/central-note
 
         assert_eq!(panel.backlink_tab, BacklinkTab::Mentions);
         assert_eq!(panel.backlink_page, 2);
+    }
+
+    #[test]
+    fn backlink_refresh_clamps_the_page_before_slicing() {
+        let ctx = egui::Context::default();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = new_app_in_dir(&ctx, data.path());
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        panel.backlink_tab = BacklinkTab::RelatedNotes;
+        panel.backlink_page = 2;
+        panel.derived.backlink_rows_related_notes = vec![BacklinkRow {
+            title: "Remaining note".into(),
+            type_badge: "Note".into(),
+            updated: String::new(),
+            snippet: "Linked from here".into(),
+            reason: "Reference".into(),
+            note_slug: Some("remaining".into()),
+            todo_id: None,
+        }];
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            panel.render_backlinks(ui, &mut app);
+        }).drop_without_applying_deltas();
+        assert_eq!(panel.backlink_page, 0);
     }
 
     #[test]

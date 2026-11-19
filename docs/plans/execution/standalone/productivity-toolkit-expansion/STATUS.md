@@ -104,6 +104,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3a1 | complete |
 | M12-B3a2 | complete |
 | M12-B3b1 | complete |
+| M12-B3b2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -780,3 +781,6 @@ M12-B3b1 registers the current outline width, filter, headings and enabled Move 
 
 
 M11-DR resolves Windows **Open source app** availability on the existing worker using exact AppInfo package identity for each observed app. The bounded view publishes only current validated toast identities. GUI focus targets and the live action checks use the exact selected toast. The seven Windows-path tests passed in 05316949-0bce-4c54-8537-7d32dc4d7bf0, including changed creation time, source removal and revoked eligibility. Independent review was clear. The real deployment and consent evidence remains blocked as recorded above.
+
+
+M12-B3b2 registers current NotePanel Details fields and actions, Backlink tabs and rows, and Preview fold and task controls. The initial five tests passed in 1fb5e637-6332-42d2-8616-b9df0e3d96f6. Review led to per-panel stable widget IDs, one ordinary Backlink activation per Enter, and clamped pagination after a source refresh. Three targeted cases passed after those corrections in 5ba87b31-ac0f-49b6-b849-48211cb38505. Preview inline links and image controls remain in the later menu/link slice.
