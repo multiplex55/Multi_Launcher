@@ -88,10 +88,12 @@ pub(crate) enum NavigationDialogKind {
     NoteFormLink,
     NoteFormNewNote,
     NoteClosePrompt,
+    NoteConflictPrompt,
+    NotePlainLinkPrompt,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 52] = [
+    pub(crate) const ALL: [Self; 54] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -144,6 +146,8 @@ impl NavigationDialogKind {
         Self::NoteFormLink,
         Self::NoteFormNewNote,
         Self::NoteClosePrompt,
+        Self::NoteConflictPrompt,
+        Self::NotePlainLinkPrompt,
     ];
 
     const fn index(self) -> usize {
@@ -200,6 +204,8 @@ impl NavigationDialogKind {
             Self::NoteFormLink => 49,
             Self::NoteFormNewNote => 50,
             Self::NoteClosePrompt => 51,
+            Self::NoteConflictPrompt => 52,
+            Self::NotePlainLinkPrompt => 53,
         }
     }
 
@@ -257,6 +263,8 @@ impl NavigationDialogKind {
             Self::NoteFormLink => "note-insert-link",
             Self::NoteFormNewNote => "note-link-new",
             Self::NoteClosePrompt => "note-close-prompt",
+            Self::NoteConflictPrompt => "note-conflict-prompt",
+            Self::NotePlainLinkPrompt => "note-plain-link-prompt",
         }
     }
 
@@ -308,7 +316,7 @@ impl NavigationDialogKind {
             Self::NoteTemplates => egui::Id::new(Some("Note Templates")),
             Self::TemplateDelete => egui::Id::new(Some("Delete Template?")),
             Self::UnusedNoteAssets => egui::Id::new(Some("Unused Note Assets")),
-            Self::ImageViewer | Self::NotePanel | Self::NoteFormTable | Self::NoteFormLink | Self::NoteFormNewNote | Self::NoteClosePrompt => return None,
+            Self::ImageViewer | Self::NotePanel | Self::NoteFormTable | Self::NoteFormLink | Self::NoteFormNewNote | Self::NoteClosePrompt | Self::NoteConflictPrompt | Self::NotePlainLinkPrompt => return None,
             Self::CalculationDependencies => egui::Id::new("calculation-dependencies-window"),
             Self::CalculationSensitivity => egui::Id::new("calculation-sensitivity-window"),
             Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
@@ -629,6 +637,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::NoteFormLink
                     | NavigationDialogKind::NoteFormNewNote
                     | NavigationDialogKind::NoteClosePrompt
+                    | NavigationDialogKind::NoteConflictPrompt
+                    | NavigationDialogKind::NotePlainLinkPrompt
                     | NavigationDialogKind::NotePanel
                     | NavigationDialogKind::ImageViewer
                     | NavigationDialogKind::DashboardEditor
@@ -668,11 +678,17 @@ impl NavigationViewportBinding {
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::Dialog {
-                kind: NavigationDialogKind::NoteClosePrompt,
+                kind: kind @ (NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt),
                 instance,
             } => {
+                let name = match kind {
+                    NavigationDialogKind::NoteClosePrompt => "close",
+                    NavigationDialogKind::NoteConflictPrompt => "save-conflict",
+                    NavigationDialogKind::NotePlainLinkPrompt => "plain-link-conversion",
+                    _ => unreachable!(),
+                };
                 self.viewport == egui::ViewportId::from_hash_of(("note-panel-editor", instance))
-                    && self.base_layer == egui::LayerId::new(egui::Order::Middle, egui::Id::new(("note-panel-prompt", "close", instance)))
+                    && self.base_layer == egui::LayerId::new(egui::Order::Middle, egui::Id::new(("note-panel-prompt", name, instance)))
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::Dialog {
@@ -824,7 +840,7 @@ impl NavigationViewportBinding {
             layer == self.base_layer
                 || Some(layer) == popup_layer
                 || (matches!(self.owner, NavigationOwner::Dialog {
-                    kind: NavigationDialogKind::TemplateDelete | NavigationDialogKind::NoteClosePrompt,
+                    kind: NavigationDialogKind::TemplateDelete | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt,
                     ..
                 }) && layer == egui::LayerId::background())
                 || (matches!(self.owner, NavigationOwner::SnippetPrompt { .. })
@@ -4622,7 +4638,7 @@ mod tests {
                     NavigationDialogKind::CalculationSensitivity => { egui::Window::new("Sensitivity Tables").id(egui::Id::new("calculation-sensitivity-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
-                    NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt => {}
+                    NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt => {}
                     NavigationDialogKind::CalendarEditor => {
                         egui::Window::new("Calendar Event").show(ctx, |_| {});
                     }
@@ -4824,7 +4840,7 @@ mod tests {
             let Some(expected_layer) = kind.layer_id() else {
                 assert!(matches!(
                     kind,
-                    NavigationDialogKind::RadialDesigner | NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt
+                    NavigationDialogKind::RadialDesigner | NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt
                 ));
                 continue;
             };

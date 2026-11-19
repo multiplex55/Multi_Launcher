@@ -108,6 +108,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3c | complete |
 | M12-B3b3 | complete |
 | M12-B3d1 | complete |
+| M12-B3d2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -796,3 +797,6 @@ M12-B3b3 registers direct task-inline Wiki, HTTP and Todo links and visible note
 
 
 M12-B3d1 gives a live dirty-close question its own exact panel and opening generation. Discard, Save and Keep Editing hints focus their real controls. The initial scoped gate passed 5/5 in a0e7ec01-1e77-42a3-878e-869439ff39f5. Review added exact prior-editor focus admission in the detached viewport and recognized the embedded fallback for Escape. The final three checks passed in 913f6a89-7ba1-49c0-9831-63435e790814. Retained root and native cases preserve the dirty draft across hint Escape and fresh Keep Editing, including with Jump disabled for the latter.
+
+
+M12-B3d2 shares NotePanel's prompt coordinator with Save Conflict and plain-link review. The current exact prompt binds its own panel, host, opening epoch and source revision. Review now restricts each prompt's widget registration to its actual foreground kind. Plain-link review opening, Convert and Cancel use accepted host actions and retire stale review evidence. The initial gate passed 6/6 in 00d497dd-2cd9-4269-a94e-16309b535afe and the reviewed checks passed 4/4 in 3f0274dc-ae69-4b2d-8f20-6b2e418e4886. The conflict fixture proves that an overlapping dirty-close prompt contributes no hints and remains open after Conflict Escape. The plain-link tests verify refreshed source requires fresh activation and ordinary conversion changes only the draft.

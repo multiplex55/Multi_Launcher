@@ -1132,7 +1132,9 @@ pub struct NotePanel {
     pending_close_after_save: bool,
     discard_unsaved_prompt: bool,
     close_prompt_epoch: u64,
-    close_prompt_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    conflict_prompt_epoch: u64,
+    plain_prompt_epoch: u64,
+    prompt_scope: Option<(NotePrompt, super::jump_mode::ui::JumpModeScope)>,
     link_search: String,
     link_menu_targets: Vec<LinkMenuResult>,
     link_menu_targets_version: Option<u64>,
@@ -1336,6 +1338,38 @@ enum NoteSaveOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NotePrompt {
+    Close,
+    Conflict,
+    PlainLink,
+}
+impl NotePrompt {
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::Conflict => "save-conflict",
+            Self::PlainLink => "plain-link-conversion",
+        }
+    }
+    pub(super) fn kind(self) -> super::jump_mode::ui::NavigationDialogKind {
+        match self {
+            Self::Close => super::jump_mode::ui::NavigationDialogKind::NoteClosePrompt,
+            Self::Conflict => super::jump_mode::ui::NavigationDialogKind::NoteConflictPrompt,
+            Self::PlainLink => super::jump_mode::ui::NavigationDialogKind::NotePlainLinkPrompt,
+        }
+    }
+    pub(super) fn surface(self) -> &'static str {
+        self.kind().surface_kind()
+    }
+}
+#[derive(Clone, Copy)]
+enum PlainLinkAction {
+    Review,
+    Convert,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConflictSaveAction {
     Overwrite,
     SaveAsNew,
@@ -1406,6 +1440,7 @@ struct NotePanelPendingHostActions {
     keep_editing_requested: bool,
     save_and_close_requested: bool,
     conflict_action: Option<ConflictSaveAction>,
+    plain_link_action: Option<PlainLinkAction>,
     external_open: Option<NoteExternalOpen>,
     attachment_picker_requested: bool,
     screenshot_requested: bool,
@@ -1838,7 +1873,9 @@ impl NotePanel {
             pending_close_after_save: false,
             discard_unsaved_prompt: false,
             close_prompt_epoch: 0,
-            close_prompt_scope: None,
+            conflict_prompt_epoch: 0,
+            plain_prompt_epoch: 0,
+            prompt_scope: None,
             link_search: String::new(),
             link_menu_targets: Vec::new(),
             link_menu_targets_version: None,
@@ -2139,7 +2176,7 @@ impl NotePanel {
                 self.sync_aliases_from_content();
                 self.mark_current_content_saved();
             }
-            Ok(false) => self.overwrite_prompt = true,
+            Ok(false) => self.show_conflict_prompt(),
             Err(err) => app.report_error("note save", format!("Failed to save aliases: {err}")),
         }
     }
@@ -2824,7 +2861,7 @@ impl NotePanel {
 
     pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
         if self.root_form_navigation(ctx).is_some()
-            || (self.host_layer_if_root().is_some() && self.close_prompt_current(ctx))
+            || (self.host_layer_if_root().is_some() && self.prompt_current(ctx).is_some())
         {
             return true;
         }
@@ -3199,6 +3236,17 @@ impl NotePanel {
             self.discard_changes();
         } else if frame.actions.keep_editing_requested {
             self.keep_editing();
+        }
+        if let Some(action) = frame.actions.plain_link_action {
+            match action {
+                PlainLinkAction::Review => {
+                    if !self.start_plain_link_conversion() {
+                        Self::show_no_plain_links_toast(app);
+                    }
+                }
+                PlainLinkAction::Cancel => self.cancel_plain_link_conversion(),
+                PlainLinkAction::Convert => if self.confirm_plain_link_conversion(frame.owner_context.input(|i| i.time)) == PlainLinkConfirmOutcome::NoCandidates { Self::show_no_plain_links_toast(app); },
+            }
         }
         if let Some(action) = frame.actions.conflict_action {
             match action {
@@ -4511,6 +4559,9 @@ impl NotePanel {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_overwrite_prompt(&self) -> bool { self.overwrite_prompt }
+
+    #[cfg(test)]
     pub(crate) fn test_mermaid_open_rect(
         &self,
         index: usize,
@@ -5564,40 +5615,85 @@ impl NotePanel {
         self.discard_unsaved_prompt = true;
     }
 
-    pub(super) fn close_prompt_current(&self, ctx: &egui::Context) -> bool {
-        let layer = egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("close"));
-        self.open
-            && self.discard_unsaved_prompt
-            && ctx.input(|input| input.focused)
-            && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
-            && ctx
-                .memory(|memory| memory.top_modal_layer())
-                .is_none_or(|modal| modal == layer)
-            && !egui::Popup::is_any_open(ctx)
-            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focused| {
-                focused == layer
-                    || focused.order == egui::Order::Background
-                    || Some(focused) == self.host_layer_if_root()
-            })
+    pub(super) fn prompt_current(&self, ctx: &egui::Context) -> Option<NotePrompt> {
+        [
+            NotePrompt::Close,
+            NotePrompt::Conflict,
+            NotePrompt::PlainLink,
+        ]
+        .into_iter()
+        .find(|prompt| {
+            let active = match prompt {
+                NotePrompt::Close => self.discard_unsaved_prompt,
+                NotePrompt::Conflict => self.overwrite_prompt,
+                NotePrompt::PlainLink => self.pending_plain_link_conversion.is_some(),
+            };
+            let layer = egui::LayerId::new(egui::Order::Middle, self.note_prompt_id(prompt.key()));
+            self.open
+                && active
+                && ctx.input(|input| input.focused)
+                && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                && ctx
+                    .memory(|memory| memory.top_modal_layer())
+                    .is_none_or(|modal| modal == layer)
+                && !egui::Popup::is_any_open(ctx)
+                && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focused| {
+                    focused == layer
+                        || focused.order == egui::Order::Background
+                        || Some(focused) == self.host_layer_if_root()
+                })
+        })
     }
-
-    pub(super) fn close_prompt_generation(&self) -> super::jump_mode::TargetGeneration {
+    pub(super) fn prompt_generation(
+        &self,
+        prompt: NotePrompt,
+    ) -> super::jump_mode::TargetGeneration {
+        let epoch = match prompt {
+            NotePrompt::Close => self.close_prompt_epoch,
+            NotePrompt::Conflict => self.conflict_prompt_epoch,
+            NotePrompt::PlainLink => self.plain_prompt_epoch,
+        };
         super::jump_mode::TargetGeneration(
             egui::Id::new((
                 self.prompt_identity,
                 self.host_state.identity().generation,
-                self.close_prompt_epoch,
+                prompt.key(),
+                epoch,
                 self.note_find.content_revision(),
             ))
             .value(),
         )
     }
+    fn show_conflict_prompt(&mut self) {
+        if !self.overwrite_prompt {
+            self.conflict_prompt_epoch = self.conflict_prompt_epoch.wrapping_add(1);
+        }
+        self.overwrite_prompt = true;
+    }
+    fn stage_prompt_cancel(&mut self, prompt: NotePrompt) {
+        match prompt {
+            NotePrompt::Close => self.pending_host_actions.keep_editing_requested = true,
+            NotePrompt::Conflict => {
+                self.pending_host_actions.conflict_action = Some(ConflictSaveAction::Cancel)
+            }
+            NotePrompt::PlainLink => {
+                self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Cancel)
+            }
+        }
+    }
 
-    pub(super) fn set_close_prompt_scope(
+    pub(super) fn set_prompt_scope(
         &mut self,
-        scope: Option<super::jump_mode::ui::JumpModeScope>,
+        scope: Option<(NotePrompt, super::jump_mode::ui::JumpModeScope)>,
     ) {
-        self.close_prompt_scope = scope;
+        self.prompt_scope = scope;
+    }
+
+    fn prompt_scope(&self, prompt: NotePrompt) -> Option<&super::jump_mode::ui::JumpModeScope> {
+        self.prompt_scope
+            .as_ref()
+            .filter(|(owner, _)| *owner == prompt)
+            .map(|(_, scope)| scope)
     }
 
     fn close_after_successful_save(&mut self, app: &mut LauncherApp) {
@@ -5692,6 +5788,7 @@ impl NotePanel {
             self.pending_plain_link_conversion = None;
             false
         } else {
+            self.plain_prompt_epoch = self.plain_prompt_epoch.wrapping_add(1);
             self.pending_plain_link_conversion =
                 Some(PendingPlainLinkConversion { source, report });
             true
@@ -5715,6 +5812,7 @@ impl NotePanel {
                 self.focus_textedit_next_frame = true;
                 return PlainLinkConfirmOutcome::NoCandidates;
             }
+            self.plain_prompt_epoch = self.plain_prompt_epoch.wrapping_add(1);
             self.pending_plain_link_conversion =
                 Some(PendingPlainLinkConversion { source, report });
             return PlainLinkConfirmOutcome::Refreshed;
@@ -5867,11 +5965,11 @@ impl NotePanel {
             UtilityPresentation::Docked => {
                 self.native_jump.cancel_all();
                 self.native_jump_frame = None;
-                if pass_authorized && root_input_allowed && self.close_prompt_current(ctx)
+                if pass_authorized && root_input_allowed && self.prompt_current(ctx).is_some()
                     && app.jump_mode_ui.active_session().is_none()
                     && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
                 {
-                    self.pending_host_actions.keep_editing_requested = true;
+                    if let Some(prompt) = self.prompt_current(ctx) { self.stage_prompt_cancel(prompt); }
                 }
                 callback_observed = true;
                 owner_pass_accepted = pass_authorized;
@@ -5932,8 +6030,10 @@ impl NotePanel {
                             && (independent || fallback_keyboard_owner);
                         let mut native_binding = None;
                         let mut native_jump_owned_escape = false;
-                        let close_current = (independent || fallback_keyboard_owner)
-                            && self.close_prompt_current(&child_ctx);
+                        let current_prompt = (independent || fallback_keyboard_owner)
+                            .then(|| self.prompt_current(&child_ctx))
+                            .flatten();
+                        let close_current = current_prompt.is_some();
                         let native_jump_allowed = independent
                             && keyboard_input_allowed
                             && !own_modal_open
@@ -5945,7 +6045,9 @@ impl NotePanel {
                                 |layer| {
                                     layer == egui::LayerId::background()
                                         || (close_current
-                                            && layer.id == self.note_prompt_id("close"))
+                                            && current_prompt.is_some_and(|prompt| {
+                                                layer.id == self.note_prompt_id(prompt.key())
+                                            }))
                                 },
                             );
                         if independent {
@@ -5961,21 +6063,21 @@ impl NotePanel {
                             let binding = super::jump_mode::ui::NavigationViewportBinding {
                                 viewport: viewport_id,
                                 owner: super::jump_mode::ui::NavigationOwner::Dialog {
-                                    kind: if close_current {
-                                        super::jump_mode::ui::NavigationDialogKind::NoteClosePrompt
-                                    } else {
-                                        super::jump_mode::ui::NavigationDialogKind::NotePanel
-                                    },
+                                    kind: current_prompt.map_or(
+                                        super::jump_mode::ui::NavigationDialogKind::NotePanel,
+                                        NotePrompt::kind,
+                                    ),
                                     instance: self.prompt_identity,
                                 },
-                                base_layer: if close_current {
-                                    egui::LayerId::new(
-                                        egui::Order::Middle,
-                                        self.note_prompt_id("close"),
-                                    )
-                                } else {
-                                    egui::LayerId::background()
-                                },
+                                base_layer: current_prompt.map_or_else(
+                                    egui::LayerId::background,
+                                    |prompt| {
+                                        egui::LayerId::new(
+                                            egui::Order::Middle,
+                                            self.note_prompt_id(prompt.key()),
+                                        )
+                                    },
+                                ),
                             };
                             let native_navigation =
                                 self.native_jump.update_navigation_owner_for_viewport(
@@ -5996,18 +6098,14 @@ impl NotePanel {
                                 .then(|| {
                                     self.native_jump.scope_for_viewport_binding(
                                         super::jump_mode::SurfaceId::dialog(
-                                            if close_current {
-                                                "note-close-prompt"
-                                            } else {
-                                                "note-panel"
-                                            },
+                                            current_prompt
+                                                .map_or("note-panel", NotePrompt::surface),
                                             self.prompt_identity,
                                         ),
-                                        if close_current {
-                                            self.close_prompt_generation()
-                                        } else {
-                                            self.jump_generation()
-                                        },
+                                        current_prompt.map_or_else(
+                                            || self.jump_generation(),
+                                            |prompt| self.prompt_generation(prompt),
+                                        ),
                                         "note-panel",
                                         binding,
                                     )
@@ -6020,8 +6118,8 @@ impl NotePanel {
                                         scope.registration_only()
                                     }
                                 });
-                            if close_current {
-                                self.set_close_prompt_scope(scope);
+                            if let Some(prompt) = current_prompt {
+                                self.set_prompt_scope(scope.map(|scope| (prompt, scope)));
                             } else {
                                 self.set_jump_scope(scope);
                             }
@@ -6039,7 +6137,9 @@ impl NotePanel {
                                 input.consume_key(egui::Modifiers::NONE, Key::Escape)
                             })
                         {
-                            self.pending_host_actions.keep_editing_requested = true;
+                            if let Some(prompt) = current_prompt {
+                                self.stage_prompt_cancel(prompt);
+                            }
                         }
                         if shortcuts_allowed && independent && !close_current {
                             let find = child_ctx.input_mut(|input| {
@@ -6123,7 +6223,7 @@ impl NotePanel {
                                 );
                             }
                             self.set_jump_scope(None);
-                            self.set_close_prompt_scope(None);
+                            self.set_prompt_scope(None);
                         }
                         owner_modal_layer =
                             child_ctx.memory(|memory| memory.top_modal_layer());
@@ -6343,6 +6443,7 @@ impl NotePanel {
             let mut dialog_open = true;
             let mut convert = false;
             let mut cancel = false;
+            let mut prompt_order = 0;
             egui::Window::new("Convert plain links?")
                 .id(self.note_prompt_id("plain-link-conversion"))
                 .collapsible(false)
@@ -6374,11 +6475,37 @@ impl NotePanel {
                         ui.end_row();
                     });
                     ui.horizontal(|ui| {
-                        convert = ui.button("Convert").clicked();
-                        cancel = ui.button("Cancel").clicked();
+                        let convert_button = ui.button("Convert");
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::PlainLink),
+                            ui,
+                            &convert_button,
+                            "convert",
+                            "Convert",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
+                        convert = convert_button.clicked();
+                        let cancel_button = ui.button("Cancel");
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::PlainLink),
+                            ui,
+                            &cancel_button,
+                            "cancel",
+                            "Cancel",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
+                        cancel = cancel_button.clicked();
                     });
                 });
-            if cancel || !dialog_open {
+            if self.defer_host_actions {
+                if cancel || !dialog_open {
+                    self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Cancel);
+                } else if convert {
+                    self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Convert);
+                }
+            } else if cancel || !dialog_open {
                 self.cancel_plain_link_conversion();
             } else if convert
                 && self.confirm_plain_link_conversion(ctx.input(|i| i.time))
@@ -6426,7 +6553,7 @@ impl NotePanel {
                         let save = ui.button("Save Changes");
                         let save = widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary);
                         super::jump_mode::ui::register_and_apply_target(
-                            self.close_prompt_scope.as_ref(),
+                            self.prompt_scope(NotePrompt::Close),
                             ui,
                             &save,
                             "save",
@@ -6446,7 +6573,7 @@ impl NotePanel {
                             ButtonEmphasis::Destructive,
                         );
                         super::jump_mode::ui::register_and_apply_target(
-                            self.close_prompt_scope.as_ref(),
+                            self.prompt_scope(NotePrompt::Close),
                             ui,
                             &response,
                             "discard",
@@ -6474,7 +6601,7 @@ impl NotePanel {
                             ButtonEmphasis::Primary,
                         );
                         super::jump_mode::ui::register_and_apply_target(
-                            self.close_prompt_scope.as_ref(),
+                            self.prompt_scope(NotePrompt::Close),
                             ui,
                             &keep_editing_response,
                             "keep",
@@ -6515,6 +6642,7 @@ impl NotePanel {
         if self.overwrite_prompt {
             let mut prompt_open = true;
             let mut selected_action = None;
+            let mut prompt_order = 0;
             egui::Window::new("Note exists")
                 .id(self.note_prompt_id("save-conflict"))
                 .collapsible(false)
@@ -6535,6 +6663,15 @@ impl NotePanel {
                             overwrite,
                             ButtonEmphasis::Destructive,
                         );
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Conflict),
+                            ui,
+                            &overwrite,
+                            "overwrite",
+                            "Overwrite",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
                         #[cfg(test)]
                         if ui.is_visible() && !ui.is_sizing_pass() {
                             self.test_conflict_overwrite_rect = Some(overwrite.rect);
@@ -6545,6 +6682,15 @@ impl NotePanel {
                         let save_as_new = ui.button("Save as New");
                         let save_as_new =
                             widgets::with_button_emphasis(ui, save_as_new, ButtonEmphasis::Primary);
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Conflict),
+                            ui,
+                            &save_as_new,
+                            "save-as-new",
+                            "Save as New",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
                         #[cfg(test)]
                         if ui.is_visible() && !ui.is_sizing_pass() {
                             self.test_conflict_save_as_new_rect = Some(save_as_new.rect);
@@ -6553,6 +6699,15 @@ impl NotePanel {
                             selected_action = Some(ConflictSaveAction::SaveAsNew);
                         }
                         let cancel = ui.button("Cancel");
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Conflict),
+                            ui,
+                            &cancel,
+                            "cancel",
+                            "Cancel",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
                         #[cfg(test)]
                         if ui.is_visible() && !ui.is_sizing_pass() {
                             self.test_conflict_cancel_rect = Some(cancel.rect);
@@ -6563,36 +6718,40 @@ impl NotePanel {
                     });
                 });
             if self.defer_host_actions {
-                self.pending_host_actions.conflict_action = selected_action;
+                if let Some(action) =
+                    selected_action.or((!prompt_open).then_some(ConflictSaveAction::Cancel))
+                {
+                    self.pending_host_actions.conflict_action = Some(action);
+                }
             } else {
                 match selected_action {
-                Some(ConflictSaveAction::Overwrite) => {
-                    let candidate = self.note.clone();
-                    self.save_with_overwrite(app, candidate);
-                }
-                Some(ConflictSaveAction::SaveAsNew) => {
-                    let mut candidate = self.note.clone();
-                    candidate.slug.clear();
-                    candidate.path = std::path::PathBuf::new();
-                    self.save_with_overwrite(app, candidate);
-                }
-                Some(ConflictSaveAction::Cancel) if self.pending_close_after_save => {
-                    self.overwrite_prompt = false;
-                    self.keep_editing();
-                }
-                Some(ConflictSaveAction::Cancel) => {
-                    self.overwrite_prompt = false;
-                    self.focus_textedit_next_frame = true;
-                }
-                None if !prompt_open => {
-                    self.overwrite_prompt = false;
-                    if self.pending_close_after_save {
+                    Some(ConflictSaveAction::Overwrite) => {
+                        let candidate = self.note.clone();
+                        self.save_with_overwrite(app, candidate);
+                    }
+                    Some(ConflictSaveAction::SaveAsNew) => {
+                        let mut candidate = self.note.clone();
+                        candidate.slug.clear();
+                        candidate.path = std::path::PathBuf::new();
+                        self.save_with_overwrite(app, candidate);
+                    }
+                    Some(ConflictSaveAction::Cancel) if self.pending_close_after_save => {
+                        self.overwrite_prompt = false;
                         self.keep_editing();
-                    } else {
+                    }
+                    Some(ConflictSaveAction::Cancel) => {
+                        self.overwrite_prompt = false;
                         self.focus_textedit_next_frame = true;
                     }
-                }
-                None => {}
+                    None if !prompt_open => {
+                        self.overwrite_prompt = false;
+                        if self.pending_close_after_save {
+                            self.keep_editing();
+                        } else {
+                            self.focus_textedit_next_frame = true;
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -9449,7 +9608,7 @@ impl NotePanel {
                 NoteSaveOutcome::Saved
             }
             Ok(false) => {
-                self.overwrite_prompt = true;
+                self.show_conflict_prompt();
                 if self.pending_close_after_save {
                     self.discard_unsaved_prompt = false;
                 }
@@ -9474,7 +9633,7 @@ impl NotePanel {
                 NoteSaveOutcome::Saved
             }
             Ok(false) => {
-                self.overwrite_prompt = true;
+                self.show_conflict_prompt();
                 NoteSaveOutcome::AwaitingDecision
             }
             Err(error) => {
@@ -10165,7 +10324,9 @@ impl NotePanel {
                 ui.close();
             }
             if ui.button("Convert plain links").clicked() {
-                if !self.start_plain_link_conversion() {
+                if self.defer_host_actions {
+                    self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Review);
+                } else if !self.start_plain_link_conversion() {
                     Self::show_no_plain_links_toast(app);
                 }
                 ui.close();

@@ -9038,16 +9038,30 @@ impl LauncherApp {
                 None
             };
             let mut panel = self.note_panels.remove(index);
-            let close_scope = if navigation == (super::jump_mode::ui::NavigationOwner::Dialog {
-                kind: super::jump_mode::ui::NavigationDialogKind::NoteClosePrompt,
-                instance: identity,
-            }) && panel.close_prompt_current(ctx) {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    super::jump_mode::SurfaceId::dialog("note-close-prompt", identity),
-                    panel.close_prompt_generation(), "note-close-prompt", ctx.viewport_id(), navigation, false,
-                )
-            } else { None };
-            panel.set_close_prompt_scope(close_scope.map(|scope| if first_ui_pass && !ctx.will_discard() { scope } else { scope.registration_only() }));
+            let prompt_scope = panel.prompt_current(ctx).and_then(|prompt| {
+                let owner = super::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: prompt.kind(),
+                    instance: identity,
+                };
+                if navigation != owner {
+                    return None;
+                }
+                let scope = self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog(prompt.surface(), identity),
+                    panel.prompt_generation(prompt),
+                    "note-prompt",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )?;
+                let scope = if first_ui_pass && !ctx.will_discard() {
+                    scope
+                } else {
+                    scope.registration_only()
+                };
+                Some((prompt, scope))
+            });
+            panel.set_prompt_scope(prompt_scope);
             panel.set_jump_scope(scope.map(|scope| {
                 if first_ui_pass && !ctx.will_discard() {
                     scope
@@ -9067,7 +9081,7 @@ impl LauncherApp {
                 observe.then_some(&mut discard),
             );
             panel.set_jump_scope(None);
-            panel.set_close_prompt_scope(None);
+            panel.set_prompt_scope(None);
             panel.configure_child_forms_jump(&self.jump_mode_ui, self.jump_mode_enabled());
             panel.show_child_forms(
                 ctx,
@@ -11212,9 +11226,9 @@ impl LauncherApp {
                 (owner, combo_popup)
             };
             let foreground_layer = super::jump_mode::ui::visible_top_middle_layer(ctx);
-            let (owner, combo_popup) = if let Some(panel) = self.note_panels.iter().find(|panel|
-                panel.host_layer_if_root().is_some() && panel.close_prompt_current(ctx)) {
-                (NavigationOwner::Dialog { kind: NavigationDialogKind::NoteClosePrompt, instance: panel.prompt_identity() }, None)
+            let (owner, combo_popup) = if let Some((panel, prompt)) = self.note_panels.iter().find_map(|panel|
+                panel.host_layer_if_root().and_then(|_| panel.prompt_current(ctx).map(|prompt| (panel, prompt)))) {
+                (NavigationOwner::Dialog { kind: prompt.kind(), instance: panel.prompt_identity() }, None)
             } else if let Some(form) = self
                 .note_panels
                 .iter()
@@ -12775,7 +12789,7 @@ impl LauncherApp {
                 });
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
-                    && !self.note_panels.iter().any(|panel| panel.host_layer_if_root().is_some() && panel.close_prompt_current(&ctx))
+                    && !self.note_panels.iter().any(|panel| panel.host_layer_if_root().is_some() && panel.prompt_current(&ctx).is_some())
                     && (escape_modifiers.is_some() || find_shortcut_modifiers.is_some())
                 {
                     let escape = escape_modifiers.is_some();
@@ -69475,6 +69489,84 @@ mod tests {
         assert!(!app.note_panels[0].note_close_observation().pending_discard);
         assert!(app.note_panels[0].open);
         assert_eq!(app.note_panels[0].note_content(), "dirty note");
+    }
+
+    #[test]
+    fn note_conflict_prompt_jump_focus_then_escape_keeps_draft() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let mut panel = launcher_show_owner_note("conflict-prompt-jump");
+                panel.replace_content_from_mutation("dirty draft".into(), 1.0);
+                app.note_save_on_close = false;
+                app.note_confirm_discard_unsaved_changes = true;
+                panel.request_close(&mut app);
+                panel.test_set_overwrite_prompt(true);
+                app.note_panels.push(panel);
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas()
+                };
+                for _ in 0..6 {
+                    frame(&mut app, Vec::new());
+                }
+                let prompt = app.note_panels[0].test_note_prompt_ids().1;
+                let rect = ctx.memory(|memory| memory.area_rect(prompt)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                let registry = app.jump_mode_ui.retained_registry();
+                assert!(
+                    registry
+                        .metadata()
+                        .all(|target| target.label() != "Discard Changes")
+                );
+                let target = registry
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Overwrite")
+                    .cloned()
+                    .expect("conflict target");
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Overwrite");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(app.note_panels[0].test_overwrite_prompt());
+                assert_eq!(app.note_panels[0].note_content(), "dirty draft");
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                );
+                assert!(!app.note_panels[0].test_overwrite_prompt());
+                assert!(app.note_panels[0].note_close_observation().pending_discard);
+                assert_eq!(app.note_panels[0].note_content(), "dirty draft");
+                assert!(app.note_panels[0].open);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
