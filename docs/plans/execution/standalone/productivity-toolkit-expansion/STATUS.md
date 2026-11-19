@@ -111,6 +111,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3d2 | complete |
 | M12-B3e1 | complete |
 | M12-B3e2 | complete |
+| M12-B3e3 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -814,3 +815,10 @@ Rejected toolbar edits restore the original source plus the exact editor caret, 
 ### M12-B3e2 Inline Note outline review
 
 The real Confirm section move and Cancel move responses are focus-only hint targets on the current NotePanel. Their target generation follows the exact reviewed move, including source revision, presentation, viewport, selected heading, destination and placement. A separate ordinary activation uses the existing retained action and prepared edit. Changing the source retires the review. The focused gate passed 5/5 (9b50a634-15cb-4497-83cc-43db53cf1bbe), including ordinary Confirm and Cancel, revision retirement, and the established Note and Studio Undo checks. Independent scoped review found no actionable defect.
+
+
+### M12-B3e3 Note source editor context menu
+
+Right-click and Ctrl+Period now open the same persistent editor context menu. The editor remains one TextEntry target. The menu follows its exact editor, document, revision and host, and retains the captured selection while a menu field has focus. The existing Markdown, note-link, attachment, Todo and tag actions expose their actual submenu and control responses. The innermost Escape closes one menu level and restores its trigger. The next Escape at the root restores editor focus.
+
+The final gate passed 11/11 (ff4f5cac-8c4a-4f94-9a96-370e18065a30), including Ctrl+Period, hints that focus without editing, and three successive ordinary Escapes with Jump Mode off. The same run passed toolbar Undo, multiline docked/native input and six note-link catalog tests. The scoped reviewer found no actionable ownership or retention issue. Live Windows editor menu input has no separate native smoke.

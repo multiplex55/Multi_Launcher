@@ -1756,6 +1756,7 @@ pub(crate) struct RegisteredTarget {
 pub(crate) enum MenuAnchorKind {
     Root,
     Submenu,
+    Context(TargetKind),
 }
 
 impl RegisteredTarget {
@@ -1849,7 +1850,9 @@ impl TargetRegistry {
         self.combo_anchors = self
             .targets
             .iter()
-            .filter(|target| target.metadata.kind() == TargetKind::ComboBox)
+            .filter(|target| {
+                target.metadata.kind() == TargetKind::ComboBox || target.menu_anchor.is_some()
+            })
             .cloned()
             .collect();
         let Some(priority) = self
@@ -1985,8 +1988,10 @@ impl TargetRegistry {
         }
         let viewport = binding.map_or(egui::ViewportId::ROOT, |b| b.viewport);
         let mut roots = self.combo_anchors.iter().filter(|anchor| {
-            anchor.menu_anchor == Some(MenuAnchorKind::Root)
-                && anchor.viewport == viewport
+            matches!(
+                anchor.menu_anchor,
+                Some(MenuAnchorKind::Root | MenuAnchorKind::Context(_))
+            ) && anchor.viewport == viewport
                 && anchor.enabled
                 && anchor.eligible
                 && parent_owner.owns_surface(anchor.id().surface())
@@ -2276,7 +2281,10 @@ impl JumpModeScope {
             response,
             identity,
             label,
-            TargetKind::ComboBox,
+            match role {
+                MenuAnchorKind::Context(kind) => kind,
+                _ => TargetKind::ComboBox,
+            },
             visual_order,
         );
         if let RegistrationResult::Registered { id, .. } = &result

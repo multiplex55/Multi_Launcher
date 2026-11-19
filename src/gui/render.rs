@@ -22528,6 +22528,125 @@ mod tests {
         assert!(app.note_panels[0].open);
     }
 
+
+    #[test]
+    fn note_editor_context_jump_follows_the_keyboard_popup_and_unwinds_each_level() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (900.0, 680.0);
+        let mut panel = launcher_show_owner_note("jump-editor-context");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        let source = panel.note_content().to_owned();
+        app.push_note_panel(panel);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.note_panels[0].host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let editor = app.note_panels[0].test_editor_widget_id().unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        frame(&mut app, Vec::new());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(editor));
+        let popup = editor.with("popup");
+        frame(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::CTRL),
+                key_press(egui::Key::Period, egui::Modifiers::CTRL),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![
+                key_release(egui::Key::Period, egui::Modifiers::CTRL),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        let hint_target = |app: &mut LauncherApp, label| {
+            let response = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .unwrap_or_else(|| panic!("missing current menu target {label}"))
+                .response_id();
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(response));
+            assert_eq!(app.note_panels[0].note_content(), source);
+            response
+        };
+        let enter = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+        };
+        let markdown = hint_target(&mut app, "Markdown");
+        enter(&mut app);
+        let block = hint_target(&mut app, "Block snippet");
+        enter(&mut app);
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Add Checkbox")
+        );
+        hint_target(&mut app, "Heading 2");
+
+        app.set_jump_mode_enabled(false);
+        for expected in [Some(block), Some(markdown), Some(editor)] {
+            frame(
+                &mut app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            assert_eq!(ctx.memory(|memory| memory.focused()), expected);
+            assert_eq!(
+                egui::Popup::is_id_open(&ctx, popup),
+                expected != Some(editor)
+            );
+            frame(
+                &mut app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+        }
+        assert!(app.note_panels[0].open);
+        assert_eq!(app.note_panels[0].note_content(), source);
+    }
+
     #[test]
     fn note_panel_preview_task_jump_focus_is_not_activation() {
         std::thread::Builder::new()

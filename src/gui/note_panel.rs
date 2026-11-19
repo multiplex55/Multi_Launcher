@@ -1209,6 +1209,7 @@ pub struct NotePanel {
     focus_textedit_next_frame: bool,
     markdown_toolbar_popup_was_open: bool,
     markdown_toolbar_owns_selection: bool,
+    editor_context_binding: Option<NoteEditorContext>,
     applying_toolbar_markdown_action: bool,
     focus_textedit_after_toolbar_action: bool,
     pending_toolbar_focus_restore: Option<PendingNoteToolbarFocusRestore>,
@@ -1471,6 +1472,15 @@ struct PendingNotePanelHostFrame {
     actions: NotePanelPendingHostActions,
 }
 
+#[derive(Clone, Copy)]
+struct NoteEditorContext {
+    host: HostIdentity,
+    revision: u64,
+    document: egui::Id,
+    editor: egui::Id,
+    keyboard: bool,
+}
+
 struct NoteToolbarEditorCheckpoint {
     editor: egui::Id,
     cursor: Option<egui::text::CCursorRange>,
@@ -1500,7 +1510,7 @@ impl NotePanelDraftCheckpoint {
             saved_content_baseline: panel.saved_content_baseline.clone(),
             pending_selection: panel.pending_selection,
             pending_cursor_position: panel.pending_cursor_position,
-            toolbar_editor: if panel.markdown_toolbar_popup_was_open {
+            toolbar_editor: if panel.markdown_toolbar_popup_was_open || panel.editor_context_binding.is_some() {
                 panel.last_textedit_id.and_then(|editor| {
                     let state = egui::widgets::text_edit::TextEditState::load(ctx, editor)?;
                     Some(NoteToolbarEditorCheckpoint {
@@ -1977,6 +1987,7 @@ impl NotePanel {
             focus_textedit_next_frame: false,
             markdown_toolbar_popup_was_open: false,
             markdown_toolbar_owns_selection: false,
+            editor_context_binding: None,
             applying_toolbar_markdown_action: false,
             focus_textedit_after_toolbar_action: false,
             pending_toolbar_focus_restore: None,
@@ -5988,6 +5999,13 @@ impl NotePanel {
         root_input_allowed: bool,
         mut observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
     ) {
+        if let Some(binding) = self.editor_context_binding
+            && (!self.open || !self.editor_context_is_current(binding, binding.editor)
+                || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split))
+        {
+            egui::Popup::close_id(ctx, binding.editor.with("popup"));
+            self.editor_context_binding = None;
+        }
         #[cfg(test)]
         {
             self.test_host_button_id = None;
@@ -8594,7 +8612,14 @@ impl NotePanel {
         };
         let response = output.response.response;
         debug_assert_eq!(response.id, editor_id);
-        self.jump_target(ui, &response, "source", "Note source editor", super::jump_mode::TargetKind::TextEntry);
+        super::jump_mode::ui::register_and_apply_menu_anchor(
+            self.jump_scope.as_ref(), ui, &response, "source", "Note source editor",
+            super::jump_mode::ui::MenuAnchorKind::Context(super::jump_mode::TargetKind::TextEntry), &mut self.jump_order,
+        );
+        if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard() && !ui.clip_rect().intersects(response.rect) {
+            response.scroll_to_me(None);
+        }
         #[cfg(feature = "qa-framebuffer-capture")]
         self.record_note_replace_control(NoteReplaceControl::NoteEditor, &response);
         let active_match = if self.note_find.is_open() {
@@ -8602,7 +8627,8 @@ impl NotePanel {
         } else {
             None
         };
-        let toolbar_selection = if !response.has_focus() && self.markdown_toolbar_owns_selection {
+        let context_selection = self.editor_context_is_open(ui.ctx(), response.id);
+        let toolbar_selection = if !response.has_focus() && (self.markdown_toolbar_owns_selection || context_selection) {
             self.pending_selection
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
                 .map(|(start, end)| start..end)
@@ -9429,6 +9455,19 @@ impl NotePanel {
         });
     }
 
+    fn editor_context_is_current(&self, binding: NoteEditorContext, editor: egui::Id) -> bool {
+        binding.editor == editor
+            && binding.host == self.host_state.identity()
+            && binding.revision == self.note_find.content_revision()
+            && binding.document == egui::Id::new((&self.note.slug, &self.note.path))
+    }
+
+    fn editor_context_is_open(&self, ctx: &egui::Context, editor: egui::Id) -> bool {
+        self.editor_context_binding
+            .is_some_and(|binding| self.editor_context_is_current(binding, editor))
+            && egui::Popup::is_id_open(ctx, editor.with("popup"))
+    }
+
     fn handle_editor_response(
         &mut self,
         resp: egui::Response,
@@ -9471,10 +9510,23 @@ impl NotePanel {
         }
         let mut state =
             egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
-        let form_owns_selection = self.table_form.as_ref().is_some_and(|form| form.basis.editor == resp.id)
-            || self.link_form.as_ref().is_some_and(|form| form.basis.editor == resp.id)
-            || self.new_note_form.as_ref().is_some_and(|form| form.basis.editor == resp.id);
-        if (self.markdown_toolbar_owns_selection || form_owns_selection) && !resp.has_focus() {
+        let form_owns_selection = self
+            .table_form
+            .as_ref()
+            .is_some_and(|form| form.basis.editor == resp.id)
+            || self
+                .link_form
+                .as_ref()
+                .is_some_and(|form| form.basis.editor == resp.id)
+            || self
+                .new_note_form
+                .as_ref()
+                .is_some_and(|form| form.basis.editor == resp.id);
+        let popup_id = resp.id.with("popup");
+        let context_selection = self.editor_context_is_open(ctx, resp.id);
+        if (self.markdown_toolbar_owns_selection || form_owns_selection || context_selection)
+            && !resp.has_focus()
+        {
             if let Some(cached) = self
                 .pending_selection
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
@@ -9511,11 +9563,36 @@ impl NotePanel {
                 None => self.pending_selection = None,
             }
         }
-        resp.context_menu(|ui| {
-            let ctx2 = ui.ctx().clone();
-            self.build_textedit_menu(ui, &ctx2, resp.id, app);
-        });
-        if resp.has_focus() && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Period)) {
+        let foreground = super::jump_mode::ui::visible_top_middle_layer(ctx);
+        let current_layer = if ctx.viewport_id() == note_panel_viewport_id(self.prompt_identity) {
+            foreground.is_none() && resp.layer_id == egui::LayerId::background()
+        } else {
+            foreground == Some(resp.layer_id)
+        };
+        let keyboard_open = resp.enabled()
+            && resp.has_focus()
+            && self.owns_keyboard_layer(ctx)
+            && current_layer
+            && ctx.input(|input| input.focused)
+            && !egui::Popup::is_any_open(ctx)
+            && !ctx.will_discard()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::Period));
+        if let Some(binding) = self.editor_context_binding
+            && !self.editor_context_is_current(binding, resp.id)
+        {
+            egui::Popup::close_id(ctx, binding.editor.with("popup"));
+            self.editor_context_binding = None;
+        }
+        if resp.secondary_clicked() || keyboard_open {
+            self.editor_context_binding = Some(NoteEditorContext {
+                host: self.host_state.identity(),
+                revision: self.note_find.content_revision(),
+                document: egui::Id::new((&self.note.slug, &self.note.path)),
+                editor: resp.id,
+                keyboard: keyboard_open,
+            });
+        }
+        if keyboard_open {
             // The right-click restoration path may have consumed `state` while
             // storing it. Reloading also snapshots the authoritative live state
             // immediately before the keyboard menu is opened.
@@ -9526,18 +9603,28 @@ impl NotePanel {
             {
                 self.pending_selection = Some(range);
             }
-            let pos = resp.rect.left_top();
-            let _ = egui::Tooltip::always_open(
-                ctx.clone(),
-                resp.layer_id,
-                egui::Id::new("note_ctx_menu"),
-                egui::PopupAnchor::Position(pos),
-            )
-            .show(|ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    self.build_textedit_menu(ui, ctx, resp.id, app);
-                });
-            });
+            egui::Popup::open_id(ctx, popup_id);
+        }
+        let popup = egui::Popup::context_menu(&resp);
+        let popup = if self
+            .editor_context_binding
+            .is_some_and(|binding| binding.keyboard)
+        {
+            popup.at_position(resp.rect.left_top())
+        } else {
+            popup
+        };
+        let escape = ctx.input(|input| input.key_pressed(Key::Escape));
+        let was_open = egui::Popup::is_id_open(ctx, popup_id);
+        popup.show(|ui| {
+            let ctx2 = ui.ctx().clone();
+            self.build_textedit_menu(ui, &ctx2, resp.id, app);
+        });
+        if !egui::Popup::is_id_open(ctx, popup_id) {
+            self.editor_context_binding = None;
+            if was_open && escape && resp.enabled() && !ctx.will_discard() {
+                resp.request_focus();
+            }
         }
         if resp.has_focus() && app.vim_mode {
             self.handle_vim_keys(ctx, resp.id);
@@ -10316,7 +10403,7 @@ impl NotePanel {
         }
     }
 
-    fn dismiss_toolbar_submenu_on_escape(ui: &egui::Ui) -> Option<egui::Id> {
+    fn dismiss_note_submenu_on_escape(ui: &egui::Ui) -> Option<egui::Id> {
         let ctx = ui.ctx();
         let menu = ui.layer_id().id;
         if !ui.is_enabled()
@@ -10328,7 +10415,15 @@ impl NotePanel {
         {
             return None;
         }
-        let child = egui::menu::MenuState::from_id(ctx, menu, |state| state.open_item)?;
+        let mut parent = menu;
+        let mut deepest = None;
+        for _ in 0..8 {
+            let next = egui::menu::MenuState::from_id(ctx, parent, |state| state.open_item);
+            let Some(child) = next else { break };
+            deepest = Some((parent, child));
+            parent = child;
+        }
+        let (parent, child) = deepest?;
         let layer = egui::LayerId::new(egui::Order::Foreground, child);
         let bounds = ctx.memory(|memory| memory.area_rect(child))?;
         if !bounds.is_positive()
@@ -10337,11 +10432,11 @@ impl NotePanel {
         {
             return None;
         }
-        egui::menu::MenuState::from_id(ctx, menu, |state| state.open_item = None);
+        egui::menu::MenuState::from_id(ctx, parent, |state| state.open_item = None);
         Some(child)
     }
 
-    fn toolbar_submenu(
+    fn note_submenu(
         ui: &mut egui::Ui,
         label: &'static str,
         dismissed: Option<egui::Id>,
@@ -10397,10 +10492,14 @@ impl NotePanel {
             MenuAnchorKind, register_and_apply_menu_anchor, register_and_apply_target,
         };
 
-        let toolbar = capture_toolbar_widgets
-            .then(|| self.jump_scope.clone())
-            .flatten();
-        let menu_scope = toolbar
+        let parent_scope = if capture_toolbar_widgets {
+            self.jump_scope.clone()
+        } else {
+            self.jump_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("source"))
+        };
+        let menu_scope = parent_scope
             .as_ref()
             .map(|scope| scope.combo_popup_scope("markdown"));
         macro_rules! target {
@@ -10414,9 +10513,7 @@ impl NotePanel {
                     TargetKind::Button,
                     &mut $order,
                 );
-                if capture_toolbar_widgets {
-                    Self::reveal_focused_menu_item($ui, &$response);
-                }
+                Self::reveal_focused_menu_item($ui, &$response);
             };
         }
         macro_rules! button {
@@ -10426,12 +10523,15 @@ impl NotePanel {
                 response
             }};
         }
-        let mut draw_items = |ui: &mut egui::Ui| {
+        let dismissed_context = include_context_menus
+            .then(|| Self::dismiss_note_submenu_on_escape(ui))
+            .flatten();
+        let draw_items = |ui: &mut egui::Ui| {
             let mut order = 0;
             let dismissed = if capture_toolbar_widgets {
-                Self::dismiss_toolbar_submenu_on_escape(ui)
+                Self::dismiss_note_submenu_on_escape(ui)
             } else {
-                None
+                dismissed_context
             };
             let add_checkbox = button!(menu_scope, ui, order, "checkbox", "Add Checkbox");
             #[cfg(test)]
@@ -10582,7 +10682,7 @@ impl NotePanel {
             let blocks = menu_scope
                 .as_ref()
                 .map(|scope| scope.combo_popup_scope("blocks"));
-            let blocks_button = Self::toolbar_submenu(ui, "Block snippet", dismissed, |ui| {
+            let blocks_button = Self::note_submenu(ui, "Block snippet", dismissed, |ui| {
                 let mut order = 0;
                 for (label, level) in [("Heading 1", 1), ("Heading 2", 2), ("Heading 3", 3)] {
                     if button!(blocks, ui, order, format!("heading/{level}"), label).clicked() {
@@ -10632,7 +10732,7 @@ impl NotePanel {
             let table_scope = menu_scope
                 .as_ref()
                 .map(|scope| scope.combo_popup_scope("table"));
-            let table_button = Self::toolbar_submenu(ui, "Table", dismissed, |ui| {
+            let table_button = Self::note_submenu(ui, "Table", dismissed, |ui| {
                 let mut order = 0;
                 if button!(
                     table_scope,
@@ -10794,67 +10894,96 @@ impl NotePanel {
                 ui.close();
             }
         };
-        let markdown_menu = ui.menu_button("Markdown", |ui| {
-            if capture_toolbar_widgets {
+        let (markdown, toolbar_open) = if capture_toolbar_widgets {
+            let menu = ui.menu_button("Markdown", |ui| {
                 let viewport_height = ui.ctx().content_rect().height();
                 let max_height = (viewport_height - 2.0 * ui.spacing().interact_size.y).max(40.0);
                 egui::ScrollArea::vertical()
                     .id_salt("note-markdown-toolbar-menu")
                     .max_height(max_height)
                     .show(ui, draw_items);
-            } else {
-                draw_items(ui);
-            }
-        });
+            });
+            let popup = egui::Popup::default_response_id(&menu.response);
+            let open = menu.inner.is_some() || egui::Popup::is_id_open(ctx, popup);
+            (menu.response, open)
+        } else {
+            (
+                Self::note_submenu(ui, "Markdown", dismissed_context, draw_items),
+                false,
+            )
+        };
         #[cfg(test)]
         if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
-            self.test_markdown_toolbar_menu = Some((
-                markdown_menu.response.id,
-                markdown_menu.response.rect,
-                ui.clip_rect(),
-            ));
+            self.test_markdown_toolbar_menu = Some((markdown.id, markdown.rect, ui.clip_rect()));
         }
+        register_and_apply_menu_anchor(
+            parent_scope.as_ref(),
+            ui,
+            &markdown,
+            "markdown",
+            "Markdown",
+            if capture_toolbar_widgets {
+                MenuAnchorKind::Root
+            } else {
+                MenuAnchorKind::Submenu
+            },
+            &mut self.jump_order,
+        );
         if capture_toolbar_widgets {
-            register_and_apply_menu_anchor(
-                toolbar.as_ref(),
-                ui,
-                &markdown_menu.response,
-                "markdown",
-                "Markdown",
-                MenuAnchorKind::Root,
-                &mut self.jump_order,
-            );
-            let popup_id = egui::Popup::default_response_id(&markdown_menu.response);
-            let popup_open =
-                markdown_menu.inner.is_some() || egui::Popup::is_id_open(ctx, popup_id);
-            self.markdown_toolbar_owns_selection = markdown_menu.response.has_focus()
-                || popup_open
+            self.markdown_toolbar_owns_selection = markdown.has_focus()
+                || toolbar_open
                 || self.markdown_toolbar_popup_was_open
                 || self.focus_textedit_after_toolbar_action
                 || self
                     .pending_toolbar_focus_restore
                     .is_some_and(|pending| pending.editor_id == id);
-            self.markdown_toolbar_popup_was_open = popup_open;
+            self.markdown_toolbar_popup_was_open = toolbar_open;
             self.applying_toolbar_markdown_action = false;
         }
         if !include_context_menus {
             return;
         }
 
-        #[cfg(not(test))]
-        let _ = markdown_menu;
+        macro_rules! submenu {
+            ($scope:ident, $key:literal, $label:literal, |$menu_ui:ident| $draw:block) => {{
+                let $scope = parent_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope($key));
+                let response = Self::note_submenu(ui, $label, dismissed_context, |$menu_ui| $draw);
+                register_and_apply_menu_anchor(
+                    parent_scope.as_ref(),
+                    ui,
+                    &response,
+                    $key,
+                    $label,
+                    MenuAnchorKind::Submenu,
+                    &mut self.jump_order,
+                );
+                Self::reveal_focused_menu_item(ui, &response);
+            }};
+        }
 
         ui.separator();
-        ui.menu_button("Insert link", |ui| {
+        submenu!(link_scope, "link-notes", "Insert link", |ui| {
+            let mut order = 0;
             ui.set_min_width(200.0);
             ui.horizontal(|ui| {
                 ui.label("Insert link:");
-                if ui.button("Link new").clicked() {
+                if button!(link_scope, ui, order, "new", "Link new").clicked() {
                     self.stage_form_open(ctx, id, super::note_form_dialog::FormKind::NewNote);
                     ui.close();
                 }
             });
-            ui.text_edit_singleline(&mut self.link_search);
+            let search = ui.text_edit_singleline(&mut self.link_search);
+            register_and_apply_target(
+                link_scope.as_ref(),
+                ui,
+                &search,
+                "search",
+                "Find notes to link",
+                TargetKind::TextEntry,
+                &mut order,
+            );
             let results = self.link_menu_results_snapshot();
             egui::ScrollArea::vertical()
                 .max_height(200.0)
@@ -10864,7 +10993,21 @@ impl NotePanel {
                     }
                     for target in &results {
                         let title = target.display_title.clone();
-                        if ui.button(&title).clicked() {
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(ui.id().with(("link", &target.slug))),
+                                |ui| ui.button(&title),
+                            )
+                            .inner;
+                        target!(
+                            link_scope,
+                            ui,
+                            response,
+                            order,
+                            format!("note/{}", target.slug),
+                            &title
+                        );
+                        if response.clicked() {
                             let insert = format!("[[{title}]]");
                             self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                             self.link_search.clear();
@@ -10878,9 +11021,10 @@ impl NotePanel {
                 });
         });
 
-        ui.menu_button("Insert image", |ui| {
+        submenu!(image_scope, "link-images", "Insert image", |ui| {
+            let mut order = 0;
             ui.set_min_width(200.0);
-            if ui.button("Upload...").clicked() {
+            if button!(image_scope, ui, order, "upload", "Upload...").clicked() {
                 if self.defer_host_actions {
                     self.pending_host_actions.attachment_picker_requested = true;
                 } else if let Some(path) = FileDialog::new()
@@ -10899,7 +11043,7 @@ impl NotePanel {
                 }
                 ui.close();
             }
-            if ui.button("Screenshot...").clicked() {
+            if button!(image_scope, ui, order, "screenshot", "Screenshot...").clicked() {
                 if self.defer_host_actions {
                     self.pending_host_actions.screenshot_requested = true;
                     ui.close();
@@ -10932,7 +11076,16 @@ impl NotePanel {
                 }
             }
             ui.label("Insert image:");
-            ui.text_edit_singleline(&mut self.image_search);
+            let search = ui.text_edit_singleline(&mut self.image_search);
+            register_and_apply_target(
+                image_scope.as_ref(),
+                ui,
+                &search,
+                "search",
+                "Find images",
+                TargetKind::TextEntry,
+                &mut order,
+            );
             let matcher = SkimMatcherV2::default();
             let filter = self.image_search.to_lowercase();
             let images = image_files();
@@ -10943,7 +11096,21 @@ impl NotePanel {
                         filter.is_empty()
                             || matcher.fuzzy_match(&name.to_lowercase(), &filter).is_some()
                     }) {
-                        if ui.button(&img).clicked() {
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(ui.id().with(("image", &img))),
+                                |ui| ui.button(&img),
+                            )
+                            .inner;
+                        target!(
+                            image_scope,
+                            ui,
+                            response,
+                            order,
+                            format!("image/{img}"),
+                            &img
+                        );
+                        if response.clicked() {
                             let insert = format!("![{0}](assets/{0})", img);
                             self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                             self.image_search.clear();
@@ -10953,7 +11120,8 @@ impl NotePanel {
                 });
         });
 
-        ui.menu_button("Link todo", |ui| {
+        submenu!(todo_scope, "link-todo", "Link todo", |ui| {
+            let mut order = 0;
             ui.label("Select existing todo");
             for todo in load_todos_or_last_good(TODO_FILE).into_iter().take(12) {
                 let todo_id = if todo.id.is_empty() {
@@ -10961,10 +11129,15 @@ impl NotePanel {
                 } else {
                     todo.id.clone()
                 };
-                if ui
-                    .button(format!("@todo:{todo_id} {}", todo.text))
-                    .clicked()
-                {
+                let label = format!("@todo:{todo_id} {}", todo.text);
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(ui.id().with(("todo", &todo_id))),
+                        |ui| ui.button(&label),
+                    )
+                    .inner;
+                target!(todo_scope, ui, response, order, &todo_id, &label);
+                if response.clicked() {
                     let token = format!("@todo:{todo_id}");
                     let mut state =
                         egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
@@ -10997,8 +11170,8 @@ impl NotePanel {
             }
         });
 
-        ui.menu_button("Insert tag", |ui| {
-            if let Some(tag) = insert_tag_menu(ui, &mut self.tag_search) {
+        submenu!(tag_scope, "insert-tag", "Insert tag", |ui| {
+            if let Some(tag) = insert_tag_menu(ui, &mut self.tag_search, tag_scope.as_ref()) {
                 self.insert_text_at_cursor_or_selection(ctx, id, &tag);
             }
         });
@@ -11193,11 +11366,26 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
     response
 }
 
-fn insert_tag_menu(ui: &mut egui::Ui, search: &mut String) -> Option<String> {
+fn insert_tag_menu(
+    ui: &mut egui::Ui,
+    search: &mut String,
+    scope: Option<&super::jump_mode::ui::JumpModeScope>,
+) -> Option<String> {
+    use super::jump_mode::{TargetKind, ui::register_and_apply_target};
     let mut inserted = None;
+    let mut order = 0;
     ui.set_min_width(200.0);
     ui.label("Insert tag:");
-    ui.text_edit_singleline(search);
+    let response = ui.text_edit_singleline(search);
+    register_and_apply_target(
+        scope,
+        ui,
+        &response,
+        "search",
+        "Find tags",
+        TargetKind::TextEntry,
+        &mut order,
+    );
     let matcher = SkimMatcherV2::default();
     let filter = search.to_lowercase();
     let tags = available_tags();
@@ -11207,9 +11395,25 @@ fn insert_tag_menu(ui: &mut egui::Ui, search: &mut String) -> Option<String> {
             for tag in tags.into_iter().filter(|t| {
                 filter.is_empty() || matcher.fuzzy_match(&t.to_lowercase(), &filter).is_some()
             }) {
-                if ui.button(format!("#{tag}")).clicked() {
-                    let insert = format!("#{tag}");
-                    inserted = Some(insert);
+                let label = format!("#{tag}");
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(ui.id().with(("tag", &tag))),
+                        |ui| ui.button(&label),
+                    )
+                    .inner;
+                register_and_apply_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("tag/{tag}"),
+                    &label,
+                    TargetKind::Button,
+                    &mut order,
+                );
+                NotePanel::reveal_focused_menu_item(ui, &response);
+                if response.clicked() {
+                    inserted = Some(label);
                     search.clear();
                     ui.close();
                 }
