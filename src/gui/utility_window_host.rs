@@ -2295,6 +2295,7 @@ pub(super) enum NoteTemplatesHostCommand {
     Apply(super::notes_dialog::TemplateHostActions),
 }
 impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::NoteTemplates);
     const KEY: &'static str = "note-templates";
     const TITLE: &'static str = "Note Templates";
     const SIZE: egui::Vec2 = egui::vec2(520.0, 360.0);
@@ -2308,9 +2309,6 @@ impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Note Templates")))
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.is_open()
     }
@@ -2318,7 +2316,7 @@ impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
         self.epoch()
     }
     fn parent_targets_allowed(&self, _: &()) -> bool {
-        false
+        self.delete_instance().is_none()
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2344,22 +2342,23 @@ impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
     fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
         None
     }
-    fn confirmation_binding(
-        &self,
-        _: egui::ViewportId,
-        _: u64,
-    ) -> Option<NavigationViewportBinding> {
-        None
+    fn confirmation_binding(&self, viewport: egui::ViewportId, _: u64) -> Option<NavigationViewportBinding> {
+        let instance = self.delete_instance()?;
+        Some(NavigationViewportBinding { viewport, base_layer: NavigationDialogKind::TemplateDelete.layer_id()?, owner: NavigationOwner::Dialog { kind: NavigationDialogKind::TemplateDelete, instance } })
+    }
+    fn confirmation_scope(&self, jump: &JumpModeUi, owner: NavigationOwner, binding: NavigationViewportBinding, _parent: SurfaceId) -> Option<JumpModeScope> {
+        let NavigationOwner::Dialog { kind: NavigationDialogKind::TemplateDelete, instance } = owner else { return None; };
+        jump.scope_for_viewport_binding(SurfaceId::dialog("note-template-delete", instance), TargetGeneration(instance), "note-templates/delete", binding)
     }
     fn capture(&self) {}
     fn restore(&mut self, _: ()) {}
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
-        _: NavigationOwner,
+        child_owner: NavigationOwner,
         first: bool,
         _: u64,
         _: &(),
@@ -2370,6 +2369,8 @@ impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
             self,
             ctx,
             allowed,
+            child_owner != NavigationOwner::Blocked,
+            scopes,
             first,
             child,
             presentation,

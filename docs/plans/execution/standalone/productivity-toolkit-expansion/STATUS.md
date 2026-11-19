@@ -94,6 +94,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A6b1 | complete |
 | M12-A6b2 | complete |
 | M12-A | complete |
+| M12-B1a1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -728,3 +729,8 @@ The Data & Recovery window exposes its current section, snapshot, store, backup 
 Data & Recovery binds its confirmation to the current shared modal opening, parent epoch and typed pending intent. The decision has its own Jump owner and is applied only after its exact root pass is retained. Replacing it with another confirmation retires recovery authority while preserving the replacement. Review exposed the launcher's earlier Escape preflight. The corrected route sends Escape to the exact Recovery child with Jump enabled or disabled and to the current Hot Folder inline decision before either parent can close. A hint still focuses without applying a decision.
 
 The initial child gate passed 5/5 (`37d4f94e-5410-46a0-8800-f13fc0ab49fa`), the Recovery Escape rerun passed 2/2 (`9cc3c86a-2669-42ce-861c-24b2e121f90a`), and the final shared Escape check passed 2/2 (`9d0e0ef8-363d-4eb2-aa1c-576b441f3114`). This closes the declared ordinary utilities in M12-A. Editor and companion coverage continues in M12-B.
+
+
+### M12-B1a1 Note Templates and its delete confirmation
+
+The retained Template Manager exposes current names, editor fields and actions in both presentations. Delete Template? uses an independent child scope keyed to the current template and manager session. Hints focus controls without deleting. Review found default-off ordinary input was tied to Jump and the native child scope used the wrong surface. The corrected docked child accepts focus without enabling its destructive action prematurely. Tests open the child through the actual Delete row for a synthetic template and verify pointer Cancel with Jump off, focus-only Delete and child Escape with Jump on, and the separate native retained target registry. The final focused rerun passed 3/3 (`e839a501-1a82-4597-b836-c7f32cf6b6b4`). Existing host reuse and layer inventory passed in the earlier focused runs.

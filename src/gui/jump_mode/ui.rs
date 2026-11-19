@@ -76,10 +76,12 @@ pub(crate) enum NavigationDialogKind {
     HotFolder,
     DataRecovery,
     DataRecoveryConfirmation,
+    NoteTemplates,
+    TemplateDelete,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 40] = [
+    pub(crate) const ALL: [Self; 42] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -120,6 +122,8 @@ impl NavigationDialogKind {
         Self::HotFolder,
         Self::DataRecovery,
         Self::DataRecoveryConfirmation,
+        Self::NoteTemplates,
+        Self::TemplateDelete,
     ];
 
     const fn index(self) -> usize {
@@ -164,6 +168,8 @@ impl NavigationDialogKind {
             Self::HotFolder => 37,
             Self::DataRecovery => 38,
             Self::DataRecoveryConfirmation => 39,
+            Self::NoteTemplates => 40,
+            Self::TemplateDelete => 41,
         }
     }
 
@@ -209,6 +215,8 @@ impl NavigationDialogKind {
             Self::HotFolder => "hotfolder-manager",
             Self::DataRecovery => "data-recovery",
             Self::DataRecoveryConfirmation => "data-recovery-confirmation",
+            Self::NoteTemplates => "note-templates",
+            Self::TemplateDelete => "note-template-delete",
         }
     }
 
@@ -257,6 +265,8 @@ impl NavigationDialogKind {
             Self::HotFolder => egui::Id::new("hotfolder_manager_window"),
             Self::DataRecovery => egui::Id::new(Some("Data & Recovery")),
             Self::DataRecoveryConfirmation => egui::Id::new("data-recovery-confirmation"),
+            Self::NoteTemplates => egui::Id::new(Some("Note Templates")),
+            Self::TemplateDelete => egui::Id::new(Some("Delete Template?")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -542,6 +552,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::FilePreview
+                    | NavigationDialogKind::NoteTemplates
+                    | NavigationDialogKind::TemplateDelete
                     | NavigationDialogKind::HashGenerator
                     | NavigationDialogKind::QrGenerator
                     | NavigationDialogKind::ExplorerTabs
@@ -599,6 +611,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::FilePreview
+                    | NavigationDialogKind::NoteTemplates
+                    | NavigationDialogKind::TemplateDelete
                     | NavigationDialogKind::HashGenerator
                     | NavigationDialogKind::QrGenerator
                     | NavigationDialogKind::ExplorerTabs
@@ -714,6 +728,8 @@ impl NavigationViewportBinding {
         focused_response_layer(ctx).is_none_or(|layer| {
             layer == self.base_layer
                 || Some(layer) == popup_layer
+                || (matches!(self.owner, NavigationOwner::Dialog { kind: NavigationDialogKind::TemplateDelete, .. })
+                    && layer == egui::LayerId::background())
                 || (matches!(self.owner, NavigationOwner::SnippetPrompt { .. })
                     && (Some(layer) == NavigationDialogKind::Snippets.layer_id()
                         || layer.order != egui::Order::Middle))
@@ -4502,6 +4518,8 @@ mod tests {
                     }
                     NavigationDialogKind::HotFolder => { egui::Window::new("Hot Folder Manager").id(egui::Id::new("hotfolder_manager_window")).show(ctx, |_| {}); }
                     NavigationDialogKind::DataRecovery => { egui::Window::new("Data & Recovery").show(ctx, |_| {}); }
+                    NavigationDialogKind::NoteTemplates => { egui::Window::new("Note Templates").show(ctx, |_| {}); }
+                    NavigationDialogKind::TemplateDelete => { egui::Window::new("Delete Template?").show(ctx, |_| {}); }
                     NavigationDialogKind::DataRecoveryConfirmation => { egui::Window::new("Confirm destructive action").id(egui::Id::new("data-recovery-confirmation")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalendarEditor => {
                         egui::Window::new("Calendar Event").show(ctx, |_| {});

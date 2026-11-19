@@ -6004,9 +6004,63 @@ impl LauncherApp {
                     Some(focus) == layer || focus.order == egui::Order::Background
                 })
         };
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let template_layer = self.note_templates_host.root_layer();
-        let template_owner = is_owner(template_layer)
-            || (root_input && self.notes_dialog.template_manager.owns_input(ctx));
+        let template_scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::NoteTemplates,
+                instance,
+            } => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("note-templates", instance),
+                super::jump_mode::TargetGeneration(self.notes_dialog.template_manager.epoch()),
+                "note-templates/form",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
+        let delete_scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::TemplateDelete,
+                instance,
+            } if self.notes_dialog.template_manager.delete_instance() == Some(instance) => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("note-template-delete", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "note-templates/delete",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        self.note_templates_host
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        let delete_open = self
+            .notes_dialog
+            .template_manager
+            .delete_instance()
+            .is_some();
+        let delete_owner = root_input
+            && delete_open
+            && !egui::Popup::is_any_open(ctx)
+            && self.notes_dialog.template_manager.owns_input(ctx);
+        let delete_input_owner = self
+            .notes_dialog
+            .template_manager
+            .delete_instance()
+            .filter(|_| delete_owner)
+            .map_or(NavigationOwner::Blocked, |instance| {
+                NavigationOwner::Dialog {
+                    kind: super::jump_mode::ui::NavigationDialogKind::TemplateDelete,
+                    instance,
+                }
+            });
+        let template_owner = !delete_open
+            && (is_owner(template_layer)
+                || (root_input && self.notes_dialog.template_manager.owns_input(ctx)));
         self.note_templates_host.show(
             ctx,
             &mut self.notes_dialog.template_manager,
@@ -6016,14 +6070,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: template_owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
-                close_shortcut: true,
+                close_shortcut: !delete_open,
                 allow_os_close: true,
-                confirmation_owner: NavigationOwner::Blocked,
+                confirmation_owner: delete_input_owner,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (template_scope.as_ref(), delete_scope.as_ref()),
             },
         );
         let assets_layer = self.unused_assets_host.root_layer();
@@ -10727,6 +10781,8 @@ impl LauncherApp {
                 self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::HotFolder, self.hotfolder_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::DataRecovery, self.data_recovery_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::NoteTemplates, self.notes_dialog.template_manager.is_open() && self.note_templates_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::TemplateDelete, self.notes_dialog.template_manager.delete_instance().is_some() && self.note_templates_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::Convert, self.convert_panel.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::QrGenerator, self.qr_dialog.open && self.qr_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::ExplorerTabs, self.explorer_tabs_dialog.open && self.explorer_tabs_host.root_layer().is_some()),
@@ -10894,6 +10950,8 @@ impl LauncherApp {
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
                     NavigationDialogKind::HotFolder => self.hotfolder_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hotfolder_manager_window"))),
                     NavigationDialogKind::DataRecovery => self.data_recovery_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Data & Recovery")))),
+                    NavigationDialogKind::NoteTemplates => self.note_templates_host.root_layer(),
+                    NavigationDialogKind::TemplateDelete => self.notes_dialog.template_manager.delete_instance().and(self.note_templates_host.root_layer()).map(|_| egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Delete Template?")))),
                     NavigationDialogKind::Convert => self.convert_panel.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"))),
                     NavigationDialogKind::QrGenerator => self.qr_host.root_layer(),
                     NavigationDialogKind::ExplorerTabs => self.explorer_tabs_host.root_layer(),
@@ -10969,6 +11027,10 @@ impl LauncherApp {
                         self.hotfolder_dialog.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::DataRecovery {
                         self.data_recovery_dialog.open.then_some(()).and(current)
+                    } else if kind == NavigationDialogKind::NoteTemplates {
+                        self.note_templates_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::TemplateDelete {
+                        self.note_templates_host.root_layer().and(self.notes_dialog.template_manager.delete_instance())
                     } else if kind == NavigationDialogKind::Convert {
                         self.convert_panel.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::QrGenerator {
@@ -11612,6 +11674,13 @@ impl LauncherApp {
                 frame_logic.should_be_visible,
                 navigation_owner_candidate,
             );
+        if first_ui_pass && self.jump_mode_ui.active_session().is_none()
+            && self.note_templates_host.root_layer().is_some()
+            && self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
+            && !self.ocr_surface_visible() && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open() && !self.pin_list_open {
+            self.notes_dialog.template_manager.stage_delete_escape(&ctx);
+        }
         let jump_session_escape_preempted = self.jump_mode_ui.active_session().is_some()
             && ctx.input(|input| input.key_pressed(egui::Key::Escape));
         self.jump_mode_ui
@@ -22485,6 +22554,215 @@ mod tests {
         assert!(app.query.contains('λ'));
         app.settings_save_workers.join_all();
         workers.join_all();
+    }
+
+    fn open_test_note_template_delete(ctx: &egui::Context, app: &mut LauncherApp) -> egui::Rect {
+        crate::plugins::note::save_template("pending", "fixture body").unwrap();
+        prepare_tool_dialog_root(ctx, app);
+        app.open_note_templates_from_origin(
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        for _ in 0..5 {
+            run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (rect, clip, enabled) = app
+            .notes_dialog
+            .template_manager
+            .test_control("delete-row/pending")
+            .expect("current template row Delete");
+        let rect = rect.intersect(clip);
+        assert!(
+            enabled && rect.is_positive(),
+            "the docked template row is interactive"
+        );
+        for pressed in [true, false] {
+            run_tool_dialog_frame(ctx, app, tool_dialog_pointer_events(rect, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.notes_dialog.template_manager.test_draft().2,
+            Some("pending")
+        );
+        for _ in 0..4 {
+            run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (rect, clip, enabled) = app
+            .notes_dialog
+            .template_manager
+            .test_control("delete-cancel")
+            .expect("current delete-window Cancel");
+        assert!(
+            enabled && rect.intersect(clip).is_positive(),
+            "the exact child must accept ordinary input; top={:?}, focus={:?}, root={:?}, root_input={}",
+            super::super::jump_mode::ui::visible_top_middle_layer(ctx),
+            super::super::jump_mode::ui::focused_response_layer(ctx),
+            app.note_templates_host.root_layer(),
+            app.native_ui_host_input_allowed(ctx, true),
+        );
+        rect.intersect(clip)
+    }
+
+    #[test]
+    fn note_templates_delete_cancel_works_with_jump_disabled() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(false);
+                let target = open_test_note_template_delete(&ctx, &mut app);
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(target, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                assert_eq!(app.notes_dialog.template_manager.test_draft().2, None);
+                assert!(app.notes_dialog.template_manager.is_open());
+                assert_eq!(
+                    crate::plugins::note::get_template("pending").unwrap(),
+                    "fixture body"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn note_templates_native_delete_child_has_own_targets() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use super::super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                app.notes_dialog.open();
+                app.notes_dialog.test_popout();
+                let pass = super::super::utility_host::ViewportPassProvenance::current(
+                    &ctx,
+                    egui::ViewportId::ROOT,
+                );
+                ctx.run_ui(egui::RawInput::default(), |_| {})
+                    .drop_without_applying_deltas();
+                let origin = app.notes_dialog.test_open_receipt(&ctx, pass).unwrap();
+                let parent = super::super::utility_host::ChildOpenOrigin::Parent(origin);
+                app.open_note_templates_from_origin(&parent);
+                assert!(app.note_templates_host.is_popped_out());
+                app.notes_dialog
+                    .template_manager
+                    .test_set_draft("draft", "body");
+                let instance = app.notes_dialog.template_manager.delete_instance().unwrap();
+                let viewport =
+                    super::super::utility_window_host::NoteTemplatesWindowHost::test_viewport(
+                        app.notes_dialog.template_manager.epoch(),
+                    );
+                for _ in 0..8 {
+                    run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                }
+                assert_eq!(
+                    app.note_templates_host.test_native_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::TemplateDelete,
+                        instance
+                    }
+                );
+                assert!(
+                    app.note_templates_host
+                        .test_native_target("Delete Template")
+                        .is_some()
+                );
+                assert!(
+                    app.note_templates_host
+                        .test_native_target("Cancel Delete")
+                        .is_some()
+                );
+                assert!(
+                    app.note_templates_host
+                        .test_native_target("Save Template")
+                        .is_none()
+                );
+                assert_eq!(
+                    app.notes_dialog.template_manager.test_draft().2,
+                    Some("pending")
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn note_templates_delete_hint_focuses_without_deleting() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                open_test_note_template_delete(&ctx, &mut app);
+                assert!(
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .any(|target| target.metadata().label() == "Delete Template")
+                );
+                assert!(
+                    !app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .any(|target| target.metadata().label() == "Save Template")
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Delete Template");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    app.notes_dialog.template_manager.test_draft().2,
+                    Some("pending")
+                );
+                assert_eq!(
+                    crate::plugins::note::get_template("pending").unwrap(),
+                    "fixture body"
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(app.notes_dialog.template_manager.test_draft().2, None);
+                assert!(app.notes_dialog.template_manager.is_open());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

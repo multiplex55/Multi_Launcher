@@ -1039,6 +1039,7 @@ pub(super) struct TemplateManagerState {
     content: String,
     pending_delete: Option<String>,
     epoch: u64,
+    delete_escape: Option<super::utility_host::ViewportPassProvenance>,
     #[cfg(test)]
     test_controls: Vec<(String, egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
@@ -1064,6 +1065,27 @@ impl TemplateManagerState {
     pub(super) fn epoch(&self) -> u64 {
         self.epoch
     }
+    pub(super) fn delete_instance(&self) -> Option<u64> {
+        self.pending_delete
+            .as_ref()
+            .map(|name| egui::Id::new(("template-delete", self.epoch, name)).value())
+    }
+    pub(super) fn stage_delete_escape(&mut self, ctx: &egui::Context) -> bool {
+        if self.pending_delete.is_some()
+            && self.owns_input(ctx)
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.delete_escape = Some(super::utility_host::ViewportPassProvenance::current(
+                ctx,
+                ctx.viewport_id(),
+            ));
+            true
+        } else {
+            false
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn test_set_draft(&mut self, name: &str, content: &str) {
         self.name = name.to_owned();
@@ -1141,6 +1163,11 @@ impl TemplateManagerState {
         &mut self,
         ctx: &egui::Context,
         input_allowed: bool,
+        child_allowed: bool,
+        scopes: (
+            Option<&super::jump_mode::ui::JumpModeScope>,
+            Option<&super::jump_mode::ui::JumpModeScope>,
+        ),
         first: bool,
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
@@ -1149,12 +1176,45 @@ impl TemplateManagerState {
         let mut open = self.open;
         let mut actions = Vec::new();
         let mut host_request = None;
+        let mut order = 0;
+        macro_rules! target {
+            ($ui:expr, $scope:expr, $response:expr, $id:expr, $label:expr, $kind:expr) => {{
+                let response = $response;
+                super::jump_mode::ui::register_and_apply_target(
+                    $scope, $ui, &response, $id, $label, $kind, &mut order,
+                );
+                response
+            }};
+        }
+        use super::jump_mode::TargetKind;
+        if first
+            && child_allowed
+            && !egui::Popup::is_any_open(ctx)
+            && (self.delete_escape
+                == Some(super::utility_host::ViewportPassProvenance::current(
+                    ctx,
+                    ctx.viewport_id(),
+                ))
+                || ctx
+                    .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)))
+        {
+            draft.pending_delete = None;
+        }
         #[cfg(test)]
         let mut test_controls = Vec::new();
         let mut body = |ui: &mut egui::Ui| {
             let interactive = input_allowed && ui.is_visible() && !ui.is_sizing_pass();
             let (host, next) =
                 super::utility_host::presentation_button(ui, presentation, interactive);
+            super::jump_mode::ui::register_and_apply_target(
+                scopes.0,
+                ui,
+                &host,
+                "presentation",
+                "Change window presentation",
+                TargetKind::Button,
+                &mut order,
+            );
             #[cfg(test)]
             test_controls.push(("host".into(), host.rect, ui.clip_rect(), host.enabled()));
             if first && !ctx.will_discard() && host.clicked() {
@@ -1162,10 +1222,28 @@ impl TemplateManagerState {
             }
             ui.add_enabled_ui(interactive, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("New Template").clicked() {
+                    if target!(
+                        ui,
+                        scopes.0,
+                        ui.button("New Template"),
+                        "new",
+                        "New Template",
+                        TargetKind::Button
+                    )
+                    .clicked()
+                    {
                         draft.clear_editor();
                     }
-                    if ui.button("Refresh").clicked() {
+                    if target!(
+                        ui,
+                        scopes.0,
+                        ui.button("Refresh"),
+                        "refresh",
+                        "Refresh",
+                        TargetKind::Button
+                    )
+                    .clicked()
+                    {
                         actions.push(TemplateManagerAction::Refresh);
                     }
                 });
@@ -1174,18 +1252,54 @@ impl TemplateManagerState {
                     widgets::compact_section_heading(&mut columns[0], "Saved templates", None);
                     egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
                         for name in draft.templates.clone() {
-                            ui.horizontal(|ui| {
-                                let selected = draft.selected.as_deref() == Some(name.as_str());
-                                if ui.selectable_label(selected, &name).clicked() {
-                                    draft.load_for_edit(&name);
-                                }
-                                if ui.small_button("Open").clicked() {
-                                    actions
-                                        .push(TemplateManagerAction::Open { name: name.clone() });
-                                }
-                                if ui.small_button("Delete").clicked() {
-                                    draft.pending_delete = Some(name.clone());
-                                }
+                            ui.push_id(("template", &name), |ui| {
+                                ui.horizontal(|ui| {
+                                    let selected = draft.selected.as_deref() == Some(name.as_str());
+                                    if target!(
+                                        ui,
+                                        scopes.0,
+                                        ui.selectable_label(selected, &name),
+                                        format!("template/{name}/select"),
+                                        format!("Select {name}"),
+                                        TargetKind::Selectable
+                                    )
+                                    .clicked()
+                                    {
+                                        draft.load_for_edit(&name);
+                                    }
+                                    if target!(
+                                        ui,
+                                        scopes.0,
+                                        ui.small_button("Open"),
+                                        format!("template/{name}/open"),
+                                        format!("Open {name}"),
+                                        TargetKind::Button
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(TemplateManagerAction::Open {
+                                            name: name.clone(),
+                                        });
+                                    }
+                                    let delete = target!(
+                                        ui,
+                                        scopes.0,
+                                        ui.small_button("Delete"),
+                                        format!("template/{name}/delete"),
+                                        format!("Delete {name}"),
+                                        TargetKind::Button
+                                    );
+                                    #[cfg(test)]
+                                    test_controls.push((
+                                        format!("delete-row/{name}"),
+                                        delete.rect,
+                                        ui.clip_rect(),
+                                        delete.enabled(),
+                                    ));
+                                    if delete.clicked() {
+                                        draft.pending_delete = Some(name.clone());
+                                    }
+                                })
                             });
                         }
                     });
@@ -1203,6 +1317,15 @@ impl TemplateManagerState {
                     let name_edit = columns[1].add(
                         egui::TextEdit::singleline(&mut draft.name).desired_width(f32::INFINITY),
                     );
+                    super::jump_mode::ui::register_and_apply_target(
+                        scopes.0,
+                        &columns[1],
+                        &name_edit,
+                        "name",
+                        "Template name",
+                        TargetKind::TextEntry,
+                        &mut order,
+                    );
                     #[cfg(test)]
                     test_controls.push((
                         "name".into(),
@@ -1213,13 +1336,31 @@ impl TemplateManagerState {
                     #[cfg(not(test))]
                     let _ = name_edit;
                     widgets::secondary_help(&mut columns[1], "Content");
-                    columns[1].add(
+                    let content_edit = columns[1].add(
                         egui::TextEdit::multiline(&mut draft.content)
                             .desired_width(f32::INFINITY)
                             .desired_rows(6),
                     );
+                    super::jump_mode::ui::register_and_apply_target(
+                        scopes.0,
+                        &columns[1],
+                        &content_edit,
+                        "content",
+                        "Template content",
+                        TargetKind::TextEntry,
+                        &mut order,
+                    );
                     columns[1].horizontal(|ui| {
                         let save_template_button = ui.button("Save Template");
+                        super::jump_mode::ui::register_and_apply_target(
+                            scopes.0,
+                            ui,
+                            &save_template_button,
+                            "save",
+                            "Save Template",
+                            TargetKind::Button,
+                            &mut order,
+                        );
                         #[cfg(test)]
                         test_controls.push((
                             "save".into(),
@@ -1239,7 +1380,16 @@ impl TemplateManagerState {
                                 content: draft.content.clone(),
                             });
                         }
-                        if ui.button("Clear").clicked() {
+                        if target!(
+                            ui,
+                            scopes.0,
+                            ui.button("Clear"),
+                            "clear",
+                            "Clear",
+                            TargetKind::Button
+                        )
+                        .clicked()
+                        {
                             draft.clear_editor();
                         }
                     });
@@ -1275,28 +1425,73 @@ impl TemplateManagerState {
             let mut confirm_open = true;
             egui::Window::new("Delete Template?")
                 .open(&mut confirm_open)
-                .enabled(input_allowed)
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    widgets::compact_section_heading(
-                        ui,
-                        &format!("Delete template '{name}'?"),
-                        None,
-                    );
-                    ui.horizontal(|ui| {
-                        let delete = ui.button("Delete");
-                        if widgets::with_button_emphasis(ui, delete, ButtonEmphasis::Destructive)
+                    ui.add_enabled_ui(child_allowed, |ui| {
+                        widgets::compact_section_heading(
+                            ui,
+                            &format!("Delete template '{name}'?"),
+                            None,
+                        );
+                        ui.horizontal(|ui| {
+                            let delete = target!(
+                                ui,
+                                scopes.1,
+                                ui.button("Delete"),
+                                "delete",
+                                "Delete Template",
+                                TargetKind::Button
+                            );
+                            #[cfg(test)]
+                            test_controls.push((
+                                "delete-confirm".into(),
+                                delete.rect,
+                                ui.clip_rect(),
+                                delete.enabled(),
+                            ));
+                            if widgets::with_button_emphasis(
+                                ui,
+                                delete,
+                                ButtonEmphasis::Destructive,
+                            )
                             .clicked()
-                        {
-                            actions.push(TemplateManagerAction::Delete { name: name.clone() });
-                        }
-                        if ui.button("Cancel").clicked() {
-                            draft.pending_delete = None;
-                        }
-                    });
+                            {
+                                actions.push(TemplateManagerAction::Delete { name: name.clone() });
+                            }
+                            let cancel = target!(
+                                ui,
+                                scopes.1,
+                                ui.button("Cancel"),
+                                "cancel",
+                                "Cancel Delete",
+                                TargetKind::Button
+                            );
+                            #[cfg(test)]
+                            test_controls.push((
+                                "delete-cancel".into(),
+                                cancel.rect,
+                                ui.clip_rect(),
+                                cancel.enabled(),
+                            ));
+                            if child_allowed
+                                && first
+                                && !ctx.will_discard()
+                                && super::jump_mode::ui::focused_response_layer(ctx)
+                                    == Some(egui::LayerId::new(
+                                        egui::Order::Middle,
+                                        egui::Id::new(Some("Note Templates")),
+                                    ))
+                            {
+                                cancel.request_focus();
+                            }
+                            if cancel.clicked() {
+                                draft.pending_delete = None;
+                            }
+                        });
+                    })
                 });
-            if !confirm_open {
+            if child_allowed && !confirm_open {
                 draft.pending_delete = None;
             }
         }
@@ -1310,7 +1505,7 @@ impl TemplateManagerState {
             close: !open,
             epoch: self.epoch,
             draft,
-            actions: if first && input_allowed && !ctx.will_discard() {
+            actions: if first && (input_allowed || child_allowed) && !ctx.will_discard() {
                 actions
             } else {
                 Vec::new()
@@ -1339,14 +1534,10 @@ impl TemplateManagerState {
     }
 
     pub(super) fn owns_input(&self, ctx: &egui::Context) -> bool {
-        let template_layer = egui::LayerId::new(
-            egui::Order::Middle,
-            egui::Id::new(Some("Note Templates")),
-        );
-        let delete_layer = egui::LayerId::new(
-            egui::Order::Middle,
-            egui::Id::new(Some("Delete Template?")),
-        );
+        let template_layer =
+            egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Note Templates")));
+        let delete_layer =
+            egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Delete Template?")));
         let layer = if self.pending_delete.is_some() {
             delete_layer
         } else if self.open {
@@ -1356,8 +1547,11 @@ impl TemplateManagerState {
         };
         (crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
             || ctx.memory(|memory| memory.top_modal_layer()) == Some(layer))
-            && crate::gui::jump_mode::ui::focused_response_layer(ctx)
-                .is_none_or(|focused| focused == layer)
+            && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focused| {
+                focused == layer
+                    || focused.order == egui::Order::Background
+                    || (self.pending_delete.is_some() && focused == template_layer)
+            })
     }
 
     fn apply_action(&mut self, action: TemplateManagerAction, app: &mut LauncherApp) {
