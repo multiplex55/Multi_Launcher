@@ -79,10 +79,11 @@ pub(crate) enum NavigationDialogKind {
     NoteTemplates,
     TemplateDelete,
     UnusedNoteAssets,
+    ImageViewer,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 43] = [
+    pub(crate) const ALL: [Self; 44] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -126,6 +127,7 @@ impl NavigationDialogKind {
         Self::NoteTemplates,
         Self::TemplateDelete,
         Self::UnusedNoteAssets,
+        Self::ImageViewer,
     ];
 
     const fn index(self) -> usize {
@@ -173,6 +175,7 @@ impl NavigationDialogKind {
             Self::NoteTemplates => 40,
             Self::TemplateDelete => 41,
             Self::UnusedNoteAssets => 42,
+            Self::ImageViewer => 43,
         }
     }
 
@@ -221,6 +224,7 @@ impl NavigationDialogKind {
             Self::NoteTemplates => "note-templates",
             Self::TemplateDelete => "note-template-delete",
             Self::UnusedNoteAssets => "unused-note-assets",
+            Self::ImageViewer => "image-viewer",
         }
     }
 
@@ -272,6 +276,7 @@ impl NavigationDialogKind {
             Self::NoteTemplates => egui::Id::new(Some("Note Templates")),
             Self::TemplateDelete => egui::Id::new(Some("Delete Template?")),
             Self::UnusedNoteAssets => egui::Id::new(Some("Unused Note Assets")),
+            Self::ImageViewer => return None,
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -582,6 +587,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::Calendar
                     | NavigationDialogKind::CalendarDetails
                     | NavigationDialogKind::CalendarEditor
+                    | NavigationDialogKind::ImageViewer
                     | NavigationDialogKind::DashboardEditor
                     | NavigationDialogKind::MouseGestures
                     | NavigationDialogKind::MouseSettings
@@ -609,6 +615,17 @@ impl NavigationViewportBinding {
     pub(crate) fn base_is_current(self, ctx: &egui::Context) -> bool {
         let visible_layer = visible_top_middle_layer(ctx);
         let layer_is_current = match self.owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::ImageViewer,
+                instance,
+            } => {
+                self.viewport == egui::ViewportId::from_hash_of(("image-viewer", instance))
+                    && self.base_layer == egui::LayerId::new(
+                        egui::Order::Middle,
+                        egui::Id::new(("image-viewer", instance)),
+                    )
+                    && visible_layer == Some(self.base_layer)
+            }
             NavigationOwner::Dialog {
                 kind: kind @ (NavigationDialogKind::FileSearch
                     | NavigationDialogKind::BatchRename
@@ -4529,6 +4546,7 @@ mod tests {
                     NavigationDialogKind::NoteTemplates => { egui::Window::new("Note Templates").show(ctx, |_| {}); }
                     NavigationDialogKind::TemplateDelete => { egui::Window::new("Delete Template?").show(ctx, |_| {}); }
                     NavigationDialogKind::DataRecoveryConfirmation => { egui::Window::new("Confirm destructive action").id(egui::Id::new("data-recovery-confirmation")).show(ctx, |_| {}); }
+                    NavigationDialogKind::ImageViewer => {}
                     NavigationDialogKind::CalendarEditor => {
                         egui::Window::new("Calendar Event").show(ctx, |_| {});
                     }
@@ -4728,7 +4746,10 @@ mod tests {
     fn expanded_dialog_layer_inventory_matches_actual_window_ids() {
         for kind in NavigationDialogKind::ALL {
             let Some(expected_layer) = kind.layer_id() else {
-                assert_eq!(kind, NavigationDialogKind::RadialDesigner);
+                assert!(matches!(
+                    kind,
+                    NavigationDialogKind::RadialDesigner | NavigationDialogKind::ImageViewer
+                ));
                 continue;
             };
             let ctx = egui::Context::default();

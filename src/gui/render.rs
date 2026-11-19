@@ -6108,9 +6108,27 @@ impl LauncherApp {
                 root_scopes: (assets_scope.as_ref(), None),
             },
         );
+        let image_jump_enabled = self.jump_mode_enabled();
         for panel in &mut self.image_panels {
             let mut host = std::mem::take(&mut panel.host);
             let layer = host.root_layer();
+            let session = panel.session();
+            let image_owner = is_owner(layer);
+            let scope = match navigation_owner {
+                NavigationOwner::Dialog {
+                    kind: super::jump_mode::ui::NavigationDialogKind::ImageViewer,
+                    instance,
+                } if image_owner && instance == session => self.jump_mode_ui.scope_for_navigation_owner(
+                        super::jump_mode::SurfaceId::dialog("image-viewer", session),
+                        super::jump_mode::TargetGeneration(session),
+                        "image-viewer/form",
+                        ctx.viewport_id(),
+                        navigation_owner,
+                        false,
+                    ),
+                _ => None,
+            };
+            host.configure_jump(&self.jump_mode_ui, image_jump_enabled);
             host.show(
                 ctx,
                 panel,
@@ -6120,14 +6138,14 @@ impl LauncherApp {
                     root_visible,
                     root_input,
                     native_input,
-                    root_owner: NavigationOwner::Blocked,
-                    parent_owner: is_owner(layer),
+                    root_owner: navigation_owner,
+                    parent_owner: image_owner,
                     root_jump_active: self.jump_mode_ui.active_session().is_some(),
                     close_shortcut: true,
                     allow_os_close: true,
                     confirmation_owner: NavigationOwner::Blocked,
                     parent_instance: 0,
-                    root_scopes: (None, None),
+                    root_scopes: (scope.as_ref(), None),
                 },
             );
             panel.host = host;
@@ -10691,6 +10709,7 @@ impl LauncherApp {
                         | super::Panel::ConvertPanel
                         | super::Panel::ExplorerTabsDialog
                         | super::Panel::UnusedAssetsDialog
+                        | super::Panel::ImagePanel
                         | super::Panel::HashGeneratorDialog
                         | super::Panel::SnippetDialog
                         | super::Panel::ClipboardDialog
@@ -11088,6 +11107,30 @@ impl LauncherApp {
                     windows,
                     combo_popup.as_ref(),
                 );
+                (owner, combo_popup)
+            };
+            let (owner, combo_popup) = if let Some(panel) = self.image_panels.iter().find(|panel| {
+                panel.open
+                    && panel.host.root_layer().is_some_and(|layer| {
+                        Some(layer) == super::jump_mode::ui::visible_top_middle_layer(ctx)
+                    })
+            }) {
+                let layer = panel.host.root_layer();
+                let focused = super::jump_mode::ui::focused_response_layer(ctx);
+                let allowed = !egui::Popup::is_any_open(ctx)
+                    && focused.is_none_or(|focus| {
+                        Some(focus) == layer || focus.order == egui::Order::Background
+                    });
+                let owner = if allowed {
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::ImageViewer,
+                        instance: panel.session(),
+                    }
+                } else {
+                    NavigationOwner::Blocked
+                };
+                (owner, None)
+            } else {
                 (owner, combo_popup)
             };
             let owner = match owner {
@@ -21832,6 +21875,152 @@ mod tests {
                 .is_none()
         );
         workers.join_all();
+    }
+
+    #[test]
+    fn image_viewer_jump_uses_foreground_session_without_activation() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                let first = workspace.root().join("jump-first.png");
+                let second = workspace.root().join("jump-second.png");
+                let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([30, 60, 90, 255]));
+                image.save(&first).unwrap();
+                image.save(&second).unwrap();
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.open_image_panel(&first);
+                app.open_image_panel(&second);
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let first_session = app.image_panels[0].session();
+                let second_session = app.image_panels[1].session();
+                assert_ne!(first_session, second_session);
+                let first_layer = app.image_panels[0].host.root_layer().unwrap();
+                ctx.move_to_top(first_layer);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let rect = ctx
+                    .memory(|memory| memory.area_rect(first_layer.id))
+                    .unwrap();
+                let title = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(title, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::ImageViewer,
+                        instance: first_session
+                    }
+                );
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Open in Default Viewer")
+                    .cloned()
+                    .unwrap();
+                assert_eq!(
+                    target.id().surface(),
+                    &super::super::jump_mode::SurfaceId::dialog("image-viewer", first_session)
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Open in Default Viewer");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.image_panels[0].test_external_opens(), 0);
+                assert_eq!(app.image_panels[1].test_external_opens(), 0);
+                let second_layer = app.image_panels[1].host.root_layer().unwrap();
+                ctx.move_to_top(second_layer);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert_eq!(
+                    super::super::jump_mode::ui::visible_top_middle_layer(&ctx),
+                    Some(second_layer)
+                );
+                let second_rect = ctx
+                    .memory(|memory| memory.area_rect(second_layer.id))
+                    .unwrap();
+                let second_title = egui::Rect::from_min_size(
+                    second_rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(second_title, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::ImageViewer,
+                        instance: second_session
+                    }
+                );
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                let current = super::super::jump_mode::SurfaceId::dialog("image-viewer", second_session);
+                assert!(targets.iter().any(|target| {
+                    target.id().surface() == &current
+                        && target.metadata().label() == "Open in Default Viewer"
+                }));
+                assert!(targets.iter().all(|target| target.id().surface() == &current));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

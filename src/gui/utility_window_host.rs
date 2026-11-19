@@ -2191,6 +2191,7 @@ pub(super) enum ImageHostCommand {
     Apply(super::image_panel::ImageHostActions),
 }
 impl HostedUtilityDialog for super::image_panel::ImagePanel {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::ImageViewer);
     const KEY: &'static str = "image-viewer";
     const TITLE: &'static str = "Image Viewer";
     const SIZE: egui::Vec2 = egui::vec2(620.0, 480.0);
@@ -2207,9 +2208,6 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
     fn dialog_layer(&self) -> egui::LayerId {
         self.query_focus_layer_id()
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
@@ -2217,7 +2215,7 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
         self.session()
     }
     fn parent_targets_allowed(&self, _: &()) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2254,7 +2252,7 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2264,7 +2262,7 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, allowed, first, child, presentation)
+        self.render_host(ctx, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request

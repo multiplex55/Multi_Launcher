@@ -96,6 +96,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A | complete |
 | M12-B1a1 | complete |
 | M12-B1a2 | complete |
+| M12-B1b | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -740,3 +741,8 @@ The retained Template Manager exposes current names, editor fields and actions i
 ### M12-B1a2 Unused Note Assets navigation
 
 Current checkbox names and the retained inventory generation identify docked and native hint targets, including the sticky footer. Ordinary input remains available with Jump off. Hints focus without toggling or deleting. Existing selection, exact inventory and accepted-delete checks remain authoritative. The first focused run passed 4/4 (`f63635a7-88b8-401a-811f-22d6ceeae5e2`). Review identified offscreen keyboard focus. The correction uses one-shot reveal only when a newly focused checkbox is clipped. The focused rerun passed 2/2 (`befbe842-4e59-411a-980f-30e4427f52c0`), including a many-row fixture in short docked and pop-out bodies.
+
+
+### M12-B1b Image Viewer session ownership
+
+The actual foreground image host and its session determine root Jump targets. The native binding checks the same session's exact viewport and layer. Presentation, Zoom, Open in Default Viewer and Close participate in navigation. Image canvas gestures keep their prior handling. Independent review found no actionable issues. The first gate passed the existing retained-native and layer inventory tests. The new two-image fixture initially clicked before egui had applied the queued foreground raise. It now checks the actual raised layer and current registry before and after switching. The exact rerun passed 1/1 (`10b596ac-4921-4b84-8b47-5d08abd006cf`), with no external viewer activation from a hint.
