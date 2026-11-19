@@ -205,6 +205,12 @@ pub(crate) struct CalculationPadDialog {
     recovery_attempted: bool,
     last_recovery_identity: Option<(DocumentId, u64, crate::calculation_pad::DocumentOptions)>,
     host_state: UtilityHostState,
+    jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    jump_order: u64,
+    native_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    native_jump_frame: Option<u64>,
+    jump_enabled: bool,
+    root_jump_active: bool,
     presentation_prepared: bool,
     deferred_source_focus: Option<(egui::ViewportId, egui::Id)>,
     dependency_navigation: Option<SourceNavigation>,
@@ -540,6 +546,82 @@ enum DialogIntent {
 }
 
 impl CalculationPadDialog {
+    pub(super) fn jump_parent_available(&self) -> bool {
+        self.open
+            && self.session.pending_transition().is_none()
+            && !self.save_as_open
+            && !self.open_chooser
+            && self.conflict_document.is_none()
+            && self.rename.is_none()
+    }
+    pub(super) fn jump_instance(&self) -> u64 {
+        egui::Id::new((
+            self.host_state.identity().generation,
+            self.session.document_incarnation(),
+            self.session.current_id(),
+        ))
+        .value()
+    }
+    pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
+        super::jump_mode::TargetGeneration(
+            egui::Id::new((
+                self.jump_instance(),
+                self.session.revision(),
+                self.session
+                    .evaluation_basis()
+                    .map(|basis| basis.generation),
+            ))
+            .value(),
+        )
+    }
+    pub(super) fn configure_jump(
+        &mut self,
+        launcher: &super::jump_mode::ui::JumpModeUi,
+        enabled: bool,
+        scope: Option<super::jump_mode::ui::JumpModeScope>,
+        first: bool,
+    ) {
+        let (chord, alphabet) = launcher.configuration();
+        self.native_jump.set_configuration(chord, alphabet);
+        self.native_jump.set_enabled(enabled);
+        self.jump_enabled = enabled;
+        self.root_jump_active = launcher.active_session().is_some();
+        self.jump_scope = scope.map(|scope| {
+            if first {
+                scope
+            } else {
+                scope.registration_only()
+            }
+        });
+        self.jump_order = 0;
+    }
+    fn jump_target(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: &str,
+        label: &str,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.jump_scope.as_ref(),
+            ui,
+            response,
+            id,
+            label,
+            kind,
+            &mut self.jump_order,
+        );
+        if response.gained_focus()
+            && response.enabled()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+            && !ui.clip_rect().contains_rect(response.rect)
+        {
+            response.scroll_to_me(None);
+        }
+    }
     fn examples_window_id() -> egui::Id {
         egui::Id::new("calculation-pad-examples-window")
     }
@@ -748,6 +830,12 @@ impl CalculationPadDialog {
             recovery_attempted: false,
             last_recovery_identity: None,
             host_state: UtilityHostState::docked(),
+            jump_scope: None,
+            jump_order: 0,
+            native_jump: Box::default(),
+            native_jump_frame: None,
+            jump_enabled: false,
+            root_jump_active: false,
             presentation_prepared: false,
             deferred_source_focus: None,
             dependency_navigation: None,
@@ -868,6 +956,9 @@ impl CalculationPadDialog {
 
     pub(crate) fn open(&mut self) {
         if !self.open {
+            self.native_jump.cancel_all();
+            self.native_jump_frame = None;
+            self.jump_scope = None;
             self.reset_host_to_docked();
         }
         let previous = self.session.document_incarnation();
@@ -1252,6 +1343,9 @@ impl CalculationPadDialog {
             self.test_child_discard_requested = false;
         }
         if !self.open {
+            self.native_jump.cancel_all();
+            self.native_jump_frame = None;
+            self.jump_scope = None;
             if first_ui_pass
                 && (self.examples_open
                     || self.examples_owner.is_some()
@@ -1271,6 +1365,8 @@ impl CalculationPadDialog {
         let mut host_effects = None;
         match self.host_state.presentation() {
             PadHost::Docked => {
+                self.native_jump.cancel_all();
+                self.native_jump_frame = None;
                 let identity = self.host_identity();
                 let mut effects = self.empty_host_effects(egui::ViewportId::ROOT);
                 let mut window_open = self.open;
@@ -1303,7 +1399,7 @@ impl CalculationPadDialog {
                                 ctx.memory(|memory| memory.top_modal_layer().is_some());
                             let surface_allowed = root_input_allowed && !modal_open;
                             body_authorized = pass_authorized && surface_allowed;
-                            if body_authorized { self.stage_completion_escape(ctx, &mut effects); }
+                            if body_authorized && !self.root_jump_active { self.stage_completion_escape(ctx, &mut effects); }
                             self.draw_host_contents(
                                 ui,
                                 ctx,
@@ -1368,6 +1464,31 @@ impl CalculationPadDialog {
                             && (!independent || focused)
                             && !native_close_requested;
                         let popup_open = egui::Popup::is_any_open(&child_ctx);
+                        let mut native_binding = None;
+                        let mut native_jump_owns_escape = false;
+                        let jump_allowed = independent && surface_allowed && focused && !modal_open
+                            && self.jump_parent_available() && !popup_open
+                            && super::jump_mode::ui::visible_top_middle_layer(&child_ctx).is_none()
+                            && super::jump_mode::ui::focused_response_layer(&child_ctx).is_none_or(|layer| layer == egui::LayerId::background());
+                        if independent {
+                            let frame = child_ctx.cumulative_frame_nr();
+                            if self.native_jump_frame != Some(frame) { self.native_jump.begin_frame(); self.native_jump_frame = Some(frame); }
+                            let binding = super::jump_mode::ui::NavigationViewportBinding {
+                                viewport: pad_viewport_id(),
+                                owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationPad, instance: self.jump_instance() },
+                                base_layer: egui::LayerId::background(),
+                            };
+                            let navigation = self.native_jump.update_navigation_owner_for_viewport(&child_ctx, binding, jump_allowed && self.jump_enabled);
+                            native_jump_owns_escape = self.native_jump.active_session().is_some();
+                            self.native_jump.handle_viewport_input(&child_ctx, navigation == binding.owner, pass_authorized, viewport_id);
+                            native_jump_owns_escape |= self.native_jump.active_session().is_some();
+                            self.native_jump.begin_ui_pass();
+                            self.jump_scope = (navigation == binding.owner).then(|| self.native_jump.scope_for_viewport_binding(
+                                super::jump_mode::SurfaceId::dialog("calculation-pad", self.jump_instance()), self.jump_generation(), "calculation-pad", binding,
+                            )).flatten().map(|scope| if pass_authorized { scope } else { scope.registration_only() });
+                            self.jump_order = 0;
+                            native_binding = Some(binding);
+                        }
                         let local_tools_focus = child.memory(|memory| [
                             egui::Id::new("calculation-pad-source"),
                             egui::Id::new("calculation-pad-find"),
@@ -1377,12 +1498,12 @@ impl CalculationPadDialog {
                             || child.memory(|memory| memory.focused())
                                 .and_then(|id| child_ctx.read_response(id))
                                 .is_some_and(|response| response.layer_id == child.layer_id());
-                        let local_editor_escape = actions_allowed && !popup_open && self.editor_tools.open
+                        let local_editor_escape = actions_allowed && !popup_open && !native_jump_owns_escape && (independent || !self.root_jump_active) && self.editor_tools.open
                             && (independent || local_tools_focus)
                             && child.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                         let mut effects = self.empty_host_effects(viewport_id);
-                        if actions_allowed { self.stage_completion_escape(&child_ctx, &mut effects); }
-                        let keyboard_close_requested = if actions_allowed && !popup_open {
+                        if actions_allowed && !native_jump_owns_escape && (independent || !self.root_jump_active) { self.stage_completion_escape(&child_ctx, &mut effects); }
+                        let keyboard_close_requested = if actions_allowed && !popup_open && !native_jump_owns_escape && (independent || !self.root_jump_active) {
                             child.input_mut(|input| {
                                 input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                                     || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
@@ -1491,6 +1612,13 @@ impl CalculationPadDialog {
                         if std::mem::take(&mut self.test_request_child_discard) {
                             child.request_discard("Calculation Pad test child pass discard");
                             self.test_child_discard_requested = true;
+                        }
+                        if let Some(binding) = native_binding {
+                            self.native_jump.finish_ui_pass();
+                            let current = self.native_jump.update_navigation_owner_for_viewport(&child_ctx, binding, jump_allowed && self.jump_enabled);
+                            if self.native_jump.prepare_pass_for_viewport(&child_ctx, binding, current, jump_allowed && self.jump_enabled) { super::jump_mode::paint::paint(&child_ctx, &self.native_jump); }
+                            if !child_ctx.will_discard() { self.native_jump.complete_frame_for_viewport(&child_ctx, binding, current, jump_allowed && self.jump_enabled); }
+                            self.jump_scope = None;
                         }
                         effects.pass_accepted =
                             pass_authorized && !ctx.will_discard() && !child.will_discard();
@@ -2091,6 +2219,7 @@ impl CalculationPadDialog {
                     ui.close();
                 }
             });
+            self.jump_target(ui, &_menu.response, "config", "Config Menu", super::jump_mode::TargetKind::Button);
             if _menu.response.is_pointer_button_down_on() {
                 effects.config_editor_focus = Some(editor_selection);
             }
@@ -2100,15 +2229,15 @@ impl CalculationPadDialog {
             }
             let title = self.session.current_name().unwrap_or("Untitled");
             ui.label(title);
-            if self.session.document_options().is_some_and(|options| options.calculation == crate::calculation_pad::CalculationPolicy::Manual)
-                && ui.button("Calculate").clicked()
-            {
-                effects.calculate = self.session.evaluation_basis();
+            if self.session.document_options().is_some_and(|options| options.calculation == crate::calculation_pad::CalculationPolicy::Manual) {
+                let response = ui.button("Calculate");
+                self.jump_target(ui, &response, "calculate", "Calculate", super::jump_mode::TargetKind::Button);
+                if response.clicked() { effects.calculate = self.session.evaluation_basis(); }
             }
-            if self.session.evaluation_status() == crate::calculation_pad::EvaluationStatus::Pending
-                && ui.button("Cancel").clicked()
-            {
-                effects.cancel_calculation = self.session.evaluation_basis();
+            if self.session.evaluation_status() == crate::calculation_pad::EvaluationStatus::Pending {
+                let response = ui.button("Cancel");
+                self.jump_target(ui, &response, "cancel-calculation", "Cancel calculation", super::jump_mode::TargetKind::Button);
+                if response.clicked() { effects.cancel_calculation = self.session.evaluation_basis(); }
             }
             if self.session.is_dirty() {
                 ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes");
@@ -4945,6 +5074,7 @@ impl CalculationPadDialog {
                 scroll
             }).inner
         }).inner;
+        self.jump_target(ui, &scroll.inner.response, "source", "Calculation Pad source editor", super::jump_mode::TargetKind::TextEntry);
         if scroll.inner.response.changed() {
             if visible_source.len() > crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES {
                 *edited_source = Some(visible_source.clone());
@@ -5816,6 +5946,11 @@ impl CalculationPadDialog {
     #[cfg(test)]
     pub(crate) fn test_resolve_pending(&mut self, decision: TransitionDecision) {
         self.decide_pending(decision);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_native_jump(&self) -> &super::jump_mode::ui::JumpModeUi {
+        self.native_jump.as_ref()
     }
 
     #[cfg(test)]

@@ -5758,6 +5758,12 @@ impl LauncherApp {
         root_visible: bool,
     ) {
         if root_visible || self.calculation_pad_dialog.needs_root_ui_when_hidden() {
+            let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+            let instance = self.calculation_pad_dialog.jump_instance();
+            let scope = if nav == (NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationPad, instance }) {
+                self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("calculation-pad", instance), self.calculation_pad_dialog.jump_generation(), "calculation-pad", ctx.viewport_id(), nav, false)
+            } else { None };
+            self.calculation_pad_dialog.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled(), scope, first_ui_pass && !ctx.will_discard());
             self.calculation_pad_dialog.show(
                 ctx,
                 first_ui_pass,
@@ -10793,6 +10799,7 @@ impl LauncherApp {
                         | super::Panel::ExplorerTabsDialog
                         | super::Panel::UnusedAssetsDialog
                         | super::Panel::ImagePanel
+                        | super::Panel::CalculationPadDialog
                         | super::Panel::MarkdownStudioDialog
                         | super::Panel::ProgrammerInspectorDialog
                         | super::Panel::CalculationSensitivityDialog
@@ -11232,6 +11239,15 @@ impl LauncherApp {
             } else {
                 (owner, combo_popup)
             };
+            let pad_layer = self.calculation_pad_dialog.host_layer_if_root();
+            let (owner, combo_popup) = if pad_layer.is_some()
+                && pad_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let allowed = self.calculation_pad_dialog.jump_parent_available()
+                    && !egui::Popup::is_any_open(ctx)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
+                        Some(focus) == pad_layer || focus.order == egui::Order::Background);
+                (if allowed { NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationPad, instance: self.calculation_pad_dialog.jump_instance() } } else { NavigationOwner::Blocked }, None)
+            } else { (owner, combo_popup) };
             let studio_layer = self.markdown_studio_dialog.host_layer_if_root();
             let (owner, combo_popup) = if studio_layer.is_some()
                 && studio_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
@@ -35612,6 +35628,134 @@ mod tests {
         assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
         assert!(!app.markdown_studio_dialog.test_is_dirty());
         assert_eq!(app.markdown_studio_dialog.test_undo_depth(), 0);
+    }
+
+
+    #[test]
+    fn calculation_pad_jump_source_restores_ordinary_multiline_input_in_both_hosts() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "x = 1";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.calculation_pad_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let label = "Calculation Pad source editor";
+        let id = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("current docked Pad source")
+            .response_id();
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        frame(&mut app, vec![egui::Event::Text("α".into())]);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(&mut app, vec![egui::Event::Text("β".into())]);
+        let docked = app.calculation_pad_dialog.test_source().unwrap().to_owned();
+        assert!(docked.contains("α\nβ"), "docked draft {docked:?}");
+
+        app.calculation_pad_dialog.test_popout_pad(&ctx);
+        let viewport = egui::ViewportId::from_hash_of("calculation_pad_native_viewport");
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let id = app
+            .calculation_pad_dialog
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("current native Pad source")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .calculation_pad_dialog
+            .test_native_jump()
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .unwrap()
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(id)))
+        );
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some(docked.as_str())
+        );
+        native(&mut app, vec![egui::Event::Text("δ".into())]);
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(&mut app, vec![egui::Event::Text("ε".into())]);
+        assert!(
+            app.calculation_pad_dialog
+                .test_source()
+                .unwrap()
+                .contains("δ\nε")
+        );
     }
 
     #[test]

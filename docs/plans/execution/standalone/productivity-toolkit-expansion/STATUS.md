@@ -117,6 +117,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3g1 | complete |
 | M12-B3g2 | complete |
 | M12-B3g3 | complete |
+| M12-B4a1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -862,3 +863,10 @@ The focused gate passed 5/5 (d0ae036b-028f-4736-8cf6-df5fb6def37b). The actual I
 The inline dirty decision binds the actual New, Open path or Close request to Studio's source and host generation. While it is pending, the editor, outline, Preview and header controls remain visible and inactive. The only hint targets are the three decision responses. Escape cancels an active hint session first. A fresh ordinary Escape cancels the pending decision and preserves the draft.
 
 Normal navigation now includes the real Outline header, source-offset headings, move and review buttons, and current Open Diagram responses. Their existing prepared edit and accepted handoff paths still govern activation. The initial focused gate passed 5/5 (23a7d50f-6a74-4381-8da5-ed7304961730). After review exposed enabled outline rows behind the decision, the final gate passed 4/4 (40c0dce8-45f7-48eb-8610-141e7fca6375). The expanded outline fixture proves it exposes only the decision, that focus on Discard leaves the Unicode draft unchanged, and that Escape preserves the Studio and root windows.
+
+
+### M12-B4a1 Calculation Pad main host and source input
+
+Calculation Pad registers its real source editor, Config Menu opener and conditional Calculate or Cancel response on the current docked, embedded or detached host. The target basis follows the current document incarnation, identity, source revision, evaluation and presentation. A source hint focuses the real multiline widget. Existing completion, local editor tools, evaluation and accepted host effects keep their normal input authority.
+
+The focused gate passed 6/6 (91a23d39-bc17-4c3e-a241-8212c650fb37), including focus-only then Unicode and newline typing in both actual callbacks, existing completion and Escape, discarded/retired source handling, and layer inventory. The Config Menu choices and standalone Reference controls remain separate checkpoints.
