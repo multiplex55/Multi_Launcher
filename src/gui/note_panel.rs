@@ -1209,7 +1209,8 @@ pub struct NotePanel {
     focus_textedit_next_frame: bool,
     markdown_toolbar_popup_was_open: bool,
     markdown_toolbar_owns_selection: bool,
-    editor_context_binding: Option<NoteEditorContext>,
+    editor_context_binding: Option<NoteContextMenu>,
+    image_context_binding: Option<NoteContextMenu>,
     applying_toolbar_markdown_action: bool,
     focus_textedit_after_toolbar_action: bool,
     pending_toolbar_focus_restore: Option<PendingNoteToolbarFocusRestore>,
@@ -1473,11 +1474,12 @@ struct PendingNotePanelHostFrame {
 }
 
 #[derive(Clone, Copy)]
-struct NoteEditorContext {
+struct NoteContextMenu {
     host: HostIdentity,
     revision: u64,
     document: egui::Id,
-    editor: egui::Id,
+    viewport: egui::ViewportId,
+    anchor: egui::Id,
     keyboard: bool,
 }
 
@@ -1988,6 +1990,7 @@ impl NotePanel {
             markdown_toolbar_popup_was_open: false,
             markdown_toolbar_owns_selection: false,
             editor_context_binding: None,
+            image_context_binding: None,
             applying_toolbar_markdown_action: false,
             focus_textedit_after_toolbar_action: false,
             pending_toolbar_focus_restore: None,
@@ -5999,13 +6002,7 @@ impl NotePanel {
         root_input_allowed: bool,
         mut observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
     ) {
-        if let Some(binding) = self.editor_context_binding
-            && (!self.open || !self.editor_context_is_current(binding, binding.editor)
-                || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split))
-        {
-            egui::Popup::close_id(ctx, binding.editor.with("popup"));
-            self.editor_context_binding = None;
-        }
+        self.retire_stale_note_contexts(ctx, app.note_images_as_links);
         #[cfg(test)]
         {
             self.test_host_button_id = None;
@@ -6080,6 +6077,7 @@ impl NotePanel {
                         callback_observed = true;
                         callback_class = class;
                         let child_ctx = child.ctx().clone();
+                        self.retire_stale_note_contexts(&child_ctx, app.note_images_as_links);
                         owner_context = child_ctx.clone();
                         let independent = class == egui::ViewportClass::Immediate
                             && child_ctx.viewport_id() == viewport_id;
@@ -8979,6 +8977,7 @@ impl NotePanel {
         let mut last = 0usize;
         let content_clone = self.note.content[render_range.clone()].to_string();
         let mut modified = false;
+        let mut image_width_edit = None;
         for cap in IMAGE_RE.captures_iter(&content_clone) {
             let m = cap.get(0).unwrap();
             let local_range = m.range();
@@ -9077,13 +9076,26 @@ impl NotePanel {
                         },
                     )
                     .inner;
-                self.jump_target(
+                super::jump_mode::ui::register_and_apply_menu_anchor(
+                    self.jump_scope.as_ref(),
                     ui,
                     &response,
                     format!("preview/image/{}", range.start),
                     "Open image",
-                    super::jump_mode::TargetKind::Button,
+                    super::jump_mode::ui::MenuAnchorKind::Context(
+                        super::jump_mode::TargetKind::Button,
+                    ),
+                    &mut self.jump_order,
                 );
+                if response.gained_focus()
+                    && response.enabled()
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass()
+                    && !ctx.will_discard()
+                    && !ui.clip_rect().contains_rect(response.rect)
+                {
+                    response.scroll_to_me(None);
+                }
                 if response.clicked() {
                     if self.defer_host_actions {
                         self.pending_host_actions
@@ -9109,23 +9121,105 @@ impl NotePanel {
                         break;
                     }
                 }
-                response.context_menu(|ui| {
+                let popup_id = response.id.with("popup");
+                if egui::Popup::is_id_open(ctx, popup_id)
+                    && !self.image_context_binding.is_some_and(|binding| {
+                        self.note_context_is_current(binding, ctx.viewport_id(), response.id)
+                    })
+                {
+                    egui::Popup::close_id(ctx, popup_id);
+                }
+                let foreground = super::jump_mode::ui::visible_top_middle_layer(ctx);
+                let current_layer =
+                    if ctx.viewport_id() == note_panel_viewport_id(self.prompt_identity) {
+                        foreground.is_none() && response.layer_id == egui::LayerId::background()
+                    } else {
+                        foreground == Some(response.layer_id)
+                    };
+                let keyboard_open = response.enabled()
+                    && response.has_focus()
+                    && self.owns_keyboard_layer(ctx)
+                    && current_layer
+                    && ctx.input(|input| input.focused)
+                    && !egui::Popup::is_any_open(ctx)
+                    && !ctx.will_discard()
+                    && ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F10));
+                if response.secondary_clicked() || keyboard_open {
+                    self.image_context_binding = Some(NoteContextMenu {
+                        host: self.host_state.identity(),
+                        revision: self.note_find.content_revision(),
+                        document: egui::Id::new((&self.note.slug, &self.note.path)),
+                        viewport: ctx.viewport_id(),
+                        anchor: response.id,
+                        keyboard: keyboard_open,
+                    });
+                }
+                if keyboard_open {
+                    egui::Popup::open_id(ctx, popup_id);
+                }
+                let popup = egui::Popup::context_menu(&response);
+                let popup = if self
+                    .image_context_binding
+                    .is_some_and(|binding| binding.anchor == response.id && binding.keyboard)
+                {
+                    popup.at_position(response.rect.left_top())
+                } else {
+                    popup
+                };
+                let escape = ctx.input(|input| input.key_pressed(Key::Escape));
+                let was_open = egui::Popup::is_id_open(ctx, popup_id);
+                let scope = self
+                    .jump_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope(format!("preview/image/{}", range.start)));
+                let mut order = 0;
+                popup.show(|ui| {
                     let mut w = width.unwrap_or(display.x);
-                    if ui
-                        .add(egui::DragValue::new(&mut w).range(20.0..=4096.0))
-                        .changed()
-                    {
+                    let size = ui.add(egui::DragValue::new(&mut w).range(20.0..=4096.0));
+                    super::jump_mode::ui::register_and_apply_target(
+                        scope.as_ref(),
+                        ui,
+                        &size,
+                        "width",
+                        "Image width",
+                        super::jump_mode::TargetKind::Slider,
+                        &mut order,
+                    );
+                    Self::reveal_focused_menu_item(ui, &size);
+                    if size.changed() {
                         let repl = format!("![{alt}]({rel}|{:.0})", w.round());
                         self.note.content.replace_range(range.clone(), &repl);
                         modified = true;
+                        image_width_edit = Some(response.id);
                     }
-                    if ui.button("Reset size").clicked() {
+                    let reset = ui.button("Reset size");
+                    super::jump_mode::ui::register_and_apply_target(
+                        scope.as_ref(),
+                        ui,
+                        &reset,
+                        "reset",
+                        "Reset size",
+                        super::jump_mode::TargetKind::Button,
+                        &mut order,
+                    );
+                    Self::reveal_focused_menu_item(ui, &reset);
+                    if reset.clicked() {
                         let repl = format!("![{alt}]({rel})");
                         self.note.content.replace_range(range.clone(), &repl);
                         modified = true;
                         ui.close();
                     }
                 });
+                if self
+                    .image_context_binding
+                    .is_some_and(|binding| binding.anchor == response.id)
+                    && !egui::Popup::is_id_open(ctx, popup_id)
+                {
+                    self.image_context_binding = None;
+                    if was_open && escape && response.enabled() && !ctx.will_discard() {
+                        response.request_focus();
+                    }
+                }
                 self.finish_find_preview_segment(ui, &range, &[], response.rect);
             }
             last = local_range.end;
@@ -9140,6 +9234,12 @@ impl NotePanel {
         }
         if modified {
             self.mark_content_changed(ctx.input(|i| i.time));
+            if let Some(image) = image_width_edit
+                && let Some(binding) = self.image_context_binding.as_mut()
+                && binding.anchor == image
+            {
+                binding.revision = self.note_find.content_revision();
+            }
         }
         modified
     }
@@ -9455,16 +9555,45 @@ impl NotePanel {
         });
     }
 
-    fn editor_context_is_current(&self, binding: NoteEditorContext, editor: egui::Id) -> bool {
-        binding.editor == editor
+    fn note_context_is_current(
+        &self,
+        binding: NoteContextMenu,
+        viewport: egui::ViewportId,
+        anchor: egui::Id,
+    ) -> bool {
+        binding.anchor == anchor
+            && binding.viewport == viewport
             && binding.host == self.host_state.identity()
             && binding.revision == self.note_find.content_revision()
             && binding.document == egui::Id::new((&self.note.slug, &self.note.path))
     }
 
+    fn retire_stale_note_contexts(&mut self, ctx: &egui::Context, images_as_links: bool) {
+        let viewport = ctx.viewport_id();
+        if let Some(binding) = self.editor_context_binding
+            && binding.viewport == viewport
+            && (!self.open
+                || !self.note_context_is_current(binding, viewport, binding.anchor)
+                || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split))
+        {
+            egui::Popup::close_id(ctx, binding.anchor.with("popup"));
+            self.editor_context_binding = None;
+        }
+        if let Some(binding) = self.image_context_binding
+            && binding.viewport == viewport
+            && (!self.open
+                || !self.note_context_is_current(binding, viewport, binding.anchor)
+                || images_as_links
+                || !matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split))
+        {
+            egui::Popup::close_id(ctx, binding.anchor.with("popup"));
+            self.image_context_binding = None;
+        }
+    }
+
     fn editor_context_is_open(&self, ctx: &egui::Context, editor: egui::Id) -> bool {
         self.editor_context_binding
-            .is_some_and(|binding| self.editor_context_is_current(binding, editor))
+            .is_some_and(|binding| self.note_context_is_current(binding, ctx.viewport_id(), editor))
             && egui::Popup::is_id_open(ctx, editor.with("popup"))
     }
 
@@ -9524,6 +9653,9 @@ impl NotePanel {
                 .is_some_and(|form| form.basis.editor == resp.id);
         let popup_id = resp.id.with("popup");
         let context_selection = self.editor_context_is_open(ctx, resp.id);
+        if !context_selection && egui::Popup::is_id_open(ctx, popup_id) {
+            egui::Popup::close_id(ctx, popup_id);
+        }
         if (self.markdown_toolbar_owns_selection || form_owns_selection || context_selection)
             && !resp.has_focus()
         {
@@ -9578,17 +9710,19 @@ impl NotePanel {
             && !ctx.will_discard()
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::Period));
         if let Some(binding) = self.editor_context_binding
-            && !self.editor_context_is_current(binding, resp.id)
+            && binding.viewport == ctx.viewport_id()
+            && !self.note_context_is_current(binding, ctx.viewport_id(), resp.id)
         {
-            egui::Popup::close_id(ctx, binding.editor.with("popup"));
+            egui::Popup::close_id(ctx, binding.anchor.with("popup"));
             self.editor_context_binding = None;
         }
         if resp.secondary_clicked() || keyboard_open {
-            self.editor_context_binding = Some(NoteEditorContext {
+            self.editor_context_binding = Some(NoteContextMenu {
                 host: self.host_state.identity(),
                 revision: self.note_find.content_revision(),
                 document: egui::Id::new((&self.note.slug, &self.note.path)),
-                editor: resp.id,
+                viewport: ctx.viewport_id(),
+                anchor: resp.id,
                 keyboard: keyboard_open,
             });
         }

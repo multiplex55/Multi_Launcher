@@ -22647,6 +22647,197 @@ mod tests {
         assert_eq!(app.note_panels[0].note_content(), source);
     }
 
+
+    #[test]
+    fn note_preview_image_size_menu_keeps_keyboard_focus_during_width_edits() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let asset = workspace.root().join("size-fixture.png");
+        image::RgbaImage::from_pixel(80, 56, image::Rgba([32, 64, 96, 255]))
+            .save(&asset)
+            .unwrap();
+        let path = asset.to_string_lossy().replace('\\', "/");
+        let source = |width| format!("![Sample]({path}|{width})");
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (900.0, 680.0);
+        app.note_images_as_links = false;
+        let mut panel = launcher_show_owner_note("jump-preview-image-size");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+        panel.replace_content_from_mutation(source(80), 0.0);
+        app.push_note_panel(panel);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.note_panels[0].host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let target = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .unwrap_or_else(|| panic!("missing current preview image target {label}"))
+                .response_id()
+        };
+        let image = target(&app, "Open image");
+        let popup = image.with("popup");
+        ctx.memory_mut(|memory| memory.request_focus(image));
+        frame(&mut app, Vec::new());
+        let open = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                    key_press(egui::Key::F10, egui::Modifiers::SHIFT),
+                ],
+            );
+            frame(
+                app,
+                vec![
+                    key_release(egui::Key::F10, egui::Modifiers::SHIFT),
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+            assert!(egui::Popup::is_id_open(&ctx, popup));
+        };
+        open(&mut app);
+        let width = target(&app, "Image width");
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, "Image width");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(width));
+        assert_eq!(app.note_panels[0].note_content(), source(80));
+        for expected in [81, 82] {
+            frame(
+                &mut app,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+            );
+            frame(
+                &mut app,
+                vec![key_release(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+            );
+            assert_eq!(app.note_panels[0].note_content(), source(expected));
+            assert!(egui::Popup::is_id_open(&ctx, popup));
+        }
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(image));
+        assert!(app.image_panels.is_empty());
+        assert!(app.note_panels[0].open);
+
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        app.set_jump_mode_enabled(true);
+        app.note_panel_default_size = (900.0, 700.0);
+        app.note_panels[0].test_pop_out();
+        let identity = app.note_panels[0].prompt_identity();
+        let viewport = egui::ViewportId::from_hash_of(("note-panel-editor", identity));
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let native_image = app.note_panels[0]
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Open image")
+            .expect("rendered native image")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app.note_panels[0]
+            .test_native_jump()
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == "Open image")
+            .unwrap()
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(native_image)))
+        );
+        native(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                key_press(egui::Key::F10, egui::Modifiers::SHIFT),
+            ],
+        );
+        native(
+            &mut app,
+            vec![
+                key_release(egui::Key::F10, egui::Modifiers::SHIFT),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let native_labels = |app: &LauncherApp, label| {
+            app.note_panels[0]
+                .test_native_jump()
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == label)
+        };
+        assert!(native_labels(&app, "Image width"));
+        assert!(!native_labels(&app, "Open image"));
+        let changed = format!("![Changed source]({path}|92)");
+        app.note_panels[0].replace_content_from_mutation(changed.clone(), 1.0);
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        assert!(!native_labels(&app, "Image width"));
+        assert!(native_labels(&app, "Open image"));
+        assert_eq!(app.note_panels[0].note_content(), changed);
+    }
+
     #[test]
     fn note_panel_preview_task_jump_focus_is_not_activation() {
         std::thread::Builder::new()

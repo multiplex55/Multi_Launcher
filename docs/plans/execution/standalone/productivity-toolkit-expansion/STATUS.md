@@ -112,6 +112,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3e1 | complete |
 | M12-B3e2 | complete |
 | M12-B3e3 | complete |
+| M12-B3e4 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -822,3 +823,10 @@ The real Confirm section move and Cancel move responses are focus-only hint targ
 Right-click and Ctrl+Period now open the same persistent editor context menu. The editor remains one TextEntry target. The menu follows its exact editor, document, revision and host, and retains the captured selection while a menu field has focus. The existing Markdown, note-link, attachment, Todo and tag actions expose their actual submenu and control responses. The innermost Escape closes one menu level and restores its trigger. The next Escape at the root restores editor focus.
 
 The final gate passed 11/11 (ff4f5cac-8c4a-4f94-9a96-370e18065a30), including Ctrl+Period, hints that focus without editing, and three successive ordinary Escapes with Jump Mode off. The same run passed toolbar Undo, multiline docked/native input and six note-link catalog tests. The scoped reviewer found no actionable ownership or retention issue. Live Windows editor menu input has no separate native smoke.
+
+
+### M12-B3e4 Note Preview image sizing
+
+Shift+F10 opens the existing context menu for the focused rendered image. Right-click opens the same menu, and ordinary Enter on the image still opens the image viewer. Jump Mode exposes the real width and reset controls for the exact image. One width change advances that image menu's source revision so another adjustment can follow. An unrelated source or host change retires the menu in its owning viewport before keyboard routing. Escape returns focus to the image.
+
+The first gate passed 5/5 (3b054de8-577f-42c9-9d44-ebc3eeabb99c). The reviewed gate passed 3/3 (4fac86a9-3f74-489a-a1ee-b16d60f6eb47). It covers focus-only hints, two ordinary width increments, Escape with Jump Mode off, and native viewport retirement after replacing the source with an image at the same byte offset. The reviewer rechecked the native fix with no unresolved finding.
