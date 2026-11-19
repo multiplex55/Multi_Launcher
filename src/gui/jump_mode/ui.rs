@@ -83,10 +83,11 @@ pub(crate) enum NavigationDialogKind {
     CalculationDependencies,
     CalculationSensitivity,
     ProgrammerInspector,
+    NotePanel,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 47] = [
+    pub(crate) const ALL: [Self; 48] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -134,6 +135,7 @@ impl NavigationDialogKind {
         Self::CalculationDependencies,
         Self::CalculationSensitivity,
         Self::ProgrammerInspector,
+        Self::NotePanel,
     ];
 
     const fn index(self) -> usize {
@@ -185,6 +187,7 @@ impl NavigationDialogKind {
             Self::CalculationDependencies => 44,
             Self::CalculationSensitivity => 45,
             Self::ProgrammerInspector => 46,
+            Self::NotePanel => 47,
         }
     }
 
@@ -237,6 +240,7 @@ impl NavigationDialogKind {
             Self::CalculationDependencies => "calculation-dependencies",
             Self::CalculationSensitivity => "calculation-sensitivity",
             Self::ProgrammerInspector => "programmer-inspector",
+            Self::NotePanel => "note-panel",
         }
     }
 
@@ -288,7 +292,7 @@ impl NavigationDialogKind {
             Self::NoteTemplates => egui::Id::new(Some("Note Templates")),
             Self::TemplateDelete => egui::Id::new(Some("Delete Template?")),
             Self::UnusedNoteAssets => egui::Id::new(Some("Unused Note Assets")),
-            Self::ImageViewer => return None,
+            Self::ImageViewer | Self::NotePanel => return None,
             Self::CalculationDependencies => egui::Id::new("calculation-dependencies-window"),
             Self::CalculationSensitivity => egui::Id::new("calculation-sensitivity-window"),
             Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
@@ -4570,7 +4574,7 @@ mod tests {
                     NavigationDialogKind::CalculationSensitivity => { egui::Window::new("Sensitivity Tables").id(egui::Id::new("calculation-sensitivity-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
-                    NavigationDialogKind::ImageViewer => {}
+                    NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel => {}
                     NavigationDialogKind::CalendarEditor => {
                         egui::Window::new("Calendar Event").show(ctx, |_| {});
                     }
@@ -4772,7 +4776,7 @@ mod tests {
             let Some(expected_layer) = kind.layer_id() else {
                 assert!(matches!(
                     kind,
-                    NavigationDialogKind::RadialDesigner | NavigationDialogKind::ImageViewer
+                    NavigationDialogKind::RadialDesigner | NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel
                 ));
                 continue;
             };

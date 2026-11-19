@@ -9004,6 +9004,7 @@ impl LauncherApp {
     ) {
         let application_input_allowed = self.native_ui_application_input_allowed(ctx);
         let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        let navigation = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let note_instances: Vec<_> = self
             .note_panels
             .iter()
@@ -9018,7 +9019,32 @@ impl LauncherApp {
             else {
                 continue;
             };
+            let scope = if navigation
+                == (super::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: super::jump_mode::ui::NavigationDialogKind::NotePanel,
+                    instance: identity,
+                })
+                && self.note_panels[index].host_layer_if_root().is_some()
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("note-panel", identity),
+                    self.note_panels[index].jump_generation(),
+                    "note-panel",
+                    ctx.viewport_id(),
+                    navigation,
+                    false,
+                )
+            } else {
+                None
+            };
             let mut panel = self.note_panels.remove(index);
+            panel.set_jump_scope(scope.map(|scope| {
+                if first_ui_pass && !ctx.will_discard() {
+                    scope
+                } else {
+                    scope.registration_only()
+                }
+            }));
             let mut discard = None;
             let observe = panel.host_layer_if_root().is_some() && note_close_frame.is_some();
             panel.ui_with_host(
@@ -9030,6 +9056,7 @@ impl LauncherApp {
                 root_input_allowed,
                 observe.then_some(&mut discard),
             );
+            panel.set_jump_scope(None);
             panel.show_child_forms(
                 ctx,
                 first_ui_pass,
@@ -11168,6 +11195,30 @@ impl LauncherApp {
                     NavigationOwner::Blocked
                 };
                 (owner, None)
+            } else {
+                (owner, combo_popup)
+            };
+            let foreground_layer = super::jump_mode::ui::visible_top_middle_layer(ctx);
+            let (owner, combo_popup) = if let Some(panel) = self.note_panels.iter().find(|panel| {
+                panel
+                    .host_layer_if_root()
+                    .is_some_and(|layer| Some(layer) == foreground_layer)
+            }) {
+                let allowed = !egui::Popup::is_any_open(ctx)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                        Some(layer) == foreground_layer || layer.order == egui::Order::Background
+                    });
+                (
+                    if allowed {
+                        NavigationOwner::Dialog {
+                            kind: NavigationDialogKind::NotePanel,
+                            instance: panel.prompt_identity(),
+                        }
+                    } else {
+                        NavigationOwner::Blocked
+                    },
+                    None,
+                )
             } else {
                 (owner, combo_popup)
             };
@@ -21913,6 +21964,98 @@ mod tests {
                 .is_none()
         );
         workers.join_all();
+    }
+
+    #[test]
+    fn note_panel_jump_focuses_source_and_preserves_multiline_input() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let mut panel = launcher_show_owner_note("jump-note-panel");
+                panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+                let instance = panel.prompt_identity();
+                let original = panel.note_content().to_owned();
+                let original_query = app.query.clone();
+                app.note_panels.push(panel);
+
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+                };
+                for _ in 0..5 {
+                    frame(&mut app, Vec::new());
+                }
+                let layer = app.note_panels[0].host_layer_if_root().unwrap();
+                ctx.move_to_top(layer);
+                for _ in 0..3 {
+                    frame(&mut app, Vec::new());
+                }
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::NotePanel,
+                        instance
+                    }
+                );
+                let editor = app.note_panels[0].test_editor_widget_id().unwrap();
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                assert!(targets.iter().any(|target| {
+                    target.metadata().label() == "Note source editor"
+                        && target.response_id() == editor
+                }));
+                assert!(
+                    !targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Search query")
+                );
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Note source editor");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(editor));
+                assert_eq!(app.note_panels[0].note_content(), original);
+
+                frame(&mut app, vec![egui::Event::Text("λ".into())]);
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                frame(&mut app, vec![egui::Event::Text("β".into())]);
+                assert!(app.note_panels[0].note_content().contains("λ\nβ"));
+                assert_eq!(app.query, original_query);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

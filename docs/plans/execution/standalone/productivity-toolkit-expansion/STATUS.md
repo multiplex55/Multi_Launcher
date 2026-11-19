@@ -100,6 +100,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B2a1 | complete |
 | M12-B2a2 | complete |
 | M12-B2b | complete |
+| M12-B3a1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -764,3 +765,6 @@ The docked and native Sensitivity companion registers its current definition, in
 ### M12-B2b Programmer Inspector navigation
 
 The current Inspector source and host bind docked and native targets for bit operations, labels, comparison and formatting. Exact bit indices and annotation ranges have stable widget identities. A hint focuses a bit without toggling it, and fresh Enter activates the exact control. The label identity regression preserves focus through removal of a preceding row. Inner scrolling reveals the focused bit, and outer scrolling reveals the bit viewport. The initial reviewed gate passed the deep-bit, layout, retained comparison/preferences, label-file guard and layer inventory tests (`2b899e18-436b-4f59-91f9-810c97c1818e`). The corrected exact gate passed all three focus and reveal regressions (`1edc0a65-683e-49a3-9735-b98408382d3f`). Native picker acceptance was not exercised.
+
+
+M12-B3a1 wires the live docked NotePanel to its exact retained owner. Editor and Find hints focus ordinary controls. Three existing scoped checks passed in 0d719851-7ce0-4079-b5a7-357cadcfd41b. The new retained regression passed in aa059500-38f8-4181-848a-5a4d835edb71 after the comparison used the fixture's existing launcher query.

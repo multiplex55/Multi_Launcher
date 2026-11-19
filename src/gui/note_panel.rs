@@ -1117,6 +1117,8 @@ pub struct NotePanel {
     deferred_root_open: Option<(String, PathBuf, UtilityPresentation)>,
     active_host_pass: Option<(HostIdentity, ViewportPassProvenance)>,
     active_host_layer: Option<egui::LayerId>,
+    jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    jump_order: u64,
     accepted_host_effect_receipt: Option<(HostIdentity, Option<ViewportPassProvenance>)>,
     accepted_host_modal_layer: Option<(HostIdentity, Option<egui::LayerId>)>,
     defer_host_actions: bool,
@@ -1817,6 +1819,8 @@ impl NotePanel {
             deferred_root_open: None,
             active_host_pass: None,
             active_host_layer: None,
+            jump_scope: None,
+            jump_order: 0,
             accepted_host_effect_receipt: None,
             accepted_host_modal_layer: None,
             defer_host_actions: false,
@@ -2709,6 +2713,60 @@ impl NotePanel {
 
     pub(super) fn is_popped_out(&self) -> bool {
         self.host_state.presentation() == UtilityPresentation::Popout
+    }
+
+    pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
+        super::jump_mode::TargetGeneration(
+            egui::Id::new((
+                self.prompt_identity,
+                self.host_state.identity().generation,
+                self.note_find.content_revision(),
+                self.view_mode as u8,
+                self.note_find.is_open(),
+                self.show_metadata,
+                self.outline_open,
+            ))
+            .value(),
+        )
+    }
+
+    pub(super) fn set_jump_scope(&mut self, scope: Option<super::jump_mode::ui::JumpModeScope>) {
+        self.jump_scope = scope;
+        self.jump_order = 0;
+    }
+
+    fn jump_target(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &'static str,
+        label: &'static str,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.jump_scope.as_ref(),
+            ui,
+            response,
+            identity,
+            label,
+            kind,
+            &mut self.jump_order,
+        );
+        let clip = ui.clip_rect();
+        let clipped = if kind == super::jump_mode::TargetKind::TextEntry {
+            !clip.intersects(response.rect)
+        } else {
+            !clip.contains_rect(response.rect)
+        };
+        if clipped
+            && response.enabled()
+            && response.gained_focus()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+        {
+            response.scroll_to_me(None);
+        }
     }
 
     pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
@@ -6272,6 +6330,13 @@ impl NotePanel {
                     UtilityPresentation::Docked => "Dock",
                     UtilityPresentation::Popout => "Pop Out",
                 });
+                self.jump_target(
+                    ui,
+                    &response,
+                    "presentation",
+                    "Dock or pop out",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(test)]
                 if ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_host_button_id = Some(response.id);
@@ -6285,12 +6350,26 @@ impl NotePanel {
             }
             let save = ui.button("Save");
             let save = widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+            self.jump_target(
+                ui,
+                &save,
+                "save",
+                "Save note",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(NoteReplaceControl::Save, &save);
             if save.clicked() {
                 save_now = true;
             }
             let find = ui.button("Find");
+            self.jump_target(
+                ui,
+                &find,
+                "find",
+                "Find in note",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(NoteReplaceControl::FindToggle, &find);
             if find.clicked() {
@@ -6303,6 +6382,13 @@ impl NotePanel {
                 self.build_toolbar_markdown_menu(ui, &ctx, editor_id, app);
             }
             let open_resp = ui.button("Open Externally");
+            self.jump_target(
+                ui,
+                &open_resp,
+                "external",
+                "Open externally",
+                super::jump_mode::TargetKind::Button,
+            );
             let popup_id = open_resp.id.with("open_with_menu");
             if open_resp.clicked() {
                 match app.note_external_open {
@@ -6363,6 +6449,13 @@ impl NotePanel {
             }
             if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split) {
                 let edit = ui.button("Edit");
+                self.jump_target(
+                    ui,
+                    &edit,
+                    "view/edit",
+                    "Edit note",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(feature = "qa-framebuffer-capture")]
                 self.record_note_replace_control(NoteReplaceControl::Edit, &edit);
                 #[cfg(test)]
@@ -6380,6 +6473,13 @@ impl NotePanel {
             }
             if !matches!(self.view_mode, NoteViewMode::Preview) {
                 let render = ui.button("Render");
+                self.jump_target(
+                    ui,
+                    &render,
+                    "view/render",
+                    "Render note",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(feature = "qa-framebuffer-capture")]
                 self.record_note_replace_control(NoteReplaceControl::Render, &render);
                 if render.clicked() {
@@ -6392,13 +6492,28 @@ impl NotePanel {
             }
             if app.note_settings.can_use_split() && !matches!(self.view_mode, NoteViewMode::Split) {
                 let split = ui.button("Split");
+                self.jump_target(
+                    ui,
+                    &split,
+                    "view/split",
+                    "Split note",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(feature = "qa-framebuffer-capture")]
                 self.record_note_replace_control(NoteReplaceControl::Split, &split);
                 if split.clicked() {
                     self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Split);
                 }
             }
-            if ui.button(self.details_toggle_label()).clicked() {
+            let details = ui.button(self.details_toggle_label());
+            self.jump_target(
+                ui,
+                &details,
+                "details",
+                "Toggle note details",
+                super::jump_mode::TargetKind::Button,
+            );
+            if details.clicked() {
                 self.set_show_metadata(app, !self.show_metadata);
                 let was_focused = self
                     .last_textedit_id
@@ -6409,20 +6524,52 @@ impl NotePanel {
                 }
             }
             ui.separator();
-            if ui.button("A-").clicked() {
+            let decrease_font = ui.button("A-");
+            self.jump_target(
+                ui,
+                &decrease_font,
+                "font/decrease",
+                "Decrease note font",
+                super::jump_mode::TargetKind::Button,
+            );
+            if decrease_font.clicked() {
                 app.note_font_size = (app.note_font_size - 1.0).max(8.0);
             }
-            if ui.button("A+").clicked() {
+            let increase_font = ui.button("A+");
+            self.jump_target(
+                ui,
+                &increase_font,
+                "font/increase",
+                "Increase note font",
+                super::jump_mode::TargetKind::Button,
+            );
+            if increase_font.clicked() {
                 app.note_font_size += 1.0;
             }
             let sections =
                 self.collapsible_sections(app.note_settings.collapsible_sections_enabled);
             if !sections.is_empty() {
                 ui.separator();
-                if ui.button("Expand all").clicked() {
+                let expand = ui.button("Expand all");
+                self.jump_target(
+                    ui,
+                    &expand,
+                    "sections/expand",
+                    "Expand all sections",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if expand.clicked() {
                     self.expand_all_collapsible_sections(app);
                 }
-                if ui.button("Collapse all").clicked() {
+                let collapse = ui.button("Collapse all");
+                self.jump_target(
+                    ui,
+                    &collapse,
+                    "sections/collapse",
+                    "Collapse all sections",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if collapse.clicked() {
                     self.collapse_all_collapsible_sections(app, &sections);
                 }
             } else if !app.note_settings.collapsible_sections_enabled {
@@ -6436,7 +6583,15 @@ impl NotePanel {
                     "Show Outline"
                 };
 
-                if ui.button(outline_label).clicked() {
+                let outline = ui.button(outline_label);
+                self.jump_target(
+                    ui,
+                    &outline,
+                    "outline/toggle",
+                    outline_label,
+                    super::jump_mode::TargetKind::Button,
+                );
+                if outline.clicked() {
                     self.outline_open = !self.outline_open;
                 }
             }
@@ -6537,6 +6692,13 @@ impl NotePanel {
                     .desired_width(220.0)
                     .hint_text("Find in this note"),
             );
+            self.jump_target(
+                ui,
+                &response,
+                "find/query",
+                "Find query",
+                super::jump_mode::TargetKind::TextEntry,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(NoteReplaceControl::FindQuery, &response);
             find_query_accepted_focus = response.enabled() && response.has_focus();
@@ -6547,13 +6709,36 @@ impl NotePanel {
             let count = self.find_matches().len();
             let current = self.find_current_index().map_or(0, |index| index + 1);
             ui.label(format!("{current}/{count}"));
-            if ui.button("Prev").clicked() {
+            let previous = ui.button("Prev");
+            self.jump_target(
+                ui,
+                &previous,
+                "find/previous",
+                "Previous match",
+                super::jump_mode::TargetKind::Button,
+            );
+            if previous.clicked() {
                 action = Some(FindNavigation::Previous);
             }
-            if ui.button("Next").clicked() {
+            let next = ui.button("Next");
+            self.jump_target(
+                ui,
+                &next,
+                "find/next",
+                "Next match",
+                super::jump_mode::TargetKind::Button,
+            );
+            if next.clicked() {
                 action = Some(FindNavigation::Next);
             }
             let close_response = ui.button("Close");
+            self.jump_target(
+                ui,
+                &close_response,
+                "find/close",
+                "Close Find",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(NoteReplaceControl::FindClose, &close_response);
             if close_response.clicked() {
@@ -6571,6 +6756,13 @@ impl NotePanel {
                             .desired_width(180.0)
                             .hint_text("Replace with"),
                     );
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "find/replacement",
+                        "Replacement text",
+                        super::jump_mode::TargetKind::TextEntry,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(
                         NoteReplaceControl::ReplacementInput,
@@ -6585,6 +6777,13 @@ impl NotePanel {
                     }
                     let has_current = self.find_current_match().is_some();
                     let replace = ui.add_enabled(has_current, egui::Button::new("Replace"));
+                    self.jump_target(
+                        ui,
+                        &replace,
+                        "find/replace",
+                        "Replace current match",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(NoteReplaceControl::ReplaceOne, &replace);
                     #[cfg(test)]
@@ -6596,6 +6795,13 @@ impl NotePanel {
                     }
                     let has_matches = !self.find_matches().is_empty();
                     let replace_all = ui.add_enabled(has_matches, egui::Button::new("Replace All"));
+                    self.jump_target(
+                        ui,
+                        &replace_all,
+                        "find/replace-all",
+                        "Replace all matches",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(NoteReplaceControl::ReplaceAll, &replace_all);
                     #[cfg(test)]
@@ -6607,6 +6813,13 @@ impl NotePanel {
                     }
                 });
             });
+            self.jump_target(
+                ui,
+                &_replace_expander.header_response,
+                "find/replace-options",
+                "Replace options",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(
                 NoteReplaceControl::ReplaceExpander,
@@ -6628,6 +6841,13 @@ impl NotePanel {
                 Some(FindPreviewVisibility::SourceOnly) => {
                     ui.weak("Source match is not displayed in Preview.");
                     let response = ui.button("Reveal in Edit");
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "find/reveal",
+                        "Reveal match in Edit",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(NoteReplaceControl::RevealInEdit, &response);
                     #[cfg(test)]
@@ -6639,6 +6859,13 @@ impl NotePanel {
                 Some(FindPreviewVisibility::Collapsed) => {
                     ui.weak("Match is in a collapsed section.");
                     let response = ui.button("Reveal in Edit");
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "find/reveal",
+                        "Reveal match in Edit",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(NoteReplaceControl::RevealInEdit, &response);
                     #[cfg(test)]
@@ -6762,7 +6989,12 @@ impl NotePanel {
 
     fn outline_stamp(&self, viewport: egui::ViewportId) -> OutlineStamp {
         OutlineStamp {
-            document: egui::Id::new(("note-outline", self.prompt_identity, &self.note.slug, &self.note.path)),
+            document: egui::Id::new((
+                "note-outline",
+                self.prompt_identity,
+                &self.note.slug,
+                &self.note.path,
+            )),
             revision: self.note_find.content_revision(),
             host: self.host_state.identity(),
             viewport,
@@ -6776,16 +7008,29 @@ impl NotePanel {
             && self.pending_plain_link_conversion.is_none()
     }
 
-    fn complete_outline_move(&mut self, ctx: &egui::Context, viewport: egui::ViewportId, action: OutlineAction) {
+    fn complete_outline_move(
+        &mut self,
+        ctx: &egui::Context,
+        viewport: egui::ViewportId,
+        action: OutlineAction,
+    ) {
         if !self.outline_input_unblocked() {
             return;
         }
         let stamp = self.outline_stamp(viewport);
-        let Some(prepared) = self.outline_moves.apply_action(stamp, &self.note.content, action) else { return; };
+        let Some(prepared) = self
+            .outline_moves
+            .apply_action(stamp, &self.note.content, action)
+        else {
+            return;
+        };
         let moved = prepared.moved_selection.start;
         match self.apply_prepared_source_edit(ctx, None, prepared.edit, Some(moved..moved), false) {
             Ok(true) => {
-                let current = NoteOutlinePosition { revision: self.note_find.content_revision(), heading_start: moved };
+                let current = NoteOutlinePosition {
+                    revision: self.note_find.content_revision(),
+                    heading_start: moved,
+                };
                 self.selected_outline_heading = Some(current);
                 self.pending_scroll_target = Some(current);
                 let scope = self.outline_stamp(viewport);
@@ -7662,6 +7907,7 @@ impl NotePanel {
         };
         let response = output.response.response;
         debug_assert_eq!(response.id, editor_id);
+        self.jump_target(ui, &response, "source", "Note source editor", super::jump_mode::TargetKind::TextEntry);
         #[cfg(feature = "qa-framebuffer-capture")]
         self.record_note_replace_control(NoteReplaceControl::NoteEditor, &response);
         let active_match = if self.note_find.is_open() {
