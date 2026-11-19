@@ -2405,6 +2405,7 @@ pub(super) enum UnusedAssetsHostCommand {
     Apply(super::unused_assets_dialog::UnusedAssetsHostActions),
 }
 impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::UnusedNoteAssets);
     const KEY: &'static str = "unused-note-assets";
     const TITLE: &'static str = "Unused Note Assets";
     const SIZE: egui::Vec2 = egui::vec2(300.0, 200.0);
@@ -2421,18 +2422,14 @@ impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
             egui::Id::new(Some("Unused Note Assets")),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
-    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
-    }
+    fn target_generation(&self) -> TargetGeneration { TargetGeneration(self.jump_generation()) }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool { true }
     fn parent_input_allowed(&self) -> bool {
         true
     }
@@ -2468,7 +2465,7 @@ impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2478,7 +2475,7 @@ impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        let mut actions = self.render_host(ctx, allowed, first, child, presentation);
+        let mut actions = self.render_host(ctx, allowed, first, child, presentation, scopes.0);
         if *pinned {
             actions.close = false;
         }

@@ -1,3 +1,7 @@
+use super::jump_mode::{
+    TargetKind,
+    ui::{JumpModeScope, register_and_apply_target},
+};
 use crate::gui::LauncherApp;
 use crate::gui::Panel;
 use crate::gui::theme::widgets::{ButtonEmphasis, with_button_emphasis};
@@ -35,6 +39,7 @@ struct UnusedAssetsLayoutObservation {
     close_rect: egui::Rect,
     selection: Option<(egui::Id, egui::Rect)>,
     last_asset_rect: Option<egui::Rect>,
+    last_selection: Option<(egui::Id, egui::Rect)>,
     close_requested: bool,
 }
 
@@ -73,6 +78,18 @@ impl UnusedAssetsDialog {
     pub(super) fn epoch(&self) -> u64 {
         self.epoch
     }
+    pub(super) fn jump_generation(&self) -> u64 {
+        egui::Id::new(("unused-note-assets", self.epoch, self.inventory_generation)).value()
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_inventory(&mut self, assets: Vec<String>, root: std::path::PathBuf) {
+        self.inventory_loader = Some(Box::new(move || assets.clone()));
+        self.test_assets_dir = Some(root);
+    }
+    #[cfg(test)]
+    pub(super) fn test_selection(&self) -> &[bool] {
+        &self.selected
+    }
 
     pub(super) fn render_host(
         &mut self,
@@ -81,17 +98,19 @@ impl UnusedAssetsDialog {
         first: bool,
         child: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
+        scope: Option<&JumpModeScope>,
     ) -> UnusedAssetsHostActions {
         let mut selected = self.selected.clone();
         let mut close = false;
         let mut open = self.open;
         let mut delete = Vec::new();
         let mut host_request = None;
+        let mut order = 0;
         #[cfg(test)]
         let mut test_layout = None;
         let mut body = |ui: &mut egui::Ui| {
             let interactive = allowed && ui.is_visible() && !ui.is_sizing_pass();
-            ui.add_enabled_ui(interactive, |ui| {
+            ui.add_enabled_ui(allowed, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 ui.spacing_mut().button_padding.x = 2.0;
                 ui.spacing_mut().button_padding.y = 1.0;
@@ -110,6 +129,8 @@ impl UnusedAssetsDialog {
                 let mut first_selection = None;
                 #[cfg(test)]
                 let mut last_asset_rect = None;
+                #[cfg(test)]
+                let mut last_selection = None;
                 let list = egui::ScrollArea::vertical()
                     .id_salt("unused_note_assets_list")
                     .auto_shrink([false, false])
@@ -120,23 +141,48 @@ impl UnusedAssetsDialog {
                             ui.label("No unused assets found");
                         }
                         for (idx, asset) in self.assets.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                let selection = ui.checkbox(&mut selected[idx], "");
-                                #[cfg(test)]
-                                if idx == 0 {
-                                    first_selection = Some((selection.id, selection.rect));
-                                }
-                                #[cfg(not(test))]
-                                let _ = selection;
-                                let label = ui.add(
-                                    egui::Label::new(asset).wrap_mode(egui::TextWrapMode::Wrap),
-                                );
-                                #[cfg(test)]
-                                if idx + 1 == self.assets.len() {
-                                    last_asset_rect = Some(label.rect);
-                                }
-                                #[cfg(not(test))]
-                                let _ = label;
+                            ui.push_id(("unused-asset", self.inventory_generation, asset), |ui| {
+                                ui.horizontal(|ui| {
+                                    let selection = ui.checkbox(&mut selected[idx], "");
+                                    let clipped = !ui.clip_rect().contains_rect(selection.rect);
+                                    if scope.is_some() && !clipped {
+                                        register_and_apply_target(
+                                            scope,
+                                            ui,
+                                            &selection,
+                                            format!("asset/{asset}"),
+                                            format!("Select {asset}"),
+                                            TargetKind::Checkbox,
+                                            &mut order,
+                                        );
+                                    }
+                                    if interactive
+                                        && clipped
+                                        && selection.gained_focus()
+                                        && !ctx.will_discard()
+                                    {
+                                        selection.scroll_to_me(None);
+                                    }
+                                    #[cfg(test)]
+                                    if idx + 1 == self.assets.len() {
+                                        last_selection = Some((selection.id, selection.rect));
+                                    }
+                                    #[cfg(test)]
+                                    if idx == 0 {
+                                        first_selection = Some((selection.id, selection.rect));
+                                    }
+                                    #[cfg(not(test))]
+                                    let _ = selection;
+                                    let label = ui.add(
+                                        egui::Label::new(asset).wrap_mode(egui::TextWrapMode::Wrap),
+                                    );
+                                    #[cfg(test)]
+                                    if idx + 1 == self.assets.len() {
+                                        last_asset_rect = Some(label.rect);
+                                    }
+                                    #[cfg(not(test))]
+                                    let _ = label;
+                                })
                             });
                         }
                     });
@@ -144,6 +190,15 @@ impl UnusedAssetsDialog {
                 let mut buttons = None;
                 ui.horizontal_wrapped(|ui| {
                     let response = ui.button("Delete Selected");
+                    register_and_apply_target(
+                        scope,
+                        ui,
+                        &response,
+                        "delete",
+                        "Delete Selected",
+                        TargetKind::Button,
+                        &mut order,
+                    );
                     let response = with_button_emphasis(ui, response, ButtonEmphasis::Destructive);
                     if response.clicked() {
                         delete = self
@@ -154,12 +209,30 @@ impl UnusedAssetsDialog {
                             .collect();
                     }
                     let close_button = ui.button("Close");
+                    register_and_apply_target(
+                        scope,
+                        ui,
+                        &close_button,
+                        "close",
+                        "Close",
+                        TargetKind::Button,
+                        &mut order,
+                    );
                     if close_button.clicked() {
                         close = true;
                     }
                     let (host, next) =
-                        super::utility_host::presentation_button(ui, presentation, interactive);
-                    if first && !ctx.will_discard() && host.clicked() {
+                        super::utility_host::presentation_button(ui, presentation, allowed);
+                    register_and_apply_target(
+                        scope,
+                        ui,
+                        &host,
+                        "presentation",
+                        "Change window presentation",
+                        TargetKind::Button,
+                        &mut order,
+                    );
+                    if first && interactive && !ctx.will_discard() && host.clicked() {
                         host_request = Some(next);
                     }
                     #[cfg(test)]
@@ -182,6 +255,7 @@ impl UnusedAssetsDialog {
                         close_rect: close_button.rect,
                         selection: first_selection,
                         last_asset_rect,
+                        last_selection,
                         close_requested: false,
                     });
                 }
@@ -282,6 +356,7 @@ impl UnusedAssetsDialog {
                 true,
                 None,
                 super::utility_host::UtilityPresentation::Docked,
+                None,
             );
             self.apply_host_actions(actions, app);
         }
@@ -551,6 +626,79 @@ mod tests {
     }
 
     #[test]
+    fn unused_note_assets_tab_reveals_the_current_offscreen_row() {
+        use super::UnusedAssetsDialog;
+        use crate::gui::utility_host::UtilityPresentation;
+
+        for presentation in [UtilityPresentation::Docked, UtilityPresentation::Popout] {
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| {
+                style.animation_time = 0.0;
+                style.scroll_animation = egui::style::ScrollAnimation::none();
+            });
+            let assets = initial_inventory();
+            let mut dialog = UnusedAssetsDialog {
+                open: true,
+                selected: vec![false; assets.len()],
+                assets,
+                epoch: 1,
+                inventory_generation: 1,
+                ..Default::default()
+            };
+            let frame = |dialog: &mut UnusedAssetsDialog, events| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(300.0, 200.0),
+                        )),
+                        focused: true,
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let child = (presentation == UtilityPresentation::Popout).then_some(ui);
+                        let actions =
+                            dialog.render_host(&ctx, true, true, child, presentation, None);
+                        assert!(actions.delete.is_empty());
+                        assert!(actions.selected.iter().all(|&selected| !selected));
+                    },
+                )
+                .drop_without_applying_deltas();
+                dialog.test_layout.unwrap()
+            };
+            for _ in 0..4 {
+                frame(&mut dialog, Vec::new());
+            }
+            let initial = dialog.test_layout.unwrap();
+            let (target, rect) = initial.last_selection.unwrap();
+            assert!(!initial.scroll_rect.contains_rect(rect));
+            let tab = |pressed| egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            for _ in 0..32 {
+                frame(&mut dialog, vec![tab(true)]);
+                frame(&mut dialog, vec![tab(false)]);
+                if ctx.memory(|memory| memory.focused()) == Some(target) {
+                    break;
+                }
+            }
+            let current = frame(&mut dialog, Vec::new());
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target));
+            assert!(
+                current
+                    .scroll_rect
+                    .contains_rect(current.last_selection.unwrap().1),
+                "{presentation:?} must reveal the actually focused asset"
+            );
+        }
+    }
+
+    #[test]
     fn accepted_delete_uses_names_and_current_inventory() {
         let directory = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
@@ -691,10 +839,15 @@ mod tests {
             .expect("the full last asset label reports its actual widget bounds");
         assert!(assert_scroll_is_legal(scrolled_layout));
         assert!(scrolled_layout.scroll_offset.y > 0.0);
-        assert!(scrolled_labels.iter().any(|text| text == &last_asset()),
+        assert!(
+            scrolled_labels.iter().any(|text| text == &last_asset()),
             "last={last_asset_rect:?} clip={:?} scroll={:?} content={:?} window={:?} footer={} labels={scrolled_labels:?}",
-            scrolled_layout.scroll_rect, scrolled_layout.scroll_offset, scrolled_layout.content_size,
-            scrolled_layout.window_rect, scrolled_layout.footer_reserved_height);
+            scrolled_layout.scroll_rect,
+            scrolled_layout.scroll_offset,
+            scrolled_layout.content_size,
+            scrolled_layout.window_rect,
+            scrolled_layout.footer_reserved_height
+        );
         assert!(scrolled_layout.scroll_rect.contains_rect(last_asset_rect));
 
         let x_requested = click_at(&ctx, &mut app, size, close_window_rect);

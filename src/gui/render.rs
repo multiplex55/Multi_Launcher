@@ -6080,6 +6080,11 @@ impl LauncherApp {
                 root_scopes: (template_scope.as_ref(), delete_scope.as_ref()),
             },
         );
+        let assets_scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::UnusedNoteAssets, instance } if is_owner(self.unused_assets_host.root_layer()) => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("unused-note-assets", instance), super::jump_mode::TargetGeneration(self.unused_assets_dialog.jump_generation()), "unused-note-assets/form", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
+        self.unused_assets_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         let assets_layer = self.unused_assets_host.root_layer();
         let pinned = self
             .pinned_panels
@@ -6093,14 +6098,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: is_owner(assets_layer),
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (assets_scope.as_ref(), None),
             },
         );
         for panel in &mut self.image_panels {
@@ -10685,6 +10690,7 @@ impl LauncherApp {
                         | super::Panel::QrDialog
                         | super::Panel::ConvertPanel
                         | super::Panel::ExplorerTabsDialog
+                        | super::Panel::UnusedAssetsDialog
                         | super::Panel::HashGeneratorDialog
                         | super::Panel::SnippetDialog
                         | super::Panel::ClipboardDialog
@@ -10781,6 +10787,7 @@ impl LauncherApp {
                 self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::HotFolder, self.hotfolder_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::DataRecovery, self.data_recovery_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::UnusedNoteAssets, self.unused_assets_dialog.open && self.unused_assets_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::NoteTemplates, self.notes_dialog.template_manager.is_open() && self.note_templates_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::TemplateDelete, self.notes_dialog.template_manager.delete_instance().is_some() && self.note_templates_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::Convert, self.convert_panel.open),
@@ -10950,6 +10957,7 @@ impl LauncherApp {
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
                     NavigationDialogKind::HotFolder => self.hotfolder_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hotfolder_manager_window"))),
                     NavigationDialogKind::DataRecovery => self.data_recovery_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Data & Recovery")))),
+                    NavigationDialogKind::UnusedNoteAssets => self.unused_assets_host.root_layer(),
                     NavigationDialogKind::NoteTemplates => self.note_templates_host.root_layer(),
                     NavigationDialogKind::TemplateDelete => self.notes_dialog.template_manager.delete_instance().and(self.note_templates_host.root_layer()).map(|_| egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Delete Template?")))),
                     NavigationDialogKind::Convert => self.convert_panel.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"))),
@@ -11027,6 +11035,8 @@ impl LauncherApp {
                         self.hotfolder_dialog.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::DataRecovery {
                         self.data_recovery_dialog.open.then_some(()).and(current)
+                    } else if kind == NavigationDialogKind::UnusedNoteAssets {
+                        self.unused_assets_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::NoteTemplates {
                         self.note_templates_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::TemplateDelete {
@@ -22696,6 +22706,37 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn unused_note_assets_hint_focuses_without_toggling_or_deleting() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            let path = workspace.root().join("unused.png");
+            std::fs::write(&path, b"asset").unwrap();
+            app.unused_assets_dialog.test_set_inventory(vec!["unused.png".into()], workspace.root().to_path_buf());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.open_unused_assets_from_origin(&super::super::utility_host::ChildOpenOrigin::<()>::Root);
+            for _ in 0..5 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let layer = app.unused_assets_host.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let title = egui::Rect::from_min_size(rect.min + egui::vec2(60.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(title, pressed), false).drop_without_applying_deltas(); }
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            assert!(app.jump_mode_ui.retained_registry().targets().iter().any(|target| target.metadata().label() == "Select unused.png"));
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false).drop_without_applying_deltas();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false).drop_without_applying_deltas();
+            let hint = dialog_hint_for_label(&app, "Select unused.png");
+            run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
+            assert_eq!(app.unused_assets_dialog.test_selection(), &[false]);
+            assert_eq!(std::fs::read(&path).unwrap(), b"asset");
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::NONE)], false).drop_without_applying_deltas();
+            assert_eq!(app.unused_assets_dialog.test_selection(), &[true]);
+            assert_eq!(std::fs::read(&path).unwrap(), b"asset");
+        }).unwrap().join().unwrap();
     }
 
     #[test]

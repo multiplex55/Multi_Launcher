@@ -78,10 +78,11 @@ pub(crate) enum NavigationDialogKind {
     DataRecoveryConfirmation,
     NoteTemplates,
     TemplateDelete,
+    UnusedNoteAssets,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 42] = [
+    pub(crate) const ALL: [Self; 43] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -124,6 +125,7 @@ impl NavigationDialogKind {
         Self::DataRecoveryConfirmation,
         Self::NoteTemplates,
         Self::TemplateDelete,
+        Self::UnusedNoteAssets,
     ];
 
     const fn index(self) -> usize {
@@ -170,6 +172,7 @@ impl NavigationDialogKind {
             Self::DataRecoveryConfirmation => 39,
             Self::NoteTemplates => 40,
             Self::TemplateDelete => 41,
+            Self::UnusedNoteAssets => 42,
         }
     }
 
@@ -217,6 +220,7 @@ impl NavigationDialogKind {
             Self::DataRecoveryConfirmation => "data-recovery-confirmation",
             Self::NoteTemplates => "note-templates",
             Self::TemplateDelete => "note-template-delete",
+            Self::UnusedNoteAssets => "unused-note-assets",
         }
     }
 
@@ -267,6 +271,7 @@ impl NavigationDialogKind {
             Self::DataRecoveryConfirmation => egui::Id::new("data-recovery-confirmation"),
             Self::NoteTemplates => egui::Id::new(Some("Note Templates")),
             Self::TemplateDelete => egui::Id::new(Some("Delete Template?")),
+            Self::UnusedNoteAssets => egui::Id::new(Some("Unused Note Assets")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -552,6 +557,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::FilePreview
+                    | NavigationDialogKind::UnusedNoteAssets
                     | NavigationDialogKind::NoteTemplates
                     | NavigationDialogKind::TemplateDelete
                     | NavigationDialogKind::HashGenerator
@@ -611,6 +617,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::FilePreview
+                    | NavigationDialogKind::UnusedNoteAssets
                     | NavigationDialogKind::NoteTemplates
                     | NavigationDialogKind::TemplateDelete
                     | NavigationDialogKind::HashGenerator
@@ -4518,6 +4525,7 @@ mod tests {
                     }
                     NavigationDialogKind::HotFolder => { egui::Window::new("Hot Folder Manager").id(egui::Id::new("hotfolder_manager_window")).show(ctx, |_| {}); }
                     NavigationDialogKind::DataRecovery => { egui::Window::new("Data & Recovery").show(ctx, |_| {}); }
+                    NavigationDialogKind::UnusedNoteAssets => { egui::Window::new("Unused Note Assets").show(ctx, |_| {}); }
                     NavigationDialogKind::NoteTemplates => { egui::Window::new("Note Templates").show(ctx, |_| {}); }
                     NavigationDialogKind::TemplateDelete => { egui::Window::new("Delete Template?").show(ctx, |_| {}); }
                     NavigationDialogKind::DataRecoveryConfirmation => { egui::Window::new("Confirm destructive action").id(egui::Id::new("data-recovery-confirmation")).show(ctx, |_| {}); }

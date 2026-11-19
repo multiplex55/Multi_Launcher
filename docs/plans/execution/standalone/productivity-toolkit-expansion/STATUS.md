@@ -95,6 +95,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A6b2 | complete |
 | M12-A | complete |
 | M12-B1a1 | complete |
+| M12-B1a2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -734,3 +735,8 @@ The initial child gate passed 5/5 (`37d4f94e-5410-46a0-8800-f13fc0ab49fa`), the 
 ### M12-B1a1 Note Templates and its delete confirmation
 
 The retained Template Manager exposes current names, editor fields and actions in both presentations. Delete Template? uses an independent child scope keyed to the current template and manager session. Hints focus controls without deleting. Review found default-off ordinary input was tied to Jump and the native child scope used the wrong surface. The corrected docked child accepts focus without enabling its destructive action prematurely. Tests open the child through the actual Delete row for a synthetic template and verify pointer Cancel with Jump off, focus-only Delete and child Escape with Jump on, and the separate native retained target registry. The final focused rerun passed 3/3 (`e839a501-1a82-4597-b836-c7f32cf6b6b4`). Existing host reuse and layer inventory passed in the earlier focused runs.
+
+
+### M12-B1a2 Unused Note Assets navigation
+
+Current checkbox names and the retained inventory generation identify docked and native hint targets, including the sticky footer. Ordinary input remains available with Jump off. Hints focus without toggling or deleting. Existing selection, exact inventory and accepted-delete checks remain authoritative. The first focused run passed 4/4 (`f63635a7-88b8-401a-811f-22d6ceeae5e2`). Review identified offscreen keyboard focus. The correction uses one-shot reveal only when a newly focused checkbox is clipped. The focused rerun passed 2/2 (`befbe842-4e59-411a-980f-30e4427f52c0`), including a many-row fixture in short docked and pop-out bodies.
