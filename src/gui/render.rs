@@ -35676,6 +35676,220 @@ mod tests {
     }
 
     #[test]
+    fn calculation_pad_input_hints_require_fresh_select_and_apply() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "amount = 7\namount + 1";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        app.calculation_pad_dialog
+            .test_show_input_and_watch_panels();
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+
+        focus(&mut app, "Choose inputs");
+        assert_eq!(app.calculation_pad_dialog.test_selected_input_count(), 0);
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        let candidate = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label().contains("amount")
+                    && target.metadata().kind() == super::super::jump_mode::TargetKind::Checkbox
+            })
+            .expect("current amount chooser checkbox");
+        let label = candidate.metadata().label().to_owned();
+        let id = candidate.response_id();
+        focus(&mut app, &label);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(app.calculation_pad_dialog.test_selected_input_count(), 0);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(app.calculation_pad_dialog.test_selected_input_count(), 1);
+        if egui::Popup::is_any_open(&ctx) {
+            chord(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        }
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "amount value");
+        chord(&mut app, egui::Key::A, egui::Modifiers::COMMAND);
+        frame(&mut app, vec![egui::Event::Text("9".into())]);
+        frame(&mut app, Vec::new());
+        focus(&mut app, "Apply amount");
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("amount = 9\namount + 1")
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "Calculation Pad source editor");
+        chord(&mut app, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn calculation_pad_input_chooser_tab_reveals_offscreen_checks() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let source = (0..20)
+            .map(|index| format!("amount{index} = {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        show_docked_pad_jump_fixture(&ctx, &mut app, &source);
+        app.calculation_pad_dialog
+            .test_show_input_and_watch_panels();
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        focus(&mut app, "Choose inputs");
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let later = "amount12 · line 13";
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == later)
+        );
+        focus(&mut app, "amount0 · line 1");
+        for _ in 0..12 {
+            chord(&mut app, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        let focused = ctx
+            .memory(|memory| memory.focused())
+            .expect("chooser retains ordinary Tab focus");
+        let target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.response_id() == focused)
+            .expect("focused offscreen checkbox was revealed");
+        assert_eq!(target.metadata().label(), later);
+        assert_eq!(app.calculation_pad_dialog.test_selected_input_count(), 0);
+    }
+
+    #[test]
+    fn calculation_pad_watch_reorder_keeps_focus_on_its_named_control() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "alpha = 1\nbeta = 2\ngamma = 3";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        app.calculation_pad_dialog
+            .test_show_input_and_watch_panels();
+        app.calculation_pad_dialog
+            .test_set_watch_names(&["alpha", "beta", "gamma"]);
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let label = "Move alpha down";
+        let response = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("current alpha watch move")
+            .response_id();
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(response));
+        assert_eq!(
+            app.calculation_pad_dialog.test_watch_names(),
+            ["alpha", "beta", "gamma"]
+        );
+
+        for expected in [["beta", "alpha", "gamma"], ["beta", "gamma", "alpha"]] {
+            frame(
+                &mut app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            frame(
+                &mut app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            assert_eq!(app.calculation_pad_dialog.test_watch_names(), expected);
+            if expected[1] == "alpha" {
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(response));
+            }
+        }
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
     fn calculation_pad_replace_hint_keeps_typing_in_the_editor_tool() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();

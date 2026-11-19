@@ -718,6 +718,25 @@ impl CalculationPadDialog {
         self.editor_tools.open.hash(&mut generation);
         self.editor_tools.goto.hash(&mut generation);
         self.editor_tools.replace.hash(&mut generation);
+        self.pad_view.show_inputs.hash(&mut generation);
+        self.pad_view.show_watches.hash(&mut generation);
+        for input in &self.pad_view.inputs {
+            input.id.hash(&mut generation);
+            input.name.hash(&mut generation);
+            input.unavailable.hash(&mut generation);
+            std::mem::discriminant(&input.config.control).hash(&mut generation);
+            if input.config.control == crate::calculation_pad::InputControl::Slider {
+                input.draft.as_ref().map(|draft| &draft.value).hash(&mut generation);
+            }
+        }
+        // Reordering keeps the same watch subjects. The registry removes
+        // direction buttons that no longer exist at the ends of the list.
+        if self.pad_view.show_watches {
+            let mut watch_names = self.pad_view.watches.iter().collect::<Vec<_>>();
+            watch_names.sort_unstable();
+            watch_names.hash(&mut generation);
+        }
+        self.pad_view.config_editor.as_ref().map(|draft| draft.id).hash(&mut generation);
         self.session
             .evaluation_basis()
             .map(|basis| basis.generation)
@@ -2436,6 +2455,28 @@ impl CalculationPadDialog {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_show_input_and_watch_panels(&mut self) {
+        self.pad_view.show_inputs = true;
+        self.pad_view.show_watches = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_input_count(&self) -> usize {
+        self.pad_view.inputs.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_watch_names(&mut self, names: &[&str]) {
+        self.pad_view.watches = names.iter().map(|name| (*name).to_owned()).collect();
+        self.persist_view_state_in_session();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_watch_names(&self) -> &[String] {
+        &self.pad_view.watches
+    }
+
     fn persist_view_state_in_session(&mut self) {
         let view = crate::calculation_pad::PadViewMetadata {
             inputs: self.pad_view.inputs.iter().map(|input| crate::calculation_pad::PadInputReference {
@@ -3496,11 +3537,19 @@ impl CalculationPadDialog {
     }
 
     fn panels_ui(
-        &self, ui: &mut egui::Ui, source: &str,
+        &mut self, ui: &mut egui::Ui, source: &str,
         evaluation: Option<&crate::calculation_pad::SessionEvaluation>,
         view: &mut PadView, effects: &mut HostEffects,
     ) {
         let ids = self.session.line_ids().unwrap_or_default();
+        let jump_scope = self.jump_scope.clone().filter(|_| self.inline_child().is_none());
+        let mut jump_order = self.jump_order;
+        macro_rules! target {
+            ($ui:expr, $response:expr, $id:expr, $label:expr, $kind:ident) => {{
+                super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), $ui, &$response, $id, $label, super::jump_mode::TargetKind::$kind, &mut jump_order);
+                if $response.gained_focus() && $response.enabled() && $ui.is_visible() && !$ui.is_sizing_pass() && !$ui.ctx().will_discard() && !$ui.clip_rect().contains_rect($response.rect) { $response.scroll_to_me(None); }
+            }};
+        }
         let revision = self.session.revision().unwrap_or_default();
         if view.show_inputs {
             let available = if let Some(basis) = effects.document_basis {
@@ -3520,13 +3569,30 @@ impl CalculationPadDialog {
             }
             ui.group(|ui| {
                 ui.label("Editable inputs");
-                ui.menu_button("Choose inputs", |ui| {
+                let choose_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("inputs/choose"));
+                let choose = ui.menu_button("Choose inputs", |ui| {
+                    let mut choose_order = 0;
                     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                     for input in &available {
                         let Some(&id) = ids.get(input.line) else { continue; };
                         let selected = view.inputs.iter().position(|entry| entry.id == id);
                         let mut checked = selected.is_some_and(|index| !view.inputs[index].unavailable);
-                        if ui.checkbox(&mut checked, format!("{} · line {}", input.name, input.line + 1)).changed() {
+                        let id_source = ui.make_persistent_id(("choose-input", id, &input.name));
+                        let label = format!("{} · line {}", input.name, input.line + 1);
+                        let response = ui.scope_builder(egui::UiBuilder::new().id(id_source), |ui| {
+                            ui.checkbox(&mut checked, &label)
+                        }).inner;
+                        super::jump_mode::ui::register_and_apply_target(
+                            choose_scope.as_ref(), ui, &response, format!("input/{}", id.get()),
+                            label, super::jump_mode::TargetKind::Checkbox, &mut choose_order,
+                        );
+                        if response.gained_focus() && response.enabled()
+                            && ui.is_visible() && !ui.is_sizing_pass() && !ui.ctx().will_discard()
+                            && !ui.clip_rect().contains_rect(response.rect)
+                        {
+                            response.scroll_to_me(None);
+                        }
+                        if response.changed() {
                             if let Some(index) = selected { view.inputs.remove(index); }
                             if checked && view.inputs.len() < 64 {
                                 view.inputs.push(InputSelection { id, name: input.name.clone(), unavailable: false, config: Default::default(), draft: None });
@@ -3535,18 +3601,22 @@ impl CalculationPadDialog {
                     }
                     });
                 });
+                super::jump_mode::ui::register_and_apply_menu_anchor(jump_scope.as_ref(), ui, &choose.response, "inputs/choose", "Choose inputs", super::jump_mode::ui::MenuAnchorKind::Root, &mut jump_order);
                 egui::ScrollArea::vertical().id_salt("pad-inputs").max_height(100.0).show(ui, |ui| {
                     let mut remove = None;
                     for (index, selected) in view.inputs.iter_mut().enumerate() {
                         let descriptor = available.iter().find(|input| ids.get(input.line) == Some(&selected.id) && input.name == selected.name);
-                        ui.push_id(selected.id.get(), |ui| { ui.horizontal_wrapped(|ui| {
+                        let row_id = ui.make_persistent_id(("input", selected.id));
+                        ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| { ui.horizontal_wrapped(|ui| {
                             let label = if selected.config.label.is_empty() { &selected.name } else { &selected.config.label };
                             ui.label(format!("{} · line {}", label, descriptor.map_or(0, |input| input.line + 1)));
                             if selected.unavailable || descriptor.is_none() {
                                 ui.weak("Unavailable; reselect this input");
                             } else if let (Some(input), Some(basis)) = (descriptor, effects.evaluation_basis) {
                                 if !selected.config.description.is_empty() { ui.label(&selected.config.description); }
-                                if ui.small_button("Configure…").clicked() {
+                                let configure = ui.small_button("Configure…");
+                                target!(ui, configure, format!("input/{}/configure", selected.id.get()), format!("Configure {}", selected.name), Button);
+                                if configure.clicked() {
                                     view.config_editor = Some(InputConfigDraft { id: selected.id, basis, original: selected.config.clone(), config: selected.config.clone(), minimum: selected.config.minimum.clone().unwrap_or_default(), maximum: selected.config.maximum.clone().unwrap_or_default(), step: selected.config.step.clone().unwrap_or_default(), error: None });
                                 }
                                 let draft = selected.draft.get_or_insert_with(|| InputDraft {
@@ -3556,11 +3626,15 @@ impl CalculationPadDialog {
                                     *draft = InputDraft { value: input.value.clone(), original: input.source_line.clone(), revision, error: None, dirty: false, basis, config: selected.config.clone() };
                                 }
                                 if draft.basis != basis || draft.config != selected.config { draft.error = Some("Source or settings changed; reset this draft.".into()); }
-                                if ui.add(egui::TextEdit::singleline(&mut draft.value).desired_width(90.0).char_limit(crate::calculation_pad::MAX_EXPRESSION_BYTES + 1)).changed() { draft.dirty = true; draft.error = None; }
+                                let value = ui.add(egui::TextEdit::singleline(&mut draft.value).desired_width(90.0).char_limit(crate::calculation_pad::MAX_EXPRESSION_BYTES + 1));
+                                target!(ui, value, format!("input/{}/value", selected.id.get()), format!("{} value", selected.name), TextEntry);
+                                if value.changed() { draft.dirty = true; draft.error = None; }
                                 if !selected.config.suffix.is_empty() { ui.label(&selected.config.suffix); }
                                 if selected.config.control != crate::calculation_pad::InputControl::Field {
                                     for (label, increase) in [("−", false), ("+", true)] {
-                                        if ui.add_enabled(draft.basis == basis && draft.config == selected.config, egui::Button::new(label)).clicked() {
+                                        let step = ui.add_enabled(draft.basis == basis && draft.config == selected.config, egui::Button::new(label));
+                                        target!(ui, step, format!("input/{}/step/{increase}", selected.id.get()), format!("{} {}", if increase { "Increase" } else { "Decrease" }, selected.name), Button);
+                                        if step.clicked() {
                                             match crate::calculation_pad::step_value(&input.kind, &selected.config, &draft.value, increase) {
                                                 Ok(value) => { draft.value = value; draft.dirty = true; draft.error = None; }
                                                 Err(error) => draft.error = Some(error),
@@ -3570,14 +3644,18 @@ impl CalculationPadDialog {
                                 }
                                 if selected.config.control == crate::calculation_pad::InputControl::Slider {
                                     if let Some((mut ordinal, count)) = crate::calculation_pad::exact_grid(&input.kind, &selected.config, &draft.value) {
-                                        if ui.add_enabled(draft.basis == basis && draft.config == selected.config, egui::Slider::new(&mut ordinal, 0..=count).show_value(false)).changed()
+                                        let slider = ui.add_enabled(draft.basis == basis && draft.config == selected.config, egui::Slider::new(&mut ordinal, 0..=count).show_value(false));
+                                        target!(ui, slider, format!("input/{}/slider", selected.id.get()), format!("{} slider", selected.name), Slider);
+                                        if slider.changed()
                                             && let Some(value) = crate::calculation_pad::exact_grid_value(&input.kind, &selected.config, ordinal)
                                         { draft.value = value; draft.dirty = true; draft.error = None; }
                                     } else if matches!(&input.kind, crate::calculation_pad::InputKind::Scalar | crate::calculation_pad::InputKind::Quantity { .. })
                                         && let Some((minimum, maximum, mut value, step)) = crate::calculation_pad::slider_values(&input.kind, &selected.config, &draft.value) {
                                         let mut slider = egui::Slider::new(&mut value, minimum..=maximum).show_value(false);
                                         if let Some(step) = step { slider = slider.step_by(step); }
-                                        if ui.add_enabled(draft.basis == basis && draft.config == selected.config, slider).changed() {
+                                        let slider = ui.add_enabled(draft.basis == basis && draft.config == selected.config, slider);
+                                        target!(ui, slider, format!("input/{}/slider", selected.id.get()), format!("{} slider", selected.name), Slider);
+                                        if slider.changed() {
                                             draft.value = value.to_string();
                                             draft.dirty = true; draft.error = None;
                                         }
@@ -3587,15 +3665,21 @@ impl CalculationPadDialog {
                                     Ok(projection) => if let Some(error) = projection.current_error { ui.colored_label(ui.visuals().warn_fg_color, format!("Current value: {error}")); },
                                     Err(error) => { ui.colored_label(ui.visuals().warn_fg_color, error); }
                                 }
-                                if ui.button("Apply").clicked() {
+                                let response = ui.button("Apply");
+                                target!(ui, response, format!("input/{}/apply", selected.id.get()), format!("Apply {}", selected.name), Button);
+                                if response.clicked() {
                                     effects.input_commit = Some(InputCommit { id: selected.id, original: draft.original.clone(), revision: draft.revision, value: draft.value.clone(), basis: draft.basis, config: draft.config.clone() });
                                 }
-                                if ui.button("Reset").clicked() {
+                                let response = ui.button("Reset");
+                                target!(ui, response, format!("input/{}/reset", selected.id.get()), format!("Reset {}", selected.name), Button);
+                                if response.clicked() {
                                     *draft = InputDraft { value: input.value.clone(), original: input.source_line.clone(), revision, error: None, dirty: false, basis, config: selected.config.clone() };
                                 }
                                 if let Some(error) = &draft.error { ui.colored_label(ui.visuals().error_fg_color, error); }
                             }
-                            if ui.small_button("×").clicked() { remove = Some(index); }
+                            let remove_button = ui.small_button("×");
+                            target!(ui, remove_button, format!("input/{}/remove", selected.id.get()), format!("Remove {}", selected.name), Button);
+                            if remove_button.clicked() { remove = Some(index); }
                         }); });
                     }
                     if let Some(index) = remove { view.inputs.remove(index); }
@@ -3604,30 +3688,33 @@ impl CalculationPadDialog {
                 if let Some(config) = view.config_editor.as_mut() {
                     ui.separator();
                     ui.label("Input settings");
-                    egui::Grid::new("input-config-grid").num_columns(2).show(ui, |ui| {
-                        ui.label("Label"); ui.add(egui::TextEdit::singleline(&mut config.config.label).char_limit(257)); ui.end_row();
-                        ui.label("Description"); ui.add(egui::TextEdit::singleline(&mut config.config.description).char_limit(1025)); ui.end_row();
-                        ui.label("Suffix (decorative)"); ui.add(egui::TextEdit::singleline(&mut config.config.suffix).char_limit(129)); ui.end_row();
-                        ui.label("Minimum"); ui.add(egui::TextEdit::singleline(&mut config.minimum).char_limit(257)); ui.end_row();
-                        ui.label("Maximum"); ui.add(egui::TextEdit::singleline(&mut config.maximum).char_limit(257)); ui.end_row();
-                        ui.label("Step"); ui.add(egui::TextEdit::singleline(&mut config.step).char_limit(257)); ui.end_row();
+                    egui::Grid::new(("input-config-grid", config.id)).num_columns(2).show(ui, |ui| {
+                        ui.label("Label"); let response = ui.add(egui::TextEdit::singleline(&mut config.config.label).char_limit(257)); target!(ui, response, format!("input/{}/settings/config.config.label", config.id.get()), "Label", TextEntry); ui.end_row();
+                        ui.label("Description"); let response = ui.add(egui::TextEdit::singleline(&mut config.config.description).char_limit(1025)); target!(ui, response, format!("input/{}/settings/config.config.description", config.id.get()), "Description", TextEntry); ui.end_row();
+                        ui.label("Suffix (decorative)"); let response = ui.add(egui::TextEdit::singleline(&mut config.config.suffix).char_limit(129)); target!(ui, response, format!("input/{}/settings/config.config.suffix", config.id.get()), "Suffix (decorative)", TextEntry); ui.end_row();
+                        ui.label("Minimum"); let response = ui.add(egui::TextEdit::singleline(&mut config.minimum).char_limit(257)); target!(ui, response, format!("input/{}/settings/config.minimum", config.id.get()), "Minimum", TextEntry); ui.end_row();
+                        ui.label("Maximum"); let response = ui.add(egui::TextEdit::singleline(&mut config.maximum).char_limit(257)); target!(ui, response, format!("input/{}/settings/config.maximum", config.id.get()), "Maximum", TextEntry); ui.end_row();
+                        ui.label("Step"); let response = ui.add(egui::TextEdit::singleline(&mut config.step).char_limit(257)); target!(ui, response, format!("input/{}/settings/config.step", config.id.get()), "Step", TextEntry); ui.end_row();
                     });
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Field, "Field");
-                        ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Stepper, "Step buttons");
-                        ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Slider, "Slider");
+                        let response = ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Field, "Field"); target!(ui, response, format!("input/{}/settings/Field", config.id.get()), "Field", Button);
+                        let response = ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Stepper, "Step buttons"); target!(ui, response, format!("input/{}/settings/Step buttons", config.id.get()), "Step buttons", Button);
+                        let response = ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Slider, "Slider"); target!(ui, response, format!("input/{}/settings/Slider", config.id.get()), "Slider", Button);
                     });
                     if Some(config.basis) != effects.evaluation_basis { ui.colored_label(ui.visuals().warn_fg_color, "Source changed; reopen settings."); }
                     if let Some(error) = &config.error { ui.colored_label(ui.visuals().error_fg_color, error); }
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(Some(config.basis) == effects.evaluation_basis, egui::Button::new("Save settings")).clicked() {
+                        let save = ui.add_enabled(Some(config.basis) == effects.evaluation_basis, egui::Button::new("Save settings"));
+                        target!(ui, save, format!("input/{}/settings/save", config.id.get()), "Save settings", Button);
+                        if save.clicked() {
                             let mut commit = config.clone();
                             commit.config.minimum = (!commit.minimum.is_empty()).then(|| commit.minimum.clone());
                             commit.config.maximum = (!commit.maximum.is_empty()).then(|| commit.maximum.clone());
                             commit.config.step = (!commit.step.is_empty()).then(|| commit.step.clone());
                             effects.input_config_commit = Some(commit);
                         }
-                        if ui.button("Cancel settings").clicked() { cancel_settings = true; }
+                        let cancel = ui.button("Cancel settings"); target!(ui, cancel, format!("input/{}/settings/cancel", config.id.get()), "Cancel settings", Button);
+                        if cancel.clicked() { cancel_settings = true; }
                     });
                 }
                 if cancel_settings { view.config_editor = None; }
@@ -3639,8 +3726,10 @@ impl CalculationPadDialog {
                 let current = evaluation.is_some_and(|result| Some(result.basis) == self.session.evaluation_basis());
                 if evaluation.is_some() && !current { ui.colored_label(ui.visuals().warn_fg_color, "Outdated results"); }
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut view.watch_entry).desired_width(100.0).hint_text("Name"));
-                    if ui.button("Pin").clicked()
+                    let name = ui.add(egui::TextEdit::singleline(&mut view.watch_entry).desired_width(100.0).hint_text("Name"));
+                    target!(ui, name, "watches/name", "Watch name", TextEntry);
+                    let pin = ui.button("Pin"); target!(ui, pin, "watches/pin", "Pin watch", Button);
+                    if pin.clicked()
                         && let Some(name) = crate::calculation_pad::watch_name(&view.watch_entry)
                         && view.watches.len() < 64 && !view.watches.contains(&name)
                     { view.watches.push(name); view.watch_entry.clear(); }
@@ -3649,7 +3738,8 @@ impl CalculationPadDialog {
                     let mut remove = None;
                     let mut swap = None;
                     for (index, name) in view.watches.iter().enumerate() {
-                        ui.horizontal_wrapped(|ui| {
+                        let row_id = ui.make_persistent_id(("watch", name));
+                        ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| { ui.horizontal_wrapped(|ui| {
                             ui.label(name);
                             match evaluation.and_then(|evaluation| evaluation.final_bindings.get(name)) {
                                 Some(binding) => match &binding.outcome {
@@ -3666,8 +3756,10 @@ impl CalculationPadDialog {
                                             crate::calculation_pad::CalculationValue::ApproximateScalar(_) => "approximate scalar",
                                             _ => "quantity",
                                         });
-                                        if ui.add_enabled(current, egui::Button::new("Copy").small()).clicked() { effects.watch_copy = Some((name.clone(), false)); }
-                                        if ui.add_enabled(current, egui::Button::new("Copy formatted").small()).clicked() { effects.watch_copy = Some((name.clone(), true)); }
+                                        let copy = ui.add_enabled(current, egui::Button::new("Copy").small()); target!(ui, copy, format!("watch/{name}/copy"), format!("Copy {name}"), Button);
+                                        if copy.clicked() { effects.watch_copy = Some((name.clone(), false)); }
+                                        let copy = ui.add_enabled(current, egui::Button::new("Copy formatted").small()); target!(ui, copy, format!("watch/{name}/copy-formatted"), format!("Copy formatted {name}"), Button);
+                                        if copy.clicked() { effects.watch_copy = Some((name.clone(), true)); }
                                     }
                                     LineOutcome::Error(error) => { ui.colored_label(ui.visuals().error_fg_color, error.to_string()); }
                                     _ => { ui.weak("Not executed"); }
@@ -3683,16 +3775,33 @@ impl CalculationPadDialog {
                                     _ => "Pending",
                                 }); }
                             }
-                            if index > 0 && ui.small_button("↑").clicked() { swap = Some((index - 1, index)); }
-                            if index + 1 < view.watches.len() && ui.small_button("↓").clicked() { swap = Some((index, index + 1)); }
-                            if ui.small_button("×").clicked() { remove = Some(index); }
-                        });
+                            let button = |ui: &mut egui::Ui, identity, caption| {
+                                let id = row_id.with(identity);
+                                ui.scope_builder(egui::UiBuilder::new().id(id), |ui| {
+                                    ui.small_button(caption)
+                                }).inner
+                            };
+                            if index > 0 {
+                                let up = button(ui, "up", "↑");
+                                target!(ui, up, format!("watch/{name}/up"), format!("Move {name} up"), Button);
+                                if up.clicked() { swap = Some((index - 1, index)); }
+                            }
+                            if index + 1 < view.watches.len() {
+                                let down = button(ui, "down", "↓");
+                                target!(ui, down, format!("watch/{name}/down"), format!("Move {name} down"), Button);
+                                if down.clicked() { swap = Some((index, index + 1)); }
+                            }
+                            let remove_button = button(ui, "remove", "×");
+                            target!(ui, remove_button, format!("watch/{name}/remove"), format!("Remove watch {name}"), Button);
+                            if remove_button.clicked() { remove = Some(index); }
+                        }); });
                     }
                     if let Some((a, b)) = swap { view.watches.swap(a, b); }
                     if let Some(index) = remove { view.watches.remove(index); }
                 });
             });
         }
+        self.jump_order = jump_order;
     }
 
     fn draw_host_contents(

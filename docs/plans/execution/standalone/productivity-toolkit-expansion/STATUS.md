@@ -123,6 +123,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B4b1 | complete |
 | M12-B4b2 | complete |
 | M12-B4c | complete |
+| M12-B4d1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -910,3 +911,10 @@ A disk conflict exposes Save As and Keep Editing directly alongside Reload. A di
 Find, Replace and Go-to register their actual fields and controls in the Pad owner. Jump Escape gets first refusal. A fresh Escape closes the editor tool even when egui has cleared widget focus on the foreground Pad. Completion focuses its actual response, then accepts only a separate Enter or ordinary pointer click with an exact current source selection, fold projection and document. The current Rename context records one retained host, viewport, evaluation basis and caret. Shift+F10 opens the same actual menu as right-click, and the typed Rename review excludes underlying targets until Apply or Cancel.
 
 The initial 9/10 gate (6cd67e45-80ea-4394-a184-b9406cde1d57) exposed the second Escape issue. Review found the discarded context opening and same-revision completion selection gaps. The first remediation run (6d7221c6-a3fa-4914-9906-b4601128b0d7) exposed an egui lock re-entry that was corrected by resolving the viewport before touching context state. The final targeted gate passed 10/10 (59e45609-d70c-496f-90a4-07b8f8e98aa1), covering ordinary editor input, a discarded Rename reopen, stale completion refusal, focus-only hints and fresh Rename and completion activation. The exact filters and output are in `target/productivity-toolkit-expansion-evidence/m12-b4c-pad-editor-final.txt`.
+
+
+### M12-B4d1 Calculation Pad inputs and watches
+
+The actual Choose inputs menu registers its current literal inputs by line identity. The panel registers existing input controls, inline settings and named watch actions. Hints focus without selecting or applying. A fresh input Apply still validates the retained source, settings and evaluation basis and is one Undo step. Watch rows and move buttons keep stable widget identities. Generation follows watch membership, while the registry removes directions unavailable at the ends of the list.
+
+The first focused gate passed 7/7 (96da337c-68e2-49db-bd7f-eb9f044f7a7d). Review identified chooser scrolling and positional widget identities. The reviewed gate verified 12 ordinary Tabs reaching an initially offscreen choice, input application and existing watch Copy and settings behavior. Its watch case exposed order-driven generation invalidation (f0c49ad0-e7e5-40c5-9d55-cf3a4e663d9e). The final focused identity test passed (dd440b29-3fe1-4002-b41c-472441d97073), moving the same named watch twice through separate Enter presses without changing the source.
