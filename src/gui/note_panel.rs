@@ -1119,6 +1119,8 @@ pub struct NotePanel {
     active_host_layer: Option<egui::LayerId>,
     jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
     jump_order: u64,
+    native_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    native_jump_frame: Option<u64>,
     accepted_host_effect_receipt: Option<(HostIdentity, Option<ViewportPassProvenance>)>,
     accepted_host_modal_layer: Option<(HostIdentity, Option<egui::LayerId>)>,
     defer_host_actions: bool,
@@ -1821,6 +1823,8 @@ impl NotePanel {
             active_host_layer: None,
             jump_scope: None,
             jump_order: 0,
+            native_jump: Box::default(),
+            native_jump_frame: None,
             accepted_host_effect_receipt: None,
             accepted_host_modal_layer: None,
             defer_host_actions: false,
@@ -2733,6 +2737,11 @@ impl NotePanel {
     pub(super) fn set_jump_scope(&mut self, scope: Option<super::jump_mode::ui::JumpModeScope>) {
         self.jump_scope = scope;
         self.jump_order = 0;
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_native_jump(&self) -> &super::jump_mode::ui::JumpModeUi {
+        &self.native_jump
     }
 
     fn jump_target(
@@ -5740,6 +5749,8 @@ impl NotePanel {
 
         match host.host {
             UtilityPresentation::Docked => {
+                self.native_jump.cancel_all();
+                self.native_jump_frame = None;
                 callback_observed = true;
                 owner_pass_accepted = pass_authorized;
                 self.active_host_layer = Some(self.show_query_focus_layer());
@@ -5797,8 +5808,74 @@ impl NotePanel {
                         let keyboard_input_allowed = application_input_allowed
                             && focused
                             && (independent || fallback_keyboard_owner);
+                        let mut native_binding = None;
+                        let mut native_jump_owned_escape = false;
+                        let native_jump_allowed = independent
+                            && keyboard_input_allowed
+                            && !own_modal_open
+                            && !egui::Popup::is_any_open(&child_ctx)
+                            && super::jump_mode::ui::visible_top_middle_layer(&child_ctx).is_none()
+                            && super::jump_mode::ui::focused_response_layer(&child_ctx)
+                                .is_none_or(|layer| layer == egui::LayerId::background());
+                        if independent {
+                            let (chord, alphabet) = app.jump_mode_ui.configuration();
+                            self.native_jump.set_configuration(chord, alphabet);
+                            let enabled = app.jump_mode_enabled();
+                            self.native_jump.set_enabled(enabled);
+                            let frame = child_ctx.cumulative_frame_nr();
+                            if self.native_jump_frame != Some(frame) {
+                                self.native_jump.begin_frame();
+                                self.native_jump_frame = Some(frame);
+                            }
+                            let binding = super::jump_mode::ui::NavigationViewportBinding {
+                                viewport: viewport_id,
+                                owner: super::jump_mode::ui::NavigationOwner::Dialog {
+                                    kind: super::jump_mode::ui::NavigationDialogKind::NotePanel,
+                                    instance: self.prompt_identity,
+                                },
+                                base_layer: egui::LayerId::background(),
+                            };
+                            let native_navigation =
+                                self.native_jump.update_navigation_owner_for_viewport(
+                                    &child_ctx,
+                                    binding,
+                                    native_jump_allowed && enabled,
+                                );
+                            native_jump_owned_escape = self.native_jump.active_session().is_some();
+                            self.native_jump.handle_viewport_input(
+                                &child_ctx,
+                                native_navigation == binding.owner,
+                                accepted,
+                                viewport_id,
+                            );
+                            native_jump_owned_escape |= self.native_jump.active_session().is_some();
+                            self.native_jump.begin_ui_pass();
+                            let scope = (native_navigation == binding.owner)
+                                .then(|| {
+                                    self.native_jump.scope_for_viewport_binding(
+                                        super::jump_mode::SurfaceId::dialog(
+                                            "note-panel",
+                                            self.prompt_identity,
+                                        ),
+                                        self.jump_generation(),
+                                        "note-panel",
+                                        binding,
+                                    )
+                                })
+                                .flatten()
+                                .map(|scope| {
+                                    if accepted {
+                                        scope
+                                    } else {
+                                        scope.registration_only()
+                                    }
+                                });
+                            self.set_jump_scope(scope);
+                            native_binding = Some(binding);
+                        }
                         let shortcuts_allowed = accepted
                             && keyboard_input_allowed
+                            && !native_jump_owned_escape
                             && !own_modal_open
                             && !egui::Popup::is_any_open(&child_ctx);
                         if shortcuts_allowed && independent {
@@ -5860,6 +5937,31 @@ impl NotePanel {
                             embedded_root_layer = Some(child.layer_id());
                             embedded_root_focused_id =
                                 child_ctx.memory(|memory| memory.focused());
+                        }
+                        if let Some(binding) = native_binding {
+                            self.native_jump.finish_ui_pass();
+                            let current = self.native_jump.update_navigation_owner_for_viewport(
+                                &child_ctx,
+                                binding,
+                                native_jump_allowed && app.jump_mode_enabled(),
+                            );
+                            if self.native_jump.prepare_pass_for_viewport(
+                                &child_ctx,
+                                binding,
+                                current,
+                                native_jump_allowed && app.jump_mode_enabled(),
+                            ) {
+                                super::jump_mode::paint::paint(&child_ctx, &self.native_jump);
+                            }
+                            if !child_ctx.will_discard() {
+                                self.native_jump.complete_frame_for_viewport(
+                                    &child_ctx,
+                                    binding,
+                                    current,
+                                    native_jump_allowed && app.jump_mode_enabled(),
+                                );
+                            }
+                            self.set_jump_scope(None);
                         }
                         owner_modal_layer =
                             child_ctx.memory(|memory| memory.top_modal_layer());

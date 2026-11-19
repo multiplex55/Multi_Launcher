@@ -609,6 +609,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::Calendar
                     | NavigationDialogKind::CalendarDetails
                     | NavigationDialogKind::CalendarEditor
+                    | NavigationDialogKind::NotePanel
                     | NavigationDialogKind::ImageViewer
                     | NavigationDialogKind::DashboardEditor
                     | NavigationDialogKind::MouseGestures
@@ -637,6 +638,14 @@ impl NavigationViewportBinding {
     pub(crate) fn base_is_current(self, ctx: &egui::Context) -> bool {
         let visible_layer = visible_top_middle_layer(ctx);
         let layer_is_current = match self.owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::NotePanel,
+                instance,
+            } => {
+                self.viewport == egui::ViewportId::from_hash_of(("note-panel-editor", instance))
+                    && self.base_layer == egui::LayerId::background()
+                    && visible_layer.is_none()
+            }
             NavigationOwner::Dialog {
                 kind: NavigationDialogKind::ImageViewer,
                 instance,

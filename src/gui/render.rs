@@ -21967,6 +21967,181 @@ mod tests {
     }
 
     #[test]
+    fn note_panel_native_jump_focuses_source_and_preserves_multiline_input() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.note_panel_default_size = (900.0, 700.0);
+                let mut panel = launcher_show_owner_note("native-jump-note");
+                panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+                panel.test_pop_out();
+                let identity = panel.prompt_identity();
+                let original = panel.note_content().to_owned();
+                let query = app.query.clone();
+                app.note_panels.push(panel);
+                let viewport = egui::ViewportId::from_hash_of(("note-panel-editor", identity));
+                for _ in 0..6 {
+                    run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                }
+                app.note_panels[0].open_find();
+                for _ in 0..3 {
+                    run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                }
+                let find = app.note_panels[0].test_find_query_widget_id().unwrap();
+                assert_eq!(
+                    super::immediate_viewport_test_focused_id(),
+                    Some((viewport, Some(find)))
+                );
+                let editor = app.note_panels[0].test_editor_widget_id().unwrap();
+                let registry = app.note_panels[0].test_native_jump().retained_registry();
+                let target = registry
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Note source editor")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "editor absent with Find open; targets: {:?}",
+                            registry
+                                .targets()
+                                .iter()
+                                .map(|target| target.metadata().label())
+                                .collect::<Vec<_>>()
+                        )
+                    });
+                assert_eq!(target.response_id(), editor);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                    false,
+                );
+                let hint = app.note_panels[0]
+                    .test_native_jump()
+                    .active_session()
+                    .unwrap()
+                    .hint_map()
+                    .assignments()
+                    .iter()
+                    .find(|assignment| assignment.target().label() == "Note source editor")
+                    .unwrap()
+                    .hint()
+                    .as_str()
+                    .to_owned();
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![egui::Event::Text(hint)],
+                    false,
+                    false,
+                );
+                assert_eq!(
+                    super::immediate_viewport_test_focused_id(),
+                    Some((viewport, Some(editor)))
+                );
+                assert_eq!(app.note_panels[0].note_content(), original);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![egui::Event::Text("λ".into())],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![egui::Event::Text("β".into())],
+                    false,
+                    false,
+                );
+                assert!(app.note_panels[0].note_content().contains("λ\nβ"));
+                assert_eq!(app.query, query);
+                // Publish the current target generation after the accepted source edit.
+                run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                    false,
+                );
+                assert!(
+                    app.note_panels[0]
+                        .test_native_jump()
+                        .active_session()
+                        .is_some()
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                assert!(
+                    app.note_panels[0]
+                        .test_native_jump()
+                        .active_session()
+                        .is_none()
+                );
+                assert!(app.note_panels[0].is_find_open());
+                assert!(app.note_panels[0].open);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn note_panel_jump_focuses_source_and_preserves_multiline_input() {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)

@@ -101,6 +101,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B2a2 | complete |
 | M12-B2b | complete |
 | M12-B3a1 | complete |
+| M12-B3a2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -768,3 +769,6 @@ The current Inspector source and host bind docked and native targets for bit ope
 
 
 M12-B3a1 wires the live docked NotePanel to its exact retained owner. Editor and Find hints focus ordinary controls. Three existing scoped checks passed in 0d719851-7ce0-4079-b5a7-357cadcfd41b. The new retained regression passed in aa059500-38f8-4181-848a-5a4d835edb71 after the comparison used the fixture's existing launcher query.
+
+
+M12-B3a2 binds each detached NotePanel to its exact native viewport and foreground editor, with registration-only replay and independent root fallback. The final retained test passed in e3c15c91-24c2-48db-aa94-13ef5d6efd99. It starts with Find focused in a viewport that fits both controls, moves focus to the source using a hint, enters Unicode and a normal newline, preserves the launcher query, and waits for the edited target generation before verifying that Escape cancels Jump with Find still open. The scoped initial runs also passed the docked source, native form and layer-inventory tests. This is retained egui viewport evidence.
