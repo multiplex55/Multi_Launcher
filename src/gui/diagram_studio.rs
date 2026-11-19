@@ -1821,6 +1821,7 @@ impl DiagramStudioDialog {
         let revision = self.documents.session().map(DiagramSession::revision).or_else(|| self.documents.visual_revision());
         self.jump_instance().hash(&mut hash);
         revision.hash(&mut hash);
+        self.visual_selection.hash(&mut hash);
         std::mem::discriminant(&self.view_mode).hash(&mut hash);
         // A pending document transition rejects any replacement until it is
         // resolved. Its kind and the active document stamp identify these controls.
@@ -1840,6 +1841,13 @@ impl DiagramStudioDialog {
 
     #[cfg(test)]
     pub(crate) fn test_native_jump(&self) -> &super::jump_mode::ui::JumpModeUi { &self.native_jump }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_visual_text(&self) -> Option<&str> {
+        let selected = self.visual_selection?;
+        let object = self.documents.visual_scene()?.objects.iter().find(|object| object.id == selected)?;
+        match &object.kind { VisualObjectKind::Text { text } => Some(text.as_str()), _ => None }
+    }
 
     fn jump_control(&mut self, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, decision: bool) {
         let active = self.documents.pending_transition().is_some() == decision;
@@ -8230,6 +8238,7 @@ impl DiagramStudioDialog {
                     drawio_review_current,
                     document_actions_allowed,
                     document_intent,
+                    jump_scope.as_ref(), &mut jump_order,
                     #[cfg(test)]
                     test_action_rects,
                 );
@@ -8382,6 +8391,7 @@ impl DiagramStudioDialog {
                         editing_allowed,
                         revision,
                         pending,
+                        jump_scope.as_ref(), &mut jump_order,
                     );
                     if generic_family.is_none() && status.preview != PreviewState::Current
                         && status.diagnostic.is_none() {
@@ -8483,6 +8493,7 @@ impl DiagramStudioDialog {
                             mermaid_color_draft,
                             base_editing_allowed && draw_effects.active_menu_scope.is_none(),
                             pending,
+                            jump_scope.as_ref(), &mut jump_order,
                             #[cfg(test)]
                             test_action_rects,
                             #[cfg(test)]
@@ -8507,6 +8518,7 @@ impl DiagramStudioDialog {
                             pending,
                             message,
                             canvas_focus_requested,
+                            jump_scope.as_ref(), &mut jump_order,
                             #[cfg(test)]
                             test_canvas_rect,
                             #[cfg(test)]
@@ -8574,6 +8586,7 @@ impl DiagramStudioDialog {
                                 pending,
                                 message,
                                 canvas_focus_requested,
+                            jump_scope.as_ref(), &mut jump_order,
                                 #[cfg(test)]
                                 &mut canvas_rect,
                                 #[cfg(test)]
@@ -8690,6 +8703,7 @@ impl DiagramStudioDialog {
                                             pending,
                                             message,
                                             canvas_focus_requested,
+                            jump_scope.as_ref(), &mut jump_order,
                                             #[cfg(test)]
                                             &mut canvas_rect,
                                             #[cfg(test)]
@@ -8754,6 +8768,12 @@ impl DiagramStudioDialog {
         }
 
         let jump_scope = self.jump_scope.clone().filter(|_| self.documents.pending_transition().is_none());
+        let mut property_order = self.jump_order;
+        macro_rules! visual_target {
+            ($ui:expr, $response:expr, $id:expr, $label:expr, $kind:ident) => {
+                diagram_panel_target(jump_scope.as_ref(), $ui, &$response, &$id, $label, super::jump_mode::TargetKind::$kind, &mut property_order)
+            };
+        }
         let pending_transition = self.documents.pending_transition().cloned();
         let path = self.documents.path().map(Path::to_path_buf);
         let visual_presentation = self.visual_projection();
@@ -9311,6 +9331,7 @@ impl DiagramStudioDialog {
                     drawio_review_current,
                     structural_edits_allowed && !visual_draft_active,
                     document_intent,
+                    jump_scope.as_ref(), &mut self.jump_order,
                     #[cfg(test)]
                     &mut self.test_action_rects,
                 );
@@ -10606,12 +10627,14 @@ impl DiagramStudioDialog {
                 ui.add_enabled_ui(visual_edits_allowed && !visual_draft_active, |ui| {
                     ui.horizontal_wrapped(|ui| {
                     ui.label("Object");
+                    let object_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("visual/object"));
                     let _object_combo = egui::ComboBox::from_id_salt("diagram-visual-object-selection")
                         .selected_text(selected_object.map_or_else(
                             || "None".to_owned(),
                             |id| format!("#{}", id.get()),
                         ))
                         .show_ui(ui, |ui| {
+                            let mut popup_order = 0;
                             if let Some(scene) = scene_snapshot.as_ref() {
                                 for object in &scene.objects {
                                     let _response = ui.selectable_value(
@@ -10619,6 +10642,7 @@ impl DiagramStudioDialog {
                                         Some(object.id),
                                         visual_object_label(object),
                                     );
+                                    diagram_menu_target(object_scope.as_ref(), ui, &_response, &format!("object/{}", object.id.get()), &visual_object_label(object), &mut popup_order);
                                     #[cfg(test)]
                                     self.test_action_rects.push((
                                         format!("visual_object_option_{}", object.id.get()),
@@ -10628,6 +10652,7 @@ impl DiagramStudioDialog {
                                 }
                             }
                         });
+                    visual_target!(ui, _object_combo.response, "visual/object", "Object", ComboBox);
                     #[cfg(test)]
                     self.test_action_rects.push((
                         "visual_object_selection".into(),
@@ -10648,17 +10673,21 @@ impl DiagramStudioDialog {
                     }
                     let selected_shape = ui.add_enabled_ui(structural_edits_allowed, |ui| {
                         let mut shape = self.visual_create_shape;
-                        egui::ComboBox::from_id_salt("diagram-visual-create-shape")
+                        let shape_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("visual/create-shape"));
+                        let combo = egui::ComboBox::from_id_salt("diagram-visual-create-shape")
                             .selected_text(visual_shape_label(shape))
                             .show_ui(ui, |ui| {
+                                let mut popup_order = 0;
                                 for candidate in visual_primitive_shapes() {
-                                    ui.selectable_value(
+                                    let response = ui.selectable_value(
                                         &mut shape,
                                         candidate,
                                         visual_shape_label(candidate),
                                     );
+                                    diagram_menu_target(shape_scope.as_ref(), ui, &response, visual_shape_label(candidate), visual_shape_label(candidate), &mut popup_order);
                                 }
                             });
+                        visual_target!(ui, combo.response, "visual/create-shape", "Shape to add", ComboBox);
                         shape
                     });
                     self.visual_create_shape = selected_shape.inner;
@@ -10666,6 +10695,7 @@ impl DiagramStudioDialog {
                     let add_shape = ui.add_enabled(structural_edits_allowed, egui::Button::new("Add shape"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_add_shape".into(), add_shape.rect, ui.clip_rect()));
+                    visual_target!(ui, add_shape, "visual/add-shape", "Add shape", Button);
                     if add_shape.clicked() && document_intent.is_none() {
                         staged_operations = Some((
                             vec![VisualOperation::AddObject(VisualObjectDraft {
@@ -10682,6 +10712,7 @@ impl DiagramStudioDialog {
                     let add_text = ui.add_enabled(structural_edits_allowed, egui::Button::new("Add text"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_add_text".into(), add_text.rect, ui.clip_rect()));
+                    visual_target!(ui, add_text, "visual/add-text", "Add text", Button);
                     if add_text.clicked() && document_intent.is_none() {
                         staged_operations = Some((
                             vec![VisualOperation::AddObject(VisualObjectDraft {
@@ -10705,6 +10736,7 @@ impl DiagramStudioDialog {
                         add_container.rect,
                         ui.clip_rect(),
                     ));
+                    visual_target!(ui, add_container, "visual/add-container", "Add container", Button);
                     if add_container.clicked() && document_intent.is_none() {
                         staged_operations = Some((
                             vec![VisualOperation::AddObject(VisualObjectDraft {
@@ -10731,6 +10763,7 @@ impl DiagramStudioDialog {
                         self.test_visual_group_enabled = group.enabled();
                         self.test_action_rects.push(("visual_group_selection".into(), group.rect, ui.clip_rect()));
                     }
+                    visual_target!(ui, group, "visual/group", "Group selection", Button);
                     if group.clicked() && document_intent.is_none() {
                         if let (Some(scene), Some(projection)) = (scene_snapshot.as_deref(), base_projection) {
                             let group_selection = group_roots.iter().copied().collect();
@@ -10751,6 +10784,7 @@ impl DiagramStudioDialog {
                     let ungroup = ui.add_enabled(structural_edits_allowed && ungroup_id.is_some(), egui::Button::new("Ungroup"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_ungroup".into(), ungroup.rect, ui.clip_rect()));
+                    visual_target!(ui, ungroup, "visual/ungroup", "Ungroup", Button);
                     if ungroup.clicked() && document_intent.is_none() {
                         if let Some(id) = ungroup_id { staged_operations = Some((vec![VisualOperation::Ungroup(id)], None)); }
                     }
@@ -10764,6 +10798,7 @@ impl DiagramStudioDialog {
                         add_horizontal_swimlane.rect,
                         ui.clip_rect(),
                     ));
+                    visual_target!(ui, add_horizontal_swimlane, "visual/add-horizontal-lane", "Add horizontal lane", Button);
                     if add_horizontal_swimlane.clicked() && document_intent.is_none() {
                         staged_operations = Some((
                             vec![VisualOperation::AddObject(VisualObjectDraft {
@@ -10790,6 +10825,7 @@ impl DiagramStudioDialog {
                         add_vertical_swimlane.rect,
                         ui.clip_rect(),
                     ));
+                    visual_target!(ui, add_vertical_swimlane, "visual/add-vertical-lane", "Add vertical lane", Button);
                     if add_vertical_swimlane.clicked() && document_intent.is_none() {
                         staged_operations = Some((
                             vec![VisualOperation::AddObject(VisualObjectDraft {
@@ -10827,6 +10863,7 @@ impl DiagramStudioDialog {
                         add_connector.rect,
                         ui.clip_rect(),
                     ));
+                    visual_target!(ui, add_connector, "visual/add-connector", "Add connector", Button);
                     if add_connector.clicked() && document_intent.is_none() {
                         if connector_endpoints.len() == 2 && selection_state.objects.len() == 2 {
                             let source = connector_endpoints[0];
@@ -10867,6 +10904,7 @@ impl DiagramStudioDialog {
                     let add_layer = ui.add_enabled(structural_edits_allowed, egui::Button::new("Add layer"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_add_layer".into(), add_layer.rect, ui.clip_rect()));
+                    visual_target!(ui, add_layer, "visual/add-layer", "Add layer", Button);
                     if add_layer.clicked() && document_intent.is_none() {
                         let index = scene_snapshot.as_ref().map_or(0, |scene| scene.layers.len());
                         staged_operations = Some((
@@ -10901,6 +10939,7 @@ impl DiagramStudioDialog {
                             send_layer_back.rect,
                             ui.clip_rect(),
                         ));
+                    visual_target!(ui, send_layer_back, "visual/layer-back", "Layer back", Button);
                         if send_layer_back.clicked()
                             && document_intent.is_none()
                             && pending.is_none()
@@ -10923,6 +10962,7 @@ impl DiagramStudioDialog {
                             bring_layer_forward.rect,
                             ui.clip_rect(),
                         ));
+                    visual_target!(ui, bring_layer_forward, "visual/layer-forward", "Layer forward", Button);
                         if bring_layer_forward.clicked()
                             && document_intent.is_none()
                             && pending.is_none()
@@ -10959,6 +10999,7 @@ impl DiagramStudioDialog {
                     );
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_create_preset".into(), add_preset.rect, ui.clip_rect()));
+                    visual_target!(ui, add_preset, "visual/add-preset", "Create preset from selection", Button);
                     if add_preset.clicked() && document_intent.is_none() {
                         let count = scene_snapshot.as_ref().map_or(0, |scene| scene.presets.len());
                         match VisualPresetDraft::from_primitives(
@@ -10978,19 +11019,23 @@ impl DiagramStudioDialog {
                         if selected_preset.is_none() {
                             selected_preset = scene.presets.first().map(|preset| preset.id);
                         }
-                        egui::ComboBox::from_id_salt("diagram-visual-preset-selection")
+                        let preset_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope("visual/preset"));
+                        let preset_combo = egui::ComboBox::from_id_salt("diagram-visual-preset-selection")
                             .selected_text(selected_preset.and_then(|id| {
                                 scene.presets.iter().find(|preset| preset.id == id)
                             }).map_or_else(|| "No preset".to_owned(), |preset| preset.name.clone()))
                             .show_ui(ui, |ui| {
+                                let mut order = 0;
                                 for preset in &scene.presets {
-                                    ui.selectable_value(
+                                    let response = ui.selectable_value(
                                         &mut selected_preset,
                                         Some(preset.id),
                                         preset.name.clone(),
                                     );
+                                    diagram_menu_target(preset_scope.as_ref(), ui, &response, &format!("preset/{}", preset.id.get()), &preset.name, &mut order);
                                 }
                             });
+                        visual_target!(ui, preset_combo.response, "visual/preset", "Preset", ComboBox);
                     }
                     let add_instance = ui.add_enabled(
                         structural_edits_allowed && selected_preset.is_some(),
@@ -10998,6 +11043,7 @@ impl DiagramStudioDialog {
                     );
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_add_preset_instance".into(), add_instance.rect, ui.clip_rect()));
+                    visual_target!(ui, add_instance, "visual/add-instance", "Add preset instance", Button);
                     if add_instance.clicked() && document_intent.is_none()
                         && let Some(preset_id) = selected_preset
                     {
@@ -11022,7 +11068,7 @@ impl DiagramStudioDialog {
                     working_object.as_mut(),
                 ) {
                     ui.add_enabled_ui(visual_edits_allowed, |ui| {
-                    egui::CollapsingHeader::new("Object properties")
+                    let properties_header = egui::CollapsingHeader::new("Object properties")
                         .default_open(true)
                         .show(ui, |ui| {
                         let selected_is_connector = matches!(
@@ -11040,6 +11086,8 @@ impl DiagramStudioDialog {
                                         || "Frame: none".to_owned(),
                                         |id| format!("Frame: #{}", id.get()),
                                     ));
+                                    let parent_key = format!("visual/{}/parent", selected_id.get());
+                                    let parent_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope(&parent_key));
                                     let _parent_combo = egui::ComboBox::from_id_salt((
                                         "diagram-visual-membership-parent",
                                         selected_id,
@@ -11050,6 +11098,7 @@ impl DiagramStudioDialog {
                                         })
                                         .map_or_else(|| "Choose frame".to_owned(), visual_object_label))
                                     .show_ui(ui, |ui| {
+                                        let mut popup_order = 0;
                                         for candidate in scene.objects.iter().filter(|candidate| {
                                             matches!(
                                                 &candidate.kind,
@@ -11062,6 +11111,7 @@ impl DiagramStudioDialog {
                                                 Some(candidate.id),
                                                 visual_object_label(candidate),
                                             );
+                                            diagram_menu_target(parent_scope.as_ref(), ui, &_response, &format!("object/{}", candidate.id.get()), &visual_object_label(candidate), &mut popup_order);
                                             #[cfg(test)]
                                             self.test_action_rects.push((
                                                 format!("visual_parent_option_{}", candidate.id.get()),
@@ -11070,6 +11120,7 @@ impl DiagramStudioDialog {
                                             ));
                                         }
                                     });
+                                    visual_target!(ui, _parent_combo.response, parent_key, "Parent frame", ComboBox);
                                     #[cfg(test)]
                                     self.test_action_rects.push((
                                         "visual_membership_parent".into(),
@@ -11090,6 +11141,7 @@ impl DiagramStudioDialog {
                                         assign.rect,
                                         ui.clip_rect(),
                                     ));
+                            visual_target!(ui, assign, format!("visual/{}/assign", selected_id.get()), "Assign / reparent", Button);
                                     if assign.clicked()
                                         && pending.is_none()
                                         && document_intent.is_none()
@@ -11115,6 +11167,7 @@ impl DiagramStudioDialog {
                                         detach.rect,
                                         ui.clip_rect(),
                                     ));
+                            visual_target!(ui, detach, format!("visual/{}/detach", selected_id.get()), "Detach from frame", Button);
                                     if detach.clicked()
                                         && pending.is_none()
                                         && document_intent.is_none()
@@ -11147,11 +11200,11 @@ impl DiagramStudioDialog {
                         if !matches!(&object.kind, VisualObjectKind::Connector { .. }) {
                             ui.add_enabled_ui(!populated_frame, |ui| ui.horizontal_wrapped(|ui| {
                                 ui.label("Position / size");
-                                ui.add(egui::DragValue::new(&mut object.transform.x).prefix("x ").speed(1.0));
-                                ui.add(egui::DragValue::new(&mut object.transform.y).prefix("y ").speed(1.0));
-                                ui.add(egui::DragValue::new(&mut object.transform.width).prefix("w ").speed(1.0));
-                                ui.add(egui::DragValue::new(&mut object.transform.height).prefix("h ").speed(1.0));
-                                ui.add(egui::DragValue::new(&mut object.transform.rotation_degrees).prefix("° ").speed(1.0));
+                                let x = ui.add(egui::DragValue::new(&mut object.transform.x).prefix("x ").speed(1.0)); visual_target!(ui, x, format!("visual/{}/x", selected_id.get()), "X position", Slider);
+                                let y = ui.add(egui::DragValue::new(&mut object.transform.y).prefix("y ").speed(1.0)); visual_target!(ui, y, format!("visual/{}/y", selected_id.get()), "Y position", Slider);
+                                let width = ui.add(egui::DragValue::new(&mut object.transform.width).prefix("w ").speed(1.0)); visual_target!(ui, width, format!("visual/{}/width", selected_id.get()), "Width", Slider);
+                                let height = ui.add(egui::DragValue::new(&mut object.transform.height).prefix("h ").speed(1.0)); visual_target!(ui, height, format!("visual/{}/height", selected_id.get()), "Height", Slider);
+                                let rotation = ui.add(egui::DragValue::new(&mut object.transform.rotation_degrees).prefix("° ").speed(1.0)); visual_target!(ui, rotation, format!("visual/{}/rotation", selected_id.get()), "Rotation", Slider);
                             }));
                             if populated_frame {
                                 ui.weak("Use the canvas group handles to transform this frame with its members.");
@@ -11161,23 +11214,27 @@ impl DiagramStudioDialog {
                             VisualObjectKind::Text { text } => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Ink");
-                                    edit_visual_color(ui, &mut object.style.border);
-                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
-                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Font ").speed(0.5));
-                                    visual_font_family_picker(ui, &mut object.style.font_family);
+                                    let color = edit_visual_color(ui, &mut object.style.border);
+                                    visual_target!(ui, color, format!("visual/{}/ink-color", selected_id.get()), "Ink", Button);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02)); visual_target!(ui, response, format!("visual/{}/field/object.style.opacity", selected_id.get()), "Opacity", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Font ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/object.style.font_size", selected_id.get()), "Font", Slider);
+                                    visual_font_family_picker_with_jump(ui, &mut object.style.font_family, jump_scope.as_ref(), &format!("visual/{}/font", selected_id.get()), &mut property_order);
                                 });
                                 ui.label("Text");
-                                ui.add(egui::TextEdit::multiline(text).desired_rows(2));
+                                let text_response = ui.add(egui::TextEdit::multiline(text).desired_rows(2));
+                                visual_target!(ui, text_response, format!("visual/{}/text", selected_id.get()), "Text", TextEntry);
                             }
                             VisualObjectKind::Container { label } => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Header fill");
-                                    edit_visual_color(ui, &mut object.style.fill);
+                                    let color = edit_visual_color(ui, &mut object.style.fill);
+                                    visual_target!(ui, color, format!("visual/{}/header-fill-color", selected_id.get()), "Header fill", Button);
                                     ui.label("Border / text");
-                                    edit_visual_color(ui, &mut object.style.border);
-                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
-                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
-                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Label font ").speed(0.5));
+                                    let color = edit_visual_color(ui, &mut object.style.border);
+                                    visual_target!(ui, color, format!("visual/{}/border-text-color", selected_id.get()), "Border / text", Button);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25)); visual_target!(ui, response, format!("visual/{}/field/object.style.border_width", selected_id.get()), "Stroke", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02)); visual_target!(ui, response, format!("visual/{}/field/object.style.opacity", selected_id.get()), "Opacity", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Label font ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/object.style.font_size", selected_id.get()), "Label font", Slider);
                                 });
                                 let label_id = ui.make_persistent_id((
                                     "diagram-visual-frame-label",
@@ -11188,6 +11245,7 @@ impl DiagramStudioDialog {
                                 let _label_edit = ui.add(
                                     egui::TextEdit::singleline(label).id(label_id),
                                 );
+                                visual_target!(ui, _label_edit, format!("visual/{}/frame-label", selected_id.get()), "Frame label", TextEntry);
                                 #[cfg(test)]
                                 self.test_action_rects.push((
                                     "visual_frame_label".into(),
@@ -11198,23 +11256,29 @@ impl DiagramStudioDialog {
                             VisualObjectKind::Swimlane { orientation, label } => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Header fill");
-                                    edit_visual_color(ui, &mut object.style.fill);
+                                    let color = edit_visual_color(ui, &mut object.style.fill);
+                                    visual_target!(ui, color, format!("visual/{}/header-fill-color", selected_id.get()), "Header fill", Button);
                                     ui.label("Border / text");
-                                    edit_visual_color(ui, &mut object.style.border);
-                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
-                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
-                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Label font ").speed(0.5));
+                                    let color = edit_visual_color(ui, &mut object.style.border);
+                                    visual_target!(ui, color, format!("visual/{}/border-text-color", selected_id.get()), "Border / text", Button);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25)); visual_target!(ui, response, format!("visual/{}/field/object.style.border_width", selected_id.get()), "Stroke", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02)); visual_target!(ui, response, format!("visual/{}/field/object.style.opacity", selected_id.get()), "Opacity", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Label font ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/object.style.font_size", selected_id.get()), "Label font", Slider);
+                                    let orientation_key = format!("visual/{}/orientation", selected_id.get());
+                                    let orientation_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope(&orientation_key));
                                     let _orientation_combo = egui::ComboBox::from_id_salt("diagram-visual-swimlane-orientation")
                                         .selected_text(match orientation {
                                             VisualSwimlaneOrientation::Horizontal => "Horizontal",
                                             VisualSwimlaneOrientation::Vertical => "Vertical",
                                         })
                                         .show_ui(ui, |ui| {
+                                            let mut order = 0;
                                             let _horizontal = ui.selectable_value(
                                                 orientation,
                                                 VisualSwimlaneOrientation::Horizontal,
                                                 "Horizontal",
                                             );
+                                            diagram_menu_target(orientation_scope.as_ref(), ui, &_horizontal, "horizontal", "Horizontal", &mut order);
                                             #[cfg(test)]
                                             self.test_action_rects.push((
                                                 "visual_swimlane_horizontal".into(),
@@ -11226,6 +11290,7 @@ impl DiagramStudioDialog {
                                                 VisualSwimlaneOrientation::Vertical,
                                                 "Vertical",
                                             );
+                                            diagram_menu_target(orientation_scope.as_ref(), ui, &_vertical, "vertical", "Vertical", &mut order);
                                             #[cfg(test)]
                                             self.test_action_rects.push((
                                                 "visual_swimlane_vertical".into(),
@@ -11233,6 +11298,7 @@ impl DiagramStudioDialog {
                                                 ui.clip_rect(),
                                             ));
                                         });
+                                    visual_target!(ui, _orientation_combo.response, orientation_key, "Lane orientation", ComboBox);
                                     #[cfg(test)]
                                     self.test_action_rects.push((
                                         "visual_swimlane_orientation".into(),
@@ -11249,6 +11315,7 @@ impl DiagramStudioDialog {
                                 let _label_edit = ui.add(
                                     egui::TextEdit::singleline(label).id(label_id),
                                 );
+                                visual_target!(ui, _label_edit, format!("visual/{}/lane-label", selected_id.get()), "Lane label", TextEntry);
                                 #[cfg(test)]
                                 self.test_action_rects.push((
                                     "visual_frame_label".into(),
@@ -11259,50 +11326,42 @@ impl DiagramStudioDialog {
                             VisualObjectKind::Primitive { .. } => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Fill");
-                                    edit_visual_color(ui, &mut object.style.fill);
+                                    let color = edit_visual_color(ui, &mut object.style.fill);
+                                    visual_target!(ui, color, format!("visual/{}/fill-color", selected_id.get()), "Fill", Button);
                                     ui.label("Border");
-                                    edit_visual_color(ui, &mut object.style.border);
-                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
-                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
+                                    let color = edit_visual_color(ui, &mut object.style.border);
+                                    visual_target!(ui, color, format!("visual/{}/border-color", selected_id.get()), "Border", Button);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25)); visual_target!(ui, response, format!("visual/{}/field/object.style.border_width", selected_id.get()), "Stroke", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02)); visual_target!(ui, response, format!("visual/{}/field/object.style.opacity", selected_id.get()), "Opacity", Slider);
                                     ui.label("Line");
-                                    egui::ComboBox::from_id_salt("diagram-visual-line-style")
-                                        .selected_text(visual_line_style_label(object.style.line_style))
-                                        .show_ui(ui, |ui| {
-                                            for style in [VisualLineStyle::Solid, VisualLineStyle::Dashed, VisualLineStyle::Dotted] {
-                                                ui.selectable_value(&mut object.style.line_style, style, visual_line_style_label(style));
-                                            }
-                                        });
+                                    visual_line_style_picker(ui, &mut object.style.line_style, jump_scope.as_ref(), &format!("visual/{}/line-style", selected_id.get()), &mut property_order);
                                 });
                             }
                             VisualObjectKind::ImageReference { .. } => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Placeholder fill");
-                                    edit_visual_color(ui, &mut object.style.fill);
+                                    let color = edit_visual_color(ui, &mut object.style.fill);
+                                    visual_target!(ui, color, format!("visual/{}/placeholder-fill-color", selected_id.get()), "Placeholder fill", Button);
                                     ui.label("Border / ink");
-                                    edit_visual_color(ui, &mut object.style.border);
-                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
-                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
-                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Font ").speed(0.5));
-                                    visual_font_family_picker(ui, &mut object.style.font_family);
-                                    egui::ComboBox::from_id_salt("diagram-visual-image-line-style")
-                                        .selected_text(visual_line_style_label(object.style.line_style))
-                                        .show_ui(ui, |ui| {
-                                            for style in [VisualLineStyle::Solid, VisualLineStyle::Dashed, VisualLineStyle::Dotted] {
-                                                ui.selectable_value(&mut object.style.line_style, style, visual_line_style_label(style));
-                                            }
-                                        });
+                                    let color = edit_visual_color(ui, &mut object.style.border);
+                                    visual_target!(ui, color, format!("visual/{}/border-ink-color", selected_id.get()), "Border / ink", Button);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25)); visual_target!(ui, response, format!("visual/{}/field/object.style.border_width", selected_id.get()), "Stroke", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02)); visual_target!(ui, response, format!("visual/{}/field/object.style.opacity", selected_id.get()), "Opacity", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Font ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/object.style.font_size", selected_id.get()), "Font", Slider);
+                                    visual_font_family_picker_with_jump(ui, &mut object.style.font_family, jump_scope.as_ref(), &format!("visual/{}/font", selected_id.get()), &mut property_order);
+                                    visual_line_style_picker(ui, &mut object.style.line_style, jump_scope.as_ref(), &format!("visual/{}/image-line-style", selected_id.get()), &mut property_order);
                                 });
                                 ui.weak("Image assets are not loaded in this checkpoint.");
                             }
                             VisualObjectKind::PresetInstance { .. } => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Preset instance opacity");
-                                    ui.add(egui::DragValue::new(&mut object.style.opacity).range(0.0..=1.0).speed(0.02));
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.opacity).range(0.0..=1.0).speed(0.02)); visual_target!(ui, response, format!("visual/{}/field/object.style.opacity", selected_id.get()), "opacity", Slider);
                                 });
                                 ui.weak("Primitive styles are defined in the preset.");
                             }
                             VisualObjectKind::Connector { connector } => {
-                                let from_id = visual_connector_endpoint_editor(
+                                let from_id = visual_connector_endpoint_editor_with_jump(
                                     ui,
                                     "From",
                                     "diagram-visual-connector-from",
@@ -11310,6 +11369,7 @@ impl DiagramStudioDialog {
                                     &mut connector.from,
                                     selected_id,
                                     &scene.objects,
+                                    jump_scope.as_ref(), &mut property_order,
                                     |option_id, action, caption, rect, clip| {
                                         #[cfg(test)]
                                         let _ = caption;
@@ -11335,7 +11395,7 @@ impl DiagramStudioDialog {
                                     *canvas_focus_requested = Some(from_id);
                                     effects.visual_connector_focus = Some(None);
                                 }
-                                visual_connector_endpoint_editor(
+                                visual_connector_endpoint_editor_with_jump(
                                     ui,
                                     "To",
                                     "diagram-visual-connector-to",
@@ -11343,6 +11403,7 @@ impl DiagramStudioDialog {
                                     &mut connector.to,
                                     selected_id,
                                     &scene.objects,
+                                    jump_scope.as_ref(), &mut property_order,
                                     |option_id, action, caption, rect, clip| {
                                         #[cfg(test)]
                                         let _ = caption;
@@ -11361,9 +11422,12 @@ impl DiagramStudioDialog {
                                 );
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Route");
+                                    let route_key = format!("visual/{}/route", selected_id.get());
+                                    let route_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope(&route_key));
                                     let _route_combo = ui.add_enabled_ui(connector.manual_route.is_none(), |ui| egui::ComboBox::from_id_salt("diagram-visual-connector-route")
                                         .selected_text(visual_connector_route_label(connector.route))
                                         .show_ui(ui, |ui| {
+                                            let mut order = 0;
                                             for route in [
                                                 VisualConnectorRoute::Straight,
                                                 VisualConnectorRoute::Elbow,
@@ -11374,6 +11438,7 @@ impl DiagramStudioDialog {
                                                     route,
                                                     visual_connector_route_label(route),
                                                 );
+                                                diagram_menu_target(route_scope.as_ref(), ui, &_response, visual_connector_route_label(route), visual_connector_route_label(route), &mut order);
                                                 #[cfg(test)]
                                                 self.test_action_rects.push((
                                                     format!(
@@ -11385,6 +11450,7 @@ impl DiagramStudioDialog {
                                                 ));
                                             }
                                         })).inner;
+                                    visual_target!(ui, _route_combo.response, route_key, "Connector route", ComboBox);
                                     #[cfg(test)]
                                     self.test_action_rects.push((
                                         "visual_connector_route".into(),
@@ -11392,9 +11458,12 @@ impl DiagramStudioDialog {
                                         ui.clip_rect(),
                                     ));
                                     ui.label("Direction");
+                                    let direction_key = format!("visual/{}/direction", selected_id.get());
+                                    let direction_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope(&direction_key));
                                     let _direction_combo = egui::ComboBox::from_id_salt("diagram-visual-connector-direction")
                                         .selected_text(visual_connector_direction_label(connector.direction))
                                         .show_ui(ui, |ui| {
+                                            let mut order = 0;
                                             for direction in [
                                                 VisualConnectorDirection::None,
                                                 VisualConnectorDirection::Forward,
@@ -11406,6 +11475,7 @@ impl DiagramStudioDialog {
                                                     direction,
                                                     visual_connector_direction_label(direction),
                                                 );
+                                                diagram_menu_target(direction_scope.as_ref(), ui, &_response, visual_connector_direction_label(direction), visual_connector_direction_label(direction), &mut order);
                                                 #[cfg(test)]
                                                 self.test_action_rects.push((
                                                     format!(
@@ -11419,6 +11489,7 @@ impl DiagramStudioDialog {
                                                 ));
                                             }
                                         });
+                                    visual_target!(ui, _direction_combo.response, direction_key, "Connector direction", ComboBox);
                                     #[cfg(test)]
                                     self.test_action_rects.push((
                                         "visual_connector_direction".into(),
@@ -11433,6 +11504,9 @@ impl DiagramStudioDialog {
                                     let add = ui.add_enabled(structural_edits_allowed && can_add, egui::Button::new("Add bend"));
                                     let remove = ui.add_enabled(structural_edits_allowed && matches!(&connector.manual_route, Some(crate::diagram::VisualManualRoute::Polyline { .. })), egui::Button::new("Remove last bend"));
                                     let reset = ui.add_enabled(structural_edits_allowed && connector.manual_route.is_some(), egui::Button::new("Reset automatic"));
+                                    visual_target!(ui, add, format!("visual/{}/add-bend", selected_id.get()), "Add bend", Button);
+                                    visual_target!(ui, remove, format!("visual/{}/remove-bend", selected_id.get()), "Remove last bend", Button);
+                                    visual_target!(ui, reset, format!("visual/{}/reset-route", selected_id.get()), "Reset automatic", Button);
                                     #[cfg(test)] {
                                         self.test_action_rects.push(("visual_connector_add_bend".into(), add.rect, ui.clip_rect()));
                                         self.test_action_rects.push(("visual_connector_remove_bend".into(), remove.rect, ui.clip_rect()));
@@ -11465,30 +11539,17 @@ impl DiagramStudioDialog {
                                 ui.weak("Manual points stay fixed when endpoints move; copying a connected selection moves the whole route.");
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Line");
-                                    egui::ComboBox::from_id_salt("diagram-visual-connector-line-style")
-                                        .selected_text(visual_line_style_label(object.style.line_style))
-                                        .show_ui(ui, |ui| {
-                                            for style in [
-                                                VisualLineStyle::Solid,
-                                                VisualLineStyle::Dashed,
-                                                VisualLineStyle::Dotted,
-                                            ] {
-                                                ui.selectable_value(
-                                                    &mut object.style.line_style,
-                                                    style,
-                                                    visual_line_style_label(style),
-                                                );
-                                            }
-                                        });
+                                    visual_line_style_picker(ui, &mut object.style.line_style, jump_scope.as_ref(), &format!("visual/{}/connector-line-style", selected_id.get()), &mut property_order);
                                     ui.label("Ink");
-                                    edit_visual_color(ui, &mut object.style.border);
-                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
-                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
+                                    let color = edit_visual_color(ui, &mut object.style.border);
+                                    visual_target!(ui, color, format!("visual/{}/ink-color", selected_id.get()), "Ink", Button);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25)); visual_target!(ui, response, format!("visual/{}/field/object.style.border_width", selected_id.get()), "Stroke", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02)); visual_target!(ui, response, format!("visual/{}/field/object.style.opacity", selected_id.get()), "Opacity", Slider);
                                 });
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Label font");
-                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Size ").speed(0.5));
-                                    visual_font_family_picker(ui, &mut object.style.font_family);
+                                    let response = ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Size ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/object.style.font_size", selected_id.get()), "Size", Slider);
+                                    visual_font_family_picker_with_jump(ui, &mut object.style.font_family, jump_scope.as_ref(), &format!("visual/{}/font", selected_id.get()), &mut property_order);
                                 });
                                 ui.label("Connector label");
                                 let _label_edit = ui.add(
@@ -11496,6 +11557,7 @@ impl DiagramStudioDialog {
                                         .desired_rows(2)
                                         .char_limit(MAX_VISUAL_CONNECTOR_LABEL_BYTES / 4),
                                 );
+                                visual_target!(ui, _label_edit, format!("visual/{}/connector-label", selected_id.get()), "Connector label", TextEntry);
                                 #[cfg(test)]
                                 self.test_action_rects.push((
                                     "visual_connector_label".into(),
@@ -11507,9 +11569,10 @@ impl DiagramStudioDialog {
                         if let Some(label) = object.owned_label.as_mut() {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("Label ink");
-                                edit_visual_color(ui, &mut label.style.border);
-                                ui.add(egui::DragValue::new(&mut label.style.font_size).prefix("Label size ").speed(0.5));
-                                visual_font_family_picker(ui, &mut label.style.font_family);
+                                let color = edit_visual_color(ui, &mut label.style.border);
+                                visual_target!(ui, color, format!("visual/{}/label-ink-color", selected_id.get()), "Label ink", Button);
+                                let response = ui.add(egui::DragValue::new(&mut label.style.font_size).prefix("Label size ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/label.style.font_size", selected_id.get()), "Label size", Slider);
+                                visual_font_family_picker_with_jump(ui, &mut label.style.font_family, jump_scope.as_ref(), &format!("visual/{}/label-font", selected_id.get()), &mut property_order);
                             });
                         }
                         if !matches!(
@@ -11518,7 +11581,9 @@ impl DiagramStudioDialog {
                                 | VisualObjectKind::Connector { .. }
                         ) {
                             let mut has_shadow = object.style.shadow.is_some();
-                            if ui.checkbox(&mut has_shadow, "Shadow").changed() {
+                            let shadow = ui.checkbox(&mut has_shadow, "Shadow");
+                            visual_target!(ui, shadow, format!("visual/{}/shadow", selected_id.get()), "Shadow", Checkbox);
+                            if shadow.changed() {
                                 object.style.shadow = has_shadow.then_some(VisualShadow {
                                     offset_x: 4.0,
                                     offset_y: 4.0,
@@ -11528,20 +11593,25 @@ impl DiagramStudioDialog {
                             }
                             if let Some(shadow) = object.style.shadow.as_mut() {
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.add(egui::DragValue::new(&mut shadow.offset_x).prefix("Shadow x ").speed(0.5));
-                                    ui.add(egui::DragValue::new(&mut shadow.offset_y).prefix("y ").speed(0.5));
-                                    ui.add(egui::DragValue::new(&mut shadow.blur).prefix("Blur ").speed(0.5));
+                                    let response = ui.add(egui::DragValue::new(&mut shadow.offset_x).prefix("Shadow x ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/shadow.offset_x", selected_id.get()), "Shadow x", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut shadow.offset_y).prefix("y ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/shadow.offset_y", selected_id.get()), "y", Slider);
+                                    let response = ui.add(egui::DragValue::new(&mut shadow.blur).prefix("Blur ").speed(0.5)); visual_target!(ui, response, format!("visual/{}/field/shadow.blur", selected_id.get()), "Blur", Slider);
                                 });
                             }
                         }
                         if let Some(scene_layer) = scene.layers.iter().find(|layer| layer.id == object.layer_id) {
-                            egui::ComboBox::from_id_salt("diagram-visual-object-layer")
+                            let layer_key = format!("visual/{}/layer", selected_id.get());
+                            let layer_scope = jump_scope.as_ref().map(|scope| scope.combo_popup_scope(&layer_key));
+                            let layer_combo = egui::ComboBox::from_id_salt("diagram-visual-object-layer")
                                 .selected_text(scene_layer.name.clone())
                                 .show_ui(ui, |ui| {
+                                    let mut order = 0;
                                     for layer in &scene.layers {
-                                        ui.selectable_value(&mut object.layer_id, layer.id, layer.name.clone());
+                                        let response = ui.selectable_value(&mut object.layer_id, layer.id, layer.name.clone());
+                                        diagram_menu_target(layer_scope.as_ref(), ui, &response, &format!("layer/{}", layer.id.get()), &layer.name, &mut order);
                                     }
                                 });
+                            visual_target!(ui, layer_combo.response, layer_key, "Object layer", ComboBox);
                         }
                         let object_index = scene
                             .objects
@@ -11567,6 +11637,7 @@ impl DiagramStudioDialog {
                             let back = ui.add_enabled(structural_edits_allowed && back_target.is_some(), egui::Button::new("Send back"));
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_send_back".into(), back.rect, ui.clip_rect()));
+                            visual_target!(ui, back, format!("visual/{}/back", selected_id.get()), "Send back", Button);
                             if back.clicked()
                                 && pending.is_none()
                                 && document_intent.is_none()
@@ -11577,6 +11648,7 @@ impl DiagramStudioDialog {
                             let forward = ui.add_enabled(structural_edits_allowed && forward_target.is_some(), egui::Button::new("Bring forward"));
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_bring_forward".into(), forward.rect, ui.clip_rect()));
+                            visual_target!(ui, forward, format!("visual/{}/forward", selected_id.get()), "Bring forward", Button);
                             if forward.clicked()
                                 && pending.is_none()
                                 && document_intent.is_none()
@@ -11585,6 +11657,7 @@ impl DiagramStudioDialog {
                                 staged_operations = Some((vec![VisualOperation::MoveObject { id: selected_id, to_index }], None));
                             }
                             let remove = ui.add_enabled(structural_edits_allowed && selected_id != crate::diagram::TITLE_OBJECT_ID, egui::Button::new("Remove object"));
+                            visual_target!(ui, remove, format!("visual/{}/remove", selected_id.get()), "Remove object", Button);
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_remove_object".into(), remove.rect, ui.clip_rect()));
                             if remove.clicked() && pending.is_none() && document_intent.is_none() {
@@ -11597,6 +11670,7 @@ impl DiagramStudioDialog {
                                 self.test_action_rects.push(("visual_apply_properties".into(), apply.rect, ui.clip_rect()));
                                 self.test_action_enabled.push(("visual_apply_properties".into(), apply.enabled()));
                             }
+                            visual_target!(ui, apply, format!("visual/{}/apply", selected_id.get()), "Apply properties", Button);
                             if apply.clicked() && pending.is_none() && document_intent.is_none() {
                                 if let Some(operations) = crate::diagram::visual_canvas_property_transform_operations(scene, object) {
                                     staged_operations = Some((operations, Some(selected_id)));
@@ -11607,11 +11681,13 @@ impl DiagramStudioDialog {
                             let cancel = ui.add_enabled(visual_edits_allowed, egui::Button::new("Cancel property edit"));
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_cancel_properties".into(), cancel.rect, ui.clip_rect()));
+                            visual_target!(ui, cancel, format!("visual/{}/cancel", selected_id.get()), "Cancel property edit", Button);
                             if cancel.clicked() {
                                 clear_visual_draft = true;
                             }
                         });
                     });
+                    visual_target!(ui, properties_header.header_response, format!("visual/{}/properties", selected_id.get()), "Object properties", Button);
                     });
                 }
 
@@ -12608,17 +12684,24 @@ fn visual_font_family_label(family: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn visual_font_family_picker(ui: &mut egui::Ui, family: &mut String) -> egui::Response {
-    egui::ComboBox::from_id_salt(ui.next_auto_id())
+    visual_font_family_picker_with_jump(ui, family, None, "test-font", &mut 0)
+}
+
+fn visual_font_family_picker_with_jump(ui: &mut egui::Ui, family: &mut String, scope: Option<&super::jump_mode::ui::JumpModeScope>, key: &str, order: &mut u64) -> egui::Response {
+    let popup_scope = scope.map(|scope| scope.combo_popup_scope(key));
+    let combo = egui::ComboBox::from_id_salt(ui.next_auto_id())
         .selected_text(visual_font_family_label(family))
         .show_ui(ui, |ui| {
-            if ui
-                .selectable_label(family.eq_ignore_ascii_case("sans-serif"), "Sans serif")
-                .clicked()
-            {
+            let mut popup_order = 0;
+            let sans = ui.selectable_label(family.eq_ignore_ascii_case("sans-serif"), "Sans serif");
+            diagram_menu_target(popup_scope.as_ref(), ui, &sans, "sans", "Sans serif", &mut popup_order);
+            if sans.clicked() {
                 *family = "sans-serif".to_owned();
             }
             let mono = ui.selectable_label(family.eq_ignore_ascii_case("monospace"), "Monospace");
+            diagram_menu_target(popup_scope.as_ref(), ui, &mono, "mono", "Monospace", &mut popup_order);
             #[cfg(test)]
             ui.ctx().data_mut(|data| {
                 data.insert_temp(egui::Id::new("test-visual-font-monospace"), mono.rect)
@@ -12626,8 +12709,22 @@ fn visual_font_family_picker(ui: &mut egui::Ui, family: &mut String) -> egui::Re
             if mono.clicked() {
                 *family = "monospace".to_owned();
             }
-        })
-        .response
+        });
+    diagram_panel_target(scope, ui, &combo.response, key, "Font family", super::jump_mode::TargetKind::ComboBox, order);
+    combo.response
+}
+
+fn visual_line_style_picker(ui: &mut egui::Ui, style: &mut VisualLineStyle, scope: Option<&super::jump_mode::ui::JumpModeScope>, key: &str, order: &mut u64) {
+    let popup_scope = scope.map(|scope| scope.combo_popup_scope(key));
+    let combo = egui::ComboBox::from_id_salt(key).selected_text(visual_line_style_label(*style)).show_ui(ui, |ui| {
+        let mut popup_order = 0;
+        for choice in [VisualLineStyle::Solid, VisualLineStyle::Dashed, VisualLineStyle::Dotted] {
+            let label = visual_line_style_label(choice);
+            let response = ui.selectable_value(style, choice, label);
+            diagram_menu_target(popup_scope.as_ref(), ui, &response, label, label, &mut popup_order);
+        }
+    });
+    diagram_panel_target(scope, ui, &combo.response, key, "Line style", super::jump_mode::TargetKind::ComboBox, order);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -13068,7 +13165,16 @@ fn visual_frame_can_parent(
     true
 }
 
+#[cfg(test)]
 fn visual_connector_endpoint_editor(
+    ui: &mut egui::Ui, label: &str, id_salt: &str, action_name: &str,
+    endpoint: &mut VisualConnectorEndpoint, connector_id: VisualObjectId, objects: &[VisualObject],
+    record_action: impl FnMut(Option<VisualObjectId>, &str, &str, egui::Rect, egui::Rect),
+) -> egui::Id {
+    visual_connector_endpoint_editor_with_jump(ui, label, id_salt, action_name, endpoint, connector_id, objects, None, &mut 0, record_action)
+}
+
+fn visual_connector_endpoint_editor_with_jump(
     ui: &mut egui::Ui,
     label: &str,
     id_salt: &str,
@@ -13076,6 +13182,8 @@ fn visual_connector_endpoint_editor(
     endpoint: &mut VisualConnectorEndpoint,
     connector_id: VisualObjectId,
     objects: &[VisualObject],
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
     mut record_action: impl FnMut(Option<VisualObjectId>, &str, &str, egui::Rect, egui::Rect),
 ) -> egui::Id {
     ui.horizontal_wrapped(|ui| {
@@ -13084,9 +13192,12 @@ fn visual_connector_endpoint_editor(
             .iter()
             .find(|object| object.id == endpoint.object_id);
         let selected_caption = visual_endpoint_label(objects, endpoint.object_id);
+        let key = format!("visual/{}/endpoint/{id_salt}", connector_id.get());
+        let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope(&key));
         let object_combo = egui::ComboBox::from_id_salt((id_salt, "object"))
             .selected_text(&selected_caption)
             .show_ui(ui, |ui| {
+                let mut order = 0;
                 for object in objects.iter().filter(|object| {
                     object.id != connector_id
                         && !matches!(&object.kind, VisualObjectKind::Connector { .. })
@@ -13099,6 +13210,7 @@ fn visual_connector_endpoint_editor(
                     } else {
                         response
                     };
+                    diagram_menu_target(popup_scope.as_ref(), ui, &response, &format!("object/{}", object.id.get()), &caption, &mut order);
                     record_action(
                         Some(object.id),
                         action_name,
@@ -13121,9 +13233,13 @@ fn visual_connector_endpoint_editor(
             ui.clip_rect(),
         );
         let object_id = response.id;
-        egui::ComboBox::from_id_salt((id_salt, "anchor"))
+        diagram_panel_target(jump_scope, ui, &response, &key, &format!("Connector {label} object"), super::jump_mode::TargetKind::ComboBox, jump_order);
+        let anchor_key = format!("{key}/anchor");
+        let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope(&anchor_key));
+        let anchor_combo = egui::ComboBox::from_id_salt((id_salt, "anchor"))
             .selected_text(visual_anchor_label(endpoint.anchor))
             .show_ui(ui, |ui| {
+                let mut order = 0;
                 for anchor in [
                     VisualAnchor::North,
                     VisualAnchor::NorthEast,
@@ -13134,9 +13250,11 @@ fn visual_connector_endpoint_editor(
                     VisualAnchor::West,
                     VisualAnchor::NorthWest,
                 ] {
-                    ui.selectable_value(&mut endpoint.anchor, anchor, visual_anchor_label(anchor));
+                    let response = ui.selectable_value(&mut endpoint.anchor, anchor, visual_anchor_label(anchor));
+                    diagram_menu_target(popup_scope.as_ref(), ui, &response, visual_anchor_label(anchor), visual_anchor_label(anchor), &mut order);
                 }
             });
+        diagram_panel_target(jump_scope, ui, &anchor_combo.response, &anchor_key, &format!("Connector {label} anchor"), super::jump_mode::TargetKind::ComboBox, jump_order);
         object_id
     }).inner
 }
@@ -13523,6 +13641,7 @@ fn source_editor(
         color_draft,
         color_enabled,
         pending,
+        jump_scope, jump_order,
         #[cfg(test)]
         test_action_rects,
         #[cfg(test)]
@@ -13612,6 +13731,8 @@ fn draw_mermaid_colors(
     prior: &Option<MermaidColorDraft>,
     enabled: bool,
     pending: &mut Option<PendingMutation>,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
     #[cfg(test)] test_action_focus_ids: &mut Vec<(String, egui::Id)>,
 ) -> Option<MermaidColorDraft> {
@@ -13625,12 +13746,13 @@ fn draw_mermaid_colors(
         None => match color_draft_for(source, document, revision, family) {
             Ok(draft) => draft,
             Err(error) => {
-                ui.collapsing("Colors", |ui| {
+                let panel = ui.collapsing("Colors", |ui| {
                     ui.colored_label(
                         egui::Color32::from_rgb(190, 65, 45),
                         format!("Resolve source configuration first: {error}"),
                     );
                 });
+                diagram_panel_target(jump_scope, ui, &panel.header_response, "colors/header", "Colors", super::jump_mode::TargetKind::Button, jump_order);
                 return None;
             }
         },
@@ -13644,17 +13766,21 @@ fn draw_mermaid_colors(
         if stale {
             ui.label("Source changed. Reload colors before applying.");
             match color_draft_for(source, document, revision, family) {
-                Ok(reloaded) => { if ui.add_enabled(enabled, egui::Button::new("Reload colors")).clicked() { draft = reloaded; } }
+                Ok(reloaded) => { let response = ui.add_enabled(enabled, egui::Button::new("Reload colors")); diagram_panel_target(jump_scope, ui, &response, "colors/reload", "Reload colors", super::jump_mode::TargetKind::Button, jump_order); if response.clicked() { draft = reloaded; } }
                 Err(error) => { ui.colored_label(egui::Color32::from_rgb(190, 65, 45), format!("Resolve source configuration first: {error}")); }
             }
         }
         ui.add_enabled_ui(enabled && draft.revision == revision, |ui| {
-            egui::ComboBox::from_id_salt("mermaid-color-preset")
+            let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope("colors/preset"));
+            let preset = egui::ComboBox::from_id_salt("mermaid-color-preset")
                 .selected_text(match draft.style.theme { None => "No preset (keep colors)", Some(crate::diagram::MermaidTheme::Default) => "Mermaid default", Some(crate::diagram::MermaidTheme::Dark) => "Dark", Some(crate::diagram::MermaidTheme::Forest) => "Forest", Some(crate::diagram::MermaidTheme::Neutral) => "Neutral" })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut draft.style.theme, None, "No preset (keep colors)");
-                    for (theme, label) in [(crate::diagram::MermaidTheme::Default, "Mermaid default"), (crate::diagram::MermaidTheme::Dark, "Dark"), (crate::diagram::MermaidTheme::Forest, "Forest"), (crate::diagram::MermaidTheme::Neutral, "Neutral")] { ui.selectable_value(&mut draft.style.theme, Some(theme), label); }
+                    let mut popup_order = 0;
+                    let response = ui.selectable_value(&mut draft.style.theme, None, "No preset (keep colors)");
+                    diagram_menu_target(popup_scope.as_ref(), ui, &response, "none", "No preset (keep colors)", &mut popup_order);
+                    for (theme, label) in [(crate::diagram::MermaidTheme::Default, "Mermaid default"), (crate::diagram::MermaidTheme::Dark, "Dark"), (crate::diagram::MermaidTheme::Forest, "Forest"), (crate::diagram::MermaidTheme::Neutral, "Neutral")] { let response = ui.selectable_value(&mut draft.style.theme, Some(theme), label); diagram_menu_target(popup_scope.as_ref(), ui, &response, label, label, &mut popup_order); }
                 });
+            diagram_panel_target(jump_scope, ui, &preset.response, "colors/preset", "Color preset", super::jump_mode::TargetKind::ComboBox, jump_order);
             ui.weak("Hex colors: #RGB or #RRGGBB. Blank inherits. Explicit colors override the preset. Palettes: comma-separated, up to eight.");
             let fields: &[(Field, &str)] = match family {
                 Some(DiagramFamily::Mindmap) => &[(Field::RootFill,"Root fill"),(Field::RootText,"Root text"),(Field::BranchFills,"Branch fills"),(Field::BranchText,"Branch text"),(Field::BranchLines,"Branch edges"),(Field::GlobalEdge,"Global edge (overrides branch edges)")],
@@ -13671,6 +13797,7 @@ fn draw_mermaid_colors(
                     ui.horizontal_wrapped(|ui| {
                         ui.label(label);
                         let _response = ui.add(egui::TextEdit::singleline(value).desired_width(180.0).char_limit(72));
+                        diagram_panel_target(jump_scope, ui, &_response, &format!("colors/{}", field.slug()), label, super::jump_mode::TargetKind::TextEntry, jump_order);
                         #[cfg(test)] test_action_rects.push((format!("mermaid_color_{}", field.slug()), _response.rect, ui.clip_rect()));
                     });
                 }
@@ -13680,6 +13807,7 @@ fn draw_mermaid_colors(
             if let Some(error) = &error { ui.colored_label(egui::Color32::from_rgb(190, 65, 45), error); }
             ui.horizontal(|ui| {
                 let apply = ui.add_enabled(error.is_none(), egui::Button::new("Apply colors"));
+                diagram_panel_target(jump_scope, ui, &apply, "colors/apply", "Apply colors", super::jump_mode::TargetKind::Button, jump_order);
                 #[cfg(test)] test_action_rects.push(("mermaid_color_apply".into(), apply.rect, ui.clip_rect()));
                 if apply.clicked() && pending.is_none() {
                     match crate::diagram::edit_mermaid_style(source, &style) {
@@ -13687,7 +13815,9 @@ fn draw_mermaid_colors(
                         Err(error) => { ui.label(error); },
                     };
                 }
-                if ui.button("Reset to app default").clicked() && pending.is_none()
+                let reset = ui.button("Reset to app default");
+                diagram_panel_target(jump_scope, ui, &reset, "colors/reset", "Reset colors", super::jump_mode::TargetKind::Button, jump_order);
+                if reset.clicked() && pending.is_none()
                     && let Ok(source) = crate::diagram::edit_mermaid_style(source, &crate::diagram::MermaidStyle::default())
                 {
                     *pending = Some(PendingMutation::ApplyMermaidStyle { source, expected_document: document.clone(), expected_revision: revision });
@@ -13708,6 +13838,7 @@ fn draw_mermaid_colors(
         ));
         test_action_focus_ids.push(("mermaid_colors".into(), _panel.header_response.id));
     }
+    diagram_panel_target(jump_scope, ui, &_panel.header_response, "colors/header", "Colors", super::jump_mode::TargetKind::Button, jump_order);
     Some(draft)
 }
 
@@ -13718,6 +13849,8 @@ fn direction_control(
     actions_allowed: bool,
     revision: u64,
     pending: &mut Option<PendingMutation>,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
 ) {
     let Some(graph) = graph else {
         ui.add_enabled_ui(false, |ui| {
@@ -13727,9 +13860,11 @@ fn direction_control(
     };
     let mut direction = graph.direction;
     ui.add_enabled_ui(actions_allowed && graph_is_current, |ui| {
-        egui::ComboBox::from_id_salt("diagram-studio-direction")
+        let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope("inspector/direction"));
+        let combo = egui::ComboBox::from_id_salt("diagram-studio-direction")
             .selected_text(direction.as_mermaid())
             .show_ui(ui, |ui| {
+                let mut order = 0;
                 for option in [
                     FlowDirection::TopDown,
                     FlowDirection::TopBottom,
@@ -13737,9 +13872,11 @@ fn direction_control(
                     FlowDirection::RightLeft,
                     FlowDirection::BottomTop,
                 ] {
-                    ui.selectable_value(&mut direction, option, option.as_mermaid());
+                    let response = ui.selectable_value(&mut direction, option, option.as_mermaid());
+                    diagram_menu_target(popup_scope.as_ref(), ui, &response, option.as_mermaid(), option.as_mermaid(), &mut order);
                 }
             });
+        diagram_panel_target(jump_scope, ui, &combo.response, "inspector/direction", "Direction", super::jump_mode::TargetKind::ComboBox, jump_order);
     });
     if direction != graph.direction && pending.is_none() {
         *pending = Some(PendingMutation::Transaction {
@@ -13876,6 +14013,8 @@ fn preview_workspace(
     pending: &mut Option<PendingMutation>,
     message: &mut Option<StudioNotice>,
     canvas_focus_requested: &mut Option<egui::Id>,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
     #[cfg(test)] test_canvas_rect: &mut Option<egui::Rect>,
     #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
@@ -13928,6 +14067,7 @@ fn preview_workspace(
             pending,
             message,
             canvas_focus_requested,
+            jump_scope, jump_order,
             #[cfg(test)]
             test_canvas_rect,
             #[cfg(test)]
@@ -14094,6 +14234,8 @@ fn visual_workspace(
     pending: &mut Option<PendingMutation>,
     message: &mut Option<StudioNotice>,
     canvas_focus_requested: &mut Option<egui::Id>,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
     #[cfg(test)] test_canvas_rect: &mut Option<egui::Rect>,
     #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
@@ -14109,6 +14251,7 @@ fn visual_workspace(
             property_draft,
             actions_allowed,
             pending,
+            jump_scope, jump_order,
             #[cfg(test)] test_action_rects,
         );
         ui.separator();
@@ -14173,6 +14316,7 @@ fn visual_workspace(
                             property_draft,
                             actions_allowed,
                             pending,
+            jump_scope, jump_order,
                             #[cfg(test)] test_action_rects,
                         );
                     });
@@ -14264,19 +14408,22 @@ fn draw_inspector(
     property_draft: &mut Option<PropertyDraft>,
     actions_allowed: bool,
     pending: &mut Option<PendingMutation>,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
     ui.set_min_width(INSPECTOR_PANE_MIN_WIDTH);
     ui.heading("Structure");
     ui.small("Click list entries or nodes to inspect them.");
     if let Some(graph) = graph {
-        ui.collapsing(format!("Nodes ({})", graph.nodes.len()), |ui| {
+        let nodes = ui.collapsing(format!("Nodes ({})", graph.nodes.len()), |ui| {
             for node in &graph.nodes {
                 let selected = selected_nodes.contains(&node.id);
-                let response = ui.selectable_label(
+                let response = ui.push_id(("node", &node.id), |ui| ui.selectable_label(
                     selected,
                     format!("{}  {}", node.id, node.label.replace('\n', " ")),
-                );
+                )).inner;
+                diagram_panel_target(jump_scope, ui, &response, &format!("inspector/node/{}", node.id), &format!("Node {}", node.id), super::jump_mode::TargetKind::Selectable, jump_order);
                 if actions_allowed && response.clicked() {
                     select_element(
                         selection,
@@ -14289,31 +14436,36 @@ fn draw_inspector(
                 }
             }
         });
-        ui.collapsing(format!("Edges ({})", graph.edges.len()), |ui| {
+        diagram_panel_target(jump_scope, ui, &nodes.header_response, "inspector/nodes", "Nodes", super::jump_mode::TargetKind::Button, jump_order);
+        let edges = ui.collapsing(format!("Edges ({})", graph.edges.len()), |ui| {
             for edge in &graph.edges {
                 let element = DiagramElement::Edge(edge.id);
                 let label = edge.label.as_deref().unwrap_or("(unlabeled)");
-                let response = ui.selectable_label(
+                let response = ui.push_id(("edge", edge.id), |ui| ui.selectable_label(
                     selection.as_ref() == Some(&element),
                     format!("{} → {}  {label}", edge.from, edge.to),
-                );
+                )).inner;
+                diagram_panel_target(jump_scope, ui, &response, &format!("inspector/edge/{}", edge.id.get()), &format!("Edge {}", edge.id.get()), super::jump_mode::TargetKind::Selectable, jump_order);
                 if actions_allowed && response.clicked() {
                     select_element(selection, selected_nodes, element, false);
                 }
             }
         });
-        ui.collapsing(format!("Groups ({})", graph.groups.len()), |ui| {
+        diagram_panel_target(jump_scope, ui, &edges.header_response, "inspector/edges", "Edges", super::jump_mode::TargetKind::Button, jump_order);
+        let groups = ui.collapsing(format!("Groups ({})", graph.groups.len()), |ui| {
             for group in &graph.groups {
                 let element = DiagramElement::Group(group.id.clone());
-                let response = ui.selectable_label(
+                let response = ui.push_id(("group", &group.id), |ui| ui.selectable_label(
                     selection.as_ref() == Some(&element),
                     format!("{}  {}", group.id, group.label),
-                );
+                )).inner;
+                diagram_panel_target(jump_scope, ui, &response, &format!("inspector/group/{}", group.id), &format!("Group {}", group.id), super::jump_mode::TargetKind::Selectable, jump_order);
                 if actions_allowed && response.clicked() {
                     select_element(selection, selected_nodes, element, false);
                 }
             }
         });
+        diagram_panel_target(jump_scope, ui, &groups.header_response, "inspector/groups", "Groups", super::jump_mode::TargetKind::Button, jump_order);
     } else {
         ui.label("No valid graph preview.");
     }
@@ -14328,6 +14480,7 @@ fn draw_inspector(
         property_draft,
         actions_allowed,
         pending,
+        jump_scope, jump_order,
         #[cfg(test)] test_action_rects,
     );
 }
@@ -14382,12 +14535,19 @@ fn draw_properties(
     property_draft: &mut Option<PropertyDraft>,
     actions_allowed: bool,
     pending: &mut Option<PendingMutation>,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
     let (Some(graph), Some(selection)) = (graph, selection.as_ref()) else {
         *property_draft = None;
         ui.label("Select a node, edge, or group.");
         return;
+    };
+    let subject = match selection {
+        DiagramElement::Node(id) => format!("node/{}", id.as_str()),
+        DiagramElement::Edge(id) => format!("edge/{}", id.get()),
+        DiagramElement::Group(id) => format!("group/{}", id.as_str()),
     };
     if property_draft
         .as_ref()
@@ -14403,7 +14563,9 @@ fn draw_properties(
             egui::Color32::from_rgb(190, 104, 18),
             "The source or history changed. Reload these properties before applying.",
         );
-        if ui.button("Reload properties").clicked() && actions_allowed {
+        let reload = ui.button("Reload properties");
+        diagram_panel_target(jump_scope, ui, &reload, &format!("property/{subject}/reload"), "Reload properties", super::jump_mode::TargetKind::Button, jump_order);
+        if reload.clicked() && actions_allowed {
             *property_draft = property_draft_for(graph, selection, revision);
         }
     }
@@ -14429,36 +14591,49 @@ fn draw_properties(
             clear_text_edit_undoer(ui.ctx(), label_id);
             ui.add_enabled_ui(actions_allowed && !stale_basis, |ui| {
                 ui.label("Label");
-                ui.add(egui::TextEdit::singleline(label).id(label_id));
+                let response = ui.add(egui::TextEdit::singleline(label).id(label_id));
+                diagram_panel_target(jump_scope, ui, &response, &format!("property/{subject}/label"), "Node label", super::jump_mode::TargetKind::TextEntry, jump_order);
                 ui.label("Node colors (#RGB or #RRGGBB; blank inherits)");
                 for (name, value) in [("Fill", &mut *fill), ("Border", &mut *stroke), ("Text", &mut *text_color)] {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(name);
                         let _response = ui.add(egui::TextEdit::singleline(value).char_limit(7));
+                        diagram_panel_target(jump_scope, ui, &_response, &format!("property/{subject}/color/{name}"), &format!("Node {name}"), super::jump_mode::TargetKind::TextEntry, jump_order);
                         #[cfg(test)] test_action_rects.push((format!("node_color_{}", name.to_lowercase()), _response.rect, ui.clip_rect()));
                     });
                 }
                 ui.label("Shape");
-                egui::ComboBox::from_id_salt(("diagram-node-shape", selection_label(selection)))
+                let shape_id = format!("property/{subject}/shape");
+                let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope(&shape_id));
+                let combo = egui::ComboBox::from_id_salt(("diagram-node-shape", selection_label(selection)))
                     .selected_text(shape_label(*shape))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(shape, NodeShape::Rectangle, "Rectangle");
-                        ui.selectable_value(shape, NodeShape::Rounded, "Rounded");
-                        ui.selectable_value(shape, NodeShape::Diamond, "Diamond");
+                        let mut order = 0;
+                        for (value, label) in [(NodeShape::Rectangle, "Rectangle"), (NodeShape::Rounded, "Rounded"), (NodeShape::Diamond, "Diamond")] {
+                            let response = ui.selectable_value(shape, value, label);
+                            diagram_menu_target(popup_scope.as_ref(), ui, &response, label, label, &mut order);
+                        }
                     });
+                diagram_panel_target(jump_scope, ui, &combo.response, &shape_id, "Node shape", super::jump_mode::TargetKind::ComboBox, jump_order);
                 ui.label("Group");
-                egui::ComboBox::from_id_salt(("diagram-node-group", selection_label(selection)))
+                let group_id = format!("property/{subject}/group");
+                let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope(&group_id));
+                let combo = egui::ComboBox::from_id_salt(("diagram-node-group", selection_label(selection)))
                     .selected_text(group.as_ref().map_or("None", GroupId::as_str))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(group, None, "None");
+                        let mut order = 0;
+                        let response = ui.selectable_value(group, None, "None");
+                        diagram_menu_target(popup_scope.as_ref(), ui, &response, "unset", "None", &mut order);
                         for candidate in &graph.groups {
-                            ui.selectable_value(
+                            let response = ui.selectable_value(
                                 group,
                                 Some(candidate.id.clone()),
                                 candidate.id.as_str(),
                             );
+                            diagram_menu_target(popup_scope.as_ref(), ui, &response, &format!("group/{}", candidate.id.as_str()), candidate.id.as_str(), &mut order);
                         }
                     });
+                diagram_panel_target(jump_scope, ui, &combo.response, &group_id, "Node group", super::jump_mode::TargetKind::ComboBox, jump_order);
             });
             if let DiagramElement::Node(id) = selection {
                 let parse = |value: &str| -> Result<Option<crate::diagram::MermaidColor>, &'static str> {
@@ -14496,26 +14671,37 @@ fn draw_properties(
             ui.add_enabled_ui(actions_allowed && !stale_basis, |ui| {
                 ui.label("Label (blank removes label)");
                 let response = ui.add(egui::TextEdit::singleline(&mut text).id(label_id));
+                diagram_panel_target(jump_scope, ui, &response, &format!("property/{subject}/label"), "Edge label", super::jump_mode::TargetKind::TextEntry, jump_order);
                 if response.changed() {
                     *label = (!text.is_empty()).then(|| text.clone());
                 }
                 if !graph.nodes.is_empty() {
                     ui.label("From");
-                    egui::ComboBox::from_id_salt(("diagram-edge-from", selection_label(selection)))
+                    let from_id = format!("property/{subject}/from");
+                    let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope(&from_id));
+                    let combo = egui::ComboBox::from_id_salt(("diagram-edge-from", selection_label(selection)))
                         .selected_text(from.as_str())
                         .show_ui(ui, |ui| {
+                            let mut order = 0;
                             for node in &graph.nodes {
-                                ui.selectable_value(from, node.id.clone(), node.id.as_str());
+                                let response = ui.selectable_value(from, node.id.clone(), node.id.as_str());
+                                diagram_menu_target(popup_scope.as_ref(), ui, &response, node.id.as_str(), node.id.as_str(), &mut order);
                             }
                         });
+                    diagram_panel_target(jump_scope, ui, &combo.response, &from_id, "Edge from", super::jump_mode::TargetKind::ComboBox, jump_order);
                     ui.label("To");
-                    egui::ComboBox::from_id_salt(("diagram-edge-to", selection_label(selection)))
+                    let to_id = format!("property/{subject}/to");
+                    let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope(&to_id));
+                    let combo = egui::ComboBox::from_id_salt(("diagram-edge-to", selection_label(selection)))
                         .selected_text(to.as_str())
                         .show_ui(ui, |ui| {
+                            let mut order = 0;
                             for node in &graph.nodes {
-                                ui.selectable_value(to, node.id.clone(), node.id.as_str());
+                                let response = ui.selectable_value(to, node.id.clone(), node.id.as_str());
+                                diagram_menu_target(popup_scope.as_ref(), ui, &response, node.id.as_str(), node.id.as_str(), &mut order);
                             }
                         });
+                    diagram_panel_target(jump_scope, ui, &combo.response, &to_id, "Edge to", super::jump_mode::TargetKind::ComboBox, jump_order);
                 }
             });
             if let DiagramElement::Edge(id) = selection {
@@ -14539,7 +14725,8 @@ fn draw_properties(
             clear_text_edit_undoer(ui.ctx(), label_id);
             ui.add_enabled_ui(actions_allowed && !stale_basis, |ui| {
                 ui.label("Label");
-                ui.add(egui::TextEdit::singleline(label).id(label_id));
+                let response = ui.add(egui::TextEdit::singleline(label).id(label_id));
+                diagram_panel_target(jump_scope, ui, &response, &format!("property/{subject}/label"), "Group label", super::jump_mode::TargetKind::TextEntry, jump_order);
             });
             if let DiagramElement::Group(id) = selection {
                 operations.push(GraphOperation::SetGroupLabel {
@@ -14550,6 +14737,7 @@ fn draw_properties(
         }
     }
     let apply = ui.add_enabled(can_apply, egui::Button::new("Apply properties"));
+    diagram_panel_target(jump_scope, ui, &apply, &format!("property/{subject}/apply/{}", draft.basis_revision), "Apply properties", super::jump_mode::TargetKind::Button, jump_order);
     #[cfg(test)] test_action_rects.push(("node_properties_apply".into(), apply.rect, ui.clip_rect()));
     if apply.clicked()
         && pending.is_none()
@@ -15321,10 +15509,14 @@ fn menu_focus_request_for_ui(
     }
 }
 
-fn diagram_menu_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, order: &mut u64) {
-    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, super::jump_mode::TargetKind::Button, order);
+fn diagram_panel_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, order: &mut u64) {
+    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order);
     if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass()
         && !ui.ctx().will_discard() && !ui.clip_rect().contains_rect(response.rect) { response.scroll_to_me(None); }
+}
+
+fn diagram_menu_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, order: &mut u64) {
+    diagram_panel_target(scope, ui, response, id, label, super::jump_mode::TargetKind::Button, order);
 }
 
 const HELP_COLOR_EXAMPLE: &str = "%%{init: {\"theme\":\"dark\",\"themeVariables\":{\"primaryColor\":\"#234567\"}}}%%\nflowchart TD\nA[\"Start\"] --> B[\"Finish\"]\nstyle A fill:#123456,stroke:#abcdef,color:#ffffff\n";
@@ -15590,6 +15782,8 @@ fn draw_drawio_workflow_panel(
     review_scope_current: bool,
     actions_allowed: bool,
     document_intent: &mut Option<DocumentIntent>,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
     #[cfg(test)]
@@ -15621,6 +15815,7 @@ fn draw_drawio_workflow_panel(
                     actions_allowed && !work.retired,
                     egui::Button::new("Cancel Draw.io"),
                 );
+                diagram_panel_target(jump_scope, ui, &cancel, "drawio/cancel", "Cancel Draw.io", super::jump_mode::TargetKind::Button, jump_order);
                 record("drawio_cancel", &cancel, ui.clip_rect());
                 if cancel.clicked() && document_intent.is_none() {
                     *document_intent = Some(DocumentIntent::DrawioCancel);
@@ -15668,6 +15863,7 @@ fn draw_drawio_workflow_panel(
                             actions_allowed && scope_live && document_intent.is_none(),
                             egui::Button::new("Open copy…"),
                         );
+                        diagram_panel_target(jump_scope, ui, &open, "drawio/open-copy", "Open copy", super::jump_mode::TargetKind::Button, jump_order);
                         record("drawio_open_copy", &open, ui.clip_rect());
                         if open.clicked() {
                             *document_intent = Some(DocumentIntent::DrawioOpenImportCopy);
@@ -15677,6 +15873,7 @@ fn draw_drawio_workflow_panel(
                             actions_allowed && scope_live && document_intent.is_none(),
                             egui::Button::new("Create .mld copy…"),
                         );
+                        diagram_panel_target(jump_scope, ui, &publish, "drawio/publish-import", "Create .mld copy", super::jump_mode::TargetKind::Button, jump_order);
                         record("drawio_publish_import", &publish, ui.clip_rect());
                         if publish.clicked() {
                             *document_intent = Some(DocumentIntent::DrawioPublishImport);
@@ -15699,6 +15896,7 @@ fn draw_drawio_workflow_panel(
                         actions_allowed && scope_live && document_intent.is_none(),
                         egui::Button::new("Save .drawio…"),
                     );
+                    diagram_panel_target(jump_scope, ui, &publish, "drawio/publish-export", "Save .drawio", super::jump_mode::TargetKind::Button, jump_order);
                     record("drawio_publish_export", &publish, ui.clip_rect());
                     if publish.clicked() {
                         *document_intent = Some(DocumentIntent::DrawioPublishExport);
@@ -15723,6 +15921,7 @@ fn draw_drawio_workflow_panel(
                 actions_allowed && document_intent.is_none(),
                 egui::Button::new("Discard review"),
             );
+            diagram_panel_target(jump_scope, ui, &cancel, "drawio/discard", "Discard review", super::jump_mode::TargetKind::Button, jump_order);
             record("drawio_cancel", &cancel, ui.clip_rect());
             if cancel.clicked() {
                 *document_intent = Some(DocumentIntent::DrawioCancel);

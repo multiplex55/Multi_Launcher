@@ -27370,6 +27370,225 @@ mod tests {
     }
 
     #[test]
+    fn diagram_colors_hints_preserve_source_until_fresh_apply() {
+        use crate::settings::{RememberedPresentation, UtilityToolKey};
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.utility_presentation_manager.remember(
+            &ctx,
+            UtilityToolKey::parse("diagram-studio").unwrap(),
+            RememberedPresentation::Docked,
+        );
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let source = "flowchart TD\nA-->B";
+        app.diagram_studio_dialog.test_replace_source(source);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        ctx.move_to_top(app.diagram_studio_dialog.owner_layer_if_root().unwrap());
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let key = |app: &mut LauncherApp, key| {
+            frame(app, vec![key_press(key, egui::Modifiers::NONE)]);
+            frame(app, vec![key_release(key, egui::Modifiers::NONE)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        focus(&mut app, "Colors");
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        key(&mut app, egui::Key::Enter);
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "Color preset");
+        key(&mut app, egui::Key::Enter);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        focus(&mut app, "Forest");
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        key(&mut app, egui::Key::Enter);
+        if egui::Popup::is_any_open(&ctx) {
+            key(&mut app, egui::Key::Escape);
+        }
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "Fill");
+        frame(&mut app, vec![egui::Event::Text("#234567".into())]);
+
+        let apply_label = "Apply colors";
+        for _ in 0..12 {
+            if app
+                .jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == apply_label)
+            {
+                break;
+            }
+            key(&mut app, egui::Key::Tab);
+            for _ in 0..3 {
+                frame(&mut app, Vec::new());
+            }
+        }
+        focus(&mut app, apply_label);
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        let before = app.diagram_studio_dialog.test_session().undo_depth();
+        key(&mut app, egui::Key::Enter);
+        let document = app.diagram_studio_dialog.test_session();
+        let style = crate::diagram::mermaid_source_style(document.draft()).unwrap();
+        assert_eq!(style.theme, Some(crate::diagram::MermaidTheme::Forest));
+        assert_eq!(
+            style.theme_variables.primary_color.map(|color| color.hex()),
+            Some("#234567".into()),
+        );
+        assert_eq!(document.undo_depth(), before + 1);
+    }
+
+    #[test]
+    fn diagram_visual_property_hint_waits_for_apply_to_change_the_object() {
+        use crate::settings::{RememberedPresentation, UtilityToolKey};
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.utility_presentation_manager.remember(
+            &ctx,
+            UtilityToolKey::parse("diagram-studio").unwrap(),
+            RememberedPresentation::Docked,
+        );
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1520.0, 1120.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        ctx.move_to_top(app.diagram_studio_dialog.owner_layer_if_root().unwrap());
+        let settle = |app: &mut LauncherApp| {
+            for _ in 0..5 {
+                frame(app, Vec::new());
+            }
+        };
+        settle(&mut app);
+        let key = |app: &mut LauncherApp, key, mods| {
+            frame(app, vec![key_press(key, mods)]);
+            frame(app, vec![key_release(key, mods)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        for label in ["File", "New Visual", "Add text"] {
+            let before = app
+                .diagram_studio_dialog
+                .test_selected_visual_text()
+                .map(str::to_owned);
+            focus(&mut app, label);
+            assert_eq!(
+                app.diagram_studio_dialog.test_selected_visual_text(),
+                before.as_deref()
+            );
+            key(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+            settle(&mut app);
+        }
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("New text")
+        );
+        focus(&mut app, "Ink");
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("New text")
+        );
+        let inspector = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Ink")
+            .expect("visible Visual object ink").clipped_rect().center();
+        let reveal_in_inspector = |app: &mut LauncherApp, label| {
+            for _ in 0..8 {
+                if app.jump_mode_ui.retained_registry().targets().iter().any(|target|
+                    target.eligible() && target.metadata().label() == label) {
+                    return;
+                }
+                frame(app, vec![
+                    egui::Event::PointerMoved(inspector),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -50.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                settle(app);
+            }
+            panic!("expected visible Visual property {label:?}");
+        };
+        reveal_in_inspector(&mut app, "Text");
+        focus(&mut app, "Text");
+        key(&mut app, egui::Key::A, egui::Modifiers::COMMAND);
+        frame(
+            &mut app,
+            vec![egui::Event::Text("Keyboard revision".into())],
+        );
+        settle(&mut app);
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("New text")
+        );
+
+        reveal_in_inspector(&mut app, "Apply properties");
+        focus(&mut app, "Apply properties");
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("New text")
+        );
+        key(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("Keyboard revision")
+        );
+    }
+
+    #[test]
     fn studio_usability_calculation_help_layer_is_owned_by_the_ordinary_root_context() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
