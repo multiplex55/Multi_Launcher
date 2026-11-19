@@ -120,6 +120,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B4a1 | complete |
 | M12-B4a2 | complete |
 | M12-B4a3 | complete |
+| M12-B4b1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -886,3 +887,10 @@ The initial 6/6 gate (d36d18f6-eff0-4eb9-86ba-0790af7a26bf) proves actual root s
 API filter, category, entry type, units and Insert Example controls expose their actual responses. During a prepared insertion review, only its source disclosure, Confirm and Cancel are available. Confirmation follows the captured current Pad document, host, caret, evaluation basis and sample through the existing retained insertion path. Ordinary Escape dismisses the review before a later window close, including with Jump Mode off. A stale review retires through the existing source/caret check.
 
 The directly affected existing tests passed 4/4 in d97025b9-981a-47ec-8a26-df8f0a197526, including guarded insertion, single Undo, stale review and Reference scope. The final integration fixture passed in c7a55239-3a9b-4886-8780-28310afd5b50. It publishes an actual Pad caret with End, opens the prepared review, verifies focus-only Confirm and fresh Escape, then checks that a separate source revision change retires an old review.
+
+
+### M12-B4b1 Calculation Pad Config menu
+
+The existing Config Menu and its actual Document, Calculation, Tools, View, Number format, Source display and Editor options submenus expose the current eligible controls. The exact known menu chain owns hints in docked and detached Pad. Existing settings, evaluation and document effects still require ordinary activation and acceptance. Keyboard opening uses the current editor selection receipt. The existing focused-only pointer selection rule remains intact. Ordinary focus reveals clipped options, and Escape unwinds one menu level even with Jump Mode off.
+
+The initial run included passing source, Escape and accepted preference tests. The final reviewed gate passed 3/3 (a46ea049-1b05-49fb-ba3d-8860378947bf) after restoring the existing pointer restriction and aligning the Word wrap hint label. The actual nested menu fixture verifies focus-only Word wrap, unchanged draft/preferences and successive ordinary Escape handling.

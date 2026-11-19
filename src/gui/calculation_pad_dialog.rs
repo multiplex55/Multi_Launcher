@@ -1549,18 +1549,21 @@ impl CalculationPadDialog {
                         let popup_open = egui::Popup::is_any_open(&child_ctx);
                         let mut native_binding = None;
                         let mut native_jump_owns_escape = false;
+                        let binding = super::jump_mode::ui::NavigationViewportBinding {
+                            viewport: pad_viewport_id(),
+                            owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationPad, instance: self.jump_instance() },
+                            base_layer: egui::LayerId::background(),
+                        };
+                        let popup_owner = independent.then(|| self.native_jump.resolve_combo_popup_owner_for_viewport(&child_ctx, binding)).flatten();
                         let jump_allowed = independent && surface_allowed && focused && !modal_open
-                            && self.jump_parent_available() && !popup_open
+                            && self.jump_parent_available()
                             && super::jump_mode::ui::visible_top_middle_layer(&child_ctx).is_none()
-                            && super::jump_mode::ui::focused_response_layer(&child_ctx).is_none_or(|layer| layer == egui::LayerId::background());
+                            && if popup_open { popup_owner.is_some() } else {
+                                super::jump_mode::ui::focused_response_layer(&child_ctx).is_none_or(|layer| layer == egui::LayerId::background())
+                            };
                         if independent {
                             let frame = child_ctx.cumulative_frame_nr();
                             if self.native_jump_frame != Some(frame) { self.native_jump.begin_frame(); self.native_jump_frame = Some(frame); }
-                            let binding = super::jump_mode::ui::NavigationViewportBinding {
-                                viewport: pad_viewport_id(),
-                                owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationPad, instance: self.jump_instance() },
-                                base_layer: egui::LayerId::background(),
-                            };
                             let navigation = self.native_jump.update_navigation_owner_for_viewport(&child_ctx, binding, jump_allowed && self.jump_enabled);
                             native_jump_owns_escape = self.native_jump.active_session().is_some();
                             self.native_jump.handle_viewport_input(&child_ctx, navigation == binding.owner, pass_authorized, viewport_id);
@@ -2205,171 +2208,726 @@ impl CalculationPadDialog {
         effects: &mut HostEffects,
     ) {
         let editor_id = egui::Id::new("calculation-pad-source");
-        let editor_selection = ui.memory(|memory| memory.has_focus(editor_id))
-            .then(|| egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
-                .and_then(|state| state.cursor.char_range()))
-            .flatten();
+        let editor_focused = ui.memory(|memory| memory.has_focus(editor_id));
+        let editor_selection = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+            .and_then(|state| state.cursor.char_range());
+        let config_scope = self
+            .jump_scope
+            .as_ref()
+            .map(|scope| scope.combo_popup_scope("config"));
+        macro_rules! target {
+            ($scope:expr, $ui:expr, $response:expr, $id:expr, $label:expr, $kind:ident, $order:expr) => {
+                super::jump_mode::ui::register_and_apply_target(
+                    $scope.as_ref(),
+                    $ui,
+                    &$response,
+                    $id,
+                    $label,
+                    super::jump_mode::TargetKind::$kind,
+                    $order,
+                );
+                if $response.gained_focus()
+                    && $response.enabled()
+                    && $ui.is_visible()
+                    && !$ui.is_sizing_pass()
+                    && !$ui.ctx().will_discard()
+                    && !$ui.clip_rect().contains_rect($response.rect)
+                {
+                    $response.scroll_to_me(None);
+                }
+            };
+        }
         ui.horizontal_wrapped(|ui| {
             let _menu = ui.menu_button("Config Menu", |ui| {
-                let _document = ui.menu_button("Document", |ui| {
-                    if ui.button("New").clicked() {
-                        effects.intent = Some(DialogIntent::New);
-                        ui.close();
-                    }
-                    if ui.button("Open").clicked() {
-                        effects.intent = Some(DialogIntent::OpenChooser);
-                        ui.close();
-                    }
-                    let save = ui.add_enabled(
-                        self.session.pending_transition().is_none(),
-                        egui::Button::new("Save"),
+                let dismissed = super::native_keyboard::dismiss_owned_submenu_on_escape(ui);
+                let mut order = 0;
+                let document_scope = config_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope("document"));
+                let _document =
+                    super::native_keyboard::show_submenu(ui, "Document", dismissed, |ui| {
+                        let mut item_order = 0;
+                        if {
+                            let response = ui.button("New");
+                            target!(
+                                document_scope,
+                                ui,
+                                response,
+                                "New",
+                                "New",
+                                Button,
+                                &mut item_order
+                            );
+                            response.clicked()
+                        } {
+                            effects.intent = Some(DialogIntent::New);
+                            ui.close();
+                        }
+                        if {
+                            let response = ui.button("Open");
+                            target!(
+                                document_scope,
+                                ui,
+                                response,
+                                "Open",
+                                "Open",
+                                Button,
+                                &mut item_order
+                            );
+                            response.clicked()
+                        } {
+                            effects.intent = Some(DialogIntent::OpenChooser);
+                            ui.close();
+                        }
+                        let save = ui.add_enabled(
+                            self.session.pending_transition().is_none(),
+                            egui::Button::new("Save"),
+                        );
+                        target!(
+                            document_scope,
+                            ui,
+                            save,
+                            "save",
+                            "Save",
+                            Button,
+                            &mut item_order
+                        );
+                        #[cfg(test)]
+                        if ui.is_visible() && !ui.is_sizing_pass() {
+                            self.test_save_rect = Some(save.rect);
+                        }
+                        if save.clicked() {
+                            effects.intent = Some(DialogIntent::Save);
+                            ui.close();
+                        }
+                        if {
+                            let response = ui.button("Save As…");
+                            target!(
+                                document_scope,
+                                ui,
+                                response,
+                                "Save As…",
+                                "Save As…",
+                                Button,
+                                &mut item_order
+                            );
+                            response.clicked()
+                        } {
+                            effects.intent = Some(DialogIntent::OpenSaveAs);
+                            ui.close();
+                        }
+                    });
+                super::jump_mode::ui::register_and_apply_menu_anchor(
+                    config_scope.as_ref(),
+                    ui,
+                    &_document,
+                    "document",
+                    "Document",
+                    super::jump_mode::ui::MenuAnchorKind::Submenu,
+                    &mut order,
+                );
+                #[cfg(test)]
+                self.test_config_groups.push(("Document", _document.rect));
+
+                let calculation_scope = config_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope("calculation"));
+                let _calculation =
+                    super::native_keyboard::show_submenu(ui, "Calculation", dismissed, |ui| {
+                        let mut item_order = 0;
+                        if let Some(options) = self.session.document_options() {
+                            let mut policy = options.calculation;
+                            let response = ui.selectable_value(
+                                &mut policy,
+                                crate::calculation_pad::CalculationPolicy::Automatic,
+                                "Automatic",
+                            );
+                            target!(
+                                calculation_scope,
+                                ui,
+                                response,
+                                "item/1",
+                                "Automatic",
+                                Button,
+                                &mut item_order
+                            );
+                            let response = ui.selectable_value(
+                                &mut policy,
+                                crate::calculation_pad::CalculationPolicy::Manual,
+                                "Manual",
+                            );
+                            target!(
+                                calculation_scope,
+                                ui,
+                                response,
+                                "item/2",
+                                "Manual",
+                                Button,
+                                &mut item_order
+                            );
+                            if policy != options.calculation {
+                                effects.calculation_policy = Some(policy);
+                            }
+                            ui.separator();
+                            let mut profile = options.profile;
+                            let response = ui.selectable_value(
+                                &mut profile,
+                                crate::calculation_pad::DocumentProfile::Standard,
+                                "Standard document",
+                            );
+                            target!(
+                                calculation_scope,
+                                ui,
+                                response,
+                                "item/3",
+                                "Standard document",
+                                Button,
+                                &mut item_order
+                            );
+                            let response = ui.selectable_value(
+                                &mut profile,
+                                crate::calculation_pad::DocumentProfile::Extended,
+                                "Extended document",
+                            );
+                            target!(
+                                calculation_scope,
+                                ui,
+                                response,
+                                "item/4",
+                                "Extended document",
+                                Button,
+                                &mut item_order
+                            );
+                            if profile != options.profile {
+                                effects.document_profile = Some(profile);
+                            }
+                        }
+                    });
+                super::jump_mode::ui::register_and_apply_menu_anchor(
+                    config_scope.as_ref(),
+                    ui,
+                    &_calculation,
+                    "calculation",
+                    "Calculation",
+                    super::jump_mode::ui::MenuAnchorKind::Submenu,
+                    &mut order,
+                );
+
+                let tools_scope = config_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope("tools"));
+                let _tools = super::native_keyboard::show_submenu(ui, "Tools", dismissed, |ui| {
+                    let mut item_order = 0;
+                    let examples = ui.button("Examples & reference");
+                    target!(
+                        tools_scope,
+                        ui,
+                        examples,
+                        "examples",
+                        "Examples",
+                        Button,
+                        &mut item_order
                     );
                     #[cfg(test)]
                     if ui.is_visible() && !ui.is_sizing_pass() {
-                        self.test_save_rect = Some(save.rect);
-                    }
-                    if save.clicked() {
-                        effects.intent = Some(DialogIntent::Save);
-                        ui.close();
-                    }
-                    if ui.button("Save As…").clicked() {
-                        effects.intent = Some(DialogIntent::OpenSaveAs);
-                        ui.close();
-                    }
-                });
-                #[cfg(test)]
-                self.test_config_groups.push(("Document", _document.response.rect));
-
-                ui.menu_button("Calculation", |ui| {
-                    if let Some(options) = self.session.document_options() {
-                        let mut policy = options.calculation;
-                        ui.selectable_value(&mut policy, crate::calculation_pad::CalculationPolicy::Automatic, "Automatic");
-                        ui.selectable_value(&mut policy, crate::calculation_pad::CalculationPolicy::Manual, "Manual");
-                        if policy != options.calculation { effects.calculation_policy = Some(policy); }
-                        ui.separator();
-                        let mut profile = options.profile;
-                        ui.selectable_value(&mut profile, crate::calculation_pad::DocumentProfile::Standard, "Standard document");
-                        ui.selectable_value(&mut profile, crate::calculation_pad::DocumentProfile::Extended, "Extended document");
-                        if profile != options.profile { effects.document_profile = Some(profile); }
-                    }
-                });
-
-                let _tools = ui.menu_button("Tools", |ui| {
-                    let examples = ui.button("Examples & reference");
-                    #[cfg(test)]
-                    if ui.is_visible() && !ui.is_sizing_pass() {
                         self.test_examples_button_rect = Some(examples.rect);
-                        self.test_examples_button_ownership = Some((ui.clip_rect(), examples.enabled()));
+                        self.test_examples_button_ownership =
+                            Some((ui.clip_rect(), examples.enabled()));
                     }
                     if examples.clicked() {
                         effects.intent = Some(DialogIntent::OpenExamples);
                         ui.close();
                     }
                     let dependencies = ui.button("Dependencies…");
+                    target!(
+                        tools_scope,
+                        ui,
+                        dependencies,
+                        "dependencies",
+                        "Dependencies",
+                        Button,
+                        &mut item_order
+                    );
                     #[cfg(test)]
-                    { self.test_dependency_open = Some((dependencies.rect, ui.clip_rect(), dependencies.enabled())); }
+                    {
+                        self.test_dependency_open =
+                            Some((dependencies.rect, ui.clip_rect(), dependencies.enabled()));
+                    }
                     if dependencies.clicked() {
                         effects.open_dependencies = true;
                         ui.close();
                     }
-                    if ui.button("Charts…").clicked() { effects.open_charts = true; ui.close(); }
+                    if {
+                        let response = ui.button("Charts…");
+                        target!(
+                            tools_scope,
+                            ui,
+                            response,
+                            "Charts…",
+                            "Charts…",
+                            Button,
+                            &mut item_order
+                        );
+                        response.clicked()
+                    } {
+                        effects.open_charts = true;
+                        ui.close();
+                    }
                     let sensitivity = ui.button("Sensitivity Tables…");
+                    target!(
+                        tools_scope,
+                        ui,
+                        sensitivity,
+                        "sensitivity",
+                        "Sensitivity",
+                        Button,
+                        &mut item_order
+                    );
                     #[cfg(test)]
-                    { self.test_sensitivity_open = Some((sensitivity.rect, ui.clip_rect(), sensitivity.enabled())); }
-                    if sensitivity.clicked() { effects.open_sensitivity = true; ui.close(); }
+                    {
+                        self.test_sensitivity_open =
+                            Some((sensitivity.rect, ui.clip_rect(), sensitivity.enabled()));
+                    }
+                    if sensitivity.clicked() {
+                        effects.open_sensitivity = true;
+                        ui.close();
+                    }
                     let inspector = ui.button("Programmer Inspector…");
+                    target!(
+                        tools_scope,
+                        ui,
+                        inspector,
+                        "inspector",
+                        "Inspector",
+                        Button,
+                        &mut item_order
+                    );
                     #[cfg(test)]
-                    { self.test_inspector_reopen = Some((inspector.rect, ui.clip_rect(), inspector.enabled())); }
+                    {
+                        self.test_inspector_reopen =
+                            Some((inspector.rect, ui.clip_rect(), inspector.enabled()));
+                    }
                     if inspector.clicked() {
                         effects.open_inspector = true;
                         ui.close();
                     }
                 });
+                super::jump_mode::ui::register_and_apply_menu_anchor(
+                    config_scope.as_ref(),
+                    ui,
+                    &_tools,
+                    "tools",
+                    "Tools",
+                    super::jump_mode::ui::MenuAnchorKind::Submenu,
+                    &mut order,
+                );
                 #[cfg(test)]
-                self.test_config_groups.push(("Tools", _tools.response.rect));
+                self.test_config_groups.push(("Tools", _tools.rect));
 
                 ui.add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
-                    let _view = ui.menu_button("View", |ui| {
-                        ui.checkbox(&mut view.show_inputs, "Editable inputs");
-                        ui.checkbox(&mut view.show_watches, "Output watches");
-                        let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
-                        let usage = ui.checkbox(&mut preferences.show_document_usage, "Document usage");
+                    let view_scope = config_scope
+                        .as_ref()
+                        .map(|scope| scope.combo_popup_scope("view"));
+                    let _view = super::native_keyboard::show_submenu(ui, "View", dismissed, |ui| {
+                        let mut item_order = 0;
+                        let response = ui.checkbox(&mut view.show_inputs, "Editable inputs");
+                        target!(
+                            view_scope,
+                            ui,
+                            response,
+                            "item/1",
+                            "Editable inputs",
+                            Checkbox,
+                            &mut item_order
+                        );
+                        let response = ui.checkbox(&mut view.show_watches, "Output watches");
+                        target!(
+                            view_scope,
+                            ui,
+                            response,
+                            "item/2",
+                            "Output watches",
+                            Checkbox,
+                            &mut item_order
+                        );
+                        let mut preferences = effects
+                            .display_preferences
+                            .unwrap_or(self.display_preferences);
+                        let usage =
+                            ui.checkbox(&mut preferences.show_document_usage, "Document usage");
+                        target!(
+                            view_scope,
+                            ui,
+                            usage,
+                            "usage",
+                            "Usage",
+                            Checkbox,
+                            &mut item_order
+                        );
                         #[cfg(test)]
-                        { self.test_usage_control = Some(usage.rect); }
-                        if usage.changed() { effects.display_preferences = Some(preferences); }
+                        {
+                            self.test_usage_control = Some(usage.rect);
+                        }
+                        if usage.changed() {
+                            effects.display_preferences = Some(preferences);
+                        }
                     });
+                    super::jump_mode::ui::register_and_apply_menu_anchor(
+                        config_scope.as_ref(),
+                        ui,
+                        &_view,
+                        "view",
+                        "View",
+                        super::jump_mode::ui::MenuAnchorKind::Submenu,
+                        &mut order,
+                    );
                     #[cfg(test)]
-                    self.test_config_groups.push(("View", _view.response.rect));
-                    ui.menu_button("Number format", |ui| {
-                        use crate::settings::CalculationPadNumberMode as Mode;
-                        let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
-                        let before = preferences;
-                        let values = || evaluation.into_iter().flat_map(|result| result.lines.iter()).filter_map(|line| match &line.outcome {
-                            LineOutcome::Value(value) => Some(value), _ => None,
-                        });
-                        let has_precision = values().any(result_format::supports_precision);
-                        let has_percent = values().any(result_format::supports_percent);
-                        ui.label("Exact values");
-                        ui.selectable_value(&mut preferences.exact_mode, crate::settings::CalculationPadExactMode::Exact, "Exact");
-                        ui.selectable_value(&mut preferences.exact_mode, crate::settings::CalculationPadExactMode::Decimal, "Decimal");
-                        ui.selectable_value(&mut preferences.exact_mode, crate::settings::CalculationPadExactMode::MixedNumber, "Mixed number");
-                        ui.separator();
-                        ui.selectable_value(&mut preferences.number_mode, Mode::Auto, "Auto");
-                        ui.add_enabled_ui(has_precision, |ui| {
-                            ui.selectable_value(&mut preferences.number_mode, Mode::Fixed, "Fixed decimal");
-                            ui.selectable_value(&mut preferences.number_mode, Mode::Scientific, "Scientific");
-                            ui.add_enabled_ui(preferences.number_mode != Mode::Auto, |ui| {
-                                ui.add(egui::Slider::new(&mut preferences.decimal_places, 0..=15).text("Decimal places"));
+                    self.test_config_groups.push(("View", _view.rect));
+                    let number_scope = config_scope
+                        .as_ref()
+                        .map(|scope| scope.combo_popup_scope("number"));
+                    let _number = super::native_keyboard::show_submenu(
+                        ui,
+                        "Number format",
+                        dismissed,
+                        |ui| {
+                            let mut item_order = 0;
+                            use crate::settings::CalculationPadNumberMode as Mode;
+                            let mut preferences = effects
+                                .display_preferences
+                                .unwrap_or(self.display_preferences);
+                            let before = preferences;
+                            let values = || {
+                                evaluation
+                                    .into_iter()
+                                    .flat_map(|result| result.lines.iter())
+                                    .filter_map(|line| match &line.outcome {
+                                        LineOutcome::Value(value) => Some(value),
+                                        _ => None,
+                                    })
+                            };
+                            let has_precision = values().any(result_format::supports_precision);
+                            let has_percent = values().any(result_format::supports_percent);
+                            ui.label("Exact values");
+                            let response = ui.selectable_value(
+                                &mut preferences.exact_mode,
+                                crate::settings::CalculationPadExactMode::Exact,
+                                "Exact",
+                            );
+                            target!(
+                                number_scope,
+                                ui,
+                                response,
+                                "item/1",
+                                "Exact",
+                                Button,
+                                &mut item_order
+                            );
+                            let response = ui.selectable_value(
+                                &mut preferences.exact_mode,
+                                crate::settings::CalculationPadExactMode::Decimal,
+                                "Decimal",
+                            );
+                            target!(
+                                number_scope,
+                                ui,
+                                response,
+                                "item/2",
+                                "Decimal",
+                                Button,
+                                &mut item_order
+                            );
+                            let response = ui.selectable_value(
+                                &mut preferences.exact_mode,
+                                crate::settings::CalculationPadExactMode::MixedNumber,
+                                "Mixed number",
+                            );
+                            target!(
+                                number_scope,
+                                ui,
+                                response,
+                                "item/3",
+                                "Mixed number",
+                                Button,
+                                &mut item_order
+                            );
+                            ui.separator();
+                            let response = ui.selectable_value(
+                                &mut preferences.number_mode,
+                                Mode::Auto,
+                                "Auto",
+                            );
+                            target!(
+                                number_scope,
+                                ui,
+                                response,
+                                "item/4",
+                                "Auto",
+                                Button,
+                                &mut item_order
+                            );
+                            ui.add_enabled_ui(has_precision, |ui| {
+                                let response = ui.selectable_value(
+                                    &mut preferences.number_mode,
+                                    Mode::Fixed,
+                                    "Fixed decimal",
+                                );
+                                target!(
+                                    number_scope,
+                                    ui,
+                                    response,
+                                    "item/5",
+                                    "Fixed decimal",
+                                    Button,
+                                    &mut item_order
+                                );
+                                let response = ui.selectable_value(
+                                    &mut preferences.number_mode,
+                                    Mode::Scientific,
+                                    "Scientific",
+                                );
+                                target!(
+                                    number_scope,
+                                    ui,
+                                    response,
+                                    "item/6",
+                                    "Scientific",
+                                    Button,
+                                    &mut item_order
+                                );
+                                ui.add_enabled_ui(preferences.number_mode != Mode::Auto, |ui| {
+                                    let response = ui.add(
+                                        egui::Slider::new(&mut preferences.decimal_places, 0..=15)
+                                            .text("Decimal places"),
+                                    );
+                                    target!(
+                                        number_scope,
+                                        ui,
+                                        response,
+                                        "item/7",
+                                        "Decimal places",
+                                        Slider,
+                                        &mut item_order
+                                    );
+                                });
                             });
-                        });
-                        ui.checkbox(&mut preferences.group_digits, "Group digits");
-                        ui.add_enabled(has_percent, egui::Checkbox::new(&mut preferences.percent, "Percent for scalars"));
-                        if preferences != before { effects.display_preferences = Some(preferences); }
-                    });
-                });
-                let _display = ui.menu_button("Source display", |ui| {
-                    let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
-                    let numbers = ui.checkbox(&mut preferences.line_numbers, "Line numbers");
-                    let wrap = ui.checkbox(&mut preferences.word_wrap, "Word wrap");
-                    #[cfg(test)]
-                    { self.test_display_controls = Some((numbers.rect, wrap.rect)); }
-                    if numbers.changed() || wrap.changed() { effects.display_preferences = Some(preferences); }
-                });
-                #[cfg(test)]
-                self.test_config_groups.push(("Source display", _display.response.rect));
-
-                ui.menu_button("Editor options", |ui| {
-                    let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
-                    let before = preferences;
-                    ui.checkbox(&mut preferences.completion, "Completions");
-                    ui.checkbox(&mut preferences.parameter_hints, "Parameter hints");
-                    ui.checkbox(&mut preferences.auto_close_delimiters, "Auto-close delimiters");
-                    if preferences != before { effects.display_preferences = Some(preferences); }
-                    let regions = editor::fold_regions(source);
-                    if !regions.is_empty() {
-                        ui.separator();
-                        egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                            for region in &regions {
-                                if let Some(id) = self.session.line_id(region.header) {
-                                    let mut closed = folds.collapsed.contains(&id);
-                                    let text = source.lines().nth(region.header).unwrap_or("").trim();
-                                    if ui.checkbox(&mut closed, format!("Fold line {}: {text}", region.header + 1)).changed() {
-                                        *fold_request = Some((id, closed));
-                                    }
-                                }
+                            let response =
+                                ui.checkbox(&mut preferences.group_digits, "Group digits");
+                            target!(
+                                number_scope,
+                                ui,
+                                response,
+                                "item/8",
+                                "Group digits",
+                                Checkbox,
+                                &mut item_order
+                            );
+                            let response = ui.add_enabled(
+                                has_percent,
+                                egui::Checkbox::new(
+                                    &mut preferences.percent,
+                                    "Percent for scalars",
+                                ),
+                            );
+                            target!(
+                                number_scope,
+                                ui,
+                                response,
+                                "item/9",
+                                "Percent for scalars",
+                                Checkbox,
+                                &mut item_order
+                            );
+                            if preferences != before {
+                                effects.display_preferences = Some(preferences);
                             }
-                        });
-                    }
+                        },
+                    );
+                    super::jump_mode::ui::register_and_apply_menu_anchor(
+                        config_scope.as_ref(),
+                        ui,
+                        &_number,
+                        "number",
+                        "Number format",
+                        super::jump_mode::ui::MenuAnchorKind::Submenu,
+                        &mut order,
+                    );
                 });
+                let display_scope = config_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope("display"));
+                let _display =
+                    super::native_keyboard::show_submenu(ui, "Source display", dismissed, |ui| {
+                        let mut item_order = 0;
+                        let mut preferences = effects
+                            .display_preferences
+                            .unwrap_or(self.display_preferences);
+                        let numbers = ui.checkbox(&mut preferences.line_numbers, "Line numbers");
+                        target!(
+                            display_scope,
+                            ui,
+                            numbers,
+                            "numbers",
+                            "Numbers",
+                            Checkbox,
+                            &mut item_order
+                        );
+                        let wrap = ui.checkbox(&mut preferences.word_wrap, "Word wrap");
+                        target!(
+                            display_scope,
+                            ui,
+                            wrap,
+                            "wrap",
+                            "Word wrap",
+                            Checkbox,
+                            &mut item_order
+                        );
+                        #[cfg(test)]
+                        {
+                            self.test_display_controls = Some((numbers.rect, wrap.rect));
+                        }
+                        if numbers.changed() || wrap.changed() {
+                            effects.display_preferences = Some(preferences);
+                        }
+                    });
+                super::jump_mode::ui::register_and_apply_menu_anchor(
+                    config_scope.as_ref(),
+                    ui,
+                    &_display,
+                    "display",
+                    "Source display",
+                    super::jump_mode::ui::MenuAnchorKind::Submenu,
+                    &mut order,
+                );
+                #[cfg(test)]
+                self.test_config_groups
+                    .push(("Source display", _display.rect));
+
+                let editor_scope = config_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope("editor"));
+                let _editor =
+                    super::native_keyboard::show_submenu(ui, "Editor options", dismissed, |ui| {
+                        let mut item_order = 0;
+                        let mut preferences = effects
+                            .display_preferences
+                            .unwrap_or(self.display_preferences);
+                        let before = preferences;
+                        let response = ui.checkbox(&mut preferences.completion, "Completions");
+                        target!(
+                            editor_scope,
+                            ui,
+                            response,
+                            "item/1",
+                            "Completions",
+                            Checkbox,
+                            &mut item_order
+                        );
+                        let response =
+                            ui.checkbox(&mut preferences.parameter_hints, "Parameter hints");
+                        target!(
+                            editor_scope,
+                            ui,
+                            response,
+                            "item/2",
+                            "Parameter hints",
+                            Checkbox,
+                            &mut item_order
+                        );
+                        let response = ui.checkbox(
+                            &mut preferences.auto_close_delimiters,
+                            "Auto-close delimiters",
+                        );
+                        target!(
+                            editor_scope,
+                            ui,
+                            response,
+                            "item/3",
+                            "Auto-close delimiters",
+                            Checkbox,
+                            &mut item_order
+                        );
+                        if preferences != before {
+                            effects.display_preferences = Some(preferences);
+                        }
+                        let regions = editor::fold_regions(source);
+                        if !regions.is_empty() {
+                            ui.separator();
+                            egui::ScrollArea::vertical()
+                                .max_height(180.0)
+                                .show(ui, |ui| {
+                                    for region in &regions {
+                                        if let Some(id) = self.session.line_id(region.header) {
+                                            let mut closed = folds.collapsed.contains(&id);
+                                            let text = source
+                                                .lines()
+                                                .nth(region.header)
+                                                .unwrap_or("")
+                                                .trim();
+                                            let response = ui.checkbox(
+                                                &mut closed,
+                                                format!("Fold line {}: {text}", region.header + 1),
+                                            );
+                                            target!(
+                                                editor_scope,
+                                                ui,
+                                                response,
+                                                format!("fold/{id:?}"),
+                                                format!("Fold line {}", region.header + 1),
+                                                Checkbox,
+                                                &mut item_order
+                                            );
+                                            if response.changed() {
+                                                *fold_request = Some((id, closed));
+                                            }
+                                        }
+                                    }
+                                });
+                        }
+                    });
+                super::jump_mode::ui::register_and_apply_menu_anchor(
+                    config_scope.as_ref(),
+                    ui,
+                    &_editor,
+                    "editor",
+                    "Editor options",
+                    super::jump_mode::ui::MenuAnchorKind::Submenu,
+                    &mut order,
+                );
                 let mut remember_source = self.remember_source;
-                if ui.checkbox(&mut remember_source, "Remember last source").changed() {
+                let remember = ui.checkbox(&mut remember_source, "Remember last source");
+                target!(
+                    config_scope,
+                    ui,
+                    remember,
+                    "remember",
+                    "Remember last source",
+                    Checkbox,
+                    &mut order
+                );
+                if remember.changed() {
                     effects.intent = Some(DialogIntent::SetRememberSource(remember_source));
                 }
-                let current = evaluation.is_some_and(|result| Some(result.basis) == self.session.evaluation_basis());
+                let current = evaluation
+                    .is_some_and(|result| Some(result.basis) == self.session.evaluation_basis());
                 let copy = ui.add_enabled(current, egui::Button::new("Copy all"));
+                target!(
+                    config_scope,
+                    ui,
+                    copy,
+                    "copy-all",
+                    "Copy all",
+                    Button,
+                    &mut order
+                );
                 #[cfg(test)]
-                { self.test_copy_all_rect = Some(copy.rect); }
-                if copy.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
+                {
+                    self.test_copy_all_rect = Some(copy.rect);
+                }
+                if copy.clicked()
+                    && let (Some(document_id), Some(basis)) =
+                        (self.session.current_id(), self.session.evaluation_basis())
+                {
                     effects.result_copy = Some(ResultCopyIntent {
                         host: identity,
                         viewport_id,
@@ -2381,6 +2939,15 @@ impl CalculationPadDialog {
                 }
                 let (host_button, requested_host) =
                     super::utility_host::presentation_button(ui, identity.host, true);
+                target!(
+                    config_scope,
+                    ui,
+                    host_button,
+                    "presentation",
+                    "Change presentation",
+                    Button,
+                    &mut order
+                );
                 #[cfg(test)]
                 if ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_host_button_rect = Some(host_button.rect);
@@ -2390,9 +2957,22 @@ impl CalculationPadDialog {
                     ui.close();
                 }
             });
-            self.jump_target(ui, &_menu.response, "config", "Config Menu", super::jump_mode::TargetKind::Button);
-            if _menu.response.is_pointer_button_down_on() {
-                effects.config_editor_focus = Some(editor_selection);
+            super::jump_mode::ui::register_and_apply_menu_anchor(
+                self.jump_scope.as_ref(),
+                ui,
+                &_menu.response,
+                "config",
+                "Config Menu",
+                super::jump_mode::ui::MenuAnchorKind::Root,
+                &mut self.jump_order,
+            );
+            let keyboard_activation = _menu.response.clicked()
+                && _menu.response.has_focus()
+                && ui.input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space));
+            if keyboard_activation || _menu.response.is_pointer_button_down_on() {
+                effects.config_editor_focus = Some(
+                    editor_selection.filter(|_| keyboard_activation || editor_focused),
+                );
             }
             #[cfg(test)]
             if ui.is_visible() && !ui.is_sizing_pass() {
@@ -2400,15 +2980,34 @@ impl CalculationPadDialog {
             }
             let title = self.session.current_name().unwrap_or("Untitled");
             ui.label(title);
-            if self.session.document_options().is_some_and(|options| options.calculation == crate::calculation_pad::CalculationPolicy::Manual) {
+            if self.session.document_options().is_some_and(|options| {
+                options.calculation == crate::calculation_pad::CalculationPolicy::Manual
+            }) {
                 let response = ui.button("Calculate");
-                self.jump_target(ui, &response, "calculate", "Calculate", super::jump_mode::TargetKind::Button);
-                if response.clicked() { effects.calculate = self.session.evaluation_basis(); }
+                self.jump_target(
+                    ui,
+                    &response,
+                    "calculate",
+                    "Calculate",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if response.clicked() {
+                    effects.calculate = self.session.evaluation_basis();
+                }
             }
-            if self.session.evaluation_status() == crate::calculation_pad::EvaluationStatus::Pending {
+            if self.session.evaluation_status() == crate::calculation_pad::EvaluationStatus::Pending
+            {
                 let response = ui.button("Cancel");
-                self.jump_target(ui, &response, "cancel-calculation", "Cancel calculation", super::jump_mode::TargetKind::Button);
-                if response.clicked() { effects.cancel_calculation = self.session.evaluation_basis(); }
+                self.jump_target(
+                    ui,
+                    &response,
+                    "cancel-calculation",
+                    "Cancel calculation",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if response.clicked() {
+                    effects.cancel_calculation = self.session.evaluation_basis();
+                }
             }
             if self.session.is_dirty() {
                 ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes");

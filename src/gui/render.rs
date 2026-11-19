@@ -11255,11 +11255,14 @@ impl LauncherApp {
             let pad_layer = self.calculation_pad_dialog.host_layer_if_root();
             let (owner, combo_popup) = if pad_layer.is_some()
                 && pad_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let pad_owner = NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationPad, instance: self.calculation_pad_dialog.jump_instance() };
+                let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, pad_owner);
                 let allowed = self.calculation_pad_dialog.jump_parent_available()
-                    && !egui::Popup::is_any_open(ctx)
-                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
-                        Some(focus) == pad_layer || focus.order == egui::Order::Background);
-                (if allowed { NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationPad, instance: self.calculation_pad_dialog.jump_instance() } } else { NavigationOwner::Blocked }, None)
+                    && if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
+                        super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
+                            Some(focus) == pad_layer || focus.order == egui::Order::Background)
+                    };
+                if allowed { (pad_owner, popup) } else { (NavigationOwner::Blocked, None) }
             } else { (owner, combo_popup) };
             let studio_layer = self.markdown_studio_dialog.host_layer_if_root();
             let (owner, combo_popup) = if studio_layer.is_some()
@@ -35647,6 +35650,105 @@ mod tests {
 
 
 
+
+
+    #[test]
+    fn calculation_pad_config_menu_hints_follow_the_innermost_options() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "amount = 7";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.calculation_pad_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let target = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let hint_focus = |app: &mut LauncherApp, label| {
+            let id = target(app, label).unwrap_or_else(|| panic!("no current Pad target {label}"));
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+            id
+        };
+        let enter = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+        };
+        let config = hint_focus(&mut app, "Config Menu");
+        let popup = config.with("popup");
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        enter(&mut app);
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert!(target(&app, "Calculation Pad source editor").is_none());
+        let submenu = hint_focus(&mut app, "Source display");
+        enter(&mut app);
+        assert!(target(&app, "Document").is_none());
+        let before = app.calculation_pad_dialog.test_display_preferences();
+        hint_focus(&mut app, "Word wrap");
+        assert_eq!(
+            app.calculation_pad_dialog.test_display_preferences(),
+            before
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(submenu));
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
 
     #[test]
     fn calculation_reference_review_fences_current_caret_and_unwinds_before_close() {
