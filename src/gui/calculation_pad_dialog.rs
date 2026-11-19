@@ -183,6 +183,22 @@ struct RenameState {
     error: Option<String>,
 }
 
+#[derive(Clone)]
+struct CompletionFocusReceipt {
+    stamp: egui::Id,
+    selection: egui::text::CCursorRange,
+    rows: Vec<egui::Id>,
+}
+
+#[derive(Clone, Copy)]
+struct RenameContextReceipt {
+    host: PadHostIdentity,
+    viewport: egui::ViewportId,
+    basis: crate::calculation_pad::EvaluationBasis,
+    caret: usize,
+    keyboard: bool,
+}
+
 enum RenameAction { Open(usize), Draft(String), Preview(String), Apply, Cancel }
 
 pub(crate) struct CalculationPadDialog {
@@ -220,7 +236,7 @@ pub(crate) struct CalculationPadDialog {
     completion: CompletionState,
     folds: FoldState,
     rename: Option<RenameState>,
-    rename_context_caret: Option<(crate::calculation_pad::EvaluationBasis, usize)>,
+    rename_context: Option<RenameContextReceipt>,
     editor_tool_focus_pending: bool,
     selected_result: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
     active_source_line: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
@@ -473,7 +489,7 @@ struct HostEffects {
     selected_result: Option<LineId>,
     editor_primary_caret: Option<usize>,
     rename_action: Option<RenameAction>,
-    rename_context_caret: Option<(crate::calculation_pad::EvaluationBasis, usize)>,
+    rename_context: Option<RenameContextReceipt>,
     result_scroll: Option<ResultScrollUpdate>,
     split_action: Option<SplitAction>,
     editor_history_action: Option<bool>,
@@ -540,6 +556,7 @@ enum PadInlineChild {
     Transition,
     Chooser,
     Conflict,
+    Rename,
 }
 
 impl PadInlineChild {
@@ -549,6 +566,7 @@ impl PadInlineChild {
             Self::Transition => DialogIntent::Decision(TransitionDecision::Cancel),
             Self::Chooser => DialogIntent::HideChooser,
             Self::Conflict => DialogIntent::DismissConflict,
+            Self::Rename => DialogIntent::CancelRename,
         }
     }
 }
@@ -563,6 +581,7 @@ enum DialogIntent {
     HideChooser,
     CancelSaveAs,
     DismissConflict,
+    CancelRename,
     Save,
     SaveAs(String),
     OpenExamples,
@@ -645,7 +664,7 @@ impl CalculationPadDialog {
         }
     }
     pub(super) fn jump_parent_available(&self) -> bool {
-        self.open && self.rename.is_none()
+        self.open
     }
     fn inline_child(&self) -> Option<PadInlineChild> {
         if self.save_as_open {
@@ -656,6 +675,8 @@ impl CalculationPadDialog {
             Some(PadInlineChild::Chooser)
         } else if self.conflict_document.is_some() {
             Some(PadInlineChild::Conflict)
+        } else if self.rename.is_some() {
+            Some(PadInlineChild::Rename)
         } else {
             None
         }
@@ -694,6 +715,9 @@ impl CalculationPadDialog {
         let mut generation = std::collections::hash_map::DefaultHasher::new();
         self.jump_instance().hash(&mut generation);
         self.session.revision().hash(&mut generation);
+        self.editor_tools.open.hash(&mut generation);
+        self.editor_tools.goto.hash(&mut generation);
+        self.editor_tools.replace.hash(&mut generation);
         self.session
             .evaluation_basis()
             .map(|basis| basis.generation)
@@ -718,6 +742,18 @@ impl CalculationPadDialog {
                 }
             }
             Some(PadInlineChild::Conflict) => self.conflict_document.hash(&mut generation),
+            Some(PadInlineChild::Rename) => {
+                if let Some(rename) = &self.rename {
+                    rename.basis.document.hash(&mut generation);
+                    rename.basis.incarnation.hash(&mut generation);
+                    rename.basis.revision.hash(&mut generation);
+                    rename.basis.generation.hash(&mut generation);
+                    rename.caret.hash(&mut generation);
+                    rename.draft.hash(&mut generation);
+                    rename.preview.is_some().hash(&mut generation);
+                    rename.preview.as_ref().is_some_and(|preview| self.session.rename_preview_is_current(preview)).hash(&mut generation);
+                }
+            }
             None => {}
         }
         super::jump_mode::TargetGeneration(generation.finish())
@@ -836,7 +872,7 @@ impl CalculationPadDialog {
             selected_result: None,
             editor_primary_caret: None,
             rename_action: None,
-            rename_context_caret: None,
+            rename_context: None,
             result_scroll: None,
             split_action: None,
             editor_history_action: None,
@@ -896,43 +932,98 @@ impl CalculationPadDialog {
     }
 
     pub(super) fn editor_tools_own_root_escape(&self, ctx: &egui::Context) -> bool {
-        self.open
-            && (self.editor_tools.open || self.completion.visible)
-            && self.host_state.presentation() == PadHost::Docked
-            && ctx.viewport_id() == egui::ViewportId::ROOT
-            && ctx.input(|input| input.focused)
-            && (ctx.memory(|memory| [
-                egui::Id::new("calculation-pad-source"),
-                egui::Id::new("calculation-pad-find"),
-                egui::Id::new("calculation-pad-replace"),
-                egui::Id::new("calculation-pad-goto"),
-            ].into_iter().any(|id| memory.has_focus(id)))
-                || ctx.memory(|memory| memory.focused())
-                    .and_then(|id| ctx.read_response(id))
-                    .is_some_and(|response| response.layer_id == Self::root_host_layer_id())
-                || ctx.memory(|memory| memory.focused().is_none()
-                    && [egui::Id::new("calculation-pad-source"), egui::Id::new("calculation-pad-find"),
-                        egui::Id::new("calculation-pad-replace"), egui::Id::new("calculation-pad-goto")]
-                        .into_iter().any(|id| memory.had_focus_last_frame(id)))
-                || (self.editor_tool_focus_pending && ctx.memory(|memory| memory.focused().is_none())))
+        if !self.open
+            || ctx.viewport_id() != egui::ViewportId::ROOT
+            || !ctx.input(|input| input.focused)
+            || !(self.editor_tools.open || self.completion.visible)
+        {
+            return false;
+        }
+        let Some(layer) = self.host_layer_if_root() else {
+            return false;
+        };
+        let focused = ctx.memory(|memory| memory.focused());
+        if let Some(id) = focused {
+            return ctx
+                .read_response(id)
+                .is_some_and(|response| response.layer_id == layer);
+        }
+        if super::jump_mode::ui::visible_top_middle_layer(ctx) != Some(layer) {
+            return false;
+        }
+        // Escape can clear egui focus before a retained editor-tool pass runs.
+        self.editor_tools.open || self.completion_owns_focus(ctx)
+    }
+
+    fn completion_focus_slot(viewport: egui::ViewportId) -> egui::Id {
+        egui::Id::new(("calculation-pad-completion-focus", viewport))
+    }
+
+    fn completion_focus_stamp(&self, folds: &FoldState) -> egui::Id {
+        egui::Id::new((
+            self.jump_instance(),
+            self.session.revision(),
+            &folds.collapsed,
+        ))
+    }
+
+    fn current_completion_receipt(
+        &self,
+        ctx: &egui::Context,
+        folds: &FoldState,
+        selection: Option<egui::text::CCursorRange>,
+    ) -> Option<CompletionFocusReceipt> {
+        let selection = selection?;
+        let stamp = self.completion_focus_stamp(folds);
+        let slot = Self::completion_focus_slot(ctx.viewport_id());
+        ctx.data(|data| data.get_temp::<CompletionFocusReceipt>(slot))
+            .filter(|receipt| receipt.stamp == stamp && receipt.selection == selection)
+    }
+
+    fn completion_owns_focus(&self, ctx: &egui::Context) -> bool {
+        let editor = egui::Id::new("calculation-pad-source");
+        let current = ctx.memory(|memory| memory.focused());
+        if current == Some(editor)
+            || (current.is_none() && ctx.memory(|memory| memory.had_focus_last_frame(editor)))
+        {
+            return true;
+        }
+        let selection = egui::widgets::text_edit::TextEditState::load(ctx, editor)
+            .and_then(|state| state.cursor.char_range());
+        self.current_completion_receipt(ctx, &self.folds, selection)
+            .is_some_and(|receipt| {
+                ctx.memory(|memory| {
+                    current.is_some_and(|id| receipt.rows.contains(&id))
+                        || (current.is_none()
+                            && receipt
+                                .rows
+                                .iter()
+                                .any(|id| memory.had_focus_last_frame(*id)))
+                })
+            })
     }
 
     fn stage_completion_escape(&self, ctx: &egui::Context, effects: &mut HostEffects) {
         let editor = egui::Id::new("calculation-pad-source");
-        let owned = ctx.memory(|memory| memory.has_focus(editor)
-            || (memory.focused().is_none() && memory.had_focus_last_frame(editor)));
-        if !self.completion.visible || !owned || !ctx.input(|input| input.focused)
+        if !self.completion.visible
+            || !ctx.input(|input| input.focused)
             || egui::Popup::is_any_open(ctx)
+            || !self.completion_owns_focus(ctx)
             || !ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        { return; }
+        {
+            return;
+        }
         ctx.memory_mut(|memory| memory.request_focus(editor));
         let caret = egui::widgets::text_edit::TextEditState::load(ctx, editor)
             .and_then(|state| state.cursor.char_range())
-            .and_then(|range| self.session.source().and_then(|source| {
-                let projection = self.fold_projection(source, &self.folds).1;
-                projection.byte_at_character(range.primary.index.0)
-                    .and_then(|byte| projection.source_byte(byte))
-            }));
+            .and_then(|range| {
+                self.session.source().and_then(|source| {
+                    let projection = self.fold_projection(source, &self.folds).1;
+                    projection
+                        .byte_at_character(range.primary.index.0)
+                        .and_then(|byte| projection.source_byte(byte))
+                })
+            });
         let mut completion = self.completion.clone();
         completion.visible = false;
         completion.dismissed = self.session.revision().zip(caret);
@@ -994,7 +1085,7 @@ impl CalculationPadDialog {
             completion: CompletionState::default(),
             folds: FoldState::default(),
             rename: None,
-            rename_context_caret: None,
+            rename_context: None,
             editor_tool_focus_pending: false,
             selected_result: None,
             active_source_line: None,
@@ -1662,7 +1753,7 @@ impl CalculationPadDialog {
                                 .and_then(|id| child_ctx.read_response(id))
                                 .is_some_and(|response| response.layer_id == child.layer_id());
                         let local_editor_escape = actions_allowed && self.inline_child().is_none() && !popup_open && !native_jump_owns_escape && (independent || !self.root_jump_active) && self.editor_tools.open
-                            && (independent || local_tools_focus)
+                            && (independent || local_tools_focus || self.editor_tools_own_root_escape(&child_ctx))
                             && child.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                         let mut effects = self.empty_host_effects(viewport_id);
                         if actions_allowed
@@ -2081,7 +2172,7 @@ impl CalculationPadDialog {
     }
 
     fn editor_tools_ui(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         editor_id: egui::Id,
         source: &str,
@@ -2095,16 +2186,28 @@ impl CalculationPadDialog {
         let focused = ui.memory(|memory| memory.focused());
         let pad_focused = ui.memory(|memory| {
             [editor_id, find_id, replace_id, goto_id]
-                .into_iter().any(|id| memory.has_focus(id))
-        }) || focused.and_then(|id| ui.ctx().read_response(id))
+                .into_iter()
+                .any(|id| memory.has_focus(id))
+        }) || focused
+            .and_then(|id| ui.ctx().read_response(id))
             .is_some_and(|response| response.layer_id == ui.layer_id())
-            || (self.editor_tool_focus_pending && focused.is_none());
-        if ui.is_enabled() && pad_focused && !popup_owns_input && self.session.pending_transition().is_none() {
+            || (focused.is_none()
+                && (self.editor_tool_focus_pending || self.editor_tools_own_root_escape(ui.ctx())));
+        if ui.is_enabled()
+            && pad_focused
+            && !popup_owns_input
+            && self.session.pending_transition().is_none()
+        {
             let shortcut = ui.input_mut(|input| {
-                if input.consume_key(egui::Modifiers::COMMAND, egui::Key::F) { Some('f') }
-                else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::H) { Some('h') }
-                else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::G) { Some('g') }
-                else { None }
+                if input.consume_key(egui::Modifiers::COMMAND, egui::Key::F) {
+                    Some('f')
+                } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::H) {
+                    Some('h')
+                } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::G) {
+                    Some('g')
+                } else {
+                    None
+                }
             });
             if let Some(shortcut) = shortcut {
                 tools.open = true;
@@ -2114,7 +2217,9 @@ impl CalculationPadDialog {
                 effects.editor_tool_focus = Some(if tools.goto { goto_id } else { find_id });
             }
         }
-        if !tools.open { return; }
+        if !tools.open {
+            return;
+        }
         if self.editor_tool_focus_pending {
             let target = if tools.goto { goto_id } else { find_id };
             if ui.memory(|memory| memory.has_focus(target)) {
@@ -2123,7 +2228,14 @@ impl CalculationPadDialog {
                 effects.editor_tool_focus = Some(target);
             }
         }
-        if ui.is_enabled() && pad_focused && !popup_owns_input
+        if ui.is_enabled()
+            && pad_focused
+            && !popup_owns_input
+            && if ui.ctx().viewport_id() == egui::ViewportId::ROOT {
+                !self.root_jump_active
+            } else {
+                self.native_jump.active_session().is_none()
+            }
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             tools.open = false;
@@ -2137,11 +2249,35 @@ impl CalculationPadDialog {
             if tools.goto {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Go to line");
-                    let response = ui.add(egui::TextEdit::singleline(&mut tools.line_input).id(goto_id).desired_width(70.0));
-                    let submit = ui.button("Go").clicked()
-                        || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut tools.line_input)
+                            .id(goto_id)
+                            .desired_width(70.0),
+                    );
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "editor-tools/goto",
+                        "Go to line",
+                        super::jump_mode::TargetKind::TextEntry,
+                    );
+                    let go = ui.button("Go");
+                    self.jump_target(
+                        ui,
+                        &go,
+                        "editor-tools/go",
+                        "Go",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    let submit = go.clicked()
+                        || (response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter)));
                     if submit {
-                        let range = tools.line_input.trim().parse::<usize>().ok()
+                        let range = tools
+                            .line_input
+                            .trim()
+                            .parse::<usize>()
+                            .ok()
                             .and_then(|line| SourcePositions::new(source).line_range(line));
                         if let Some(range) = range {
                             effects.editor_navigation = Some(range.start..range.start);
@@ -2150,42 +2286,154 @@ impl CalculationPadDialog {
                             tools.message = Some("Enter an existing physical line number.".into());
                         }
                     }
-                    if ui.small_button("Close").clicked() { tools.open = false; }
+                    let close = ui.small_button("Close");
+                    self.jump_target(
+                        ui,
+                        &close,
+                        "editor-tools/close",
+                        "Close editor tools",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if close.clicked() {
+                        tools.open = false;
+                    }
                 });
             } else {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Find");
-                    let changed = ui.add(egui::TextEdit::singleline(&mut tools.query).id(find_id).char_limit(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES).desired_width(150.0)).changed();
-                    let case_changed = ui.checkbox(&mut tools.case_sensitive, "Match case").changed();
-                    if changed || case_changed { tools.refresh(source, revision); }
-                    if ui.small_button("Previous").clicked() { effects.editor_navigation = tools.navigate(false); }
-                    if ui.small_button("Next").clicked() { effects.editor_navigation = tools.navigate(true); }
+                    let query = ui.add(
+                        egui::TextEdit::singleline(&mut tools.query)
+                            .id(find_id)
+                            .char_limit(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES)
+                            .desired_width(150.0),
+                    );
+                    self.jump_target(
+                        ui,
+                        &query,
+                        "editor-tools/find",
+                        "Find",
+                        super::jump_mode::TargetKind::TextEntry,
+                    );
+                    let changed = query.changed();
+                    let case = ui.checkbox(&mut tools.case_sensitive, "Match case");
+                    self.jump_target(
+                        ui,
+                        &case,
+                        "editor-tools/case",
+                        "Match case",
+                        super::jump_mode::TargetKind::Checkbox,
+                    );
+                    let case_changed = case.changed();
+                    if changed || case_changed {
+                        tools.refresh(source, revision);
+                    }
+                    let previous = ui.small_button("Previous");
+                    self.jump_target(
+                        ui,
+                        &previous,
+                        "editor-tools/previous",
+                        "Previous match",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if previous.clicked() {
+                        effects.editor_navigation = tools.navigate(false);
+                    }
+                    let next = ui.small_button("Next");
+                    self.jump_target(
+                        ui,
+                        &next,
+                        "editor-tools/next",
+                        "Next match",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if next.clicked() {
+                        effects.editor_navigation = tools.navigate(true);
+                    }
                     let selected = tools.current.map_or(0, |index| index + 1);
                     ui.label(format!("{selected}/{}", tools.matches.len()));
-                    if ui.small_button("Close").clicked() { tools.open = false; }
+                    let close = ui.small_button("Close");
+                    self.jump_target(
+                        ui,
+                        &close,
+                        "editor-tools/close",
+                        "Close editor tools",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if close.clicked() {
+                        tools.open = false;
+                    }
                 });
                 if tools.replace {
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Replace");
-                        ui.add(egui::TextEdit::singleline(&mut tools.replacement).id(replace_id).char_limit(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES + 1).desired_width(150.0));
-                        if ui.button("Replace").clicked() {
-                            if tools.current.is_none() { let _ = tools.navigate(true); }
+                        let replacement = ui.add(
+                            egui::TextEdit::singleline(&mut tools.replacement)
+                                .id(replace_id)
+                                .char_limit(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES + 1)
+                                .desired_width(150.0),
+                        );
+                        self.jump_target(
+                            ui,
+                            &replacement,
+                            "editor-tools/replacement",
+                            "Replacement",
+                            super::jump_mode::TargetKind::TextEntry,
+                        );
+                        let replace = ui.button("Replace");
+                        self.jump_target(
+                            ui,
+                            &replace,
+                            "editor-tools/replace",
+                            "Replace",
+                            super::jump_mode::TargetKind::Button,
+                        );
+                        if replace.clicked() {
+                            if tools.current.is_none() {
+                                let _ = tools.navigate(true);
+                            }
                             effects.editor_replacement = tools.replacement(source, false);
-                            if effects.editor_replacement.is_none() { tools.message = Some("No replacement was made or the result is too large.".into()); }
+                            if effects.editor_replacement.is_none() {
+                                tools.message = Some(
+                                    "No replacement was made or the result is too large.".into(),
+                                );
+                            }
                         }
-                        if ui.button("Replace all").clicked() {
+                        let replace_all = ui.button("Replace all");
+                        self.jump_target(
+                            ui,
+                            &replace_all,
+                            "editor-tools/replace-all",
+                            "Replace all",
+                            super::jump_mode::TargetKind::Button,
+                        );
+                        if replace_all.clicked() {
                             effects.editor_replacement = tools.replacement(source, true);
-                            if effects.editor_replacement.is_none() { tools.message = Some("No replacement was made or the result is too large.".into()); }
+                            if effects.editor_replacement.is_none() {
+                                tools.message = Some(
+                                    "No replacement was made or the result is too large.".into(),
+                                );
+                            }
                         }
                     });
                 }
             }
-            if let Some(message) = &tools.message { ui.label(message); }
+            if let Some(message) = &tools.message {
+                ui.label(message);
+            }
         });
         if !tools.open {
             effects.editor_tool_focus = None;
             effects.editor_tool_focus_acknowledged = true;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_editor_tools(&self) -> (bool, &str, &str) {
+        (
+            self.editor_tools.open,
+            &self.editor_tools.query,
+            &self.editor_tools.replacement,
+        )
     }
 
     fn persist_view_state_in_session(&mut self) {
@@ -2200,39 +2448,135 @@ impl CalculationPadDialog {
         if let Err(message) = self.session.set_view_metadata(view) { self.error = Some(message.into()); }
     }
 
-    fn rename_ui(&self, ui: &mut egui::Ui, effects: &mut HostEffects) {
-        let Some(state) = &self.rename else { return; };
+    fn rename_ui(&mut self, ui: &mut egui::Ui, effects: &mut HostEffects) {
+        let Some(state) = self.rename.as_ref() else {
+            return;
+        };
+        let jump_scope = self
+            .jump_scope
+            .clone()
+            .filter(|_| self.inline_child() == Some(PadInlineChild::Rename));
         let current = Some(state.basis) == self.session.evaluation_basis();
-        let preview_current = state.preview.as_ref().is_some_and(|preview| self.session.rename_preview_is_current(preview));
+        let preview_current = state
+            .preview
+            .as_ref()
+            .is_some_and(|preview| self.session.rename_preview_is_current(preview));
         ui.group(|ui| {
             ui.heading("Rename Variable");
             let scope = match &state.scope {
-                crate::calculation_pad::RenameScope::Document => "Document scope, including loop bindings".to_owned(),
-                crate::calculation_pad::RenameScope::Parameter { owner_line } => format!("Parameter of function at r{}", owner_line + 1),
-                crate::calculation_pad::RenameScope::Function { owner_line } => format!("Function declared at r{}", owner_line + 1),
+                crate::calculation_pad::RenameScope::Document => {
+                    "Document scope, including loop bindings".to_owned()
+                }
+                crate::calculation_pad::RenameScope::Parameter { owner_line } => {
+                    format!("Parameter of function at r{}", owner_line + 1)
+                }
+                crate::calculation_pad::RenameScope::Function { owner_line } => {
+                    format!("Function declared at r{}", owner_line + 1)
+                }
             };
             ui.label(format!("{} · {scope}", state.old_name));
             let mut draft = state.draft.clone();
             ui.horizontal(|ui| {
                 ui.label("New name:");
-                if ui.text_edit_singleline(&mut draft).changed() { effects.rename_action = Some(RenameAction::Draft(draft.clone())); }
-                if ui.add_enabled(current, egui::Button::new("Preview")).clicked() { effects.rename_action = Some(RenameAction::Preview(draft.clone())); }
-                if ui.add_enabled(current && preview_current && draft == state.draft, egui::Button::new("Apply")).clicked() { effects.rename_action = Some(RenameAction::Apply); }
-                if ui.button("Cancel").clicked() { effects.rename_action = Some(RenameAction::Cancel); }
+                let name = ui.text_edit_singleline(&mut draft);
+                super::jump_mode::ui::register_and_apply_target(
+                    jump_scope.as_ref(),
+                    ui,
+                    &name,
+                    "rename/name",
+                    "New name",
+                    super::jump_mode::TargetKind::TextEntry,
+                    &mut self.jump_order,
+                );
+                if name.changed() {
+                    effects.rename_action = Some(RenameAction::Draft(draft.clone()));
+                }
+                let preview = ui.add_enabled(current, egui::Button::new("Preview"));
+                super::jump_mode::ui::register_and_apply_target(
+                    jump_scope.as_ref(),
+                    ui,
+                    &preview,
+                    "rename/preview",
+                    "Preview rename",
+                    super::jump_mode::TargetKind::Button,
+                    &mut self.jump_order,
+                );
+                if preview.clicked() {
+                    effects.rename_action = Some(RenameAction::Preview(draft.clone()));
+                }
+                let apply = ui.add_enabled(
+                    current && preview_current && draft == state.draft,
+                    egui::Button::new("Apply"),
+                );
+                super::jump_mode::ui::register_and_apply_target(
+                    jump_scope.as_ref(),
+                    ui,
+                    &apply,
+                    "rename/apply",
+                    "Apply rename",
+                    super::jump_mode::TargetKind::Button,
+                    &mut self.jump_order,
+                );
+                if apply.clicked() {
+                    effects.rename_action = Some(RenameAction::Apply);
+                }
+                let cancel = ui.button("Cancel");
+                super::jump_mode::ui::register_and_apply_target(
+                    jump_scope.as_ref(),
+                    ui,
+                    &cancel,
+                    "rename/cancel",
+                    "Cancel rename",
+                    super::jump_mode::TargetKind::Button,
+                    &mut self.jump_order,
+                );
+                if cancel.clicked() {
+                    effects.rename_action = Some(RenameAction::Cancel);
+                }
             });
-            if !current { ui.colored_label(ui.visuals().warn_fg_color, "Document changed; start a new rename."); }
-            if current && state.preview.is_some() && !preview_current { ui.colored_label(ui.visuals().warn_fg_color, "Related references changed; preview again."); }
-            if let Some(error) = &state.error { ui.colored_label(ui.visuals().error_fg_color, error); }
+            if !current {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Document changed; start a new rename.",
+                );
+            }
+            if current && state.preview.is_some() && !preview_current {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Related references changed; preview again.",
+                );
+            }
+            if let Some(error) = &state.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
             if preview_current && let Some(preview) = &state.preview {
-                ui.label(format!("{} occurrence(s) on {} physical line(s)", preview.plan.ranges.len(), preview.plan.lines.len()));
-                let before = self.session.source().unwrap_or_default().lines().collect::<Vec<_>>();
+                ui.label(format!(
+                    "{} occurrence(s) on {} physical line(s)",
+                    preview.plan.ranges.len(),
+                    preview.plan.lines.len()
+                ));
+                let before = self
+                    .session
+                    .source()
+                    .unwrap_or_default()
+                    .lines()
+                    .collect::<Vec<_>>();
                 let after = preview.plan.source.lines().collect::<Vec<_>>();
-                egui::ScrollArea::vertical().max_height(150.0).id_salt("rename-preview").show_rows(ui, 24.0, preview.plan.lines.len(), |ui, range| {
-                    for &line in &preview.plan.lines[range] {
-                        let text = format!("r{}: {} → {}", line + 1, before.get(line).copied().unwrap_or(""), after.get(line).copied().unwrap_or(""));
-                        ui.add(egui::Label::new(&text).truncate()).on_hover_text(text);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(150.0)
+                    .id_salt("rename-preview")
+                    .show_rows(ui, 24.0, preview.plan.lines.len(), |ui, range| {
+                        for &line in &preview.plan.lines[range] {
+                            let text = format!(
+                                "r{}: {} → {}",
+                                line + 1,
+                                before.get(line).copied().unwrap_or(""),
+                                after.get(line).copied().unwrap_or("")
+                            );
+                            ui.add(egui::Label::new(&text).truncate())
+                                .on_hover_text(text);
+                        }
+                    });
             }
         });
     }
@@ -3435,7 +3779,7 @@ impl CalculationPadDialog {
                     ui.add_enabled_ui(parent_active, |ui| {
                         self.editor_tools_ui(ui, editor_id, &source, &mut tools, effects, popup_owns_input || !parent_active);
                     });
-                    self.rename_ui(ui, effects);
+                    ui.add_enabled_ui(self.inline_child() == Some(PadInlineChild::Rename), |ui| self.rename_ui(ui, effects));
                     if tools != self.editor_tools { effects.editor_tools = Some(tools); }
                     let mut completion = effects.completion.clone().unwrap_or_else(|| self.completion.clone());
                     let mut staged_save_as_name = self.save_as_name.clone();
@@ -3455,7 +3799,7 @@ impl CalculationPadDialog {
                         &mut effects.inspector_caret,
                         &mut effects.editor_primary_caret,
                         &mut effects.rename_action,
-                        &mut effects.rename_context_caret,
+                        &mut effects.rename_context,
                         &mut effects.open_inspector,
                         &mut effects.dependency_applied,
                         &mut effects.result_navigation,
@@ -3839,7 +4183,7 @@ impl CalculationPadDialog {
             host.selected_result = None;
             host.editor_primary_caret = None;
             host.rename_action = None;
-            host.rename_context_caret = None;
+            host.rename_context = None;
             host.result_scroll = None;
         }
 
@@ -3919,7 +4263,7 @@ impl CalculationPadDialog {
             || host.selected_result.is_some()
             || host.editor_primary_caret.is_some()
             || host.rename_action.is_some()
-            || host.rename_context_caret.is_some()
+            || host.rename_context.is_some()
             || host.open_charts
             || host.open_sensitivity
             || host.input_config_commit.is_some()
@@ -3929,7 +4273,7 @@ impl CalculationPadDialog {
             || self.host_state.bootstrap_pending();
         let host_request_requested = host.host_request.is_some();
         let host_intent_requested = host.intent.is_some();
-        if let Some(caret) = host.rename_context_caret.take() { self.rename_context_caret = Some(caret); }
+        if let Some(caret) = host.rename_context.take() { self.rename_context = Some(caret); }
         let mut renamed = false;
         if host.document_basis == current_basis && host.evaluation_basis == self.session.evaluation_basis()
             && !accepted_input_commit
@@ -4178,7 +4522,7 @@ impl CalculationPadDialog {
             }
             self.completion = CompletionState::default();
             self.rename = None;
-            self.rename_context_caret = None;
+            self.rename_context = None;
             self.editor_tools = EditorTools::default();
             self.folds.collapsed.clear();
             self.selected_result = None;
@@ -5123,7 +5467,7 @@ impl CalculationPadDialog {
         inspector_caret: &mut Option<std::ops::Range<usize>>,
         editor_primary_caret: &mut Option<usize>,
         rename_action: &mut Option<RenameAction>,
-        rename_context_caret: &mut Option<(crate::calculation_pad::EvaluationBasis, usize)>,
+        rename_context: &mut Option<RenameContextReceipt>,
         open_inspector: &mut bool,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
         result_navigation: &mut Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
@@ -5231,7 +5575,7 @@ impl CalculationPadDialog {
                             inspector_caret,
                             editor_primary_caret,
                             rename_action,
-                            rename_context_caret,
+                            rename_context,
                             dependency_applied,
                             display_preferences,
                             display_selection,
@@ -5290,7 +5634,7 @@ impl CalculationPadDialog {
                 inspector_caret,
                 editor_primary_caret,
                 rename_action,
-                rename_context_caret,
+                rename_context,
                 dependency_applied,
                 display_preferences,
                 display_selection,
@@ -5532,7 +5876,7 @@ impl CalculationPadDialog {
         inspector_caret: &mut Option<std::ops::Range<usize>>,
         editor_primary_caret: &mut Option<usize>,
         rename_action: &mut Option<RenameAction>,
-        rename_context_caret: &mut Option<(crate::calculation_pad::EvaluationBasis, usize)>,
+        rename_context: &mut Option<RenameContextReceipt>,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
         display_preferences: &mut Option<crate::settings::CalculationPadDisplayPreferences>,
         display_selection: &mut Option<egui::text::CCursorRange>,
@@ -5580,10 +5924,13 @@ impl CalculationPadDialog {
         let clipboard_requested = ui.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Copy | egui::Event::Cut)));
         let original_state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id);
         let persistent_selection = original_state.as_ref().and_then(|state| state.cursor.char_range());
-        let mut editor_selection = ui.memory(|memory| memory.has_focus(editor_id)).then(|| {
-            original_state.clone()
-                .and_then(|state| state.cursor.char_range())
-        }).flatten();
+        let candidate_focused = authorized_pass && self.completion.visible
+            && self.current_completion_receipt(ui.ctx(), folds, persistent_selection)
+                .is_some_and(|receipt| ui.memory(|memory| {
+                    memory.focused().is_some_and(|id| receipt.rows.contains(&id))
+                }));
+        let editor_focused = ui.memory(|memory| memory.has_focus(editor_id));
+        let mut editor_selection = (editor_focused || candidate_focused).then_some(persistent_selection).flatten();
         let mut expanded = false;
         if authorized_pass && !self.folds.collapsed.is_empty()
             && let Some(selection) = editor_selection
@@ -5730,7 +6077,7 @@ impl CalculationPadDialog {
             .and_then(|index| source.char_indices().map(|(offset, _)| offset)
             .chain(std::iter::once(source.len())).nth(index));
         let revision = self.session.revision().unwrap_or_default();
-        let candidates = if focused && preferences.completion && !self.editor_tools.open {
+        let candidates = if (focused || candidate_focused) && preferences.completion && !self.editor_tools.open {
             caret.map_or_else(Vec::new, |caret| editor::suggestions(source, caret))
         } else { Vec::new() };
         completion.visible = !candidates.is_empty()
@@ -5744,7 +6091,12 @@ impl CalculationPadDialog {
                 (*key == egui::Key::Z && modifiers.command) || matches!(key, egui::Key::Backspace | egui::Key::Delete),
             _ => false,
         }));
-        if completion.visible && !conflicting_edit && !popup_owns_input {
+        let jump_active = if ui.ctx().viewport_id() == egui::ViewportId::ROOT {
+            self.root_jump_active
+        } else {
+            self.native_jump.active_session().is_some()
+        };
+        if completion.visible && focused && !conflicting_edit && !popup_owns_input && !jump_active {
             if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 completion.visible = false;
                 completion.dismissed = caret.map(|caret| (revision, caret));
@@ -5972,7 +6324,19 @@ impl CalculationPadDialog {
                 scroll
             }).inner
         }).inner;
-        self.jump_target(ui, &scroll.inner.response, "source", "Calculation Pad source editor", super::jump_mode::TargetKind::TextEntry);
+        let parent_active = self.inline_child().is_none();
+        super::jump_mode::ui::register_and_apply_menu_anchor(
+            self.jump_scope.as_ref().filter(|_| parent_active), ui,
+            &scroll.inner.response, "source", "Calculation Pad source editor",
+            super::jump_mode::ui::MenuAnchorKind::Context(super::jump_mode::TargetKind::TextEntry),
+            &mut self.jump_order,
+        );
+        if scroll.inner.response.gained_focus() && scroll.inner.response.enabled()
+            && ui.is_visible() && !ui.is_sizing_pass() && !ui.ctx().will_discard()
+            && !ui.clip_rect().contains_rect(scroll.inner.response.rect)
+        {
+            scroll.inner.response.scroll_to_me(None);
+        }
         if scroll.inner.response.changed() {
             if visible_source.len() > crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES {
                 *edited_source = Some(visible_source.clone());
@@ -6133,21 +6497,102 @@ impl CalculationPadDialog {
             self.test_editor_geometry = Some((scroll.inner.galley.size().x, scroll.inner_rect.width(), scroll.content_size.x, rows));
         }
         let response = &scroll.inner.response;
-        if authorized_pass && response.secondary_clicked()
-            && let Some(position) = response.interact_pointer_pos()
-        {
-            let cursor = scroll.inner.galley.cursor_from_pos(position - scroll.inner.galley_pos);
-            *rename_context_caret = projection.byte_at_character(cursor.index.0).and_then(|byte| projection.source_byte(byte)).zip(self.session.evaluation_basis()).map(|(caret, basis)| (basis, caret));
-        }
-        response.context_menu(|ui| {
-            let caret = (*rename_context_caret).or(self.rename_context_caret).filter(|(basis, _)| Some(*basis) == self.session.evaluation_basis()).map(|(_, caret)| caret);
-            let button = ui.add_enabled(authorized_pass && caret.is_some(), egui::Button::new("Rename Variable…"));
-            #[cfg(test)] { self.test_rename_context_button = Some(button.rect); }
-            if button.clicked() {
-                if let Some(caret) = caret { *rename_action = Some(RenameAction::Open(caret)); }
-                ui.close();
+        let context = ui.ctx();
+        let popup_id = response.id.with("popup");
+        let keyboard_context = authorized_pass
+            && response.enabled()
+            && response.has_focus()
+            && context.input(|input| input.focused)
+            && !popup_owns_input
+            && !context.will_discard()
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F10));
+        if response.secondary_clicked() || keyboard_context {
+            // Retire the previous opening immediately. Only accepted effects can
+            // publish the exact caret for this opening, even on the same source.
+            self.rename_context = None;
+            if authorized_pass && !context.will_discard() {
+                let character = if keyboard_context {
+                    editor_selection.map(|selection| selection.primary.index.0)
+                } else {
+                    response.interact_pointer_pos().map(|position| {
+                        scroll
+                            .inner
+                            .galley
+                            .cursor_from_pos(position - scroll.inner.galley_pos)
+                            .index
+                            .0
+                    })
+                };
+                let caret = character
+                    .and_then(|index| projection.byte_at_character(index))
+                    .and_then(|byte| projection.source_byte(byte));
+                *rename_context =
+                    caret
+                        .zip(self.session.evaluation_basis())
+                        .map(|(caret, basis)| RenameContextReceipt {
+                            host: self.host_identity(),
+                            viewport: context.viewport_id(),
+                            basis,
+                            caret,
+                            keyboard: keyboard_context,
+                        });
+                if keyboard_context && rename_context.is_some() {
+                    egui::Popup::open_id(context, popup_id);
+                }
             }
+        }
+        let receipt = (*rename_context).or(self.rename_context).filter(|receipt| {
+            receipt.host == self.host_identity()
+                && receipt.viewport == context.viewport_id()
+                && Some(receipt.basis) == self.session.evaluation_basis()
         });
+        if let Some(receipt) = receipt {
+            if let Some(scope) = &self.jump_scope {
+                scope.record_open_context_anchor(ui, response, "source");
+            }
+            let scope = self
+                .jump_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("source"));
+            let popup = egui::Popup::context_menu(response);
+            let popup = if receipt.keyboard {
+                popup.at_position(response.rect.left_top())
+            } else {
+                popup
+            };
+            let was_open = egui::Popup::is_id_open(context, popup_id);
+            let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+            popup.show(|ui| {
+                let button = ui.add_enabled(authorized_pass, egui::Button::new("Rename Variable…"));
+                let mut order = 0;
+                super::jump_mode::ui::register_and_apply_target(
+                    scope.as_ref(),
+                    ui,
+                    &button,
+                    "rename",
+                    "Rename Variable",
+                    super::jump_mode::TargetKind::Button,
+                    &mut order,
+                );
+                #[cfg(test)]
+                {
+                    self.test_rename_context_button = Some(button.rect);
+                }
+                if button.clicked() {
+                    *rename_action = Some(RenameAction::Open(receipt.caret));
+                    ui.close();
+                }
+            });
+            if !egui::Popup::is_id_open(context, popup_id) {
+                self.rename_context = None;
+                *rename_context = None;
+                if was_open && escape && authorized_pass && !context.will_discard() {
+                    response.request_focus();
+                }
+            }
+        } else if egui::Popup::is_id_open(context, popup_id) {
+            egui::Popup::close_id(context, popup_id);
+        }
         let cursor_interaction = response.clicked()
             || response.dragged()
             || response.changed()
@@ -6202,15 +6647,27 @@ impl CalculationPadDialog {
             });
         }
         if completion.visible {
+            let mut completion_rows = Vec::new();
             egui::ScrollArea::vertical().id_salt("calculation-pad-completions")
                 .max_height(64.0).show(ui, |ui| {
                     for (index, candidate) in candidates.iter().enumerate() {
-                        if ui.selectable_label(index == completion.selected, &candidate.label).clicked() {
+                        let key = egui::Id::new((caret, candidate.replacement.start, candidate.replacement.end, &candidate.insertion)).value();
+                        let response = ui.push_id(("completion", key), |ui|
+                            ui.selectable_label(index == completion.selected, &candidate.label)).inner;
+                        completion_rows.push(response.id);
+                        self.jump_target(ui, &response, &format!("completion/{key}"), &candidate.label, super::jump_mode::TargetKind::Button);
+                        if response.clicked() {
                             completion.selected = index;
                             accept = true;
                         }
                     }
                 });
+            if authorized_pass && !ui.ctx().will_discard() && let Some(selection) = editor_selection {
+                let stamp = self.completion_focus_stamp(folds);
+                let slot = Self::completion_focus_slot(ui.ctx().viewport_id());
+                let receipt = CompletionFocusReceipt { stamp, selection, rows: completion_rows };
+                ui.ctx().data_mut(|data| data.insert_temp(slot, receipt));
+            }
         }
         if accept && let Some(selection) = editor_selection
             && let (Some(a), Some(b)) = (
@@ -6714,6 +7171,7 @@ impl CalculationPadDialog {
             DialogIntent::HideChooser => self.open_chooser = false,
             DialogIntent::CancelSaveAs => self.save_as_open = false,
             DialogIntent::DismissConflict => self.clear_feedback(),
+            DialogIntent::CancelRename => self.rename = None,
             DialogIntent::Save => self.save_current(),
             DialogIntent::SaveAs(name) => self.save_as(&name),
             DialogIntent::OpenExamples => self.open_examples(),
@@ -6817,7 +7275,7 @@ impl CalculationPadDialog {
         self.source_highlight = None;
         self.editor_tools = EditorTools::default();
         self.rename = None;
-        self.rename_context_caret = None;
+        self.rename_context = None;
         self.folds.collapsed.clear();
         self.editor_tool_focus_pending = false;
         self.selected_result = None;
@@ -7280,6 +7738,37 @@ mod tests {
         let x = dialog.test_editor_rect.unwrap().left() + 8.0;
         let point = egui::pos2(x, y);
         assert!(dialog.test_editor_rect.unwrap().contains(point) && dialog.test_editor_clip.unwrap().contains(point), "right-click point {point:?}, editor {:?}, clip {:?}", dialog.test_editor_rect, dialog.test_editor_clip);
+        let alpha = egui::pos2(x, dialog.test_editor_geometry.as_ref().unwrap().3[0].1 + 4.0);
+        right_click(&mut dialog, &ctx, size, alpha);
+        assert!(dialog.rename_context.unwrap().caret < "alpha".len());
+        let popup = editor.with("popup");
+        frame(&mut dialog, &ctx, size, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+
+        let pointer = |pressed| vec![
+            egui::Event::PointerMoved(point),
+            egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        frame(&mut dialog, &ctx, size, pointer(true));
+        let discarded = ctx.run_ui(input(size, pointer(false)), |ui| {
+            let first = ui.ctx().current_pass_index() == 0;
+            dialog.show(ui.ctx(), first, true, true);
+            if first {
+                ui.ctx().request_discard("late discarded rename context opening");
+            }
+        });
+        dialog.on_ui_frame_complete(&ctx);
+        discarded.drop_without_applying_deltas();
+        frame(&mut dialog, &ctx, size, Vec::new());
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert!(dialog.rename_context.is_none());
+        assert!(dialog.rename.is_none());
+
         right_click(&mut dialog, &ctx, size, point);
         let button = dialog.test_rename_context_button.expect("rename context action after clicking visible editor row");
         click(&mut dialog, &ctx, size, button.center());

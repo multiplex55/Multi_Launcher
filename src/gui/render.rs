@@ -35656,6 +35656,264 @@ mod tests {
 
 
 
+    fn show_docked_pad_jump_fixture(ctx: &egui::Context, app: &mut LauncherApp, source: &str) {
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(ctx, app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source(source);
+        for _ in 0..6 {
+            pad_jump_test_frame(ctx, app, Vec::new());
+        }
+        ctx.move_to_top(app.calculation_pad_dialog.host_layer_if_root().unwrap());
+        for _ in 0..4 {
+            pad_jump_test_frame(ctx, app, Vec::new());
+        }
+    }
+
+    fn pad_jump_test_frame(ctx: &egui::Context, app: &mut LauncherApp, events: Vec<egui::Event>) {
+        run_tool_dialog_frame_at_size(ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+            .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn calculation_pad_replace_hint_keeps_typing_in_the_editor_tool() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "amount = 7";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Calculation Pad source editor");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        chord(&mut app, egui::Key::H, egui::Modifiers::COMMAND);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(
+            app.calculation_pad_dialog.test_editor_tools(),
+            (true, "", "")
+        );
+        let replacement_id = egui::Id::new("calculation-pad-replace");
+        let replacement_label = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.response_id() == replacement_id)
+            .expect("retained replacement entry")
+            .metadata()
+            .label()
+            .to_owned();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, &replacement_label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(replacement_id));
+        assert_eq!(
+            app.calculation_pad_dialog.test_editor_tools(),
+            (true, "", "")
+        );
+        frame(&mut app, vec![egui::Event::Text("雪".into())]);
+        assert_eq!(
+            app.calculation_pad_dialog.test_editor_tools(),
+            (true, "", "雪")
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        arm(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        chord(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.calculation_pad_dialog.test_editor_tools().0);
+        chord(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.calculation_pad_dialog.test_editor_tools().0);
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn calculation_pad_completion_hint_requires_fresh_acceptance() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        show_docked_pad_jump_fixture(&ctx, &mut app, "");
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Calculation Pad source editor");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        frame(&mut app, vec![egui::Event::Text("sqr".into())]);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqr"));
+        assert!(app.calculation_pad_dialog.test_completion_visible());
+        let candidate = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label().contains("sqrt"))
+            .expect("current sqrt completion response");
+        let id = candidate.response_id();
+        let label = candidate.metadata().label().to_owned();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, &label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqr"));
+        assert!(app.calculation_pad_dialog.test_completion_visible());
+
+        let editor = egui::Id::new("calculation-pad-source");
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(0),
+            )));
+        state.store(&ctx, editor);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqr"));
+
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Calculation Pad source editor");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::End, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::End, egui::Modifiers::NONE)],
+        );
+        frame(&mut app, Vec::new());
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, &label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqr"));
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqrt()"));
+        assert!(!app.calculation_pad_dialog.test_completion_visible());
+    }
+
+    #[test]
+    fn calculation_pad_rename_hints_focus_the_current_review_without_applying() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "amount = 7\namount + 1";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        focus(&mut app, "Calculation Pad source editor");
+        chord(&mut app, egui::Key::Home, egui::Modifiers::COMMAND);
+        chord(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        chord(&mut app, egui::Key::F10, egui::Modifiers::SHIFT);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let popup = egui::Id::new("calculation-pad-source").with("popup");
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        focus(&mut app, "Rename Variable");
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Calculation Pad source editor")
+        );
+        focus(&mut app, "New name");
+        chord(&mut app, egui::Key::A, egui::Modifiers::COMMAND);
+        frame(&mut app, vec![egui::Event::Text("total".into())]);
+        frame(&mut app, Vec::new());
+        focus(&mut app, "Preview rename");
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Apply rename")
+        );
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "Apply rename");
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("total = 7\ntotal + 1")
+        );
+    }
+
     #[test]
     fn calculation_pad_document_decision_hints_and_escape_keep_the_dirty_draft() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();

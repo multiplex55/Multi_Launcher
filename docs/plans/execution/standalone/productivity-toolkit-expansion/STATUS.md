@@ -122,6 +122,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B4a3 | complete |
 | M12-B4b1 | complete |
 | M12-B4b2 | complete |
+| M12-B4c | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -902,3 +903,10 @@ The initial run included passing source, Escape and accepted preference tests. T
 The current typed inline child owns the saved document rows, Save As form, transition decision or disk conflict. Underlying Pad controls are inactive while the child is current. Target identities include the relevant current document, request and inventory. Fresh Escape cancels the child after any active hint session in the actual docked or detached callback. The existing retained document actions still govern changes.
 
 A disk conflict exposes Save As and Keep Editing directly alongside Reload. A dirty transition also retains Save As after a conflict. The first gate passed 5/5 (75ca6fb1-10ce-4829-8a1c-6ea3079fa574). The reviewed gate passed 3/3 (bf4a51a3-db44-4360-98ab-d11676d810cf), including actual Discard focus without execution, successive Escape, conflict Save As focus followed by ordinary form opening, unchanged draft and saved document identity, and the existing real disk-change and blank Save As cases.
+
+
+### M12-B4c Calculation Pad editor tools, completion and Rename
+
+Find, Replace and Go-to register their actual fields and controls in the Pad owner. Jump Escape gets first refusal. A fresh Escape closes the editor tool even when egui has cleared widget focus on the foreground Pad. Completion focuses its actual response, then accepts only a separate Enter or ordinary pointer click with an exact current source selection, fold projection and document. The current Rename context records one retained host, viewport, evaluation basis and caret. Shift+F10 opens the same actual menu as right-click, and the typed Rename review excludes underlying targets until Apply or Cancel.
+
+The initial 9/10 gate (6cd67e45-80ea-4394-a184-b9406cde1d57) exposed the second Escape issue. Review found the discarded context opening and same-revision completion selection gaps. The first remediation run (6d7221c6-a3fa-4914-9906-b4601128b0d7) exposed an egui lock re-entry that was corrected by resolving the viewport before touching context state. The final targeted gate passed 10/10 (59e45609-d70c-496f-90a4-07b8f8e98aa1), covering ordinary editor input, a discarded Rename reopen, stale completion refusal, focus-only hints and fresh Rename and completion activation. The exact filters and output are in `target/productivity-toolkit-expansion-evidence/m12-b4c-pad-editor-final.txt`.
