@@ -179,7 +179,7 @@ impl ReceiptStore {
         }
         let names = enumerate_transfer_directory(
             held.directory().file(),
-            &path,
+            path,
             MAX_CATALOG_ENTRIES,
             MAX_CATALOG_ENTRIES * 512,
             || false,

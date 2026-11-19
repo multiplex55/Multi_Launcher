@@ -25,8 +25,9 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ActionKind {
+    #[default]
     Copy,
     Move,
     Duplicate,
@@ -123,11 +124,6 @@ struct Edit {
     review_page: usize,
     detail_page: usize,
     terminal_page: Option<(TransferJobId, usize)>,
-}
-impl Default for ActionKind {
-    fn default() -> Self {
-        Self::Copy
-    }
 }
 #[derive(Default)]
 pub(super) struct FileOperationsCenterDialog {

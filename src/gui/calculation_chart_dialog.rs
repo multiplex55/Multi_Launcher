@@ -451,8 +451,9 @@ impl CalculationChartDialog {
                         chart_target(scope, ui, &response, &format!("kind/{name}"), name, TargetKind::Selectable, &mut order);
                         #[cfg(test)] actions.controls.push((format!("kind/{name}"), response.rect));
                         if response.clicked() && active {
-                            if distribution_kind && definition.distribution.is_none() {
-                                if let Some((vector, _)) = distribution_vectors.first() { definition.distribution = Some(DistributionDefinition { vector: vector.clone(), bins: DistributionBins::Auto, scale: DistributionScale::Count }); }
+                            if distribution_kind && definition.distribution.is_none()
+                                && let Some((vector, _)) = distribution_vectors.first() {
+                                definition.distribution = Some(DistributionDefinition { vector: vector.clone(), bins: DistributionBins::Auto, scale: DistributionScale::Count });
                             }
                             if !distribution_kind || definition.distribution.is_some() { definition.kind = kind; }
                         }
@@ -504,7 +505,7 @@ impl CalculationChartDialog {
                             });
                             if let Err(error) = draft.bins() { ui.colored_label(ui.visuals().error_fg_color, error); }
                             else if let Some(error) = &draft.error { ui.colored_label(ui.visuals().error_fg_color, error); }
-                            pending_bin_draft = draft.bins().map_or(true, |bins| bins != distribution.bins);
+                            pending_bin_draft = draft.bins() != Ok(distribution.bins);
                             if active && self.distribution_draft.as_ref() != Some(&draft) { actions.draft = Some(draft); }
                             ui.horizontal(|ui| for (scale, label) in [(DistributionScale::Count, "Count"), (DistributionScale::Percentage, "Percentage")] {
                                 let response = ui.selectable_value(&mut distribution.scale, scale, label);

@@ -25,7 +25,7 @@ enum Loaded {
     Empty,
     Invalid,
     Unsupported(u8),
-    History(Inbox),
+    History(Box<Inbox>),
 }
 
 fn read(path: &Path) -> std::io::Result<Loaded> {
@@ -49,7 +49,7 @@ fn read(path: &Path) -> std::io::Result<Loaded> {
         return Ok(Loaded::Unsupported(history.version));
     }
     Ok(if history.inbox.valid_persistent_snapshot() {
-        Loaded::History(history.inbox)
+        Loaded::History(Box::new(history.inbox))
     } else {
         Loaded::Invalid
     })
@@ -89,7 +89,7 @@ impl InboxStore {
             Loaded::Unsupported(version) => {
                 bail!("Notification history uses unsupported version {version}.")
             }
-            Loaded::History(inbox) => inbox,
+            Loaded::History(inbox) => *inbox,
         };
         Ok(Self {
             path: Some(path),

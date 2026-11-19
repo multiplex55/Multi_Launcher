@@ -135,6 +135,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B | pending |
 | M13-R1 | complete |
 | M13-D | complete |
+| M13-R2 | complete |
 | M13-A | pending |
 
 ## M0-B platform decisions
@@ -992,3 +993,10 @@ The final Nextest invocation compiled the normal library for the integration tar
 ### M13-D Launcher discovery and user guides
 
 The README now identifies the current Notes and Markdown Studio print entry points, Password Generator, File Operations, Downloads Triage and Notification Inbox. It also describes the ZIP destination suggestion and keyboard focus boundaries, and links to the optional Windows deployment guide. The independent reviewer identified the discovery gaps during the cumulative review. The new entry points and labels were checked against the application, and the diff passed Git whitespace validation.
+
+
+### M13-R2 Scoped first-party lint corrections
+
+The final Clippy pass exited successfully with 199 library and three application warnings. The corrections preserve the exact transfer-stage proof, Inbox validity and privacy defaults, and print snapshot. Print pixel loops keep the same incomplete remainder behavior. Pad and Hot Folder guards preserve existing widget registration and action order. Independent review found no substantive behavior issue.
+
+The focused Nextest correction gate passed 139 of 139. The follow-up library Clippy pass exited successfully with 164 warnings, including 47 primary spans on changed lines. Those comprise 26 collapsible conditions, 16 large transfer error returns, two large print output enum variants and three individual style suggestions. The typed transfer and print payloads carry recovery or confirmation evidence across effect paths. The remaining layout and style findings stay visible in the log. Evidence files are `m13-clippy.txt`, `m13-r2-nextest.txt`, `m13-r2-nextest-filter.txt` and `m13-r2-clippy.txt` under the ignored evidence directory.

@@ -4055,10 +4055,10 @@ pub(crate) mod transfer_native {
             result.map(TransferStage).map_err(|error| {
                 let unresolved = observation
                     .filter(|observation| error.cleanup_failed() || !observation.creation_confirmed)
-                    .map(|observation| TransferStageAttempt {
+                    .map(|observation| Box::new(TransferStageAttempt {
                         leaf: observation.leaf,
                         identity: observation.identity,
-                    });
+                    }));
                 TransferStageCreateFailure { error, unresolved }
             })
         }
@@ -4732,7 +4732,7 @@ pub(crate) mod transfer_native {
     #[derive(Debug)]
     pub(crate) struct TransferStageCreateFailure {
         pub(crate) error: NativeArchiveError,
-        pub(crate) unresolved: Option<TransferStageAttempt>,
+        pub(crate) unresolved: Option<Box<TransferStageAttempt>>,
     }
 
     pub(crate) struct TransferStage(OwnedStage);

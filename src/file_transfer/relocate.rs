@@ -160,10 +160,10 @@ pub(super) fn move_same_volume_file(
     } else {
         None
     };
-    if let Some(undo) = undo_digest {
-        if expected != Some((undo.sha256, undo.zone_sha256)) {
-            return Err(CopyFailure::ContentMismatch.into());
-        }
+    if let Some(undo) = undo_digest
+        && expected != Some((undo.sha256, undo.zone_sha256))
+    {
+        return Err(CopyFailure::ContentMismatch.into());
     }
     journal
         .record(Event::MoveRenameIntent {
@@ -181,10 +181,10 @@ pub(super) fn move_same_volume_file(
             continue;
         };
         check_before()?;
-        if let Some(expected_inventory) = inventory {
-            if stream_inventory(held.file(), length)? != expected_inventory {
-                return Err(CopyFailure::Admission(AdmissionError::StaleEntry).into());
-            }
+        if let Some(expected_inventory) = inventory
+            && stream_inventory(held.file(), length)? != expected_inventory
+        {
+            return Err(CopyFailure::Admission(AdmissionError::StaleEntry).into());
         }
         if let Some(undo) = undo_digest {
             let data = held.data_file().ok_or(CopyFailure::UnsupportedPlan)?;

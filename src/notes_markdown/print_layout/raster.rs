@@ -324,7 +324,7 @@ pub fn raster_page(
                         if cancelled() {
                             return Err(RasterError::Cancelled);
                         }
-                        for pixel in chunk.chunks_exact(4) {
+                        for pixel in chunk.as_chunks::<4>().0 {
                             let a = u16::from(pixel[3]);
                             rgba.extend(
                                 pixel[..3]

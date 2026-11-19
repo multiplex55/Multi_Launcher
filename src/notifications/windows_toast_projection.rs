@@ -136,7 +136,7 @@ impl ToastProjection {
 
 pub(super) fn unix_seconds(created_ticks: i64) -> Option<i64> {
     let delta = created_ticks.checked_sub(UNIX_EPOCH_TICKS)?;
-    (delta >= 0).then(|| delta / TICKS_PER_SECOND)
+    (delta >= 0).then_some(delta / TICKS_PER_SECOND)
 }
 
 pub(super) fn text_from_utf16(units: &[u16], limit: usize) -> Option<String> {

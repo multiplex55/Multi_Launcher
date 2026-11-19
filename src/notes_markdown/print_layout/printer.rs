@@ -390,7 +390,7 @@ impl PreparedPrint {
                     if cancel.load(Ordering::Acquire) {
                         return Err(PrinterError::Cancelled);
                     }
-                    for pixel in chunk.chunks_exact_mut(4) {
+                    for pixel in chunk.as_chunks_mut::<4>().0 {
                         pixel.swap(0, 2);
                     }
                 }

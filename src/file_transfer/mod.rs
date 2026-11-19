@@ -581,7 +581,7 @@ fn observe_entry_metadata(file: &File) -> Result<EntryMetadata, AdmissionError> 
     }
     Ok(EntryMetadata {
         kind,
-        byte_len: (kind == EntryKind::File).then(|| metadata.len()),
+        byte_len: (kind == EntryKind::File).then_some(metadata.len()),
         attributes: info.FileAttributes,
         created: info.CreationTime,
         modified: info.LastWriteTime,

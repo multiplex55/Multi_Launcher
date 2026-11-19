@@ -238,11 +238,7 @@ impl HostedUtilityDialog for DownloadsTriageDialog {
     fn capture(&self) {}
     fn restore(&mut self, _: ()) {}
     fn accept_close(&mut self, _: bool) -> bool {
-        if self.view.recycle.take().is_some() {
-            false
-        } else {
-            true
-        }
+        self.view.recycle.take().is_none()
     }
     fn render_host(
         &mut self,

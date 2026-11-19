@@ -276,7 +276,7 @@ impl<F: FnMut() -> bool> Builder<'_, F> {
             },
             size,
         )
-        .map_err(|e| PrintError::Unplaceable(e))?;
+        .map_err(PrintError::Unplaceable)?;
         self.glyph_work = self
             .glyph_work
             .checked_add(shape.runs.iter().map(|r| r.glyphs.len()).sum::<usize>())

@@ -2743,7 +2743,7 @@ impl CalculationPadDialog {
                 let _document =
                     super::native_keyboard::show_submenu(ui, "Document", dismissed, |ui| {
                         let mut item_order = 0;
-                        if {
+                        let clicked = {
                             let response = ui.button("New");
                             target!(
                                 document_scope,
@@ -2755,11 +2755,12 @@ impl CalculationPadDialog {
                                 &mut item_order
                             );
                             response.clicked()
-                        } {
+                        };
+                        if clicked {
                             effects.intent = Some(DialogIntent::New);
                             ui.close();
                         }
-                        if {
+                        let clicked = {
                             let response = ui.button("Open");
                             target!(
                                 document_scope,
@@ -2771,7 +2772,8 @@ impl CalculationPadDialog {
                                 &mut item_order
                             );
                             response.clicked()
-                        } {
+                        };
+                        if clicked {
                             effects.intent = Some(DialogIntent::OpenChooser);
                             ui.close();
                         }
@@ -2796,7 +2798,7 @@ impl CalculationPadDialog {
                             effects.intent = Some(DialogIntent::Save);
                             ui.close();
                         }
-                        if {
+                        let clicked = {
                             let response = ui.button("Save As…");
                             target!(
                                 document_scope,
@@ -2808,7 +2810,8 @@ impl CalculationPadDialog {
                                 &mut item_order
                             );
                             response.clicked()
-                        } {
+                        };
+                        if clicked {
                             effects.intent = Some(DialogIntent::OpenSaveAs);
                             ui.close();
                         }
@@ -2953,7 +2956,7 @@ impl CalculationPadDialog {
                         effects.open_dependencies = true;
                         ui.close();
                     }
-                    if {
+                    let clicked = {
                         let response = ui.button("Charts…");
                         target!(
                             tools_scope,
@@ -2965,7 +2968,8 @@ impl CalculationPadDialog {
                             &mut item_order
                         );
                         response.clicked()
-                    } {
+                    };
+                    if clicked {
                         effects.open_charts = true;
                         ui.close();
                     }

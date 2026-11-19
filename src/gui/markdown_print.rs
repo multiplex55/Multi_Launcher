@@ -72,7 +72,7 @@ pub(super) struct SceneReceipt {
 }
 #[derive(Clone)]
 enum Work {
-    Prepare(Snapshot),
+    Prepare(Box<Snapshot>),
     Raster(Arc<SceneReceipt>),
 }
 struct Request {
@@ -173,7 +173,7 @@ impl PreviewWorker {
         ctx: &egui::Context,
         viewport: egui::ViewportId,
     ) -> u64 {
-        self.submit(Work::Prepare(snapshot), page, scale, ctx, viewport)
+        self.submit(Work::Prepare(Box::new(snapshot)), page, scale, ctx, viewport)
     }
     pub fn raster(
         &self,
@@ -289,7 +289,7 @@ fn run(shared: Arc<Shared>) {
                 if cancelled() {
                     return Err("Preview cancelled.".into());
                 }
-                pixels.extend(chunk.chunks_exact(4).map(|pixel| {
+                pixels.extend(chunk.as_chunks::<4>().0.iter().map(|pixel| {
                     egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2])
                 }));
             }

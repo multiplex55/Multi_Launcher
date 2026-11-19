@@ -785,7 +785,7 @@ impl HotFolderDialog {
                         ui.horizontal(|ui| {
                             if snapshot.plugin_enabled {
                                 if snapshot.paused {
-                                    if {
+                                    let clicked = {
                                         let response = ui.button("Resume");
                                         reveal_hotfolder_target(
                                             manager_scope,
@@ -797,10 +797,11 @@ impl HotFolderDialog {
                                             &mut order,
                                         );
                                         interactive && response.clicked()
-                                    } {
+                                    };
+                                    if clicked {
                                         actions.push(HotFolderDialogAction::Resume);
                                     }
-                                } else if {
+                                } else {
                                     let response = ui.button("Pause");
                                     reveal_hotfolder_target(
                                         manager_scope,
@@ -811,12 +812,12 @@ impl HotFolderDialog {
                                         TargetKind::Button,
                                         &mut order,
                                     );
-                                    interactive && response.clicked()
-                                } {
-                                    actions.push(HotFolderDialogAction::Pause);
+                                    if interactive && response.clicked() {
+                                        actions.push(HotFolderDialogAction::Pause);
+                                    }
                                 }
                             }
-                            if {
+                            let clicked = {
                                 let response = ui.add_enabled(
                                     self.pending.is_none(),
                                     egui::Button::new("New Rule"),
@@ -831,7 +832,8 @@ impl HotFolderDialog {
                                     &mut order,
                                 );
                                 interactive && response.clicked()
-                            } {
+                            };
+                            if clicked {
                                 self.begin_new(
                                     snapshot.store.as_ref().map_or(0, |store| store.revision),
                                 );
@@ -1082,7 +1084,7 @@ impl HotFolderDialog {
                             ui.label(format!("Watching: {}", rule.watched_root.display()));
                             ui.label(rule_scope_summary(rule));
                             ui.horizontal(|ui| {
-                                if {
+                                let clicked = {
                                     let response = ui.add_enabled(
                                         self.pending.is_none(),
                                         egui::Button::new("Edit"),
@@ -1097,11 +1099,12 @@ impl HotFolderDialog {
                                         order,
                                     );
                                     interactive && response.clicked()
-                                } {
+                                };
+                                if clicked {
                                     self.begin_edit(store.revision, rule.clone());
                                 }
                                 if snapshot.plugin_enabled && rule.enabled {
-                                    if {
+                                    let clicked = {
                                         let response = ui.button("Disable");
                                         reveal_hotfolder_target(
                                             scope,
@@ -1113,7 +1116,8 @@ impl HotFolderDialog {
                                             order,
                                         );
                                         interactive && response.clicked()
-                                    } {
+                                    };
+                                    if clicked {
                                         actions.push(HotFolderDialogAction::Disable {
                                             expected_revision: store.revision,
                                             rule_id: rule.id.clone(),
@@ -1123,26 +1127,25 @@ impl HotFolderDialog {
                                     && !rule.enabled
                                     && !snapshot.paused
                                     && snapshot.enable_previews.is_empty()
-                                    && {
-                                        let response = ui.button("Enable…");
-                                        reveal_hotfolder_target(
-                                            scope,
-                                            ui,
-                                            &response,
-                                            format!("rule/{}/enable", rule.id.as_str()),
-                                            format!("Enable {}", rule.name),
-                                            TargetKind::Button,
-                                            order,
-                                        );
-                                        interactive && response.clicked()
-                                    }
                                 {
-                                    actions.push(HotFolderDialogAction::PrepareEnable {
-                                        expected_revision: store.revision,
-                                        rule_id: rule.id.clone(),
-                                    });
+                                    let response = ui.button("Enable…");
+                                    reveal_hotfolder_target(
+                                        scope,
+                                        ui,
+                                        &response,
+                                        format!("rule/{}/enable", rule.id.as_str()),
+                                        format!("Enable {}", rule.name),
+                                        TargetKind::Button,
+                                        order,
+                                    );
+                                    if interactive && response.clicked() {
+                                        actions.push(HotFolderDialogAction::PrepareEnable {
+                                            expected_revision: store.revision,
+                                            rule_id: rule.id.clone(),
+                                        });
+                                    }
                                 }
-                                if {
+                                let clicked = {
                                     let response = ui.button("Delete…");
                                     reveal_hotfolder_target(
                                         scope,
@@ -1154,7 +1157,8 @@ impl HotFolderDialog {
                                         order,
                                     );
                                     interactive && response.clicked()
-                                } {
+                                };
+                                if clicked {
                                     self.delete_confirmation = Some((store.revision, rule.clone()));
                                 }
                             });

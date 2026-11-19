@@ -288,7 +288,7 @@ impl Settings {
                 })
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Inbox {
     settings: Settings,
@@ -302,19 +302,6 @@ pub(crate) struct Inbox {
     omitted: u64,
     #[serde(skip)]
     consumed_actions: HashSet<(FactId, ActionKind)>,
-}
-impl Default for Inbox {
-    fn default() -> Self {
-        Self {
-            settings: Settings::default(),
-            records: Vec::new(),
-            cleared: VecDeque::new(),
-            action: None,
-            next_action: 0,
-            omitted: 0,
-            consumed_actions: HashSet::new(),
-        }
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ingest {

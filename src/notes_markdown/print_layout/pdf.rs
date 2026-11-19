@@ -116,7 +116,7 @@ pub fn encode_pdf(
         let mut rgb = Vec::with_capacity(bytes / 4 * 3);
         let mut alpha = Vec::with_capacity(bytes / 4);
         let mut translucent = false;
-        for (index, pixel) in asset.rgba.chunks_exact(4).enumerate() {
+        for (index, pixel) in asset.rgba.as_chunks::<4>().0.iter().enumerate() {
             if index % 4096 == 0 && cancelled() {
                 return Err(PdfError::Cancelled);
             }

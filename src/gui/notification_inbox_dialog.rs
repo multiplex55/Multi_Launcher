@@ -85,12 +85,10 @@ pub(super) struct NotificationInboxDialog {
 }
 impl NotificationInboxDialog {
     pub fn open(&mut self) {
-        if !self.open {
-            if let Some(next) = self.session.checked_add(1) {
-                self.session = next;
-                self.open = true;
-                self.view = View::default();
-            }
+        if !self.open && let Some(next) = self.session.checked_add(1) {
+            self.session = next;
+            self.open = true;
+            self.view = View::default();
         }
     }
     pub fn ensure_open(&mut self) {
@@ -171,11 +169,7 @@ impl HostedUtilityDialog for NotificationInboxDialog {
     fn capture(&self) {}
     fn restore(&mut self, _: ()) {}
     fn accept_close(&mut self, _: bool) -> bool {
-        if self.view.clear.take().is_some() {
-            false
-        } else {
-            true
-        }
+        self.view.clear.take().is_none()
     }
     fn render_host(
         &mut self,
@@ -497,7 +491,10 @@ impl NotificationInboxDialog {
                 if record.status!=Status::SourceRemoved && matches!(&record.related,Some(RelatedItem::Timer{..}|RelatedItem::Calendar{..})) {
                     ui.horizontal_wrapped(|ui| for minutes in [5,10,15] { let label=format!("Snooze {minutes} min"); let b=ui.add_enabled(!runtime.busy,egui::Button::new(&label)); target!(ui,b,&format!("snooze/{minutes}"),label,TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::Snooze(minutes));} });
                 }
-                ui.horizontal_wrapped(|ui| { let b=ui.button("Clear this source…"); target!(ui,b,"clear/source","Clear this source",TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::BeginClear(ClearTarget::Source(record.id.source())));} if let Some(name)=app(record) { let b=ui.button("Clear this app…"); target!(ui,b,"clear/app","Clear this app",TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::BeginClear(ClearTarget::App(name.to_owned())));} } });
+                ui.horizontal_wrapped(|ui| {
+                    let b=ui.button("Clear this source…"); target!(ui,b,"clear/source","Clear this source",TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::BeginClear(ClearTarget::Source(record.id.source())));}
+                    if let Some(name)=app(record) { let b=ui.button("Clear this app…"); target!(ui,b,"clear/app","Clear this app",TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::BeginClear(ClearTarget::App(name.to_owned())));} }
+                });
             }
             let b=ui.button("Clear all locally…"); target!(ui,b,"clear/all","Clear all locally",TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::BeginClear(ClearTarget::All));}
             if let Some(clear)=&actions.view.clear { ui.group(|ui| {

@@ -111,10 +111,10 @@ fn classify(raw: DownloadsScan, now: SystemTime) -> Scan {
     }
     let mut sizes = HashMap::<u64, usize>::new();
     for row in &rows {
-        if row.entry.metadata().kind == EntryKind::File {
-            if let Some(n) = row.entry.metadata().byte_len {
-                *sizes.entry(n).or_default() += 1;
-            }
+        if row.entry.metadata().kind == EntryKind::File
+            && let Some(n) = row.entry.metadata().byte_len
+        {
+            *sizes.entry(n).or_default() += 1;
         }
     }
     for row in &mut rows {
