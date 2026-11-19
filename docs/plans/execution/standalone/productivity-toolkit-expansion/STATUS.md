@@ -105,6 +105,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3a2 | complete |
 | M12-B3b1 | complete |
 | M12-B3b2 | complete |
+| M12-B3c | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -784,3 +785,6 @@ M11-DR resolves Windows **Open source app** availability on the existing worker 
 
 
 M12-B3b2 registers current NotePanel Details fields and actions, Backlink tabs and rows, and Preview fold and task controls. The initial five tests passed in 1fb5e637-6332-42d2-8616-b9df0e3d96f6. Review led to per-panel stable widget IDs, one ordinary Backlink activation per Enter, and clamped pagination after a source refresh. Three targeted cases passed after those corrections in 5ba87b31-ac0f-49b6-b849-48211cb38505. Preview inline links and image controls remain in the later menu/link slice.
+
+
+M12-B3c binds Table, Link and New Note forms to their exact docked or detached session and keeps accepted FormBasis submission and ordinary keyboard input. The docked test verified focus-only Insert and separate hint-versus-form Escape with Jump Off for the latter. The detached Link test typed into the hinted URL field directly, rejected a discarded draft update and preserved the captured Unicode selection. Both and the constrained table test passed after the placement correction in d36f999c-ef18-46bd-ae7e-098686ed689f. The older two-note query fixture reproduced its initial geometry failure on a cached pre-form binary. Restored Table-only default placement removed the overlap. The older fixture now opens through the accepted form path and requires a fresh click after discarded release. Its unchanged content, caret, query and Undo/Redo assertions passed in 7605aa15-7bd9-47a1-a34e-80d093c35325, and the isolated discarded-submit case passed in 3fd2a550-8542-4f11-b326-8d5d6002f8d4.

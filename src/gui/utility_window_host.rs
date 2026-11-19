@@ -291,6 +291,10 @@ pub(super) trait UtilityWindowCompanion {
 
 impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     #[cfg(test)]
+    pub(super) fn test_native_jump(&self) -> &JumpModeUi {
+        &self.native_jump
+    }
+    #[cfg(test)]
     pub(super) fn test_target_rect(&self, label: &str) -> egui::Rect {
         self.native_jump
             .retained_registry()

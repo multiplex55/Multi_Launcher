@@ -2819,6 +2819,9 @@ impl NotePanel {
     }
 
     pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
+        if self.root_form_navigation(ctx).is_some() {
+            return true;
+        }
         if self.host_state.presentation() != UtilityPresentation::Popout
             || ctx.viewport_id() != egui::ViewportId::ROOT
             || !ctx.input(|input| input.focused)
@@ -5109,6 +5112,34 @@ impl NotePanel {
         }
     }
 
+    pub(super) fn configure_child_forms_jump(
+        &mut self,
+        jump: &super::jump_mode::ui::JumpModeUi,
+        enabled: bool,
+    ) {
+        self.table_form_host.configure_jump(jump, enabled);
+        self.link_form_host.configure_jump(jump, enabled);
+        self.new_note_form_host.configure_jump(jump, enabled);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_link_form_jump(&self) -> &super::jump_mode::ui::JumpModeUi {
+        self.link_form_host.test_native_jump()
+    }
+
+    pub(super) fn root_form_navigation(
+        &self,
+        ctx: &egui::Context,
+    ) -> Option<super::jump_mode::ui::NavigationOwner> {
+        use super::note_form_dialog::root_form_owner;
+        if !self.open {
+            return None;
+        }
+        root_form_owner(ctx, &self.table_form_host, self.table_form.as_ref())
+            .or_else(|| root_form_owner(ctx, &self.link_form_host, self.link_form.as_ref()))
+            .or_else(|| root_form_owner(ctx, &self.new_note_form_host, self.new_note_form.as_ref()))
+    }
+
     pub(super) fn show_child_forms(
         &mut self,
         ctx: &egui::Context,
@@ -5117,6 +5148,7 @@ impl NotePanel {
         root_input: bool,
         native_input: bool,
         jump_active: bool,
+        navigation: Option<(&super::jump_mode::ui::JumpModeUi, super::jump_mode::ui::NavigationOwner)>,
     ) {
         use super::note_form_dialog::show_form;
         show_form(
@@ -5128,6 +5160,7 @@ impl NotePanel {
             root_input,
             native_input,
             jump_active,
+            navigation,
         );
         show_form(
             ctx,
@@ -5138,6 +5171,7 @@ impl NotePanel {
             root_input,
             native_input,
             jump_active,
+            navigation,
         );
         show_form(
             ctx,
@@ -5148,6 +5182,7 @@ impl NotePanel {
             root_input,
             native_input,
             jump_active,
+            navigation,
         );
     }
 
@@ -20054,6 +20089,7 @@ More text.
                         true,
                         true,
                         false,
+                        None,
                     );
                     if discard && !discarded {
                         discarded = true;
@@ -20121,7 +20157,7 @@ More text.
                     ..Default::default()
                 },
                 |ctx| {
-                    panel.show_child_forms(ctx, true, true, true, true, false);
+                    panel.show_child_forms(ctx, true, true, true, true, false, None);
                 },
             )
             .drop_without_applying_deltas();

@@ -9057,6 +9057,7 @@ impl LauncherApp {
                 observe.then_some(&mut discard),
             );
             panel.set_jump_scope(None);
+            panel.configure_child_forms_jump(&self.jump_mode_ui, self.jump_mode_enabled());
             panel.show_child_forms(
                 ctx,
                 first_ui_pass,
@@ -9064,6 +9065,7 @@ impl LauncherApp {
                 root_input_allowed,
                 application_input_allowed,
                 self.jump_mode_ui.active_session().is_some(),
+                Some((&self.jump_mode_ui, navigation)),
             );
             if let Some(observed) = note_close_frame.as_deref_mut().filter(|_| observe) {
                 observed.observe_panel(&panel, discard);
@@ -11199,7 +11201,13 @@ impl LauncherApp {
                 (owner, combo_popup)
             };
             let foreground_layer = super::jump_mode::ui::visible_top_middle_layer(ctx);
-            let (owner, combo_popup) = if let Some(panel) = self.note_panels.iter().find(|panel| {
+            let (owner, combo_popup) = if let Some(form) = self
+                .note_panels
+                .iter()
+                .find_map(|panel| panel.root_form_navigation(ctx))
+            {
+                (form, None)
+            } else if let Some(panel) = self.note_panels.iter().find(|panel| {
                 panel
                     .host_layer_if_root()
                     .is_some_and(|layer| Some(layer) == foreground_layer)
@@ -21696,6 +21704,85 @@ mod tests {
     }
 
     #[test]
+    fn docked_note_form_jump_focuses_and_escape_closes_only_the_current_form() {
+        use super::super::note_form_dialog::FormKind;
+        use super::super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let mut panel = launcher_show_owner_note("jump-table-form");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        let original = panel.note_content().to_owned();
+        app.push_note_panel(panel);
+
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                app,
+                events,
+                false,
+                egui::vec2(1200.0, 900.0),
+            )
+            .drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        app.note_panels[0].test_begin_custom_table_builder(&ctx);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.note_panels[0].test_custom_table_builder_layer().unwrap();
+        let session = app.note_panels[0].test_form_session(FormKind::Table).unwrap();
+        ctx.move_to_top(layer);
+        frame(&mut app, Vec::new());
+        let rect = app.note_panels[0].test_custom_table_builder_rect().unwrap();
+        let title = egui::Rect::from_min_size(
+            rect.min + egui::vec2(96.0, 10.0),
+            egui::vec2(4.0, 4.0),
+        );
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(title, pressed));
+        }
+        frame(&mut app, Vec::new());
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog { kind: NavigationDialogKind::NoteFormTable, instance: session },
+        );
+        let insert = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Insert")
+            .expect("current table Insert").response_id();
+        let arm = |app: &mut LauncherApp| {
+            frame(app, vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ]);
+            frame(app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Insert");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(insert));
+        assert_eq!(app.note_panels[0].note_content(), original);
+        assert_eq!(app.note_panels[0].test_form_session(FormKind::Table), Some(session));
+
+        arm(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        frame(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(app.note_panels[0].test_form_session(FormKind::Table), Some(session));
+        frame(&mut app, vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)]);
+        app.set_jump_mode_enabled(false);
+        frame(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.note_panels[0].open);
+        assert_eq!(app.note_panels[0].test_form_session(FormKind::Table), None);
+        assert_eq!(app.note_panels[0].note_content(), original);
+    }
+
+    #[test]
     fn native_note_form_preserves_draft_and_applies_captured_selection() {
         use super::super::note_form_dialog::{FormHost, FormKind, Link};
         use crate::settings::NoteViewMode;
@@ -21832,9 +21919,20 @@ mod tests {
         assert!(app.query.contains('λ'));
         app.request_launcher_visibility(false);
         let child = FormHost::<Link>::test_viewport(session);
+        app.set_jump_mode_enabled(true);
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
         }
+        let target = app.note_panels[0].test_link_form_jump().retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Link URL").expect("current native URL target");
+        assert_eq!(target.viewport(), child);
+        run_host_viewport_frame(&ctx, &mut app, child, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false, false);
+        run_host_viewport_frame(&ctx, &mut app, child, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false, false);
+        let hint = app.note_panels[0].test_link_form_jump().active_session().unwrap().hint_map().assignments().iter()
+            .find(|assignment| assignment.target().label() == "Link URL").unwrap().hint().as_str().to_owned();
+        run_host_viewport_frame(&ctx, &mut app, child, vec![egui::Event::Text(hint)], false, false);
+        assert_eq!(app.note_panels[0].test_form_text(FormKind::Link), Some(""));
+        assert_eq!(app.note_panels[0].test_link_form_label(), Some("αβ"));
         let control = |app: &LauncherApp, name: &str| {
             let (rect, clip, enabled) = app.note_panels[0]
                 .test_form_control(FormKind::Link, name)
@@ -21846,17 +21944,6 @@ mod tests {
             );
             visible
         };
-        let url = control(&app, "url");
-        for pressed in [true, false] {
-            run_host_viewport_frame(
-                &ctx,
-                &mut app,
-                child,
-                tool_dialog_pointer_events(url, pressed),
-                false,
-                false,
-            );
-        }
         run_host_viewport_frame(
             &ctx,
             &mut app,
@@ -72792,11 +72879,17 @@ mod tests {
                 egui::text::CCursor::new(source[..select_end].chars().count()),
             )));
         editor_state.store(&ctx, editor_id);
-        app.note_panels[0].test_begin_custom_table_builder(&ctx);
+        app.note_panels[0].test_stage_form_open(
+            &ctx,
+            super::super::note_form_dialog::FormKind::Table,
+        );
+        let output = ctx.run_ui(launcher_show_owner_input(true, screen_size), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        output.drop_without_applying_deltas();
         assert_eq!(
             app.note_panels[0].test_custom_table_origin_insert_at(),
             Some(insert_at),
-            "the builder captures the original selection start"
+            "the accepted form captures the original selection start"
         );
 
         app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
@@ -72868,8 +72961,13 @@ mod tests {
         let (_, passes) = app.run_root_frame_for_test(&ctx, release, true);
         assert_eq!(
             passes, 2,
-            "the insertion event is replayed through an accepted pass"
+            "egui redraws after the discarded pointer release"
         );
+        assert_eq!(app.note_panels[0].note_content(), source);
+        let current_insert = app.note_panels[0]
+            .test_custom_table_builder_insert_rect()
+            .expect("the discarded release leaves the captured builder retryable");
+        notes_query_mouse_click(&mut app, &ctx, screen_size, current_insert);
 
         let updated = app.note_panels[0].note_content().to_owned();
         assert!(updated.starts_with("# Table A\n\nbefore \n\n"));
