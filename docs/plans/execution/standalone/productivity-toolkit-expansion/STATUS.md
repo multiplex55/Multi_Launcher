@@ -129,6 +129,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B5a | complete |
 | M12-B5b1 | complete |
 | M12-B5b2 | complete |
+| M12-B5b3 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -958,3 +959,10 @@ The initial 5/6 run (321c0b4e-dc74-46db-8a74-7977fa3724c7) passed actual docked 
 The existing Mermaid Colors, inspector, properties, Direction and Draw.io panels now register their actual controls and owned choices. The Visual sidebar registers current object/property fields, selectors and their options, color openers and normal structural controls. Semantic subject IDs keep exact current choices distinct, including a Mermaid group named none and the cleared group option. Existing retained property and workflow effects still authorize mutation and preserve drafts on refusal.
 
 The initial gate passed 6/7 (de15f321-54b6-46ee-a259-af522a434215), including the real Forest preset and Fill text committing one source Undo only on fresh Apply, short Colors geometry, stale properties and Draw.io refusal. The Visual fixture needed the bounded inspector scrolled into view. Review also added the actual object color openers. The reviewed property run passed the two existing cases (ebe7b4f6-495d-42aa-aced-e672c98158a2), and the exact final fixture passed (b968af5b-ed0a-4912-9dea-248e61599650), proving Ink focus, retained text draft and fresh Apply on the selected Text object. The separate Viewer owner follows in B5b3.
+
+
+### M12-B5b3 Diagram Viewer
+
+The Viewer owns a separate docked, embedded or detached Jump scope tied to the actual Viewer layer or viewport, host, Viewer lifetime and active Studio document. The current Zoom, Fit, 100%, presentation and Close controls register their real responses. Viewer pass completion observes the existing discard boundary. Current foreground Viewer ownership excludes the studio source and leaves its document effects with the Studio.
+
+The initial focused gate passed 5/5 (6d09313e-642b-40d0-a143-3d94f23521d2), including existing canvas focus and docked close ownership. The final discard/embedded/actual docked-to-detached fixture gate passed 3/3 (501b042f-9047-421a-aa4c-948a82ccfc62). The actual Open viewer, Pop Out and native Close required separate activation, leaving Studio and source intact. Independent review found no ownership or retained effect defect.

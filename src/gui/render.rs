@@ -9134,6 +9134,11 @@ impl LauncherApp {
             self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("diagram-studio", instance), self.diagram_studio_dialog.jump_generation(), "diagram-studio", ctx.viewport_id(), navigation_owner, false)
         } else { None };
         self.diagram_studio_dialog.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled(), scope, first_ui_pass && !ctx.will_discard());
+        let viewer_instance = self.diagram_studio_dialog.viewer_jump_instance();
+        let viewer_scope = if navigation_owner == (NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DiagramViewer, instance: viewer_instance }) {
+            self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("diagram-viewer", viewer_instance), self.diagram_studio_dialog.viewer_jump_generation(), "diagram-viewer", ctx.viewport_id(), navigation_owner, false)
+        } else { None };
+        self.diagram_studio_dialog.configure_viewer_jump(&self.jump_mode_ui, self.jump_mode_enabled(), viewer_scope, first_ui_pass && !ctx.will_discard());
         let application_input_allowed = self.native_ui_application_input_allowed(ctx);
         let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
         #[cfg(feature = "qa-framebuffer-capture")]
@@ -11081,6 +11086,7 @@ impl LauncherApp {
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
                     NavigationDialogKind::DiagramStudio => self.diagram_studio_dialog.owner_layer_if_root(),
+                    NavigationDialogKind::DiagramViewer => self.diagram_studio_dialog.embedded_viewer_layer_if_root(),
                     NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
                     NavigationDialogKind::HotFolder => self.hotfolder_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hotfolder_manager_window"))),
@@ -11162,6 +11168,8 @@ impl LauncherApp {
                         self.calculation_chart_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DiagramStudio {
                         self.diagram_studio_dialog.owner_layer_if_root().map(|_| self.diagram_studio_dialog.jump_instance())
+                    } else if kind == NavigationDialogKind::DiagramViewer {
+                        self.diagram_studio_dialog.embedded_viewer_layer_if_root().map(|_| self.diagram_studio_dialog.viewer_jump_instance())
                     } else if kind == NavigationDialogKind::FilePreview {
                         self.file_preview_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::HotFolder {
@@ -11296,6 +11304,12 @@ impl LauncherApp {
                     super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| Some(focus) == diagram_layer || focus.order == egui::Order::Background)
                 };
                 if allowed { (diagram_owner, popup) } else { (NavigationOwner::Blocked, None) }
+            } else { (owner, combo_popup) };
+            let viewer_layer = self.diagram_studio_dialog.embedded_viewer_layer_if_root();
+            let (owner, combo_popup) = if viewer_layer.is_some() && viewer_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let allowed = !egui::Popup::is_any_open(ctx)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| Some(focus) == viewer_layer);
+                (if allowed { NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramViewer, instance: self.diagram_studio_dialog.viewer_jump_instance() } } else { NavigationOwner::Blocked }, None)
             } else { (owner, combo_popup) };
             let foreground_layer = super::jump_mode::ui::visible_top_middle_layer(ctx);
             let (owner, combo_popup) = if let Some((panel, prompt)) = self.note_panels.iter().find_map(|panel|
@@ -27586,6 +27600,181 @@ mod tests {
             app.diagram_studio_dialog.test_selected_visual_text(),
             Some("Keyboard revision")
         );
+    }
+
+    #[test]
+    fn diagram_viewer_jump_has_its_own_docked_and_native_owner() {
+        use crate::settings::{RememberedPresentation, UtilityToolKey};
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        for key in ["diagram-studio", "diagram-viewer"] {
+            app.utility_presentation_manager.remember(
+                &ctx,
+                UtilityToolKey::parse(key).unwrap(),
+                RememberedPresentation::Docked,
+            );
+        }
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let draft = "flowchart TD\nA[Alpha] --> B[Bravo]";
+        app.diagram_studio_dialog.test_replace_source(draft);
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1520.0, 1120.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            root(&mut app, Vec::new());
+        }
+        let studio = app.diagram_studio_dialog.owner_layer_if_root().unwrap();
+        ctx.move_to_top(studio);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let arm_root = |app: &mut LauncherApp| {
+            root(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            root(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        let focus_root = |app: &mut LauncherApp, label| {
+            arm_root(app);
+            let hint = dialog_hint_for_label(app, label);
+            root(app, vec![egui::Event::Text(hint)]);
+        };
+        let enter_root = |app: &mut LauncherApp| {
+            root(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            root(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+        };
+        focus_root(&mut app, "Open viewer");
+        assert!(
+            app.diagram_studio_dialog
+                .embedded_viewer_layer_if_root()
+                .is_none()
+        );
+        enter_root(&mut app);
+        for _ in 0..5 {
+            root(&mut app, Vec::new());
+        }
+        let viewer = app
+            .diagram_studio_dialog
+            .embedded_viewer_layer_if_root()
+            .expect("docked Viewer layer");
+        ctx.move_to_top(viewer);
+        let header = ctx
+            .memory(|memory| memory.area_rect(viewer.id))
+            .expect("Viewer area");
+        let title =
+            egui::Rect::from_min_size(header.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(title, pressed));
+        }
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Diagram source editor")
+        );
+        focus_root(&mut app, "Pop Out");
+        assert_eq!(
+            app.diagram_studio_dialog.embedded_viewer_layer_if_root(),
+            Some(viewer)
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+        enter_root(&mut app);
+        assert!(
+            app.diagram_studio_dialog
+                .embedded_viewer_layer_if_root()
+                .is_none()
+        );
+
+        let viewport = super::super::diagram_studio::viewer_viewport_id();
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false)
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let label = "Close viewer";
+        let jump = app.diagram_studio_dialog.test_viewer_jump();
+        assert!(
+            !jump
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Diagram source editor")
+        );
+        let close = jump
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("actual native Viewer close")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .diagram_studio_dialog
+            .test_viewer_jump()
+            .active_session()
+            .expect("native Viewer hints")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("native Close viewer hint")
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(close)))
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(!app.diagram_studio_dialog.test_is_viewer_open());
+        assert_eq!(
+            app.diagram_studio_dialog.owner_layer_if_root(),
+            Some(studio)
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
     }
 
     #[test]

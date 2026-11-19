@@ -1310,6 +1310,10 @@ pub(crate) struct DiagramStudioDialog {
     viewer_bootstrap_pending: bool,
     viewer_focus_pending: bool,
     viewer_generation: u64,
+    viewer_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    viewer_jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    viewer_jump_order: u64,
+    viewer_jump_frame: Option<u64>,
     viewer_embedded_root_layer: Option<egui::LayerId>,
     viewer_embedded_root_focused_id: Option<egui::Id>,
     pending_viewer_effects: Option<PendingViewerEffects>,
@@ -1543,6 +1547,10 @@ impl DiagramStudioDialog {
             viewer_bootstrap_pending: false,
             viewer_focus_pending: false,
             viewer_generation: 0,
+            viewer_jump: Box::new(super::jump_mode::ui::JumpModeUi::default()),
+            viewer_jump_scope: None,
+            viewer_jump_order: 0,
+            viewer_jump_frame: None,
             viewer_embedded_root_layer: None,
             viewer_embedded_root_focused_id: None,
             pending_viewer_effects: None,
@@ -1842,6 +1850,32 @@ impl DiagramStudioDialog {
     #[cfg(test)]
     pub(crate) fn test_native_jump(&self) -> &super::jump_mode::ui::JumpModeUi { &self.native_jump }
 
+    pub(super) fn viewer_jump_instance(&self) -> u64 {
+        egui::Id::new((self.viewer_generation, self.viewer_host.identity().generation, self.owner_generation, &self.render_document)).value()
+    }
+
+    pub(super) fn viewer_jump_generation(&self) -> super::jump_mode::TargetGeneration {
+        let revision = self.documents.session().map(DiagramSession::revision).or_else(|| self.documents.visual_revision());
+        super::jump_mode::TargetGeneration(egui::Id::new((self.viewer_jump_instance(), revision)).value())
+    }
+
+    pub(super) fn configure_viewer_jump(&mut self, launcher: &super::jump_mode::ui::JumpModeUi, enabled: bool, scope: Option<super::jump_mode::ui::JumpModeScope>, first: bool) {
+        let (chord, alphabet) = launcher.configuration();
+        self.viewer_jump.set_configuration(chord, alphabet);
+        self.viewer_jump.set_enabled(enabled);
+        self.viewer_jump_scope = scope.map(|scope| if first { scope } else { scope.registration_only() });
+        self.viewer_jump_order = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_viewer_jump(&self) -> &super::jump_mode::ui::JumpModeUi { &self.viewer_jump }
+    #[cfg(test)]
+    pub(crate) fn test_is_viewer_open(&self) -> bool { self.viewer_open }
+
+    fn viewer_jump_control(&mut self, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str) {
+        diagram_panel_target(self.viewer_jump_scope.as_ref(), ui, response, id, label, super::jump_mode::TargetKind::Button, &mut self.viewer_jump_order);
+    }
+
     #[cfg(test)]
     pub(crate) fn test_selected_visual_text(&self) -> Option<&str> {
         let selected = self.visual_selection?;
@@ -1897,13 +1931,9 @@ impl DiagramStudioDialog {
         let Some(layer) = self.viewer_embedded_root_layer else {
             return false;
         };
-        let has_focus = if self.viewer_host.presentation() == UtilityPresentation::Docked {
-            focused_on_layer(ctx, layer).is_some()
-        } else {
-            self.viewer_embedded_root_focused_id
-                .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id))
-        };
-        has_focus
+        let retained_focus = self.viewer_embedded_root_focused_id
+            .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id)));
+        (focused_on_layer(ctx, layer).is_some() || retained_focus)
             && !active_pointer_position(ctx).is_some_and(|position| {
                 ctx.layer_id_at(position)
                     .is_some_and(|hit_layer| hit_layer != layer)
@@ -2791,6 +2821,28 @@ impl DiagramStudioDialog {
                 && !close_requested_by_os
                 && (!independent || focused)
                 && (independent || (child.is_visible() && !child.is_sizing_pass()));
+            let mut viewer_binding = None;
+            if independent {
+                let binding = super::jump_mode::ui::NavigationViewportBinding {
+                    viewport: viewer_viewport_id(),
+                    owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DiagramViewer, instance: self.viewer_jump_instance() },
+                    base_layer: egui::LayerId::background(),
+                };
+                let allowed = surface_input_allowed && focused && !modal_open
+                    && !egui::Popup::is_any_open(&child_context)
+                    && super::jump_mode::ui::visible_top_middle_layer(&child_context).is_none()
+                    && super::jump_mode::ui::focused_response_layer(&child_context).is_none_or(|layer| layer == egui::LayerId::background());
+                let frame = child_context.cumulative_frame_nr();
+                if self.viewer_jump_frame != Some(frame) { self.viewer_jump.begin_frame(); self.viewer_jump_frame = Some(frame); }
+                let owner = self.viewer_jump.update_navigation_owner_for_viewport(&child_context, binding, allowed && self.jump_enabled);
+                self.viewer_jump.handle_viewport_input(&child_context, owner == binding.owner, pass_authorized, actual_viewport_id);
+                self.viewer_jump.begin_ui_pass();
+                self.viewer_jump_scope = (owner == binding.owner).then(|| self.viewer_jump.scope_for_viewport_binding(
+                    super::jump_mode::SurfaceId::dialog("diagram-viewer", self.viewer_jump_instance()), self.viewer_jump_generation(), "diagram-viewer", binding,
+                )).flatten().map(|scope| if pass_authorized { scope } else { scope.registration_only() });
+                self.viewer_jump_order = 0;
+                viewer_binding = Some((binding, allowed));
+            }
             focus_requested = self.viewer_focus_pending
                 && pass_authorized
                 && surface_input_allowed
@@ -2807,6 +2859,7 @@ impl DiagramStudioDialog {
                     body_rendered = ui.is_visible() && !ui.is_sizing_pass();
                     let (control, _) = presentation_button(ui, viewer_host.host, actions_allowed);
                     self.record_host_action("viewer_presentation", ui, &control);
+                    self.viewer_jump_control(ui, &control, "presentation", if viewer_host.host == UtilityPresentation::Docked { "Pop Out" } else { "Dock" });
                     change_host = control.clicked();
                     close_requested |=
                         self.draw_viewer_body(ui, actions_allowed, &mut canvas_focus_requested, &mut preview_drag, &mut visual_navigation);
@@ -2818,6 +2871,7 @@ impl DiagramStudioDialog {
                 }
                 let (control, _) = presentation_button(child, viewer_host.host, actions_allowed);
                 self.record_host_action("viewer_presentation", child, &control);
+                self.viewer_jump_control(child, &control, "presentation", if viewer_host.host == UtilityPresentation::Docked { "Pop Out" } else { "Dock" });
                 change_host = control.clicked();
                 close_requested |=
                     self.draw_viewer_body(child, actions_allowed, &mut canvas_focus_requested, &mut preview_drag, &mut visual_navigation);
@@ -2852,9 +2906,7 @@ impl DiagramStudioDialog {
                 } else if pointer_active {
                     None
                 } else {
-                    let focused_id = child.memory(|memory| memory.focused());
-                    self.viewer_embedded_root_focused_id
-                        .filter(|viewer_id| focused_id == Some(*viewer_id))
+                    focused_on_layer(&child_context, child.layer_id())
                 };
             }
 
@@ -2862,6 +2914,16 @@ impl DiagramStudioDialog {
             if std::mem::take(&mut self.test_request_viewer_discard) {
                 child.request_discard("Diagram viewer test child pass discard");
                 self.test_viewer_discard_requested = true;
+            }
+
+            if let Some((binding, allowed)) = viewer_binding {
+                self.viewer_jump.finish_ui_pass();
+                let owner = self.viewer_jump.update_navigation_owner_for_viewport(&child_context, binding, allowed && self.jump_enabled);
+                if self.viewer_jump.prepare_pass_for_viewport(&child_context, binding, owner, allowed && self.jump_enabled) { super::jump_mode::paint::paint(&child_context, &self.viewer_jump); }
+                if !child_context.will_discard() && !ctx.will_discard() {
+                    self.viewer_jump.complete_frame_for_viewport(&child_context, binding, owner, allowed && self.jump_enabled);
+                }
+                self.viewer_jump_scope = None;
             }
 
             callback_pass_accepted =
@@ -2951,6 +3013,8 @@ impl DiagramStudioDialog {
             );
         }
         self.ensure_generic_texture(ui.ctx());
+        let viewer_scope = self.viewer_jump_scope.clone();
+        let mut viewer_order = self.viewer_jump_order;
         let Self {
             documents,
             cache,
@@ -3010,6 +3074,7 @@ impl DiagramStudioDialog {
             ui.strong("Diagram Viewer");
             ui.separator();
             let zoom_out = ui.add_enabled(actions_allowed, egui::Button::new("−"));
+            diagram_panel_target(viewer_scope.as_ref(), ui, &zoom_out, "zoom-out", "Zoom out", super::jump_mode::TargetKind::Button, &mut viewer_order);
             if zoom_out.clicked() {
                 viewer_camera.zoom = (viewer_camera.zoom / CAMERA_KEYBOARD_ZOOM_FACTOR)
                     .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
@@ -3017,27 +3082,26 @@ impl DiagramStudioDialog {
             }
             ui.label(format!("{:.0}%", viewer_camera.zoom * 100.0));
             let zoom_in = ui.add_enabled(actions_allowed, egui::Button::new("+"));
+            diagram_panel_target(viewer_scope.as_ref(), ui, &zoom_in, "zoom-in", "Zoom in", super::jump_mode::TargetKind::Button, &mut viewer_order);
             if zoom_in.clicked() {
                 viewer_camera.zoom = (viewer_camera.zoom * CAMERA_KEYBOARD_ZOOM_FACTOR)
                     .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
                 viewer_camera.fit_next = false;
             }
-            if ui
-                .add_enabled(actions_allowed, egui::Button::new("Fit"))
-                .clicked()
-            {
+            let fit = ui.add_enabled(actions_allowed, egui::Button::new("Fit"));
+            diagram_panel_target(viewer_scope.as_ref(), ui, &fit, "fit", "Fit", super::jump_mode::TargetKind::Button, &mut viewer_order);
+            if fit.clicked() {
                 viewer_camera.fit_next = true;
             }
-            if ui
-                .add_enabled(actions_allowed, egui::Button::new("100%"))
-                .clicked()
-            {
+            let zoom_100 = ui.add_enabled(actions_allowed, egui::Button::new("100%"));
+            diagram_panel_target(viewer_scope.as_ref(), ui, &zoom_100, "zoom-100", "100%", super::jump_mode::TargetKind::Button, &mut viewer_order);
+            if zoom_100.clicked() {
                 viewer_camera.zoom = 1.0;
                 viewer_camera.fit_next = false;
             }
-            close_requested = ui
-                .add_enabled(actions_allowed, egui::Button::new("Close viewer"))
-                .clicked();
+            let close = ui.add_enabled(actions_allowed, egui::Button::new("Close viewer"));
+            diagram_panel_target(viewer_scope.as_ref(), ui, &close, "close", "Close viewer", super::jump_mode::TargetKind::Button, &mut viewer_order);
+            close_requested = close.clicked();
         });
 
         if generic_family.is_some() {
@@ -3166,6 +3230,7 @@ impl DiagramStudioDialog {
             ui.strong("Diagram Viewer");
             ui.separator();
             let zoom_out = ui.add_enabled(actions_allowed, egui::Button::new("−"));
+            self.viewer_jump_control(ui, &zoom_out, "zoom-out", "Zoom out");
             #[cfg(test)]
             self.test_action_rects.push((
                 "visual_viewer_zoom_out".into(),
@@ -3180,6 +3245,7 @@ impl DiagramStudioDialog {
             }
             ui.label(format!("{:.0}%", camera.zoom * 100.0));
             let zoom_in = ui.add_enabled(actions_allowed, egui::Button::new("+"));
+            self.viewer_jump_control(ui, &zoom_in, "zoom-in", "Zoom in");
             #[cfg(test)]
             self.test_action_rects.push((
                 "visual_viewer_zoom_in".into(),
@@ -3193,6 +3259,7 @@ impl DiagramStudioDialog {
                 fit_follow = false;
             }
             let fit = ui.add_enabled(actions_allowed, egui::Button::new("Fit"));
+            self.viewer_jump_control(ui, &fit, "fit", "Fit");
             #[cfg(test)]
             self.test_action_rects
                 .push(("visual_viewer_fit".into(), fit.rect, ui.clip_rect()));
@@ -3201,6 +3268,7 @@ impl DiagramStudioDialog {
                 fit_follow = true;
             }
             let zoom_100 = ui.add_enabled(actions_allowed, egui::Button::new("100%"));
+            self.viewer_jump_control(ui, &zoom_100, "zoom-100", "100%");
             #[cfg(test)]
             self.test_action_rects.push((
                 "visual_viewer_zoom_100".into(),
@@ -3212,9 +3280,9 @@ impl DiagramStudioDialog {
                 camera.fit_next = false;
                 fit_follow = false;
             }
-            close_requested = ui
-                .add_enabled(actions_allowed, egui::Button::new("Close viewer"))
-                .clicked();
+            let close = ui.add_enabled(actions_allowed, egui::Button::new("Close viewer"));
+            self.viewer_jump_control(ui, &close, "close", "Close viewer");
+            close_requested = close.clicked();
         });
         ui.separator();
         ui.label("Read-only visual document preview");
