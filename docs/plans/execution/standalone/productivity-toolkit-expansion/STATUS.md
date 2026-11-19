@@ -115,6 +115,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3e4 | complete |
 | M12-B3f | complete |
 | M12-B3g1 | complete |
+| M12-B3g2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -846,3 +847,10 @@ The final gate passed 5/5 (7cda5484-262d-49f8-a067-ad2513d2b489), including actu
 Docked and embedded Studio use the actual foreground window. A detached Studio uses its own current viewport and background layer. Both bind target identity to the Studio opening, presentation, document revision and mode. Existing main file, presentation, mode and Undo/Redo controls expose their real responses. The multiline source remains an ordinary TextEdit. Its hint transfers focus and later keys edit the same draft. The existing rejected-pass effect fence remains in place.
 
 The 5/5 gate (5212b59f-2a68-4938-94af-cd710d336e7b) covers root and detached source hints followed by Unicode and newlines, existing Space and export behavior, discarded source/save handling, document Undo, presentation moves and layer inventory. Menus, inline decisions and outline/preview actions are in the next checkpoint.
+
+
+### M12-B3g2 Markdown Studio menus
+
+Existing Export, Format, Insert and Table menu openers and actual available choices use exact popup scopes in docked and detached Studio. Selection participates in the target generation so choices tied to an older source selection retire. Hinting focuses only the live menu response. Ordinary activation still uses the existing edit, export and output paths.
+
+The focused gate passed 5/5 (d0ae036b-028f-4736-8cf6-df5fb6def37b). The actual Insert and Heading 2 hint flow requires separate Enter presses to open the menu and apply one edit. One subsequent ordinary Undo restores the same draft. Unicode selection, ordinary export navigation, detached multiline source and rejected source/save tests also passed. Scoped review found no actionable issue.

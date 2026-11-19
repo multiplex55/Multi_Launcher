@@ -11235,11 +11235,14 @@ impl LauncherApp {
             let studio_layer = self.markdown_studio_dialog.host_layer_if_root();
             let (owner, combo_popup) = if studio_layer.is_some()
                 && studio_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let studio_owner = NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownStudio, instance: self.markdown_studio_dialog.jump_instance() };
+                let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, studio_owner);
                 let allowed = self.markdown_studio_dialog.jump_parent_available()
-                    && !egui::Popup::is_any_open(ctx)
-                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
-                        Some(focus) == studio_layer || focus.order == egui::Order::Background);
-                (if allowed { NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownStudio, instance: self.markdown_studio_dialog.jump_instance() } } else { NavigationOwner::Blocked }, None)
+                    && if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
+                        super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
+                            Some(focus) == studio_layer || focus.order == egui::Order::Background)
+                    };
+                if allowed { (studio_owner, popup) } else { (NavigationOwner::Blocked, None) }
             } else { (owner, combo_popup) };
             let foreground_layer = super::jump_mode::ui::visible_top_middle_layer(ctx);
             let (owner, combo_popup) = if let Some((panel, prompt)) = self.note_panels.iter().find_map(|panel|
@@ -35752,6 +35755,96 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+
+    #[test]
+    fn markdown_studio_jump_insert_menu_focus_precedes_one_ordinary_edit() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+        let original = "Élan";
+        app.markdown_studio_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 980.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.markdown_studio_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let response = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let hint_focus = |app: &mut LauncherApp, label| {
+            let widget =
+                response(app, label).unwrap_or_else(|| panic!("no current Studio target {label}"));
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(widget));
+            widget
+        };
+        let enter = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+        };
+        let insert = hint_focus(&mut app, "Insert");
+        let popup = insert.with("popup");
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        enter(&mut app);
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert!(response(&app, "Markdown source editor").is_none());
+        hint_focus(&mut app, "Heading 2");
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
+        let undo_before = app.markdown_studio_dialog.test_undo_depth();
+        enter(&mut app);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert!(
+            app.markdown_studio_dialog
+                .test_source()
+                .unwrap()
+                .contains("## ")
+        );
+        assert_eq!(
+            app.markdown_studio_dialog.test_undo_depth(),
+            undo_before + 1
+        );
+
+        hint_focus(&mut app, "Undo");
+        enter(&mut app);
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
     }
 
     #[test]
