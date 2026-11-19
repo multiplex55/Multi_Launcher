@@ -132,11 +132,11 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B5b3 | complete |
 | M12-B5c | complete |
 | M12-B6 | complete |
-| M12-B | pending |
+| M12-B | blocked on detached native Jump verification |
 | M13-R1 | complete |
 | M13-D | complete |
 | M13-R2 | complete |
-| M13-A | pending |
+| M13-A | complete, with partial environment outcome |
 
 ## M0-B platform decisions
 
@@ -1000,3 +1000,22 @@ The README now identifies the current Notes and Markdown Studio print entry poin
 The final Clippy pass exited successfully with 199 library and three application warnings. The corrections preserve the exact transfer-stage proof, Inbox validity and privacy defaults, and print snapshot. Print pixel loops keep the same incomplete remainder behavior. Pad and Hot Folder guards preserve existing widget registration and action order. Independent review found no substantive behavior issue.
 
 The focused Nextest correction gate passed 139 of 139. The follow-up library Clippy pass exited successfully with 164 warnings, including 47 primary spans on changed lines. Those comprise 26 collapsible conditions, 16 large transfer error returns, two large print output enum variants and three individual style suggestions. The typed transfer and print payloads carry recovery or confirmation evidence across effect paths. The remaining layout and style findings stay visible in the log. Evidence files are `m13-clippy.txt`, `m13-r2-nextest.txt`, `m13-r2-nextest-filter.txt` and `m13-r2-clippy.txt` under the ignored evidence directory.
+
+
+### M13-A Final verification and chained handoff
+
+**Outcome** Partial / Environment blocked. M11-C and M11-D retain the external Windows listener gate. M12-B retains the detached native Jump interaction gate. The final documentation checkpoint records the implemented feature paths, passing scoped evidence and remaining verification.
+
+The final integration Nextest selection ran 396 cases across the affected library and plugin query binaries. All passed. The locked, offline fast-dev selection and exact filter are in `m13-nextest-union.txt` and `m13-nextest-filter.txt`. The 139-case verification of the lint corrections also passed. Two pre-existing fixture failures remain recorded from the cached pre-change binary. Quick Notes expected two visible query rows before input. Diagram Studio expected its first native Open picker invocation, with observed count zero. These fixtures are outside the passing union.
+
+Independent cumulative and correction review found no remaining substantive behavior defect in the inspected source. The Clippy pass completed with warnings. The correction pass leaves 164 library warnings, including 47 on changed lines. See M13-R2 for the specific categories and log locations.
+
+Representative Windows evidence includes the same-volume Downloads → reviewed File Operations Move → Inbox and Activity exact-job navigation, the verified cross-volume transfer and guarded Undo, and a Timer notification that created one Todo. The Windows virtual print job produced two Letter pages that were rendered and visually inspected. The separate Krilla export was inspected for selectable text, links and page content. Calculation Pad shipped 119 executable reference examples and real retained editor/navigation tests.
+
+Native checks still outstanding include an accepted ZIP destination picker and extraction, clipboard protection and restart exclusion on the real desktop, copied chart appearance, native reference insertion/Undo, popped-out outline move/Undo, and accepted Save/Print through the application chooser. Physical printer output was outside the available printer setup. The Windows Inbox listener installation, consent, external capture and revocation are blocked. See the [native acceptance stall report](stalls/2026-11-19T09-10-29Z.md).
+
+The ordinary Windows build `cargo build --release --bin multi_launcher --offline --locked -j 2` exited zero after 19m 57s. The optimized executable is 101,390,336 bytes with SHA-256 `B5B6348969980716E1DB8BABCAA1135CEFB29EA02CC61D2CBA6A44F4A5117A9C`. The build log and artifact record are `m13-release-build.txt` and `m13-release-exe.json`.
+
+The exact release executable opened the docked Calculation Pad from the keyboard-focused query result. Its keyboard-focused Pop Out opened the separate native window. Sending Shift+Space then Escape left that window open. The main launcher then accepted `inbox` while the Pad remained open. Capture timed out on both windows and the detached accessibility tree exposed only the native frame. The detached hint, source typing and exact Escape transition remain unverified live. The fixture process exited and its observation and cleanup records are in `m13-native`. The M12 retained viewport tests verify these editor and keyboard transitions with actual widgets.
+
+Cumulative diff whitespace verification passed. The single checkout preserves the direct-child M0-A ancestry and all checkpoints. The final commit resolves the literal handoff tip after this ledger is written. Use that exact tip as the next Goal's direct parent and carry the unresolved Windows evidence forward.
