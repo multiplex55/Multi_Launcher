@@ -556,7 +556,6 @@ enum MermaidColorField {
     GitBranches, GitHighlights, GitBranchText,
 }
 impl MermaidColorField {
-    #[cfg(test)]
     fn slug(self) -> &'static str {
         match self {
             Self::Fill => "fill", Self::Border => "border", Self::Text => "text", Self::Line => "line",

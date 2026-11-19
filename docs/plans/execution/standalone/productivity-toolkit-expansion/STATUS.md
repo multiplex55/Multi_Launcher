@@ -133,6 +133,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B5c | complete |
 | M12-B6 | complete |
 | M12-B | pending |
+| M13-R1 | complete |
 | M13-A | pending |
 
 ## M0-B platform decisions
@@ -980,3 +981,8 @@ The targeted gate passed 4/4 (7159fb45-e1e9-4919-aac4-c09298e1c03a). The actual 
 ### M12-B6 Remaining utility disclosure controls
 
 Print Preview now registers the real Warnings disclosure in its current preview scope. File Operations registers the actual All sources disclosure for the exact queued job. Both remain focus-only until ordinary activation, and their existing content and retained actions remain authoritative. The two scoped companion tests passed (dbcd5e21-de46-4a33-84e1-7d286c5b5615). The batched final verification and native main-query → pop-out smoke are tracked in M13-A.
+
+
+### M13-R1 Compile Diagram Studio target identifiers in the application
+
+The final Nextest invocation compiled the normal library for the integration target and found E0599 in the Mermaid Colors keyboard targets. The existing field identifier was only compiled for unit tests. The correction makes the same identifier available to the application. The first invocation ran no tests. The corrected locked, offline fast-dev union passed all 396 selected cases across three binaries. The filter, compile failure and full results are recorded under the ignored productivity evidence directory.
