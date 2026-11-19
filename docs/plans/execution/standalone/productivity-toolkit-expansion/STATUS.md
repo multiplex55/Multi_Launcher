@@ -124,6 +124,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B4b2 | complete |
 | M12-B4c | complete |
 | M12-B4d1 | complete |
+| M12-B4d2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -918,3 +919,10 @@ The initial 9/10 gate (6cd67e45-80ea-4394-a184-b9406cde1d57) exposed the second 
 The actual Choose inputs menu registers its current literal inputs by line identity. The panel registers existing input controls, inline settings and named watch actions. Hints focus without selecting or applying. A fresh input Apply still validates the retained source, settings and evaluation basis and is one Undo step. Watch rows and move buttons keep stable widget identities. Generation follows watch membership, while the registry removes directions unavailable at the ends of the list.
 
 The first focused gate passed 7/7 (96da337c-68e2-49db-bd7f-eb9f044f7a7d). Review identified chooser scrolling and positional widget identities. The reviewed gate verified 12 ordinary Tabs reaching an initially offscreen choice, input application and existing watch Copy and settings behavior. Its watch case exposed order-driven generation invalidation (f0c49ad0-e7e5-40c5-9d55-cf3a4e663d9e). The final focused identity test passed (dd440b29-3fe1-4002-b41c-472441d97073), moving the same named watch twice through separate Enter presses without changing the source.
+
+
+### M12-B4d2 Calculation Pad result rows and context actions
+
+The current result rows use one keyboard focus response per document, evaluation and line identity. Virtual scrolling preserves the identity of a row that remains rendered. Shift+F10 and right-click share the actual context popup. Its retained receipt carries the exact host, viewport, evaluation basis and line, and retired or discarded openings cannot target neighboring results. Hints focus the existing source, comparison, copy and Inspector actions. Ordinary invocation still goes through the established retained result effects.
+
+The initial gate passed 9/9 (31c291f3-d40a-4a09-a5f8-b7a5ca19f0a7), including same-revision outdated results and discarded navigation. Review identified positional widget IDs in compact results and an extra keyboard stop on the row label. The final scoped gate passed 4/4 (ef3e22b1-d48f-4fcc-a871-5e54d5cb8f25), including Shift+Tab and Tab across two exact result responses, real context focus without selection, fresh Enter moving the source caret, and existing pointer and copy cases.

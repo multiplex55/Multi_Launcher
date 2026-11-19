@@ -35676,6 +35676,90 @@ mod tests {
     }
 
     #[test]
+    fn calculation_pad_result_context_hints_navigate_only_after_fresh_enter() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "amount = 7\nmeasure = amount + 1";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        let result = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Result r2 · measure")
+            .expect("retained exact result response")
+            .response_id();
+        focus(&mut app, "Result r2 · measure");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(result));
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert!(!app.calculation_pad_dialog.test_has_selected_result());
+        chord(&mut app, egui::Key::Tab, egui::Modifiers::SHIFT);
+        let previous = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Result r1 · amount")
+            .expect("prior result row")
+            .response_id();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(previous));
+        chord(&mut app, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(result));
+        chord(&mut app, egui::Key::F10, egui::Modifiers::SHIFT);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let popup = result.with("popup");
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        let go = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Go to source")
+            .expect("retained current row action")
+            .response_id();
+        focus(&mut app, "Go to source");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(go));
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert!(!app.calculation_pad_dialog.test_has_selected_result());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let editor = egui::Id::new("calculation-pad-source");
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(editor));
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        let selection = state.cursor.char_range().unwrap();
+        assert_eq!(selection.primary.index.0, original.find("measure").unwrap());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
     fn calculation_pad_input_hints_require_fresh_select_and_apply() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();

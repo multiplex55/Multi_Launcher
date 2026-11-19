@@ -199,6 +199,17 @@ struct RenameContextReceipt {
     keyboard: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ResultContextReceipt {
+    host: PadHostIdentity,
+    viewport: egui::ViewportId,
+    basis: crate::calculation_pad::EvaluationBasis,
+    line: LineId,
+    anchor: egui::Id,
+    current: bool,
+    keyboard: bool,
+}
+
 enum RenameAction { Open(usize), Draft(String), Preview(String), Apply, Cancel }
 
 pub(crate) struct CalculationPadDialog {
@@ -237,6 +248,7 @@ pub(crate) struct CalculationPadDialog {
     folds: FoldState,
     rename: Option<RenameState>,
     rename_context: Option<RenameContextReceipt>,
+    result_context: Option<ResultContextReceipt>,
     editor_tool_focus_pending: bool,
     selected_result: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
     active_source_line: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
@@ -490,6 +502,7 @@ struct HostEffects {
     editor_primary_caret: Option<usize>,
     rename_action: Option<RenameAction>,
     rename_context: Option<RenameContextReceipt>,
+    result_context: Option<ResultContextReceipt>,
     result_scroll: Option<ResultScrollUpdate>,
     split_action: Option<SplitAction>,
     editor_history_action: Option<bool>,
@@ -892,6 +905,7 @@ impl CalculationPadDialog {
             editor_primary_caret: None,
             rename_action: None,
             rename_context: None,
+            result_context: None,
             result_scroll: None,
             split_action: None,
             editor_history_action: None,
@@ -1105,6 +1119,7 @@ impl CalculationPadDialog {
             folds: FoldState::default(),
             rename: None,
             rename_context: None,
+            result_context: None,
             editor_tool_focus_pending: false,
             selected_result: None,
             active_source_line: None,
@@ -2464,6 +2479,11 @@ impl CalculationPadDialog {
     #[cfg(test)]
     pub(crate) fn test_selected_input_count(&self) -> usize {
         self.pad_view.inputs.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_selected_result(&self) -> bool {
+        self.selected_result.is_some()
     }
 
     #[cfg(test)]
@@ -3912,6 +3932,7 @@ impl CalculationPadDialog {
                         &mut effects.open_inspector,
                         &mut effects.dependency_applied,
                         &mut effects.result_navigation,
+                        &mut effects.result_context,
                         &mut effects.selected_result,
                         &mut effects.result_scroll,
                         &mut effects.display_preferences,
@@ -4293,6 +4314,7 @@ impl CalculationPadDialog {
             host.editor_primary_caret = None;
             host.rename_action = None;
             host.rename_context = None;
+            host.result_context = None;
             host.result_scroll = None;
         }
 
@@ -4373,6 +4395,7 @@ impl CalculationPadDialog {
             || host.editor_primary_caret.is_some()
             || host.rename_action.is_some()
             || host.rename_context.is_some()
+            || host.result_context.is_some()
             || host.open_charts
             || host.open_sensitivity
             || host.input_config_commit.is_some()
@@ -4383,6 +4406,7 @@ impl CalculationPadDialog {
         let host_request_requested = host.host_request.is_some();
         let host_intent_requested = host.intent.is_some();
         if let Some(caret) = host.rename_context.take() { self.rename_context = Some(caret); }
+        if let Some(context) = host.result_context.take() { self.result_context = Some(context); }
         let mut renamed = false;
         if host.document_basis == current_basis && host.evaluation_basis == self.session.evaluation_basis()
             && !accepted_input_commit
@@ -5580,6 +5604,7 @@ impl CalculationPadDialog {
         open_inspector: &mut bool,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
         result_navigation: &mut Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
+        result_context: &mut Option<ResultContextReceipt>,
         selected_result: &mut Option<LineId>,
         result_scroll: &mut Option<ResultScrollUpdate>,
         display_preferences: &mut Option<crate::settings::CalculationPadDisplayPreferences>,
@@ -5721,6 +5746,7 @@ impl CalculationPadDialog {
                             inspector_selection,
                             open_inspector,
                             result_navigation,
+                            result_context,
                             selected_result,
                             result_scroll,
                         );
@@ -5772,6 +5798,7 @@ impl CalculationPadDialog {
                 inspector_selection,
                 open_inspector,
                 result_navigation,
+                result_context,
                 selected_result,
                 result_scroll,
             );
@@ -6851,6 +6878,7 @@ impl CalculationPadDialog {
         inspector_selection: &mut Option<LineId>,
         open_inspector: &mut bool,
         result_navigation: &mut Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
+        result_context: &mut Option<ResultContextReceipt>,
         selected_result: &mut Option<LineId>,
         result_scroll: &mut Option<ResultScrollUpdate>,
     ) {
@@ -6871,6 +6899,8 @@ impl CalculationPadDialog {
 
         let mut scroll_target = None;
         let mut virtual_target = None;
+        let mut context_seen = false;
+        let parent_active = self.inline_child().is_none();
         const COMPACT_ROW_HEIGHT: f32 = 36.0;
         let scroll = egui::ScrollArea::vertical()
             .id_salt("calculation-pad-results")
@@ -6948,16 +6978,17 @@ impl CalculationPadDialog {
                     #[cfg(test)]
                     let mut text_rect = egui::Rect::NOTHING;
                     let highlight = ui.painter().add(egui::Shape::Noop);
+                    let row_id = ui.make_persistent_id((
+                        "calculation-result-row",
+                        evaluation.basis.document,
+                        evaluation.basis.incarnation,
+                        host_identity.generation,
+                        evaluation.basis.revision,
+                        evaluation.basis.generation,
+                        line.id,
+                    ));
                     let scope = ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .id_salt((
-                                "calculation-result-row",
-                                self.session.current_id(),
-                                self.session.document_incarnation(),
-                                host_identity.generation,
-                                line.id,
-                            ))
-                            .sense(egui::Sense::click()),
+                        egui::UiBuilder::new().id(row_id).sense(egui::Sense::click()),
                         |ui| ui.group(|ui| {
                         ui.set_min_width(ui.available_width());
                         #[cfg(test)]
@@ -6981,13 +7012,14 @@ impl CalculationPadDialog {
                                 format!(" uses {}", line.dependency_indices.iter().map(|index| format!("r{}", index + 1)).collect::<Vec<_>>().join(", "))
                             };
                             let text = format!("r{}{name}{refs}  {detail}", line.line_index + 1);
-                            let response = ui.add(egui::Label::new(&text).truncate().sense(egui::Sense::click())).on_hover_text(text);
+                            let response = ui.add(egui::Label::new(&text).truncate().sense(egui::Sense::CLICK)).on_hover_text(text);
                             #[cfg(test)] { text_rect = response.rect; if matches!(line.outcome, LineOutcome::Value(_)) { self.test_result_rows.push((line.line_index, response.rect)); } }
                             response
                         } else { ui.horizontal_wrapped(|ui| {
-                            let row = ui
-                                .monospace(format!("r{}", line.line_index + 1))
-                                .interact(egui::Sense::click());
+                            let row = ui.add(
+                                egui::Label::new(egui::RichText::new(format!("r{}", line.line_index + 1)).monospace())
+                                    .sense(egui::Sense::CLICK),
+                            );
                             if matches!(line.outcome, LineOutcome::Value(_)) {
                                 #[cfg(test)]
                                 self.test_result_rows.push((line.line_index, row.rect));
@@ -7051,75 +7083,143 @@ impl CalculationPadDialog {
                     if current && row_response.clicked() {
                         *selected_result = Some(line.id);
                     }
-                    row_response.context_menu(|ui| {
-                        let go_to_source = ui.add_enabled(current, egui::Button::new("Go to source"));
-                        #[cfg(test)] { self.test_go_to_source = Some(go_to_source.rect); }
-                        if go_to_source.clicked()
-                            && let (Some(document), Some(incarnation), Some(revision)) = (
-                                self.session.current_id(), self.session.document_incarnation(), self.session.revision(),
-                            )
-                        {
-                            *result_navigation = Some((super::calculation_dependency_dialog::DependencyNavigation {
-                                document, incarnation, line: line.id, basis: Some(evaluation.basis),
-                            }, revision));
-                            ui.close();
-                        }
-                        let has_value = current && matches!(line.outcome, LineOutcome::Value(_));
-                        let select = ui.add_enabled(has_value, egui::Button::new("Select for comparison"));
-                        #[cfg(test)] { self.test_select_comparison = Some(select.rect); }
-                        if select.clicked() {
-                            *inspector_selection = Some(line.id);
-                            ui.close();
-                        }
-                        let copy = ui.add_enabled(has_value, egui::Button::new("Copy"));
-                        if copy.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
-                            *result_copy = Some(ResultCopyIntent {
-                                host: host_identity,
-                                viewport_id,
-                                document_id,
-                                basis,
-                                target: ResultCopyTarget::Line(line.id),
+                    let jump_scope = self.jump_scope.as_ref().filter(|_| parent_active && current);
+                    let row_key = jump_scope.map(|_| format!("result/{}", line.id.get()));
+                    if let Some(key) = &row_key {
+                        let row_label = line.assignment_name.as_deref().map_or_else(
+                            || format!("Result r{}", line.line_index + 1),
+                            |name| format!("Result r{} · {name}", line.line_index + 1),
+                        );
+                        super::jump_mode::ui::register_and_apply_menu_anchor(
+                            jump_scope, ui, &row_response, key, row_label,
+                            super::jump_mode::ui::MenuAnchorKind::Context(super::jump_mode::TargetKind::Button),
+                            &mut self.jump_order,
+                        );
+                    }
+                    if row_response.gained_focus() && row_response.enabled() && ui.is_visible()
+                        && !ui.is_sizing_pass() && !ui.ctx().will_discard()
+                        && !ui.clip_rect().contains_rect(row_response.rect) {
+                        row_response.scroll_to_me(None);
+                    }
+                    let popup_id = row_response.id.with("popup");
+                    let keyboard_open = parent_active && current && row_response.enabled() && row_response.has_focus()
+                        && ui.input(|input| input.focused) && !egui::Popup::is_any_open(ui.ctx())
+                        && !ui.ctx().will_discard()
+                        && ui.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F10));
+                    if row_response.secondary_clicked() || keyboard_open {
+                        self.result_context = None;
+                        if parent_active && ui.is_enabled() && !ui.is_sizing_pass() && !ui.ctx().will_discard() {
+                            *result_context = Some(ResultContextReceipt {
+                                host: host_identity, viewport: viewport_id, basis: evaluation.basis,
+                                line: line.id, anchor: row_response.id, current, keyboard: keyboard_open,
                             });
-                            ui.close();
+                            if keyboard_open { egui::Popup::open_id(ui.ctx(), popup_id); }
                         }
-                        let copy_formatted = ui.add_enabled(has_value, egui::Button::new("Copy formatted"));
-                        if copy_formatted.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
-                            *result_copy = Some(ResultCopyIntent {
-                                host: host_identity,
-                                viewport_id,
-                                document_id,
-                                basis,
-                                target: ResultCopyTarget::FormattedLine(line.id),
-                            });
-                            ui.close();
-                        }
-                        #[cfg(test)]
-                        self.test_result_actions.extend([
-                            ("Go to source", go_to_source.rect, go_to_source.enabled()),
-                            ("Select for comparison", select.rect, select.enabled()),
-                            ("Copy", copy.rect, copy.enabled()),
-                            ("Copy formatted", copy_formatted.rect, copy_formatted.enabled()),
-                        ]);
-                        if matches!(&line.outcome, LineOutcome::Value(
-                            crate::calculation_pad::CalculationValue::Integer(_)
-                                | crate::calculation_pad::CalculationValue::ExactBase { .. }
-                        )) {
-                            let inspect = ui.add_enabled(current, egui::Button::new("Inspect bits…"));
-                            #[cfg(test)]
+                    }
+                    let receipt = (*result_context).or(self.result_context).filter(|receipt|
+                        receipt.host == host_identity && receipt.viewport == viewport_id
+                            && receipt.basis == evaluation.basis && receipt.current == current
+                            && receipt.line == line.id && receipt.anchor == row_response.id && parent_active);
+                    if let Some(receipt) = receipt {
+                        context_seen = true;
+                        let context_scope = jump_scope.zip(row_key.as_deref()).map(|(scope, key)| {
+                            scope.record_open_context_anchor(ui, &row_response, key);
+                            scope.combo_popup_scope(key)
+                        });
+                        let popup = egui::Popup::context_menu(&row_response);
+                        let popup = if receipt.keyboard { popup.at_position(row_response.rect.left_top()) } else { popup };
+                        let was_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+                        let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+                        popup.show(|ui| {
+                            let mut order = 0;
+                            let go_to_source = ui.add_enabled(current, egui::Button::new("Go to source"));
+                            super::jump_mode::ui::register_and_apply_target(context_scope.as_ref(), ui, &go_to_source, "source", "Go to source", super::jump_mode::TargetKind::Button, &mut order);
+                            #[cfg(test)] { self.test_go_to_source = Some(go_to_source.rect); }
+                            if go_to_source.clicked()
+                                && let (Some(document), Some(incarnation), Some(revision)) = (
+                                    self.session.current_id(), self.session.document_incarnation(), self.session.revision(),
+                                )
                             {
-                                self.test_inspect_rects.push((line.line_index, inspect.rect, ui.clip_rect(), inspect.enabled()));
-                                self.test_result_actions.push(("Inspect bits…", inspect.rect, inspect.enabled()));
-                            }
-                            if inspect.clicked() {
-                                *inspector_selection = Some(line.id);
-                                *open_inspector = true;
+                                *result_navigation = Some((super::calculation_dependency_dialog::DependencyNavigation {
+                                    document, incarnation, line: line.id, basis: Some(evaluation.basis),
+                                }, revision));
                                 ui.close();
                             }
+                            let has_value = current && matches!(line.outcome, LineOutcome::Value(_));
+                            let select = ui.add_enabled(has_value, egui::Button::new("Select for comparison"));
+                            super::jump_mode::ui::register_and_apply_target(context_scope.as_ref(), ui, &select, "comparison", "Select for comparison", super::jump_mode::TargetKind::Button, &mut order);
+                            #[cfg(test)] { self.test_select_comparison = Some(select.rect); }
+                            if select.clicked() {
+                                *inspector_selection = Some(line.id);
+                                ui.close();
+                            }
+                            let copy = ui.add_enabled(has_value, egui::Button::new("Copy"));
+                            super::jump_mode::ui::register_and_apply_target(context_scope.as_ref(), ui, &copy, "copy", "Copy", super::jump_mode::TargetKind::Button, &mut order);
+                            if copy.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
+                                *result_copy = Some(ResultCopyIntent {
+                                    host: host_identity,
+                                    viewport_id,
+                                    document_id,
+                                    basis,
+                                    target: ResultCopyTarget::Line(line.id),
+                                });
+                                ui.close();
+                            }
+                            let copy_formatted = ui.add_enabled(has_value, egui::Button::new("Copy formatted"));
+                            super::jump_mode::ui::register_and_apply_target(context_scope.as_ref(), ui, &copy_formatted, "copy-formatted", "Copy formatted", super::jump_mode::TargetKind::Button, &mut order);
+                            if copy_formatted.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
+                                *result_copy = Some(ResultCopyIntent {
+                                    host: host_identity,
+                                    viewport_id,
+                                    document_id,
+                                    basis,
+                                    target: ResultCopyTarget::FormattedLine(line.id),
+                                });
+                                ui.close();
+                            }
+                            #[cfg(test)]
+                            self.test_result_actions.extend([
+                                ("Go to source", go_to_source.rect, go_to_source.enabled()),
+                                ("Select for comparison", select.rect, select.enabled()),
+                                ("Copy", copy.rect, copy.enabled()),
+                                ("Copy formatted", copy_formatted.rect, copy_formatted.enabled()),
+                            ]);
+                            if matches!(&line.outcome, LineOutcome::Value(
+                                crate::calculation_pad::CalculationValue::Integer(_)
+                                    | crate::calculation_pad::CalculationValue::ExactBase { .. }
+                            )) {
+                                let inspect = ui.add_enabled(current, egui::Button::new("Inspect bits…"));
+                                super::jump_mode::ui::register_and_apply_target(context_scope.as_ref(), ui, &inspect, "inspect", "Inspect bits", super::jump_mode::TargetKind::Button, &mut order);
+                                #[cfg(test)]
+                                {
+                                    self.test_inspect_rects.push((line.line_index, inspect.rect, ui.clip_rect(), inspect.enabled()));
+                                    self.test_result_actions.push(("Inspect bits…", inspect.rect, inspect.enabled()));
+                                }
+                                if inspect.clicked() {
+                                    *inspector_selection = Some(line.id);
+                                    *open_inspector = true;
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if !egui::Popup::is_id_open(ui.ctx(), popup_id) {
+                            self.result_context = None;
+                            *result_context = None;
+                            if was_open && escape && parent_active && !ui.ctx().will_discard() { row_response.request_focus(); }
                         }
-                    });
+                    } else if egui::Popup::is_id_open(ui.ctx(), popup_id) {
+                        egui::Popup::close_id(ui.ctx(), popup_id);
+                    }
                 }
                 if compact { ui.add_space((visible_rows.len() - end) as f32 * COMPACT_ROW_HEIGHT); }
             });
+        if !context_seen && ui.is_visible() && !ui.is_sizing_pass() && !ui.ctx().will_discard()
+            && let Some(receipt) = self.result_context
+            && receipt.viewport == viewport_id
+        {
+            egui::Popup::close_id(ui.ctx(), receipt.anchor.with("popup"));
+            self.result_context = None;
+        }
         if let (Some(target), Some(identity)) = (scroll_target, self.pending_result_scroll) {
             let mut state = scroll.state;
             if !scroll.inner_rect.contains_rect(target) {
