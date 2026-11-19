@@ -562,7 +562,6 @@ impl CalculationPadDialog {
         self.open
             && self.examples_open
             && self.examples_owner == self.session.document_incarnation()
-            && self.pending_reference_insert.is_none()
     }
     pub(super) fn reference_jump_generation(&self) -> super::jump_mode::TargetGeneration {
         super::jump_mode::TargetGeneration(
@@ -572,6 +571,8 @@ impl CalculationPadDialog {
                 self.examples_owner,
                 &self.examples_search,
                 self.reference_view.jump_identity(),
+                self.reference_review_identity(),
+                self.reference_current_anchor_identity(),
             ))
             .value(),
         )
@@ -1817,6 +1818,13 @@ impl CalculationPadDialog {
                                 && Self::owns_reference_root_input(ui)
                                 && !ctx.memory(|m| m.top_modal_layer().is_some());
                             effects.input_authorized = allowed;
+                            if first && allowed && !ctx.will_discard()
+                                && self.reference_owns_root_shortcuts(ctx) && !self.root_jump_active
+                                && self.pending_reference_insert.is_some()
+                                && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                            {
+                                effects.reference_insert = Some(InsertAction::Cancel);
+                            }
                             effects.close = first
                                 && allowed
                                 && !ctx.will_discard()
@@ -1922,6 +1930,12 @@ impl CalculationPadDialog {
                             allowed && self.reference_owns_root_shortcuts(&child_ctx)
                                 && !self.root_jump_active
                         };
+                        if pass_ok && keyboard_owner && !jump_owns_escape
+                            && self.pending_reference_insert.is_some()
+                            && child_ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                        {
+                            effects.reference_insert = Some(InsertAction::Cancel);
+                        }
                         effects.close = pass_ok
                             && (close || (keyboard_owner && !jump_owns_escape
                                 && self.pending_reference_insert.is_none()
@@ -4652,6 +4666,15 @@ impl CalculationPadDialog {
     }
 
     fn examples_ui(&mut self, ui: &mut egui::Ui, effects: &mut HelpEffects) {
+        if self.pending_reference_insert.is_some() {
+            self.reference_review_ui(ui, effects);
+            ui.add_enabled_ui(false, |ui| self.examples_body(ui, effects));
+        } else {
+            self.examples_body(ui, effects);
+        }
+    }
+
+    fn examples_body(&mut self, ui: &mut egui::Ui, effects: &mut HelpEffects) {
         let mut view = self.reference_view.clone();
         ui.horizontal_wrapped(|ui| {
             let grouped = ui.selectable_value(&mut view.api_visible, false, "Grouped Examples");

@@ -112,8 +112,98 @@ fn click_with_focus_reveal(response: egui::Response) -> bool {
 
 impl CalculationPadDialog {
     #[cfg(test)]
+    pub(crate) fn test_prepare_reference_review(&mut self, ctx: &egui::Context) {
+        self.reference_view.api_visible = true;
+        let anchor = self.reference_anchor().expect("the Pad published its actual current caret");
+        let example = reference::entry(ReferenceId::Topic("Chart axes")).unwrap().example;
+        self.complete_reference_insert(ctx, Some(InsertAction::Prepare { anchor, example }));
+        assert!(self.test_has_reference_review());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_reference_review(&self) -> bool {
+        self.pending_reference_insert.is_some()
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_reference_query(&self) -> &str {
         &self.reference_view.query
+    }
+
+    fn anchor_identity(anchor: &InsertAnchor) -> u64 {
+        egui::Id::new((anchor.host.host as u8, anchor.host.generation, anchor.basis.incarnation,
+            anchor.basis.document, anchor.basis.revision, anchor.basis.generation,
+            anchor.caret.range.start, anchor.caret.range.end, anchor.caret.generation)).value()
+    }
+    pub(super) fn reference_current_anchor_identity(&self) -> Option<u64> {
+        self.reference_anchor().as_ref().map(Self::anchor_identity)
+    }
+    pub(super) fn reference_review_identity(&self) -> Option<u64> {
+        self.pending_reference_insert.as_ref().map(|pending| {
+            egui::Id::new((Self::anchor_identity(&pending.anchor), pending.sample)).value()
+        })
+    }
+    pub(super) fn reference_review_ui(&mut self, ui: &mut egui::Ui, effects: &mut HelpEffects) {
+        let Some(pending) = self.pending_reference_insert.as_ref() else {
+            return;
+        };
+        let anchor = pending.anchor.clone();
+        let sample = pending.sample;
+        let title = pending.title;
+        let conflicts = pending.prepared.conflicting_names.clone();
+        let shifted = pending.prepared.shifted_row_references;
+        let valid = self.reference_anchor_is_safe(&anchor);
+        ui.group(|ui| {
+            ui.strong("Review insertion");
+            ui.label(title);
+            let header = ui.collapsing("Example source", |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(sample).monospace()).wrap());
+            });
+            self.reference_target(
+                ui,
+                &header.header_response,
+                "review/source",
+                "Example source",
+                super::super::jump_mode::TargetKind::Button,
+            );
+            if !conflicts.is_empty() {
+                ui.label("Names already used in the draft");
+                ui.label(conflicts.join(", "));
+            }
+            if shifted {
+                ui.label("Existing physical row references may point at different results.");
+            }
+            if !valid {
+                ui.label("The Pad changed. Choose the insertion point again.");
+            }
+            ui.horizontal_wrapped(|ui| {
+                let confirm = ui.add_enabled(valid, egui::Button::new("Confirm Insert"));
+                self.reference_target(
+                    ui,
+                    &confirm,
+                    "review/confirm",
+                    "Confirm Insert",
+                    super::super::jump_mode::TargetKind::Button,
+                );
+                if confirm.clicked() {
+                    effects.reference_insert = Some(InsertAction::Confirm {
+                        anchor: anchor.clone(),
+                        sample,
+                    });
+                }
+                let cancel = ui.button("Cancel insertion");
+                self.reference_target(
+                    ui,
+                    &cancel,
+                    "review/cancel",
+                    "Cancel insertion",
+                    super::super::jump_mode::TargetKind::Button,
+                );
+                if cancel.clicked() {
+                    effects.reference_insert = Some(InsertAction::Cancel);
+                }
+            });
+        });
     }
 
     pub(super) fn reference_contents(
@@ -122,42 +212,6 @@ impl CalculationPadDialog {
         effects: &mut HelpEffects,
         view: &mut ReferenceView,
     ) {
-        if let Some(pending) = &self.pending_reference_insert {
-            ui.group(|ui| {
-                ui.strong("Review insertion");
-                ui.label(pending.title);
-                ui.collapsing("Example source", |ui| {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(pending.sample).monospace()).wrap(),
-                    );
-                });
-                if !pending.prepared.conflicting_names.is_empty() {
-                    ui.label("Names already used in the draft");
-                    ui.label(pending.prepared.conflicting_names.join(", "));
-                }
-                if pending.prepared.shifted_row_references {
-                    ui.label("Existing physical row references may point at different results.");
-                }
-                let valid = self.reference_anchor().as_ref() == Some(&pending.anchor);
-                if !valid {
-                    ui.label("The Pad changed. Choose the insertion point again.");
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(valid, egui::Button::new("Confirm Insert"))
-                        .clicked()
-                    {
-                        effects.reference_insert = Some(InsertAction::Confirm {
-                            anchor: pending.anchor.clone(),
-                            sample: pending.sample,
-                        });
-                    }
-                    if ui.button("Cancel insertion").clicked() {
-                        effects.reference_insert = Some(InsertAction::Cancel);
-                    }
-                });
-            });
-        }
         if let Some(message) = &self.reference_feedback {
             ui.label(message);
         }
@@ -215,7 +269,7 @@ impl CalculationPadDialog {
                 }
                 let units = entry.unit_definitions().collect::<Vec<_>>();
                 if !units.is_empty() {
-                    ui.collapsing("Accepted units and aliases", |ui| {
+                    let header = ui.collapsing("Accepted units and aliases", |ui| {
                         for unit in units {
                             ui.group(|ui| {
                                 ui.strong(unit.symbol);
@@ -229,6 +283,7 @@ impl CalculationPadDialog {
                             });
                         }
                     });
+                    self.reference_target(ui, &header.header_response, "api/units", "Accepted units and aliases", super::super::jump_mode::TargetKind::Button);
                 }
                 ui.separator();
                 let anchor = self.reference_anchor();
@@ -257,6 +312,7 @@ impl CalculationPadDialog {
                                 anchor.is_some() && self.pending_reference_insert.is_none(),
                                 egui::Button::new("Insert Example into Pad"),
                             );
+                            self.reference_target(ui, &insert, format!("api/example/{index}/insert"), format!("Insert {title} into Pad"), super::super::jump_mode::TargetKind::Button);
                             if click_with_focus_reveal(insert)
                                 && let Some(anchor) = anchor.clone()
                             {
@@ -323,21 +379,25 @@ impl CalculationPadDialog {
                 .map_or("All categories", ReferenceCategory::label),
             view.filter.label()
         );
-        egui::CollapsingHeader::new(filters)
+        let filters = egui::CollapsingHeader::new(filters)
             .id_salt("api-reference-filters")
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut view.category, None, "All categories");
+                    let all = ui.selectable_value(&mut view.category, None, "All categories");
+                    self.reference_target(ui, &all, "api/category/all", "All categories", super::super::jump_mode::TargetKind::Button);
                     for category in ReferenceCategory::ALL {
-                        ui.selectable_value(&mut view.category, Some(category), category.label());
+                        let response = ui.selectable_value(&mut view.category, Some(category), category.label());
+                        self.reference_target(ui, &response, format!("api/category/{}", category as u8), category.label(), super::super::jump_mode::TargetKind::Button);
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
                     for filter in EntryFilter::ALL {
-                        ui.selectable_value(&mut view.filter, filter, filter.label());
+                        let response = ui.selectable_value(&mut view.filter, filter, filter.label());
+                        self.reference_target(ui, &response, format!("api/type/{}", filter as u8), filter.label(), super::super::jump_mode::TargetKind::Button);
                     }
                 });
             });
+        self.reference_target(ui, &filters.header_response, "api/filters", "Reference filters", super::super::jump_mode::TargetKind::Button);
         if view.query != old_query || view.category != old_category || view.filter != old_filter {
             view.results_scroll = 0.0;
             view.last_selected = None;

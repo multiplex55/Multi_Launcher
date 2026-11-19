@@ -35647,6 +35647,123 @@ mod tests {
 
 
 
+
+    #[test]
+    fn calculation_reference_review_fences_current_caret_and_unwinds_before_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "threshold = 7\nthreshold";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let pad_layer = app.calculation_pad_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(pad_layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let editor = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Calculation Pad source editor")
+            .expect("current Pad source")
+            .response_id();
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        frame(&mut app, Vec::new());
+        frame(&mut app, vec![key_press(egui::Key::End, egui::Modifiers::NONE)]);
+        frame(&mut app, vec![key_release(egui::Key::End, egui::Modifiers::NONE)]);
+        app.calculation_pad_dialog.test_open_examples();
+        app.calculation_pad_dialog
+            .test_prepare_reference_review(&ctx);
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.calculation_pad_dialog.examples_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let bounds = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+        let title =
+            egui::Rect::from_min_size(bounds.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(title, pressed));
+        }
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let labels = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let confirm = labels(&app, "Confirm Insert").expect("actual reviewed insert response");
+        assert!(labels(&app, "Search API reference").is_none());
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, "Confirm Insert");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(confirm));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        assert!(labels(&app, "Cancel insertion").is_some());
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!app.calculation_pad_dialog.test_has_reference_review());
+        assert!(
+            app.calculation_pad_dialog
+                .examples_layer_if_root()
+                .is_some()
+        );
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        app.set_jump_mode_enabled(true);
+        app.calculation_pad_dialog
+            .test_prepare_reference_review(&ctx);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(labels(&app, "Confirm Insert").is_some());
+        let changed = "threshold = 8\nthreshold";
+        app.calculation_pad_dialog.test_replace_source(changed);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(labels(&app, "Confirm Insert").is_none());
+        assert!(!app.calculation_pad_dialog.test_has_reference_review());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(changed));
+    }
+
     #[test]
     fn calculation_reference_jump_owns_search_without_retargeting_pad() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();

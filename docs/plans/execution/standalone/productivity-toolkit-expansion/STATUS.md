@@ -119,6 +119,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3g3 | complete |
 | M12-B4a1 | complete |
 | M12-B4a2 | complete |
+| M12-B4a3 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -878,3 +879,10 @@ The focused gate passed 6/6 (91a23d39-bc17-4c3e-a241-8212c650fb37), including fo
 Examples & Reference owns a separate active scope in its actual docked, embedded and detached presentations. It registers the existing Grouped Examples and API Reference selectors, presentation, searches, clear buttons, group headers, Copy, results, and detail Back and related controls. Its target basis follows the Reference opening, owning document, host, query, filters and detail history. The Pad source stays independent.
 
 The initial 6/6 gate (d36d18f6-eff0-4eb9-86ba-0790af7a26bf) proves actual root search input and a separate ordinary presentation change, followed by focus on the same search in its detached callback. Independent review found ordinary Escape could reach the Pad from docked Reference. The reviewed 4/4 gate (b16a1af0-cd49-40fa-98fa-dd20807a0657) covers retained Reference-only close routing, first Escape for hints, ordinary Escape with Jump Mode off, unchanged Pad draft, and existing Copy and hidden-root behavior. Reference filters and reviewed insertion controls remain the next slice.
+
+
+### M12-B4a3 Reference filters and reviewed insertion
+
+API filter, category, entry type, units and Insert Example controls expose their actual responses. During a prepared insertion review, only its source disclosure, Confirm and Cancel are available. Confirmation follows the captured current Pad document, host, caret, evaluation basis and sample through the existing retained insertion path. Ordinary Escape dismisses the review before a later window close, including with Jump Mode off. A stale review retires through the existing source/caret check.
+
+The directly affected existing tests passed 4/4 in d97025b9-981a-47ec-8a26-df8f0a197526, including guarded insertion, single Undo, stale review and Reference scope. The final integration fixture passed in c7a55239-3a9b-4886-8780-28310afd5b50. It publishes an actual Pad caret with End, opens the prepared review, verifies focus-only Confirm and fresh Escape, then checks that a separate source revision change retires an old review.
