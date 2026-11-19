@@ -8,7 +8,8 @@ use crate::gui::utility_host::{
 use crate::gui::utility_window_geometry::NativeViewportIdentity;
 use crate::gui::{ActivationSource, LauncherApp};
 use crate::gui::jump_mode::ui::{
-    JumpModeScope, JumpModeUi, NavigationOwner, NavigationViewportBinding,
+    JumpModeScope, JumpModeUi, MenuAnchorKind, NavigationOwner, NavigationViewportBinding,
+    register_and_apply_menu_anchor,
 };
 use crate::plugins::note::{
     Note, append_note_content, delete_template, get_template, list_templates, note_backlink_count,
@@ -874,6 +875,7 @@ pub struct NotesDialog {
     projection_key: Option<ProjectionKey>,
     notes_geometry: Option<NotesGeometry>,
     menu_owner: Option<NoteMenuOwner>,
+    keyboard_context_anchor: Option<egui::Id>,
     refresh_retry: Option<RefreshRetry>,
     editor_context_menu_open: bool,
     edit_idx: Option<usize>,
@@ -1623,7 +1625,7 @@ impl NotesDialog {
         crate::gui::jump_mode::TargetGeneration(generation.finish())
     }
 
-    pub(crate) fn jump_mode_unsupported_nested_owner_open(&self) -> bool {
+    pub(crate) fn has_open_context_menu(&self) -> bool {
         self.open
             && (self.editor_context_menu_open
                 || self
@@ -2560,7 +2562,7 @@ impl NotesDialog {
         let bootstrap_pending = self.host_state.bootstrap_pending();
         let focus_host_pending = self.host_state.focus_pending();
         let jump_generation = self.jump_mode_target_generation();
-        let nested_owner_open = self.jump_mode_unsupported_nested_owner_open();
+        let nested_owner_open = self.has_open_context_menu();
         let mut body_close = false;
         let mut draw_contents = |this: &mut NotesDialog,
                                  ui: &mut egui::Ui,
@@ -2600,24 +2602,28 @@ impl NotesDialog {
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(10)
                                 .show(ui);
-                            register_jump_mode_target(
-                                jump_scope,
-                                ui,
-                                &output.response,
-                                "edit/content",
-                                "Note content",
-                                crate::gui::jump_mode::TargetKind::TextEntry,
-                                &mut jump_visual_order,
-                            );
                             let resp = output.response.clone();
+                            register_quick_notes_context_anchor(
+                                jump_scope, ui, &resp, "edit/content", "Note content",
+                                crate::gui::jump_mode::TargetKind::TextEntry, &mut jump_visual_order,
+                            );
+                            let popup = quick_notes_context_popup(&resp, &mut this.keyboard_context_anchor);
+                            let popup_scope = jump_scope.map(|scope| scope.combo_popup_scope("edit/content"));
                             let caret_char_idx =
                                 output.cursor_range.map(|range| range.primary.index.0);
 
                             let mut insert_timestamp = false;
                             let mut insert_idx = None;
-                            resp.context_menu(|ui| {
+                            let escape = resp.context_menu_opened()
+                                && ctx.input(|input| input.key_pressed(egui::Key::Escape));
+                            popup.show(|ui| {
                                 ui.add_enabled_ui(popup_input_allowed, |ui| {
-                                    if ui.button("Insert timestamp").clicked() {
+                                    let insert = ui.button("Insert timestamp");
+                                    register_jump_mode_target(
+                                        popup_scope.as_ref(), ui, &insert, "timestamp", "Insert timestamp",
+                                        crate::gui::jump_mode::TargetKind::Button, &mut jump_visual_order,
+                                    );
+                                    if insert.clicked() {
                                         insert_timestamp = true;
                                         insert_idx = caret_char_idx;
                                         ui.close();
@@ -2625,6 +2631,9 @@ impl NotesDialog {
                                 });
                             });
                             this.editor_context_menu_open = resp.context_menu_opened();
+                            if escape && !this.editor_context_menu_open && popup_input_allowed {
+                                resp.request_focus();
+                            }
 
                             if insert_timestamp {
                                 let ts = format_note_timestamp_now();
@@ -2919,11 +2928,7 @@ impl NotesDialog {
                                             let header = ui.scope_builder(
                                                 egui::UiBuilder::new()
                                                     .layout(egui::Layout::top_down(egui::Align::Min))
-                                                    .sense(if jump_scope.is_some() {
-                                                        egui::Sense::click()
-                                                    } else {
-                                                        egui::Sense::hover()
-                                                    }),
+                                                    .sense(egui::Sense::click()),
                                                 |ui| {
                                                     let title = ui.add(
                                                         egui::Label::new(
@@ -2952,7 +2957,7 @@ impl NotesDialog {
                                                 .union(title_response)
                                                 .union(meta_response);
                                             if !entry.slug.is_empty() {
-                                                register_jump_mode_target(
+                                                register_quick_notes_context_anchor(
                                                     jump_scope,
                                                     ui,
                                                     &header_response,
@@ -2967,6 +2972,7 @@ impl NotesDialog {
                                                 this.test_open_row.push((entry.slug.clone(), header_response.rect, ui.clip_rect(), header_response.enabled()));
                                             }
                                             let activate_note = jump_scope.is_some()
+                                                && body_input_allowed
                                                 && !entry.slug.is_empty()
                                                 && header_response.has_focus()
                                                 && ctx.input(|input| {
@@ -3005,16 +3011,35 @@ impl NotesDialog {
                                                 Some(ui.small(preview).rect)
                                             };
                                             let idx_copy = idx;
-                                            response.clone().context_menu(|ui| {
+                                            let popup = quick_notes_context_popup(
+                                                &response, &mut this.keyboard_context_anchor,
+                                            );
+                                            let root_scope = jump_scope
+                                                .filter(|_| !entry.slug.is_empty())
+                                                .map(|scope| scope.combo_popup_scope(format!("note/{}/header", entry.slug)));
+                                            let escape = response.context_menu_opened()
+                                                && ctx.input(|input| input.key_pressed(egui::Key::Escape));
+                                            popup.show(|ui| {
                                                 ui.add_enabled_ui(popup_input_allowed, |ui| {
-                                                    let open = ui.button("Open");
+                                                    let mut order = 0;
+                                                    macro_rules! item {
+                                                        ($ui:expr, $key:expr, $label:expr) => {{
+                                                            let item = $ui.button($label);
+                                                            register_jump_mode_target(
+                                                                root_scope.as_ref(), $ui, &item, $key, $label,
+                                                                crate::gui::jump_mode::TargetKind::Button, &mut order,
+                                                            );
+                                                            item
+                                                        }};
+                                                    }
+                                                    let open = item!(ui, "open", "Open");
                                                     #[cfg(test)]
                                                     { this.test_menu_open = Some((open.rect, ui.clip_rect(), open.enabled())); }
                                                     if open.clicked() {
                                                         open_note_panels.push(entry.slug.clone());
                                                         ui.close();
                                                     }
-                                                    let edit_button = ui.button("Edit");
+                                                    let edit_button = item!(ui, "edit", "Edit");
                                                     #[cfg(test)]
                                                     {
                                                         this.test_menu_edit_rect =
@@ -3025,27 +3050,27 @@ impl NotesDialog {
                                                         this.text = entry.content.clone();
                                                         ui.close();
                                                     }
-                                                    if ui.button("Open externally").clicked() {
+                                                    if item!(ui, "open-external", "Open externally").clicked() {
                                                         external_open_paths.push(entry.path.clone());
                                                         ui.close();
                                                     }
-                                                    if ui.button("Copy link").clicked() {
+                                                    if item!(ui, "copy-link", "Copy link").clicked() {
                                                         let link = format!("[[{}]]", entry.slug);
                                                         clipboard_texts.push(link);
                                                         ui.close();
                                                     }
-                                                    if ui.button("Copy slug").clicked() {
+                                                    if item!(ui, "copy-slug", "Copy slug").clicked() {
                                                         clipboard_texts.push(entry.slug.clone());
                                                         ui.close();
                                                     }
                                                     if app.note_settings.aliases_enabled
-                                                        && ui.button("Manage aliases").clicked()
+                                                        && item!(ui, "aliases", "Manage aliases").clicked()
                                                     {
                                                         open_note_panels.push(entry.slug.clone());
                                                         ui.close();
                                                     }
                                                     if app.note_settings.templates_enabled
-                                                        && ui.button("Create note from template").clicked()
+                                                        && item!(ui, "template", "Create note from template").clicked()
                                                     {
                                                         activations.push(note_action(
                                                             "New note",
@@ -3053,13 +3078,25 @@ impl NotesDialog {
                                                         ));
                                                         ui.close();
                                                     }
-                                                    ui.menu_button("Meta", |ui| {
-                                                        if ui.button("Wrap links in note").clicked() {
+                                                    let dismissed = super::native_keyboard::dismiss_owned_submenu_on_escape(ui);
+                                                    let metadata = root_scope.as_ref().map(|scope| scope.combo_popup_scope("metadata"));
+                                                    let meta = super::native_keyboard::show_submenu(ui, "Meta", dismissed, |ui| {
+                                                        let mut order = 0;
+                                                        let wrap = ui.button("Wrap links in note");
+                                                        register_jump_mode_target(
+                                                            metadata.as_ref(), ui, &wrap, "wrap-links", "Wrap links in note",
+                                                            crate::gui::jump_mode::TargetKind::Button, &mut order,
+                                                        );
+                                                        if wrap.clicked() {
                                                             wrap_links_slug = Some(entry.slug.clone());
                                                             ui.close();
                                                         }
                                                     });
-                                                    let remove_button = ui.button("Remove Note");
+                                                    register_and_apply_menu_anchor(
+                                                        root_scope.as_ref(), ui, &meta, "metadata", "Meta",
+                                                        MenuAnchorKind::Submenu, &mut order,
+                                                    );
+                                                    let remove_button = item!(ui, "remove", "Remove Note");
                                                     #[cfg(test)]
                                                     {
                                                         this.test_menu_remove_rect =
@@ -3090,10 +3127,16 @@ impl NotesDialog {
                                                         } else {
                                                             todo.id.clone()
                                                         };
-                                                        if ui
-                                                            .button(format!("@todo:{todo_id} {}", todo.text))
-                                                            .clicked()
-                                                        {
+                                                        let label = format!("@todo:{todo_id} {}", todo.text);
+                                                        let choice = ui.scope_builder(
+                                                            egui::UiBuilder::new().id(ui.id().with(("quick-notes-todo", &todo_id))),
+                                                            |ui| ui.button(&label),
+                                                        ).inner;
+                                                        register_jump_mode_target(
+                                                            root_scope.as_ref(), ui, &choice, format!("todo/{todo_id}"), &label,
+                                                            crate::gui::jump_mode::TargetKind::Button, &mut order,
+                                                        );
+                                                        if choice.clicked() {
                                                             if let Some(target) = this.entries.get(idx_copy) {
                                                                 note_to_save = Some(PendingNoteSave::Append {
                                                                     identity: target.slug.clone(),
@@ -3107,6 +3150,8 @@ impl NotesDialog {
                                             });
                                             if response.context_menu_opened() {
                                                 open_menu_response = Some(response.clone());
+                                            } else if escape && popup_input_allowed {
+                                                response.request_focus();
                                             }
                                             (
                                                 header_response.rect,
@@ -3873,6 +3918,58 @@ impl NotesDialog {
             external_open_paths: effects.external_open_paths,
             clipboard_texts: effects.clipboard_texts,
         }
+    }
+}
+
+fn quick_notes_context_popup<'a>(
+    response: &'a egui::Response,
+    keyboard_anchor: &mut Option<egui::Id>,
+) -> egui::Popup<'a> {
+    let ctx = &response.ctx;
+    let popup_id = egui::Popup::default_response_id(response);
+    if response.secondary_clicked() {
+        *keyboard_anchor = None;
+    } else if response.enabled()
+        && response.has_focus()
+        && !ctx.will_discard()
+        && !egui::Popup::is_any_open(ctx)
+        && ctx.input(|input| input.focused)
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F10))
+    {
+        *keyboard_anchor = Some(popup_id);
+        egui::Popup::open_id(ctx, popup_id);
+    }
+    let popup = egui::Popup::context_menu(response);
+    if *keyboard_anchor == Some(popup_id) && egui::Popup::is_id_open(ctx, popup_id) {
+        popup.at_position(response.rect.left_top())
+    } else {
+        popup
+    }
+}
+
+fn register_quick_notes_context_anchor(
+    scope: Option<&JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    order: &mut u64,
+) {
+    if response.context_menu_opened() {
+        if let Some(scope) = scope {
+            scope.record_open_context_anchor(ui, response, identity);
+        }
+    } else {
+        register_and_apply_menu_anchor(
+            scope,
+            ui,
+            response,
+            identity,
+            label,
+            MenuAnchorKind::Context(kind),
+            order,
+        );
     }
 }
 

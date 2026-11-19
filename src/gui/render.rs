@@ -2080,7 +2080,7 @@ impl LauncherApp {
                 gesture_capture_active,
             )
             || (self.notes_dialog.host_layer_if_root().is_some()
-                && self.notes_dialog.jump_mode_unsupported_nested_owner_open())
+                && self.notes_dialog.has_open_context_menu())
             || (self.unused_assets_dialog.open
                 && self
                     .unused_assets_host
@@ -2544,7 +2544,7 @@ impl LauncherApp {
             && visible_top_middle_layer(ctx) == Some(notes_layer)
             && focused_response_layer(ctx)
                 .is_none_or(|layer| layer == notes_layer || layer.order != egui::Order::Middle)
-            && !self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+            && !self.notes_dialog.has_open_context_menu()
             && self
                 .unused_assets_host
                 .root_layer()
@@ -11289,7 +11289,8 @@ impl LauncherApp {
                 }
                 NavigationOwner::Notes { .. }
                     if self.notes_dialog.host_layer_if_root().is_none()
-                        || self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+                        || (self.notes_dialog.has_open_context_menu()
+                            && combo_popup.is_none())
                         || (self.unused_assets_dialog.open
                             && self.unused_assets_host.root_layer().is_some()) =>
                 {
@@ -63837,6 +63838,139 @@ mod tests {
         assert_eq!(app.notes_dialog.test_edit_draft(), "unsaved note draft");
         assert!(app.test_activation_trace.is_empty());
         drop(workspace);
+    }
+
+
+    #[test]
+    fn quick_notes_context_hints_use_only_the_open_row_or_editor_menu() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let draft = "Quick Notes context fixture";
+        let stored_draft = format!("# Context fixture\n\n{draft}");
+        crate::plugins::note::save_notes(&[crate::plugins::note::Note {
+            title: "Context fixture".into(),
+            path: std::path::PathBuf::new(),
+            content: draft.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "quick-note-context".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        }])
+        .unwrap();
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.notes_dialog.open();
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 900.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.notes_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let response = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let open_context = |app: &mut LauncherApp, anchor| {
+            ctx.memory_mut(|memory| memory.request_focus(anchor));
+            frame(app, Vec::new());
+            frame(
+                app,
+                vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                    key_press(egui::Key::F10, egui::Modifiers::SHIFT),
+                ],
+            );
+            frame(
+                app,
+                vec![
+                    key_release(egui::Key::F10, egui::Modifiers::SHIFT),
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+            assert!(egui::Popup::is_id_open(&ctx, anchor.with("popup")));
+        };
+        let focus_hint = |app: &mut LauncherApp, label| {
+            let id = response(app, label).unwrap_or_else(|| {
+                panic!(
+                    "no current popup target {label}; owner {:?}, targets {:?}",
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .metadata()
+                        .map(|target| target.label())
+                        .collect::<Vec<_>>(),
+                )
+            });
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        };
+        let row = "Context fixture (quick-note-context)";
+        let row_id = response(&app, row).expect("actual Quick Notes row");
+        open_context(&mut app, row_id);
+        assert!(response(&app, row).is_none());
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.notes_query_bridge_provenance().is_some())
+        );
+        focus_hint(&mut app, "Edit");
+        assert!(!app.notes_dialog.test_is_editing());
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(app.notes_dialog.test_is_editing());
+        assert_eq!(app.notes_dialog.test_edit_draft(), stored_draft);
+        let editor = response(&app, "Note content").expect("actual Quick Notes editor");
+        open_context(&mut app, editor);
+        assert!(response(&app, "Note content").is_none());
+        focus_hint(&mut app, "Insert timestamp");
+        assert_eq!(app.notes_dialog.test_edit_draft(), stored_draft);
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, editor.with("popup")));
+        assert!(app.notes_dialog.test_is_editing());
+        assert_eq!(app.notes_dialog.test_edit_draft(), stored_draft);
     }
 
     #[test]

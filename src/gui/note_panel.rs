@@ -10537,58 +10537,6 @@ impl NotePanel {
         }
     }
 
-    fn dismiss_note_submenu_on_escape(ui: &egui::Ui) -> Option<egui::Id> {
-        let ctx = ui.ctx();
-        let menu = ui.layer_id().id;
-        if !ui.is_enabled()
-            || !ui.is_visible()
-            || ui.is_sizing_pass()
-            || ctx.will_discard()
-            || !ctx.input(|input| input.focused && input.key_pressed(Key::Escape))
-            || !egui::Popup::is_id_open(ctx, menu)
-        {
-            return None;
-        }
-        let mut parent = menu;
-        let mut deepest = None;
-        for _ in 0..8 {
-            let next = egui::menu::MenuState::from_id(ctx, parent, |state| state.open_item);
-            let Some(child) = next else { break };
-            deepest = Some((parent, child));
-            parent = child;
-        }
-        let (parent, child) = deepest?;
-        let layer = egui::LayerId::new(egui::Order::Foreground, child);
-        let bounds = ctx.memory(|memory| memory.area_rect(child))?;
-        if !bounds.is_positive()
-            || ctx.layer_id_at(bounds.center()) != Some(layer)
-            || !ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
-        {
-            return None;
-        }
-        egui::menu::MenuState::from_id(ctx, parent, |state| state.open_item = None);
-        Some(child)
-    }
-
-    fn note_submenu(
-        ui: &mut egui::Ui,
-        label: &'static str,
-        dismissed: Option<egui::Id>,
-        contents: impl FnOnce(&mut egui::Ui),
-    ) -> egui::Response {
-        let button = egui::menu::SubMenuButton::new(label);
-        let Some(dismissed) = dismissed else {
-            return button.ui(ui, contents).0;
-        };
-        let response = ui.add(button.button);
-        if egui::menu::SubMenu::id_from_widget_id(response.id) == dismissed {
-            response.request_focus();
-        } else {
-            button.sub_menu.show(ui, &response, contents);
-        }
-        response
-    }
-
     fn build_textedit_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -10658,12 +10606,12 @@ impl NotePanel {
             }};
         }
         let dismissed_context = include_context_menus
-            .then(|| Self::dismiss_note_submenu_on_escape(ui))
+            .then(|| super::native_keyboard::dismiss_owned_submenu_on_escape(ui))
             .flatten();
         let draw_items = |ui: &mut egui::Ui| {
             let mut order = 0;
             let dismissed = if capture_toolbar_widgets {
-                Self::dismiss_note_submenu_on_escape(ui)
+                super::native_keyboard::dismiss_owned_submenu_on_escape(ui)
             } else {
                 dismissed_context
             };
@@ -10816,7 +10764,7 @@ impl NotePanel {
             let blocks = menu_scope
                 .as_ref()
                 .map(|scope| scope.combo_popup_scope("blocks"));
-            let blocks_button = Self::note_submenu(ui, "Block snippet", dismissed, |ui| {
+            let blocks_button = super::native_keyboard::show_submenu(ui, "Block snippet", dismissed, |ui| {
                 let mut order = 0;
                 for (label, level) in [("Heading 1", 1), ("Heading 2", 2), ("Heading 3", 3)] {
                     if button!(blocks, ui, order, format!("heading/{level}"), label).clicked() {
@@ -10866,7 +10814,7 @@ impl NotePanel {
             let table_scope = menu_scope
                 .as_ref()
                 .map(|scope| scope.combo_popup_scope("table"));
-            let table_button = Self::note_submenu(ui, "Table", dismissed, |ui| {
+            let table_button = super::native_keyboard::show_submenu(ui, "Table", dismissed, |ui| {
                 let mut order = 0;
                 if button!(
                     table_scope,
@@ -11042,7 +10990,7 @@ impl NotePanel {
             (menu.response, open)
         } else {
             (
-                Self::note_submenu(ui, "Markdown", dismissed_context, draw_items),
+                super::native_keyboard::show_submenu(ui, "Markdown", dismissed_context, draw_items),
                 false,
             )
         };
@@ -11083,7 +11031,7 @@ impl NotePanel {
                 let $scope = parent_scope
                     .as_ref()
                     .map(|scope| scope.combo_popup_scope($key));
-                let response = Self::note_submenu(ui, $label, dismissed_context, |$menu_ui| $draw);
+                let response = super::native_keyboard::show_submenu(ui, $label, dismissed_context, |$menu_ui| $draw);
                 register_and_apply_menu_anchor(
                     parent_scope.as_ref(),
                     ui,

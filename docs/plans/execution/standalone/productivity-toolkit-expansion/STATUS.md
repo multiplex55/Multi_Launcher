@@ -113,6 +113,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3e2 | complete |
 | M12-B3e3 | complete |
 | M12-B3e4 | complete |
+| M12-B3f | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -830,3 +831,10 @@ The final gate passed 11/11 (ff4f5cac-8c4a-4f94-9a96-370e18065a30), including Ct
 Shift+F10 opens the existing context menu for the focused rendered image. Right-click opens the same menu, and ordinary Enter on the image still opens the image viewer. Jump Mode exposes the real width and reset controls for the exact image. One width change advances that image menu's source revision so another adjustment can follow. An unrelated source or host change retires the menu in its owning viewport before keyboard routing. Escape returns focus to the image.
 
 The first gate passed 5/5 (3b054de8-577f-42c9-9d44-ebc3eeabb99c). The reviewed gate passed 3/3 (4fac86a9-3f74-489a-a1ee-b16d60f6eb47). It covers focus-only hints, two ordinary width increments, Escape with Jump Mode off, and native viewport retirement after replacing the source with an image at the same byte offset. The reviewer rechecked the native fix with no unresolved finding.
+
+
+### M12-B3f Quick Notes row and editor context menus
+
+Shift+F10 opens the focused Quick Notes row or editor's existing context menu. Jump Mode registers the actual menu items and Meta submenu. The body stays disabled while the popup owns input. A separate receipt retains the exact rendered source response, even for an offscreen owned row, without exposing it as a hint. The launcher query bridge remains suppressed behind the menu. Escape dismisses the current submenu first or restores the source when the root closes.
+
+The final gate passed 5/5 (7cda5484-262d-49f8-a067-ad2513d2b489), including actual row hint then fresh Edit, the source editor's Insert timestamp focus, ordinary Escape with Jump Mode off, offscreen identity retention, and both existing query bridge guards. The older `jump_mode_notes_rows_use_visible_slug_identity_and_fresh_enter_opens_exact_note` fixture fails its initial two-visible-rows assertion before any input. The same failure was reproduced on the cached pre-context build (evidence `m12-b3f-precontext-rows.txt`). Its assertions and the feature-off row activation behavior were preserved.

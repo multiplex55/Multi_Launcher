@@ -1549,7 +1549,10 @@ pub(crate) fn resolve_layer_navigation_owner_with_combo_popup(
         return NavigationOwner::Blocked;
     }
     if egui::Popup::is_any_open(ctx) {
-        if combo_popup.is_some_and(|popup| popup.is_current(ctx, parent_owner)) {
+        if combo_popup.is_some_and(|popup| {
+            popup.is_current(ctx, parent_owner)
+                || (!popup.menu_chain.is_empty() && popup.is_sizing_pass(ctx, parent_owner))
+        }) {
             parent_owner
         } else {
             NavigationOwner::Blocked
@@ -1823,6 +1826,16 @@ pub(crate) struct TargetRegistry {
     // Combo anchors are retained separately when the popup becomes the active
     // surface, so the next frame can prove which native popup owns navigation.
     combo_anchors: Vec<RegisteredTarget>,
+    context_anchors: Vec<ContextAnchorReceipt>,
+}
+
+/// A rendered, already-open context anchor. It is evidence only and never a hint target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ContextAnchorReceipt {
+    id: TargetId,
+    response_id: egui::Id,
+    viewport: egui::ViewportId,
+    layer: egui::LayerId,
 }
 
 impl TargetRegistry {
@@ -1964,6 +1977,17 @@ impl TargetRegistry {
                 && navigation_owner.owns_surface(target.id().surface())
                 && ctx.memory(|memory| memory.allows_interaction(target.layer_id))
         });
+        self.context_anchors.retain(|anchor| {
+            viewport_is_current
+                && anchor.viewport == expected_viewport
+                && navigation_owner != NavigationOwner::Blocked
+                && navigation_owner.owns_surface(anchor.id.surface())
+                && egui::Popup::is_id_open(ctx, anchor.response_id.with("popup"))
+                && match viewport_binding {
+                    Some(binding) => anchor.layer == binding.base_layer,
+                    None => combo_anchor_layer_is_current(ctx, navigation_owner, anchor.id.surface(), anchor.layer),
+                }
+        });
     }
 
     fn open_combo_popup(
@@ -1987,7 +2011,7 @@ impl TargetRegistry {
             return Err(());
         }
         let viewport = binding.map_or(egui::ViewportId::ROOT, |b| b.viewport);
-        let mut roots = self.combo_anchors.iter().filter(|anchor| {
+        let roots = self.combo_anchors.iter().filter(|anchor| {
             matches!(
                 anchor.menu_anchor,
                 Some(MenuAnchorKind::Root | MenuAnchorKind::Context(_))
@@ -1997,23 +2021,41 @@ impl TargetRegistry {
                 && parent_owner.owns_surface(anchor.id().surface())
                 && egui::Popup::is_id_open(ctx, anchor.response_id.with("popup"))
         });
-        let Some(root) = roots.next() else {
+        let mut root: Option<ContextAnchorReceipt> = None;
+        for anchor in roots {
+            let receipt = ContextAnchorReceipt {
+                id: anchor.id().clone(),
+                response_id: anchor.response_id,
+                viewport: anchor.viewport,
+                layer: anchor.layer_id,
+            };
+            if root.as_ref().is_some_and(|old| old != &receipt) {
+                return Err(());
+            }
+            root = Some(receipt);
+        }
+        for receipt in self.context_anchors.iter().filter(|anchor| {
+            anchor.viewport == viewport
+                && parent_owner.owns_surface(anchor.id.surface())
+                && egui::Popup::is_id_open(ctx, anchor.response_id.with("popup"))
+        }) {
+            if root.as_ref().is_some_and(|old| old != receipt) {
+                return Err(());
+            }
+            root = Some(receipt.clone());
+        }
+        let Some(root) = root else {
             return Ok(None);
         };
-        if roots.next().is_some() {
-            return Err(());
-        }
         let anchor_is_current = match binding {
-            Some(binding) => root.layer_id == binding.base_layer,
-            None => {
-                combo_anchor_layer_is_current(ctx, parent_owner, root.id().surface(), root.layer_id)
-            }
+            Some(binding) => root.layer == binding.base_layer,
+            None => combo_anchor_layer_is_current(ctx, parent_owner, root.id.surface(), root.layer),
         };
         if !anchor_is_current {
             return Err(());
         }
         let mut id = root.response_id.with("popup");
-        let mut surface = combo_popup_surface(root.id());
+        let mut surface = combo_popup_surface(&root.id);
         let mut chain = vec![(id, egui::LayerId::new(egui::Order::Foreground, id))];
         const MAX_MENU_DEPTH: usize = 8;
         loop {
@@ -2031,7 +2073,7 @@ impl TargetRegistry {
                     && anchor.enabled
                     && anchor.eligible
                     && anchor.id().surface() == &surface
-                    && anchor.id().generation() == root.id().generation()
+                    && anchor.id().generation() == root.id.generation()
                     && anchor.layer_id == layer
                     && egui::menu::SubMenu::id_from_widget_id(anchor.response_id) == child_id
             });
@@ -2047,11 +2089,11 @@ impl TargetRegistry {
         }
         let owner = ComboPopupOwner {
             parent_owner,
-            anchor_id: root.id().clone(),
+            anchor_id: root.id.clone(),
             viewport,
             binding,
             response_id: root.response_id,
-            anchor_layer: root.layer_id,
+            anchor_layer: root.layer,
             popup_layer: chain.last().ok_or(())?.1,
             popup_surface: surface,
             menu_chain: chain,
@@ -2263,6 +2305,62 @@ impl JumpModeScope {
     pub(crate) fn combo_popup_scope(&self, anchor_identity: impl AsRef<str>) -> Self {
         let anchor_id = self.target_id(anchor_identity);
         self.with_surface(combo_popup_surface(&anchor_id), self.generation)
+    }
+
+    /// Record only the identity of an already-open context popup's rendered source.
+    /// The source may be disabled or clipped; it is never offered as a focus target.
+    pub(crate) fn record_open_context_anchor(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+    ) -> bool {
+        let ctx = ui.ctx();
+        let Some(owner) = self.navigation_owner else {
+            return false;
+        };
+        let popup_id = egui::Popup::default_response_id(response);
+        if popup_id != response.id.with("popup")
+            || !egui::Popup::is_id_open(ctx, popup_id)
+            || ctx.viewport_id() != self.viewport
+            || response.ctx.viewport_id() != self.viewport
+            || ui.layer_id() != response.layer_id
+            || !ctx.input(|input| input.focused)
+            || !owner.owns_surface(&self.surface)
+        {
+            return false;
+        }
+        let layer_current = match self.viewport_binding {
+            Some(binding) => {
+                binding.owner == owner
+                    && binding.viewport == self.viewport
+                    && binding.base_is_current(ctx)
+                    && binding.base_layer == response.layer_id
+            }
+            None => {
+                self.viewport == egui::ViewportId::ROOT
+                    && combo_anchor_layer_is_current(ctx, owner, &self.surface, response.layer_id)
+            }
+        };
+        if !layer_current {
+            return false;
+        }
+        let receipt = ContextAnchorReceipt {
+            id: self.target_id(identity),
+            response_id: response.id,
+            viewport: self.viewport,
+            layer: response.layer_id,
+        };
+        let Ok(mut collector) = self.collector.lock() else {
+            return false;
+        };
+        if collector.closed {
+            return false;
+        }
+        if !collector.registry.context_anchors.contains(&receipt) {
+            collector.registry.context_anchors.push(receipt);
+        }
+        true
     }
 
     /// Register the actual menu opener and return only a focus directive.
@@ -3135,8 +3233,18 @@ impl JumpModeUi {
                         .collect()
                 })
                 .unwrap_or_default();
+            let context_anchors = combo_popup
+                .as_ref()
+                .filter(|popup| !popup.menu_chain.is_empty() && popup.parent_owner == candidate)
+                .map(|popup| {
+                    self.pass_registry.as_ref().unwrap_or(&self.retained_registry).context_anchors
+                        .iter().filter(|anchor| anchor.id == popup.anchor_id
+                            && anchor.response_id == popup.response_id && anchor.layer == popup.anchor_layer
+                            && anchor.viewport == popup.viewport).cloned().collect()
+                }).unwrap_or_default();
             self.cancel_all();
             self.retained_registry.combo_anchors = menu_anchors;
+            self.retained_registry.context_anchors = context_anchors;
             self.last_completed_focus_handoff = None;
             self.navigation_owner = candidate;
             self.active_combo_popup = combo_popup;
@@ -3844,6 +3952,7 @@ impl JumpModeUi {
             && self.active_combo_popup.as_ref().is_some_and(|popup| !popup.menu_chain.is_empty())
         {
             completed.combo_anchors = std::mem::take(&mut self.retained_registry.combo_anchors);
+            completed.context_anchors = std::mem::take(&mut self.retained_registry.context_anchors);
         }
         let pending_intent = self.pending_focus_intent.take();
         let mut completed_focus_handoff = None;
