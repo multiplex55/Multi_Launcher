@@ -6311,8 +6311,13 @@ impl LauncherApp {
             .pinned_panels
             .contains(&super::Panel::CalculationSensitivityDialog);
         let runtime = self.calculation_pad_dialog.sensitivity_runtime(pinned);
-        self.calculation_sensitivity_host
-            .configure_jump(&self.jump_mode_ui, false);
+        self.calculation_sensitivity_dialog.sync_jump_generation(&runtime);
+        let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match nav {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationSensitivity, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("calculation-sensitivity", instance), super::jump_mode::TargetGeneration(self.calculation_sensitivity_dialog.jump_generation()), "calculation-sensitivity/form", ctx.viewport_id(), nav, false),
+            _ => None,
+        };
+        self.calculation_sensitivity_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.calculation_sensitivity_host.show(
             ctx,
             &mut self.calculation_sensitivity_dialog,
@@ -6322,14 +6327,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: nav,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
@@ -10715,6 +10720,7 @@ impl LauncherApp {
                         | super::Panel::ExplorerTabsDialog
                         | super::Panel::UnusedAssetsDialog
                         | super::Panel::ImagePanel
+                        | super::Panel::CalculationSensitivityDialog
                         | super::Panel::CalculationDependencyDialog
                         | super::Panel::HashGeneratorDialog
                         | super::Panel::SnippetDialog
@@ -10812,6 +10818,7 @@ impl LauncherApp {
                 self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::HotFolder, self.hotfolder_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::DataRecovery, self.data_recovery_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::CalculationSensitivity, self.calculation_sensitivity_dialog.open && self.calculation_sensitivity_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::CalculationDependencies, self.calculation_dependency_dialog.open && self.calculation_dependency_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::UnusedNoteAssets, self.unused_assets_dialog.open && self.unused_assets_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::NoteTemplates, self.notes_dialog.template_manager.is_open() && self.note_templates_host.root_layer().is_some()),
@@ -10983,6 +10990,7 @@ impl LauncherApp {
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
                     NavigationDialogKind::HotFolder => self.hotfolder_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hotfolder_manager_window"))),
                     NavigationDialogKind::DataRecovery => self.data_recovery_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Data & Recovery")))),
+                    NavigationDialogKind::CalculationSensitivity => self.calculation_sensitivity_host.root_layer(),
                     NavigationDialogKind::CalculationDependencies => self.calculation_dependency_host.root_layer(),
                     NavigationDialogKind::UnusedNoteAssets => self.unused_assets_host.root_layer(),
                     NavigationDialogKind::NoteTemplates => self.note_templates_host.root_layer(),
@@ -11062,6 +11070,8 @@ impl LauncherApp {
                         self.hotfolder_dialog.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::DataRecovery {
                         self.data_recovery_dialog.open.then_some(()).and(current)
+                    } else if kind == NavigationDialogKind::CalculationSensitivity {
+                        self.calculation_sensitivity_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::CalculationDependencies {
                         self.calculation_dependency_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::UnusedNoteAssets {
@@ -24880,6 +24890,53 @@ mod tests {
         for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false); }
         assert!(!app.calculation_pad_dialog.open);
         assert!(!app.calculation_sensitivity_dialog.open);
+    }
+
+    #[test]
+    fn sensitivity_jump_input_option_focuses_without_changing_settings() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| style.animation_time = 0.0);
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::CalculationPadDialog);
+            app.calculation_pad_dialog.test_replace_source("x = 1\ny = 2\nx + y");
+            let input = app.calculation_pad_dialog.test_line_id(0).unwrap();
+            app.calculation_pad_dialog.test_set_sensitivity(crate::calculation_pad::SensitivitySettings {
+                input_name: "x".into(), definition: crate::calculation_pad::SensitivityDefinition {
+                    input, start: "1".into(), end: "3".into(),
+                    sampling: crate::calculation_pad::Sampling::Count(3), outputs: vec![],
+                },
+            });
+            let root = egui::ViewportId::ROOT;
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            open_pad_config_menu(&ctx, &mut app, root, Some("Tools"));
+            let (button, clip, enabled) = app.calculation_pad_dialog.test_sensitivity_open().unwrap();
+            assert!(enabled && clip.contains_rect(button));
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(button, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let layer = app.calculation_sensitivity_host.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let title = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(title, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let input_rect = app.jump_mode_ui.retained_registry().targets().iter()
+                .find(|target| target.metadata().label() == "Input").unwrap().clipped_rect();
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(input_rect, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter()
+                .find(|target| target.metadata().label() == "y · line 2").cloned().expect("current input option is owned by the popup");
+            let before = app.calculation_pad_dialog.sensitivity_runtime(false).settings;
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false, false);
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false, false);
+            let hint = dialog_hint_for_label(&app, "y · line 2");
+            run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::Text(hint)], false, false);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.calculation_pad_dialog.sensitivity_runtime(false).settings, before);
+            assert!(app.calculation_pad_dialog.test_sensitivity_table().is_none());
+        }).unwrap().join().unwrap();
     }
 
     #[test]

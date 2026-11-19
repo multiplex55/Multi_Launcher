@@ -98,6 +98,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B1a2 | complete |
 | M12-B1b | complete |
 | M12-B2a1 | complete |
+| M12-B2a2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -752,3 +753,8 @@ The actual foreground image host and its session determine root Jump targets. Th
 ### M12-B2a1 Dependency Explorer navigation
 
 Current document, incarnation, evaluation basis and LineId bind the docked and native scopes for source rows and relationship links. Presentation, the source chooser, Go to source, Close and both direct/transitive relationship section headers register ordinary controls. Hint focus leaves the Pad and selected line unchanged, and a fresh activation takes the established navigation path. The first focused gate passed 4/4 (`113f0eb9-8126-4a3a-a861-e9631fa14a84`). Review found clipped ordinary keyboard focus and missing relationship headers. The corrected gate passed 3/3 (`47196171-40e0-4a96-ad64-fe4d65ac5768`), including Tab reveal in short docked and pop-out bodies.
+
+
+### M12-B2a2 Sensitivity navigation
+
+The docked and native Sensitivity companion registers its current definition, input and watched-output popup choices, table and export controls. Current Pad identity, evaluation and settings fence the targets and retained actions. Hints focus an exact input without selecting it, changing settings or running a table. The initial targeted gate passed 3/3 (`d41cd518-ad66-4c69-a39d-71ee13fe9e57`). Review identified ordinary focus reveal. The corrected gate passed 2/2 (`6ab8ad1f-d7ff-49c0-b13f-ba1d1bc11f08`), including actual Tab reveal of clipped Generate in both short bodies without starting work.
