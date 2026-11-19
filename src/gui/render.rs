@@ -9128,6 +9128,12 @@ impl LauncherApp {
         first_ui_pass: bool,
         root_visible: bool,
     ) {
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.diagram_studio_dialog.jump_instance();
+        let scope = if navigation_owner == (NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DiagramStudio, instance }) {
+            self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("diagram-studio", instance), self.diagram_studio_dialog.jump_generation(), "diagram-studio", ctx.viewport_id(), navigation_owner, false)
+        } else { None };
+        self.diagram_studio_dialog.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled(), scope, first_ui_pass && !ctx.will_discard());
         let application_input_allowed = self.native_ui_application_input_allowed(ctx);
         let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
         #[cfg(feature = "qa-framebuffer-capture")]
@@ -11074,6 +11080,7 @@ impl LauncherApp {
                     }
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
+                    NavigationDialogKind::DiagramStudio => self.diagram_studio_dialog.owner_layer_if_root(),
                     NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
                     NavigationDialogKind::HotFolder => self.hotfolder_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hotfolder_manager_window"))),
@@ -11153,6 +11160,8 @@ impl LauncherApp {
                         self.markdown_print_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::CalculationChart {
                         self.calculation_chart_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::DiagramStudio {
+                        self.diagram_studio_dialog.owner_layer_if_root().map(|_| self.diagram_studio_dialog.jump_instance())
                     } else if kind == NavigationDialogKind::FilePreview {
                         self.file_preview_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::HotFolder {
@@ -11278,6 +11287,12 @@ impl LauncherApp {
                             Some(focus) == studio_layer || focus.order == egui::Order::Background)
                     };
                 if allowed { (studio_owner, popup) } else { (NavigationOwner::Blocked, None) }
+            } else { (owner, combo_popup) };
+            let diagram_layer = self.diagram_studio_dialog.owner_layer_if_root();
+            let (owner, combo_popup) = if diagram_layer.is_some() && diagram_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let allowed = !egui::Popup::is_any_open(ctx)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| Some(focus) == diagram_layer || focus.order == egui::Order::Background);
+                (if allowed { NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramStudio, instance: self.diagram_studio_dialog.jump_instance() } } else { NavigationOwner::Blocked }, None)
             } else { (owner, combo_popup) };
             let foreground_layer = super::jump_mode::ui::visible_top_middle_layer(ctx);
             let (owner, combo_popup) = if let Some((panel, prompt)) = self.note_panels.iter().find_map(|panel|
@@ -12899,7 +12914,7 @@ impl LauncherApp {
                         .embedded_viewer_owns_root_input(&ctx)
                     && !self
                         .diagram_studio_dialog
-                        .docked_owner_owns_root_input(&ctx)
+                        .owner_owns_root_input(&ctx)
                     && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
@@ -12999,7 +13014,7 @@ impl LauncherApp {
                         .embedded_viewer_owns_root_input(&ctx)
                     && !self
                         .diagram_studio_dialog
-                        .docked_owner_owns_root_input(&ctx)
+                        .owner_owns_root_input(&ctx)
                     && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
@@ -26937,6 +26952,296 @@ mod tests {
             Some(crate::calculation_pad::ChartSource::Vectors { x: None, .. })
         ));
         }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn diagram_studio_jump_source_keeps_fresh_text_in_the_docked_and_native_editor() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let key = crate::settings::UtilityToolKey::parse("diagram-studio").unwrap();
+        app.utility_presentation_manager.remember(
+            &ctx,
+            key,
+            crate::settings::RememberedPresentation::Docked,
+        );
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let original = "flowchart TD\nA-->B";
+        app.diagram_studio_dialog.test_replace_source(original);
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            root(&mut app, Vec::new());
+        }
+        let layer = app
+            .diagram_studio_dialog
+            .owner_layer_if_root()
+            .expect("docked Diagram Studio");
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let label = "Diagram source editor";
+        let source = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("docked source target")
+            .response_id();
+        let arm_root = |app: &mut LauncherApp| {
+            root(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            root(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, label);
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(source));
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), original);
+        root(
+            &mut app,
+            vec![key_press(egui::Key::End, egui::Modifiers::COMMAND)],
+        );
+        root(
+            &mut app,
+            vec![key_release(egui::Key::End, egui::Modifiers::COMMAND)],
+        );
+        root(&mut app, vec![egui::Event::Text("λ".into())]);
+        let docked = app.diagram_studio_dialog.test_session().draft().to_owned();
+        assert!(docked.contains('λ'));
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+
+        app.diagram_studio_dialog.request_close();
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == label)
+        );
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, "Cancel");
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+        root(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        root(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, "Pop Out");
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(app.diagram_studio_dialog.owner_layer_if_root(), Some(layer));
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+        root(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        root(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(app.diagram_studio_dialog.owner_layer_if_root().is_none());
+
+        let viewport = super::super::diagram_studio::viewport_id();
+        let native = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_size(viewport, egui::vec2(1200.0, 900.0), || {
+                run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+            });
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let source = app
+            .diagram_studio_dialog
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| panic!(
+                "native Diagram source missing: viewport={:?}, immediate={}, body={}, application_input={}, keyboard_owner={:?}, enabled_source={}, focus={:?}, labels={:?}",
+                app.diagram_studio_dialog.test_last_callback().0,
+                matches!(app.diagram_studio_dialog.test_last_callback().1, Some(egui::ViewportClass::Immediate)),
+                app.diagram_studio_dialog.test_last_callback().2,
+                app.diagram_studio_dialog.test_last_callback().3,
+                app.diagram_studio_dialog.test_native_jump().frame_navigation_owner(),
+                app.diagram_studio_dialog.test_source_editor_enabled(),
+                super::immediate_viewport_test_focused_id(),
+                app.diagram_studio_dialog.test_native_jump().retained_registry().metadata().map(|target| target.label()).collect::<Vec<_>>(),
+            ))
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .diagram_studio_dialog
+            .test_native_jump()
+            .active_session()
+            .expect("native Diagram Studio hints")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("native Diagram source hint")
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(source)))
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(&mut app, vec![egui::Event::Text("π".into())]);
+        let draft = app.diagram_studio_dialog.test_session().draft();
+        assert!(draft.contains('λ'));
+        assert!(draft.contains("π") && draft.matches('\n').count() > docked.matches('\n').count());
+    }
+
+    #[test]
+    fn diagram_embedded_dirty_escape_respects_root_query_focus() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(true);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let draft = "flowchart TD\nA-->B";
+        app.diagram_studio_dialog.test_replace_source(draft);
+        let frame = |app: &mut LauncherApp, events| {
+            let mut input = actual_query_input(true);
+            input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 1000.0)));
+            input.events = events;
+            app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+                ui.ctx().set_embed_viewports(true);
+                app.render_root_ui(ui);
+            }).0.drop_without_applying_deltas();
+        };
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(matches!(
+            app.diagram_studio_dialog.test_last_callback().1,
+            Some(egui::ViewportClass::EmbeddedWindow)
+        ));
+        app.diagram_studio_dialog.request_close();
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+
+        let query = egui::Id::new("query_input");
+        assert!(ctx.read_response(query).is_some());
+        ctx.memory_mut(|memory| memory.request_focus(query));
+        assert!(!app.diagram_studio_dialog.owner_owns_root_input(&ctx));
+        let escape = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+        };
+        escape(&mut app);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+
+        prepare_tool_dialog_root(&ctx, &mut app);
+        ctx.memory_mut(|memory| memory.surrender_focus(query));
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        ctx.move_to_top(app.diagram_studio_dialog.owner_layer_if_root().expect("reopened embedded owner"));
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let cancel = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Cancel")
+            .expect("embedded Diagram Studio dirty Cancel response")
+            .response_id();
+        ctx.memory_mut(|memory| memory.request_focus(cancel));
+        assert!(app.diagram_studio_dialog.owner_owns_root_input(&ctx));
+        escape(&mut app);
+        assert!(app.diagram_studio_dialog.open);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
     }
 
     #[test]

@@ -93,10 +93,11 @@ pub(crate) enum NavigationDialogKind {
     MarkdownStudio,
     CalculationPad,
     CalculationReference,
+    DiagramStudio,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 57] = [
+    pub(crate) const ALL: [Self; 58] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -154,6 +155,7 @@ impl NavigationDialogKind {
         Self::MarkdownStudio,
         Self::CalculationPad,
         Self::CalculationReference,
+        Self::DiagramStudio,
     ];
 
     const fn index(self) -> usize {
@@ -215,6 +217,7 @@ impl NavigationDialogKind {
             Self::MarkdownStudio => 54,
             Self::CalculationPad => 55,
             Self::CalculationReference => 56,
+            Self::DiagramStudio => 57,
         }
     }
 
@@ -277,6 +280,7 @@ impl NavigationDialogKind {
             Self::MarkdownStudio => "markdown-studio",
             Self::CalculationPad => "calculation-pad",
             Self::CalculationReference => "calculation-reference",
+            Self::DiagramStudio => "diagram-studio",
         }
     }
 
@@ -334,6 +338,7 @@ impl NavigationDialogKind {
             Self::MarkdownStudio => egui::Id::new("markdown-studio-window"),
             Self::CalculationPad => egui::Id::new("calculation-pad-window"),
             Self::CalculationReference => egui::Id::new("calculation-pad-examples-window"),
+            Self::DiagramStudio => egui::Id::new("diagram-studio"),
             Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
@@ -657,6 +662,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::CalculationReference
                     | NavigationDialogKind::CalculationPad
                     | NavigationDialogKind::MarkdownStudio
+                    | NavigationDialogKind::DiagramStudio
                     | NavigationDialogKind::NotePanel
                     | NavigationDialogKind::ImageViewer
                     | NavigationDialogKind::DashboardEditor
@@ -719,6 +725,10 @@ impl NavigationViewportBinding {
             }
             NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownStudio, .. } => {
                 self.viewport == egui::ViewportId::from_hash_of("markdown_studio_viewport")
+                    && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
+            }
+            NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramStudio, .. } => {
+                self.viewport == egui::ViewportId::from_hash_of("diagram_studio_viewport")
                     && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
             }
             NavigationOwner::Dialog {
@@ -4998,6 +5008,7 @@ mod tests {
                     NavigationDialogKind::MarkdownStudio => { egui::Window::new("Markdown Studio").id(egui::Id::new("markdown-studio-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationPad => { egui::Window::new("Calculation Pad").id(egui::Id::new("calculation-pad-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationReference => { egui::Window::new("Calculation Pad Examples & Reference").id(egui::Id::new("calculation-pad-examples-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::DiagramStudio => { egui::Window::new("Diagram Studio").id(egui::Id::new("diagram-studio")).show(ctx, |_| {}); }
                     NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt => {}

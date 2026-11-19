@@ -1289,6 +1289,12 @@ pub(crate) struct DiagramStudioDialog {
     #[cfg(all(windows, not(test)))]
     picker_owner: Option<(egui::Context, Option<NativeViewportIdentity>)>,
     owner_generation: u64,
+    jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    jump_order: u64,
+    native_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    native_jump_frame: Option<u64>,
+    jump_enabled: bool,
+    root_jump_active: bool,
     viewport_bootstrap_pending: bool,
     focus_viewport: bool,
     focus_source: bool,
@@ -1509,6 +1515,12 @@ impl DiagramStudioDialog {
         Self {
             open: false,
             owner_generation: 0,
+            jump_scope: None,
+            jump_order: 0,
+            native_jump: Box::new(super::jump_mode::ui::JumpModeUi::default()),
+            native_jump_frame: None,
+            jump_enabled: false,
+            root_jump_active: false,
             owner_host: UtilityHostState::popped_out(),
             viewer_host: UtilityHostState::popped_out(),
             owner_presentation_prepared: false,
@@ -1799,14 +1811,67 @@ impl DiagramStudioDialog {
             .or_else(|| self.owner_host.embedded_root_layer())
     }
 
-    pub(super) fn docked_owner_owns_root_input(&self, ctx: &egui::Context) -> bool {
-        self.docked_owner_layer().is_some_and(|layer| {
-            focused_on_layer(ctx, layer).is_some()
-                && !active_pointer_position(ctx).is_some_and(|position| {
-                    ctx.layer_id_at(position)
-                        .is_some_and(|hit_layer| hit_layer != layer)
-                })
-        })
+    pub(super) fn jump_instance(&self) -> u64 {
+        egui::Id::new((self.owner_generation, self.owner_host.identity().generation, &self.render_document)).value()
+    }
+
+    pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        let revision = self.documents.session().map(DiagramSession::revision).or_else(|| self.documents.visual_revision());
+        self.jump_instance().hash(&mut hash);
+        revision.hash(&mut hash);
+        std::mem::discriminant(&self.view_mode).hash(&mut hash);
+        // A pending document transition rejects any replacement until it is
+        // resolved. Its kind and the active document stamp identify these controls.
+        self.documents.pending_transition().map(std::mem::discriminant).hash(&mut hash);
+        super::jump_mode::TargetGeneration(hash.finish())
+    }
+
+    pub(super) fn configure_jump(&mut self, launcher: &super::jump_mode::ui::JumpModeUi, enabled: bool, scope: Option<super::jump_mode::ui::JumpModeScope>, first: bool) {
+        let (chord, alphabet) = launcher.configuration();
+        self.native_jump.set_configuration(chord, alphabet);
+        self.native_jump.set_enabled(enabled);
+        self.jump_enabled = enabled;
+        self.root_jump_active = launcher.active_session().is_some();
+        self.jump_scope = scope.map(|scope| if first { scope } else { scope.registration_only() });
+        self.jump_order = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_native_jump(&self) -> &super::jump_mode::ui::JumpModeUi { &self.native_jump }
+
+    fn jump_control(&mut self, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, decision: bool) {
+        let active = self.documents.pending_transition().is_some() == decision;
+        super::jump_mode::ui::register_and_apply_target(self.jump_scope.as_ref().filter(|_| active), ui, response, id, label, kind, &mut self.jump_order);
+        if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard() && !ui.clip_rect().contains_rect(response.rect) { response.scroll_to_me(None); }
+    }
+
+    fn jump_menu(&mut self, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str) {
+        let enabled = self.documents.pending_transition().is_none();
+        super::jump_mode::ui::register_and_apply_menu_anchor(self.jump_scope.as_ref().filter(|_| enabled), ui, response, id, label, super::jump_mode::ui::MenuAnchorKind::Root, &mut self.jump_order);
+    }
+
+    pub(super) fn owner_owns_root_input(&self, ctx: &egui::Context) -> bool {
+        self.owner_layer_if_root()
+            .is_some_and(|layer| self.root_layer_owns_keyboard(ctx, layer))
+    }
+
+    fn root_layer_owns_keyboard(&self, ctx: &egui::Context, layer: egui::LayerId) -> bool {
+        ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && (focused_on_layer(ctx, layer).is_some()
+                || (self.documents.pending_transition().is_some()
+                    && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                    && ctx.memory(|memory| {
+                        memory.focused().is_none()
+                            && !memory.had_focus_last_frame(egui::Id::new("query_input"))
+                    })))
+            && !active_pointer_position(ctx).is_some_and(|position| {
+                ctx.layer_id_at(position)
+                    .is_some_and(|hit_layer| hit_layer != layer)
+            })
     }
 
     pub(super) fn embedded_viewer_layer_if_root(&self) -> Option<egui::LayerId> {
@@ -2179,10 +2244,34 @@ impl DiagramStudioDialog {
             let actions_allowed = pass_authorized && child_input_allowed && visible_body;
             let keyboard_actions_allowed = actions_allowed
                 && !embedded_viewer_focused
-                && (class != egui::ViewportClass::Root
-                    || focused_on_layer(&child_context, child.layer_id()).is_some());
+                && (independent || self.root_layer_owns_keyboard(&child_context, child.layer_id()));
             let source_focus_allowed =
                 pass_authorized && surface_input_allowed && !modal_open && !embedded_viewer_focused;
+            let mut native_binding = None;
+            let mut jump_owns_escape = !independent && self.root_jump_active;
+            if independent {
+                let binding = super::jump_mode::ui::NavigationViewportBinding {
+                    viewport: viewport_id(),
+                    owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DiagramStudio, instance: self.jump_instance() },
+                    base_layer: egui::LayerId::background(),
+                };
+                let allowed = surface_input_allowed && focused && !modal_open
+                    && !egui::Popup::is_any_open(&child_context)
+                    && super::jump_mode::ui::visible_top_middle_layer(&child_context).is_none()
+                    && super::jump_mode::ui::focused_response_layer(&child_context).is_none_or(|layer| layer == egui::LayerId::background());
+                let frame = child_context.cumulative_frame_nr();
+                if self.native_jump_frame != Some(frame) { self.native_jump.begin_frame(); self.native_jump_frame = Some(frame); }
+                let owner = self.native_jump.update_navigation_owner_for_viewport(&child_context, binding, allowed && self.jump_enabled);
+                jump_owns_escape = self.native_jump.active_session().is_some();
+                self.native_jump.handle_viewport_input(&child_context, owner == binding.owner, pass_authorized, child_context.viewport_id());
+                jump_owns_escape |= self.native_jump.active_session().is_some();
+                self.native_jump.begin_ui_pass();
+                self.jump_scope = (owner == binding.owner).then(|| self.native_jump.scope_for_viewport_binding(
+                    super::jump_mode::SurfaceId::dialog("diagram-studio", self.jump_instance()), self.jump_generation(), "diagram-studio", binding,
+                )).flatten().map(|scope| if pass_authorized { scope } else { scope.registration_only() });
+                self.jump_order = 0;
+                native_binding = Some((binding, allowed));
+            }
             focus_requested = self.focus_viewport
                 && pass_authorized
                 && surface_input_allowed
@@ -2191,7 +2280,10 @@ impl DiagramStudioDialog {
                 && (independent || class == egui::ViewportClass::Root);
 
             let popup_open = egui::Popup::is_any_open(child);
-            let keyboard_close = if keyboard_actions_allowed {
+            let pending_escape = keyboard_actions_allowed && !popup_open && !jump_owns_escape
+                && self.documents.pending_transition().is_some()
+                && child.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            let keyboard_close = if keyboard_actions_allowed && !jump_owns_escape && !pending_escape {
                 let (escape_pressed, close_shortcut) = child.input_mut(|input| {
                     (
                         !popup_open && self.visual_inline_label.is_none() && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
@@ -2235,7 +2327,7 @@ impl DiagramStudioDialog {
             } else {
                 None
             };
-            document_intent = keyboard_document_intent;
+            document_intent = if pending_escape { Some(DocumentIntent::ResolvePending(TransitionDecision::Cancel)) } else { keyboard_document_intent };
             os_close_requested = close_requested_by_os;
             if pass_authorized && (close_requested_by_os || keyboard_close || self.close_pending) {
                 close_requested = true;
@@ -2266,6 +2358,7 @@ impl DiagramStudioDialog {
                         actions_allowed && !close_requested && can_change_host,
                     );
                     self.record_host_action("owner_presentation", ui, &control);
+                    self.jump_control(ui, &control, "presentation", if owner_host.host == UtilityPresentation::Docked { "Pop Out" } else { "Dock" }, super::jump_mode::TargetKind::Button, false);
                     change_host = control.clicked();
                     let effects = self.draw_body(
                         ui,
@@ -2310,6 +2403,7 @@ impl DiagramStudioDialog {
                     actions_allowed && !close_requested && can_change_host,
                 );
                 self.record_host_action("owner_presentation", child, &control);
+                self.jump_control(child, &control, "presentation", if owner_host.host == UtilityPresentation::Docked { "Pop Out" } else { "Dock" }, super::jump_mode::TargetKind::Button, false);
                 change_host = control.clicked();
                 let effects = self.draw_body(
                     child,
@@ -2345,6 +2439,13 @@ impl DiagramStudioDialog {
                 visual_inspector_ratio = effects.visual_inspector_ratio;
                 if effects.visual_connector_tool.is_some() { visual_connector_tool = effects.visual_connector_tool; }
                 visual_connector_focus = effects.visual_connector_focus;
+            }
+            if let Some((binding, allowed)) = native_binding {
+                self.native_jump.finish_ui_pass();
+                let owner = self.native_jump.update_navigation_owner_for_viewport(&child_context, binding, allowed && self.jump_enabled);
+                if self.native_jump.prepare_pass_for_viewport(&child_context, binding, owner, allowed && self.jump_enabled) { super::jump_mode::paint::paint(&child_context, &self.native_jump); }
+                if !child_context.will_discard() { self.native_jump.complete_frame_for_viewport(&child_context, binding, owner, allowed && self.jump_enabled); }
+                self.jump_scope = None;
             }
             if body_rendered
                 && pass_authorized
@@ -7484,6 +7585,7 @@ impl DiagramStudioDialog {
                     ("decision_cancel", "Cancel", TransitionDecision::Cancel),
                 ] {
                     let response = ui.add_enabled(enabled, egui::Button::new(label));
+                    self.jump_control(ui, &response, _name, label, super::jump_mode::TargetKind::Button, true);
                     #[cfg(test)]
                     {
                         self.test_action_rects.push((_name.into(), response.rect, ui.clip_rect()));
@@ -7548,6 +7650,8 @@ impl DiagramStudioDialog {
             .drawio_review
             .as_ref()
             .is_some_and(|review| review.scope().matches(self, ui.ctx().viewport_id()));
+        let jump_scope = self.jump_scope.clone().filter(|_| self.documents.pending_transition().is_none());
+        let mut jump_order = self.jump_order;
         let Self {
             documents,
             view_mode,
@@ -7780,6 +7884,7 @@ impl DiagramStudioDialog {
                         test_action_rects.push(("menu_file".into(), file_menu.response.rect, ui.clip_rect()));
                         test_action_focus_ids.push(("menu_file".into(), file_menu.response.id));
                     }
+                    super::jump_mode::ui::register_and_apply_menu_anchor(jump_scope.as_ref(), ui, &file_menu.response, "menu/file", "File", super::jump_mode::ui::MenuAnchorKind::Root, &mut jump_order);
                     let file_popup = egui::Popup::default_response_id(&file_menu.response);
                     if egui::Popup::is_id_open(ui.ctx(), file_popup) {
                         active_menu_scope = Some(MenuFocusScope {
@@ -7871,6 +7976,7 @@ impl DiagramStudioDialog {
                     #[cfg(test)]
                     test_action_focus_ids
                         .push(("menu_templates".into(), _templates_menu.response.id));
+                    super::jump_mode::ui::register_and_apply_menu_anchor(jump_scope.as_ref(), ui, &_templates_menu.response, "menu/templates", "Templates", super::jump_mode::ui::MenuAnchorKind::Root, &mut jump_order);
                     let templates_popup_id =
                         egui::Popup::default_response_id(&_templates_menu.response);
                     if egui::Popup::is_id_open(ui.ctx(), templates_popup_id) {
@@ -7887,6 +7993,7 @@ impl DiagramStudioDialog {
                         test_action_rects.push(("menu_help".into(), help.rect, ui.clip_rect()));
                         test_action_focus_ids.push(("menu_help".into(), help.id));
                     }
+                    super::jump_mode::ui::register_and_apply_menu_anchor(jump_scope.as_ref(), ui, &help, "menu/help", "Help", super::jump_mode::ui::MenuAnchorKind::Root, &mut jump_order);
                     let help_popup = egui::Popup::default_response_id(&help);
                     if egui::Popup::is_id_open(ui.ctx(), help_popup) {
                         active_menu_scope = Some(MenuFocusScope { popup_id: help_popup, trigger_id: help.id, item_ids: help_items, sizing_pass: help_sizing });
@@ -7951,6 +8058,7 @@ impl DiagramStudioDialog {
                         test_action_rects.push(("menu_view".into(), view.response.rect, ui.clip_rect()));
                         test_action_focus_ids.push(("menu_view".into(), view.response.id));
                     }
+                    super::jump_mode::ui::register_and_apply_menu_anchor(jump_scope.as_ref(), ui, &view.response, "menu/view", "View", super::jump_mode::ui::MenuAnchorKind::Root, &mut jump_order);
                     let view_popup = egui::Popup::default_response_id(&view.response);
                     if egui::Popup::is_id_open(ui.ctx(), view_popup) {
                         active_menu_scope = Some(MenuFocusScope {
@@ -7984,6 +8092,7 @@ impl DiagramStudioDialog {
                         test_action_rects.push(("menu_edit".into(), edit.response.rect, ui.clip_rect()));
                         test_action_focus_ids.push(("menu_edit".into(), edit.response.id));
                     }
+                    super::jump_mode::ui::register_and_apply_menu_anchor(jump_scope.as_ref(), ui, &edit.response, "menu/edit", "Edit", super::jump_mode::ui::MenuAnchorKind::Root, &mut jump_order);
                     let edit_popup = egui::Popup::default_response_id(&edit.response);
                     if egui::Popup::is_id_open(ui.ctx(), edit_popup) {
                         active_menu_scope = Some(MenuFocusScope {
@@ -8014,6 +8123,7 @@ impl DiagramStudioDialog {
                         "open_viewer".into(),
                         viewer_button.enabled() && ui.is_visible() && !ui.is_sizing_pass(),
                     ));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &viewer_button, "viewer", "Open viewer", super::jump_mode::TargetKind::Button, &mut jump_order);
                     if viewer_button.clicked() {
                         draw_effects.open_viewer_requested = true;
                     }
@@ -8036,6 +8146,7 @@ impl DiagramStudioDialog {
                         ui.add_enabled(background_actions_allowed, egui::Button::new("−"));
                     #[cfg(test)]
                     test_action_rects.push(("zoom_out".into(), zoom_out.rect, ui.clip_rect()));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &zoom_out, "zoom-out", "Zoom out", super::jump_mode::TargetKind::Button, &mut jump_order);
                     if zoom_out.clicked() {
                         camera.zoom = (camera.zoom / CAMERA_KEYBOARD_ZOOM_FACTOR)
                             .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
@@ -8052,6 +8163,7 @@ impl DiagramStudioDialog {
                         ui.add_enabled(background_actions_allowed, egui::Button::new("+"));
                     #[cfg(test)]
                     test_action_rects.push(("zoom_in".into(), zoom_in.rect, ui.clip_rect()));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &zoom_in, "zoom-in", "Zoom in", super::jump_mode::TargetKind::Button, &mut jump_order);
                     if zoom_in.clicked() {
                         camera.zoom = (camera.zoom * CAMERA_KEYBOARD_ZOOM_FACTOR)
                             .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
@@ -8060,6 +8172,7 @@ impl DiagramStudioDialog {
                     let fit = ui.add_enabled(background_actions_allowed, egui::Button::new("Fit"));
                     #[cfg(test)]
                     test_action_rects.push(("fit".into(), fit.rect, ui.clip_rect()));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &fit, "fit", "Fit", super::jump_mode::TargetKind::Button, &mut jump_order);
                     if fit.clicked() {
                         camera.fit_next = true;
                     }
@@ -8067,6 +8180,7 @@ impl DiagramStudioDialog {
                         ui.add_enabled(background_actions_allowed, egui::Button::new("100%"));
                     #[cfg(test)]
                     test_action_rects.push(("zoom_100".into(), zoom_100.rect, ui.clip_rect()));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &zoom_100, "zoom-100", "100%", super::jump_mode::TargetKind::Button, &mut jump_order);
                     if zoom_100.clicked() {
                         camera.zoom = 1.0;
                         camera.fit_next = false;
@@ -8075,6 +8189,7 @@ impl DiagramStudioDialog {
                         ui.add_enabled(background_actions_allowed, egui::Button::new("Reset view"));
                     #[cfg(test)]
                     test_action_rects.push(("reset_view".into(), reset_view.rect, ui.clip_rect()));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &reset_view, "reset-view", "Reset view", super::jump_mode::TargetKind::Button, &mut jump_order);
                     if reset_view.clicked() {
                         *camera = Camera::default();
                         camera.fit_next = false;
@@ -8122,6 +8237,7 @@ impl DiagramStudioDialog {
                     test_action_enabled.push(("add_node".into(), add_node.enabled()));
                     #[cfg(test)]
                     test_action_rects.push(("add_node".into(), add_node.rect, ui.clip_rect()));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &add_node, "add-node", "Add node", super::jump_mode::TargetKind::Button, &mut jump_order);
                     if add_node.clicked()
                         && pending.is_none()
                         && let Some(graph) = graph
@@ -8143,16 +8259,16 @@ impl DiagramStudioDialog {
                             Err(error) => *message = Some(StudioNotice::error(error)),
                         }
                     }
-                    if ui
-                        .add_enabled(
+                    let add_edge = ui.add_enabled(
                             visual_mutations_allowed
                                 && graph.is_some_and(|graph| {
                                     graph.nodes.len() >= 2
                                         && graph.edges.len() < crate::diagram::MAX_DIAGRAM_EDGES
                                 }),
                             egui::Button::new("Add edge"),
-                        )
-                        .clicked()
+                        );
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &add_edge, "add-edge", "Add edge", super::jump_mode::TargetKind::Button, &mut jump_order);
+                    if add_edge.clicked()
                         && pending.is_none()
                         && let Some(graph) = graph
                     {
@@ -8170,14 +8286,14 @@ impl DiagramStudioDialog {
                             });
                         }
                     }
-                    if ui
-                        .add_enabled(
+                    let add_group = ui.add_enabled(
                             visual_mutations_allowed
                                 && graph
                                     .is_some_and(|graph| graph.groups.len() < MAX_DIAGRAM_GROUPS),
                             egui::Button::new("Add group"),
-                        )
-                        .clicked()
+                        );
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &add_group, "add-group", "Add group", super::jump_mode::TargetKind::Button, &mut jump_order);
+                    if add_group.clicked()
                         && pending.is_none()
                         && let Some(graph) = graph
                     {
@@ -8200,9 +8316,9 @@ impl DiagramStudioDialog {
                             || selection.as_ref().is_some_and(|selected| {
                                 !matches!(selected, DiagramElement::Node(_))
                             }));
-                    if ui
-                        .add_enabled(can_remove, egui::Button::new("Remove selection"))
-                        .clicked()
+                    let remove = ui.add_enabled(can_remove, egui::Button::new("Remove selection"));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &remove, "remove", "Remove selection", super::jump_mode::TargetKind::Button, &mut jump_order);
+                    if remove.clicked()
                         && pending.is_none()
                         && graph.is_some()
                     {
@@ -8225,6 +8341,7 @@ impl DiagramStudioDialog {
                         auto_layout.rect,
                         ui.clip_rect(),
                     ));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &auto_layout, "auto-layout", "Auto-layout", super::jump_mode::TargetKind::Button, &mut jump_order);
                     if auto_layout.clicked() && document_intent.is_none() {
                         *document_intent = Some(DocumentIntent::AutoLayout);
                     }
@@ -8244,6 +8361,7 @@ impl DiagramStudioDialog {
                         let refresh = ui.add_enabled(editing_allowed, egui::Button::new("Refresh preview"));
                         #[cfg(test)]
                         test_action_rects.push(("refresh_preview".into(), refresh.rect, ui.clip_rect()));
+                    super::jump_mode::ui::register_and_apply_target(jump_scope.as_ref(), ui, &refresh, "refresh", "Refresh preview", super::jump_mode::TargetKind::Button, &mut jump_order);
                         if refresh.clicked() && pending.is_none() {
                             *pending = Some(PendingMutation::ReparseSource {
                                 expected_document: render_document.clone(),
@@ -8315,6 +8433,7 @@ impl DiagramStudioDialog {
                             generic_family,
                             mermaid_color_draft,
                             base_editing_allowed && draw_effects.active_menu_scope.is_none(),
+                            jump_scope.as_ref(), &mut jump_order,
                             #[cfg(test)]
                             test_source_editor_id,
                             #[cfg(test)]
@@ -8396,6 +8515,7 @@ impl DiagramStudioDialog {
                                 generic_family,
                                 mermaid_color_draft,
                                 base_editing_allowed && draw_effects.active_menu_scope.is_none(),
+                            jump_scope.as_ref(), &mut jump_order,
                                 #[cfg(test)]
                                 &mut source_id,
                                 #[cfg(test)]
@@ -8476,6 +8596,7 @@ impl DiagramStudioDialog {
                                             mermaid_color_draft,
                                             base_editing_allowed
                                                 && draw_effects.active_menu_scope.is_none(),
+                                            jump_scope.as_ref(), &mut jump_order,
                                             #[cfg(test)]
                                             &mut source_id,
                                             #[cfg(test)]
@@ -8924,6 +9045,7 @@ impl DiagramStudioDialog {
                         self.test_action_focus_ids
                             .push(("menu_file".into(), file_response.id));
                     }
+                    self.jump_menu(ui, &file_response, "menu/file", "File");
                     let file_popup = egui::Popup::default_response_id(&file_response);
                     if egui::Popup::is_id_open(ui.ctx(), file_popup) {
                         effects.active_menu_scope = Some(MenuFocusScope {
@@ -8966,6 +9088,7 @@ impl DiagramStudioDialog {
                         self.test_action_focus_ids
                             .push(("menu_edit".into(), edit.response.id));
                     }
+                    self.jump_menu(ui, &edit.response, "menu/edit", "Edit");
                     let edit_popup = egui::Popup::default_response_id(&edit.response);
                     if egui::Popup::is_id_open(ui.ctx(), edit_popup) {
                         effects.active_menu_scope = Some(MenuFocusScope {
@@ -9002,6 +9125,7 @@ impl DiagramStudioDialog {
                         self.test_action_focus_ids
                             .push(("menu_view".into(), view.response.id));
                     }
+                    self.jump_menu(ui, &view.response, "menu/view", "View");
                     let view_popup = egui::Popup::default_response_id(&view.response);
                     if egui::Popup::is_id_open(ui.ctx(), view_popup) {
                         effects.active_menu_scope = Some(MenuFocusScope {
@@ -9036,6 +9160,7 @@ impl DiagramStudioDialog {
                         self.test_action_rects.push(("menu_visual_templates".into(), templates.response.rect, ui.clip_rect()));
                         self.test_action_focus_ids.push(("menu_visual_templates".into(), templates.response.id));
                     }
+                    self.jump_menu(ui, &templates.response, "menu/templates", "Templates");
                     let template_popup_id = egui::Popup::default_response_id(&templates.response);
                     if egui::Popup::is_id_open(ui.ctx(), template_popup_id) {
                         effects.active_menu_scope = Some(MenuFocusScope { popup_id: template_popup_id, trigger_id: templates.response.id, item_ids: template_item_ids, sizing_pass: template_sizing_pass });
@@ -9045,6 +9170,7 @@ impl DiagramStudioDialog {
                         self.test_action_rects.push(("menu_help".into(), help.rect, ui.clip_rect()));
                         self.test_action_focus_ids.push(("menu_help".into(), help.id));
                     }
+                    self.jump_menu(ui, &help, "menu/help", "Help");
                     let help_popup = egui::Popup::default_response_id(&help);
                     if egui::Popup::is_id_open(ui.ctx(), help_popup) {
                         effects.active_menu_scope = Some(MenuFocusScope { popup_id: help_popup, trigger_id: help.id, item_ids: help_items, sizing_pass: help_sizing });
@@ -9067,6 +9193,7 @@ impl DiagramStudioDialog {
                     ));
                     #[cfg(test)]
                     self.test_action_enabled.push(("open_viewer".into(), viewer.enabled() && ui.is_visible() && !ui.is_sizing_pass()));
+                    self.jump_control(ui, &viewer, "viewer", "Open viewer", super::jump_mode::TargetKind::Button, false);
                     if viewer.clicked() {
                         effects.open_viewer_requested = true;
                     }
@@ -9076,6 +9203,7 @@ impl DiagramStudioDialog {
                         });
                     if export_cancellable {
                         let cancel_export = ui.add_enabled(export_allowed, egui::Button::new("Cancel export"));
+                        self.jump_control(ui, &cancel_export, "cancel-export", "Cancel export", super::jump_mode::TargetKind::Button, false);
                         effects.visual_export_cancel_pointer_down = cancel_export.is_pointer_button_down_on();
                         #[cfg(test)] {
                             self.test_action_rects.push(("visual_export_cancel".into(), cancel_export.rect, ui.clip_rect()));
@@ -9109,6 +9237,7 @@ impl DiagramStudioDialog {
                         import_enabled,
                         egui::Button::new("Add image…"),
                     );
+                    self.jump_control(ui, &add_image, "add-image", "Add image", super::jump_mode::TargetKind::Button, false);
                     #[cfg(test)]
                     self.test_action_rects.push((
                         "visual_add_image".into(),
@@ -9209,6 +9338,7 @@ impl DiagramStudioDialog {
                     let zoom_out = ui.add_enabled(navigation_controls_allowed, egui::Button::new("−"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_zoom_out".into(), zoom_out.rect, ui.clip_rect()));
+                    self.jump_control(ui, &zoom_out, "zoom-out", "Zoom out", super::jump_mode::TargetKind::Button, false);
                     if zoom_out.clicked() {
                         camera.zoom = (camera.zoom / CAMERA_KEYBOARD_ZOOM_FACTOR)
                             .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
@@ -9218,6 +9348,7 @@ impl DiagramStudioDialog {
                     let zoom_in = ui.add_enabled(navigation_controls_allowed, egui::Button::new("+"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_zoom_in".into(), zoom_in.rect, ui.clip_rect()));
+                    self.jump_control(ui, &zoom_in, "zoom-in", "Zoom in", super::jump_mode::TargetKind::Button, false);
                     if zoom_in.clicked() {
                         camera.zoom = (camera.zoom * CAMERA_KEYBOARD_ZOOM_FACTOR)
                             .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
@@ -9226,12 +9357,14 @@ impl DiagramStudioDialog {
                     let fit = ui.add_enabled(navigation_controls_allowed, egui::Button::new("Fit"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_fit".into(), fit.rect, ui.clip_rect()));
+                    self.jump_control(ui, &fit, "fit", "Fit", super::jump_mode::TargetKind::Button, false);
                     if fit.clicked() {
                         camera.fit_next = true;
                     }
                     let zoom_100 = ui.add_enabled(navigation_controls_allowed, egui::Button::new("100%"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_zoom_100".into(), zoom_100.rect, ui.clip_rect()));
+                    self.jump_control(ui, &zoom_100, "zoom-100", "100%", super::jump_mode::TargetKind::Button, false);
                     if zoom_100.clicked() {
                         camera.zoom = 1.0;
                         camera.fit_next = false;
@@ -9281,6 +9414,7 @@ impl DiagramStudioDialog {
                         ("visual_align_bottom", "Bottom", VisualAlign::Bottom),
                     ] {
                         let response = ui.add_enabled(align_enabled, egui::Button::new(label));
+                        self.jump_control(ui, &response, _name, &format!("Align {label}"), super::jump_mode::TargetKind::Button, false);
                         #[cfg(test)]
                         self.test_action_rects
                             .push((_name.into(), response.rect, ui.clip_rect()));
@@ -9322,6 +9456,7 @@ impl DiagramStudioDialog {
                             distribute_enabled,
                             egui::Button::new(label),
                         );
+                        self.jump_control(ui, &response, _name, &format!("Distribute {label}"), super::jump_mode::TargetKind::Button, false);
                         #[cfg(test)]
                         self.test_action_rects
                             .push((_name.into(), response.rect, ui.clip_rect()));
@@ -9366,6 +9501,7 @@ impl DiagramStudioDialog {
                     navigation_controls_allowed,
                     egui::Slider::new(&mut canvas_ratio, 0.5..=2.0).text("Canvas height"),
                 );
+                self.jump_control(ui, &size_control, "canvas-height", "Canvas height", super::jump_mode::TargetKind::Slider, false);
                 #[cfg(test)]
                 self.test_action_rects.push(("visual_canvas_size".into(), size_control.rect, ui.clip_rect()));
                 if size_control.changed() { effects.visual_canvas_ratio = Some(canvas_ratio); }
@@ -9377,6 +9513,7 @@ impl DiagramStudioDialog {
                         "Show properties ◂"
                     }),
                 );
+                self.jump_control(ui, &inspector_toggle, "properties", "Toggle properties", super::jump_mode::TargetKind::Button, false);
                 #[cfg(test)]
                 self.test_action_rects.push((
                     "visual_inspector_toggle".into(), inspector_toggle.rect, ui.clip_rect(),
@@ -13236,6 +13373,8 @@ fn source_editor(
     family: Option<DiagramFamily>,
     color_draft: &Option<MermaidColorDraft>,
     color_enabled: bool,
+    jump_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    jump_order: &mut u64,
     #[cfg(test)] test_editor_id: &mut Option<egui::Id>,
     #[cfg(test)] test_editor_rect: &mut Option<egui::Rect>,
     #[cfg(test)] test_editor_enabled: &mut bool,
@@ -13258,6 +13397,8 @@ fn source_editor(
             .code_editor()
             .lock_focus(true),
     );
+    super::jump_mode::ui::register_and_apply_target(jump_scope, ui, &response, "source", "Diagram source editor", super::jump_mode::TargetKind::TextEntry, jump_order);
+    if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass() && !ui.ctx().will_discard() && !ui.clip_rect().contains_rect(response.rect) { response.scroll_to_me(None); }
     #[cfg(test)]
     {
         *test_editor_id = Some(editor_id);
