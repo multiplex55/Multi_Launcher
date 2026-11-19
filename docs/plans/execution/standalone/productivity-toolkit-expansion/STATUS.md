@@ -134,6 +134,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B6 | complete |
 | M12-B | pending |
 | M13-R1 | complete |
+| M13-D | complete |
 | M13-A | pending |
 
 ## M0-B platform decisions
@@ -986,3 +987,8 @@ Print Preview now registers the real Warnings disclosure in its current preview 
 ### M13-R1 Compile Diagram Studio target identifiers in the application
 
 The final Nextest invocation compiled the normal library for the integration target and found E0599 in the Mermaid Colors keyboard targets. The existing field identifier was only compiled for unit tests. The correction makes the same identifier available to the application. The first invocation ran no tests. The corrected locked, offline fast-dev union passed all 396 selected cases across three binaries. The filter, compile failure and full results are recorded under the ignored productivity evidence directory.
+
+
+### M13-D Launcher discovery and user guides
+
+The README now identifies the current Notes and Markdown Studio print entry points, Password Generator, File Operations, Downloads Triage and Notification Inbox. It also describes the ZIP destination suggestion and keyboard focus boundaries, and links to the optional Windows deployment guide. The independent reviewer identified the discovery gaps during the cumulative review. The new entry points and labels were checked against the application, and the diff passed Git whitespace validation.
