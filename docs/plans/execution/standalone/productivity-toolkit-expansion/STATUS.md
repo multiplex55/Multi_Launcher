@@ -125,6 +125,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B4c | complete |
 | M12-B4d1 | complete |
 | M12-B4d2 | complete |
+| M12-B4e | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -926,3 +927,10 @@ The first focused gate passed 7/7 (96da337c-68e2-49db-bd7f-eb9f044f7a7d). Review
 The current result rows use one keyboard focus response per document, evaluation and line identity. Virtual scrolling preserves the identity of a row that remains rendered. Shift+F10 and right-click share the actual context popup. Its retained receipt carries the exact host, viewport, evaluation basis and line, and retired or discarded openings cannot target neighboring results. Hints focus the existing source, comparison, copy and Inspector actions. Ordinary invocation still goes through the established retained result effects.
 
 The initial gate passed 9/9 (31c291f3-d40a-4a09-a5f8-b7a5ca19f0a7), including same-revision outdated results and discarded navigation. Review identified positional widget IDs in compact results and an extra keyboard stop on the row label. The final scoped gate passed 4/4 (ef3e22b1-d48f-4fcc-a871-5e54d5cb8f25), including Shift+Tab and Tab across two exact result responses, real context focus without selection, fresh Enter moving the source caret, and existing pointer and copy cases.
+
+
+### M12-B4e Chart source pickers
+
+The chart registers the actual X and distribution ComboBoxes and the Y vector and sensitivity output menus. Physical rows, named bindings, index axes and sensitivity output subjects remain distinct. The root and native registrations use the current document, evaluation/table and chart source definition, with exact popup ownership and existing retained chart admission.
+
+The focused gate passed 4/4 (7467c08d-8da1-4857-affa-3afc75e27dea). The docked fixture focused the named X option by hint, preserved the definition until fresh Enter, and then accepted it. The detached callback focused its exact index option and committed only on fresh Enter. The actual Y scroll, source identity and retained popup selections also passed. Review found no source defects. The initial fixture-only viewport-focus type mismatch was corrected.

@@ -9,6 +9,21 @@ fn chart_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::
     super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order)
 }
 
+fn vector_key(reference: &ChartVectorReference) -> String {
+    match reference {
+        ChartVectorReference::Physical(id) => format!("physical/{}", id.get()),
+        ChartVectorReference::Named { name } => format!("named/{:016x}", egui::Id::new(name).value()),
+    }
+}
+
+fn popup_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, order: &mut u64) {
+    chart_target(scope, ui, response, id, label, kind, order);
+    if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass()
+        && !ui.ctx().will_discard() && !ui.clip_rect().contains_rect(response.rect) {
+        response.scroll_to_me(None);
+    }
+}
+
 fn distribution_summary(data: &DistributionData, kind: ChartKind, index: usize) -> Option<String> {
     if kind == ChartKind::Histogram {
         let bin = data.bins.get(index)?;
@@ -20,6 +35,7 @@ fn distribution_summary(data: &DistributionData, kind: ChartKind, index: usize) 
 }
 
 fn axis_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::JumpModeScope>, axis: &mut AxisDraft, name: &str, order: &mut u64, actions: &mut ChartActions) {
+    #[cfg(not(test))] let _ = &actions;
     use super::jump_mode::TargetKind;
     ui.group(|ui| {
         ui.label(format!("{name} axis"));
@@ -62,6 +78,7 @@ fn axis_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::JumpMod
 }
 
 fn reference_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::JumpModeScope>, draft: &mut ChartOptionsDraft, runtime: &ChartRuntime, order: &mut u64, actions: &mut ChartActions, active: bool) {
+    #[cfg(not(test))] let _ = &actions;
     use super::jump_mode::TargetKind;
     let choices = scalar_choices(runtime);
     ui.label("Reference lines");
@@ -128,6 +145,7 @@ fn reference_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::Ju
 }
 
 fn style_controls(ui: &mut egui::Ui, scope: Option<&super::jump_mode::ui::JumpModeScope>, draft: &mut ChartOptionsDraft, definition: &ChartDefinition, order: &mut u64, actions: &mut ChartActions, active: bool) {
+    #[cfg(not(test))] let _ = &actions;
     use super::jump_mode::TargetKind;
     ui.label("Series appearance");
     for (index, (key, label)) in style_sources(definition).into_iter().enumerate() {
@@ -328,6 +346,36 @@ pub(super) struct ChartActions {
 }
 
 impl CalculationChartDialog {
+    pub(super) fn jump_generation(&self, runtime: &ChartRuntime) -> super::jump_mode::TargetGeneration {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.epoch.hash(&mut hash);
+        runtime.identity.hash(&mut hash);
+        runtime.pad_host.map(|host| (std::mem::discriminant(&host.host), host.generation)).hash(&mut hash);
+        for basis in [runtime.basis, runtime.evaluation.as_ref().map(|evaluation| evaluation.basis)] {
+            basis.map(|basis| (basis.document, basis.incarnation, basis.revision, basis.generation)).hash(&mut hash);
+        }
+        if let Some(table) = &runtime.table {
+            table.basis.document.hash(&mut hash);
+            table.basis.incarnation.hash(&mut hash);
+            table.basis.revision.hash(&mut hash);
+            table.basis.generation.hash(&mut hash);
+            table.basis.definition.outputs.hash(&mut hash);
+        }
+        if let Some(definition) = &runtime.definition {
+            std::mem::discriminant(&definition.kind).hash(&mut hash);
+            match &definition.source {
+                ChartSource::Vectors { x, y } => {
+                    0u8.hash(&mut hash);
+                    x.as_ref().map(vector_key).hash(&mut hash);
+                    for reference in y { vector_key(reference).hash(&mut hash); }
+                }
+                ChartSource::Sensitivity { outputs } => { 1u8.hash(&mut hash); outputs.hash(&mut hash); }
+            }
+            definition.distribution.as_ref().map(|distribution| vector_key(&distribution.vector)).hash(&mut hash);
+        }
+        super::jump_mode::TargetGeneration(hash.finish())
+    }
     pub(super) fn open(&mut self) { if !self.open { self.epoch = self.epoch.wrapping_add(1); self.open = true; self.close_requested = false; self.view.reset(); } }
     pub(super) fn close(&mut self) { self.open = false; self.close_requested = false; self.view.reset(); self.bound = None; self.popup_anchors.clear(); self.popup_viewport = None; self.distribution_draft = None; self.options_draft = None; self.summary_row = None; self.summary_focus = None; self.summary_stamp = None; *self.cache.borrow_mut() = None; }
     pub(super) fn request_close(&mut self) { self.close_requested = true; }
@@ -413,13 +461,17 @@ impl CalculationChartDialog {
                 if matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
                     if let Some(distribution) = definition.distribution.as_mut() {
                         let selected = distribution_vectors.iter().find(|(vector, _)| vector == &distribution.vector).map(|(_, label)| label.clone()).unwrap_or_else(|| format!("{} (unavailable)", reference_label(&distribution.vector)));
+                        let popup_scope = scope.map(|scope| scope.combo_popup_scope("distribution/vector"));
                         let response = egui::ComboBox::from_id_salt("chart-distribution-vector").selected_text(selected).show_ui(ui, |ui| {
+                            let mut popup_order = 0;
                             for (reference, label) in &distribution_vectors {
-                                let response = ui.selectable_value(&mut distribution.vector, reference.clone(), label);
+                                let key = vector_key(reference);
+                                let response = ui.push_id(&key, |ui| ui.selectable_value(&mut distribution.vector, reference.clone(), label)).inner;
+                                popup_target(popup_scope.as_ref(), ui, &response, &key, label, TargetKind::Selectable, &mut popup_order);
                                 #[cfg(test)] actions.controls.push((format!("distribution/{label}"), response.rect));
                             }
                         });
-                        chart_target(scope, ui, &response.response, "distribution/vector", "Distribution vector", TargetKind::Button, &mut order);
+                        chart_target(scope, ui, &response.response, "distribution/vector", "Distribution vector", TargetKind::ComboBox, &mut order);
                         #[cfg(test)] actions.controls.push(("distribution-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
                         if definition.kind == ChartKind::Histogram {
@@ -473,33 +525,65 @@ impl CalculationChartDialog {
                 match &mut definition.source {
                     ChartSource::Vectors { x, y } => {
                         let selected = x.as_ref().map(|reference| vectors.iter().find(|row| &row.0 == reference).map(|row| row.1.clone()).unwrap_or_else(|| format!("{} (unavailable)", reference_label(reference)))).unwrap_or_else(|| "Indexes 0…N−1".into());
+                        let popup_scope = scope.map(|scope| scope.combo_popup_scope("source/x"));
                         let response = egui::ComboBox::from_id_salt("chart-x").selected_text(selected).show_ui(ui, |ui| {
-                            ui.selectable_value(x, None, "Indexes 0…N−1");
-                            for (reference, label) in &vectors { let _response = ui.selectable_value(x, Some(reference.clone()), label); #[cfg(test)] actions.controls.push((format!("x/{label}"), _response.rect)); }
+                            let mut popup_order = 0;
+                            let indexes = ui.selectable_value(x, None, "Indexes 0…N−1");
+                            popup_target(popup_scope.as_ref(), ui, &indexes, "indexes", "Indexes 0…N−1", TargetKind::Selectable, &mut popup_order);
+                            for (reference, label) in &vectors {
+                                let key = vector_key(reference);
+                                let response = ui.push_id(&key, |ui| ui.selectable_value(x, Some(reference.clone()), label)).inner;
+                                popup_target(popup_scope.as_ref(), ui, &response, &key, label, TargetKind::Selectable, &mut popup_order);
+                                #[cfg(test)] actions.controls.push((format!("x/{label}"), response.rect));
+                            }
                         });
-                        chart_target(scope, ui, &response.response, "source/x", "X vector", TargetKind::Button, &mut order);
+                        chart_target(scope, ui, &response.response, "source/x", "X vector", TargetKind::ComboBox, &mut order);
                         #[cfg(test)] actions.controls.push(("x-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
+                        let popup_scope = scope.map(|scope| scope.combo_popup_scope("source/y"));
                         let response = ui.menu_button("Y vectors", |ui| {
+                            let mut popup_order = 0;
                             let _scroll = egui::ScrollArea::vertical().id_salt("chart-y-sources").max_height(240.0).show(ui, |ui| {
                                 for (reference, label) in &vectors {
                                     let mut selected = y.contains(reference);
-                                    let response = ui.checkbox(&mut selected, label);
+                                    let key = vector_key(reference);
+                                    let response = ui.push_id(&key, |ui| ui.checkbox(&mut selected, label)).inner;
+                                    popup_target(popup_scope.as_ref(), ui, &response, &key, label, TargetKind::Checkbox, &mut popup_order);
                                     #[cfg(test)] actions.controls.push((format!("y/{label}"), response.rect));
                                     if response.changed() { if selected && y.len() < 8 { y.push(reference.clone()); } else if !selected { y.retain(|value| value != reference); } }
                                 }
                                 for reference in y.clone().into_iter().filter(|reference| !vectors.iter().any(|row| &row.0 == reference)) {
                                     let mut selected = true;
-                                    if ui.checkbox(&mut selected, format!("{} (unavailable)", reference_label(&reference))).changed() && !selected { y.retain(|value| value != &reference); }
+                                    let key = vector_key(&reference);
+                                    let label = format!("{} (unavailable)", reference_label(&reference));
+                                    let response = ui.push_id(&key, |ui| ui.checkbox(&mut selected, &label)).inner;
+                                    popup_target(popup_scope.as_ref(), ui, &response, &key, &label, TargetKind::Checkbox, &mut popup_order);
+                                    if response.changed() && !selected { y.retain(|value| value != &reference); }
                                 }
                             });
                             #[cfg(test)] actions.controls.push(("y-scroll".into(), _scroll.inner_rect));
                         });
-                        chart_target(scope, ui, &response.response, "source/y", "Y vectors", TargetKind::Button, &mut order);
+                        super::jump_mode::ui::register_and_apply_menu_anchor(scope, ui, &response.response, "source/y", "Y vectors", super::jump_mode::ui::MenuAnchorKind::Root, &mut order);
                         #[cfg(test)] actions.controls.push(("y-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
                     }
-                    ChartSource::Sensitivity { outputs } => if let Some(table) = &runtime.table { let response = ui.menu_button("Y outputs", |ui| for name in &table.basis.definition.outputs { let mut selected = outputs.contains(name); let response = ui.checkbox(&mut selected, name); #[cfg(test)] actions.controls.push((format!("output/{name}"), response.rect)); if response.changed() { if selected && outputs.len() < 8 { outputs.push(name.clone()); } else if !selected { outputs.retain(|value| value != name); } } }); chart_target(scope, ui, &response.response, "source/outputs", "Y outputs", TargetKind::Button, &mut order); #[cfg(test)] actions.controls.push(("output-menu".into(), response.response.rect)); actions.popup_anchors.push((response.response.id, response.response.layer_id)); },
+                    ChartSource::Sensitivity { outputs } => if let Some(table) = &runtime.table {
+                        let popup_scope = scope.map(|scope| scope.combo_popup_scope("source/outputs"));
+                        let response = ui.menu_button("Y outputs", |ui| {
+                            let mut popup_order = 0;
+                            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| for name in &table.basis.definition.outputs {
+                                let mut selected = outputs.contains(name);
+                                let key = format!("output/{:016x}", egui::Id::new(name).value());
+                                let response = ui.push_id(&key, |ui| ui.checkbox(&mut selected, name)).inner;
+                                popup_target(popup_scope.as_ref(), ui, &response, &key, name, TargetKind::Checkbox, &mut popup_order);
+                                #[cfg(test)] actions.controls.push((format!("output/{name}"), response.rect));
+                                if response.changed() { if selected && outputs.len() < 8 { outputs.push(name.clone()); } else if !selected { outputs.retain(|value| value != name); } }
+                            });
+                        });
+                        super::jump_mode::ui::register_and_apply_menu_anchor(scope, ui, &response.response, "source/outputs", "Y outputs", super::jump_mode::ui::MenuAnchorKind::Root, &mut order);
+                        #[cfg(test)] actions.controls.push(("output-menu".into(), response.response.rect));
+                        actions.popup_anchors.push((response.response.id, response.response.layer_id));
+                    },
                 }
                 }
                 ui.horizontal(|ui| { ui.label("X label"); let response = ui.add(egui::TextEdit::singleline(&mut definition.x_label).char_limit(129).desired_width(100.0)); chart_target(scope, ui, &response, "label/x", "X label", TargetKind::TextEntry, &mut order); ui.label("Y label"); let response = ui.add(egui::TextEdit::singleline(&mut definition.y_label).char_limit(129).desired_width(100.0)); chart_target(scope, ui, &response, "label/y", "Y label", TargetKind::TextEntry, &mut order); });
@@ -1054,13 +1138,13 @@ mod tests {
         let ctx = egui::Context::default(); let mut dialog = CalculationChartDialog::default(); dialog.open();
         let control = |actions: &ChartActions, name: &str| actions.controls.iter().find(|(key, _)| key == name).unwrap_or_else(|| panic!("missing {name}: {:?}", actions.controls)).1.center();
         let mut actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
-        actions = chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "kind/Histogram"));
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "kind/Histogram"));
         assert_eq!(runtime.definition.as_ref().unwrap().kind, ChartKind::Histogram);
         actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "distribution-menu"));
         actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         assert!(!actions.controls.iter().any(|(key, _)| key.starts_with("distribution/s ")));
-        actions = chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "distribution/w (2 values)"));
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "distribution/w (2 values)"));
         assert!(matches!(&runtime.definition.as_ref().unwrap().distribution.as_ref().unwrap().vector, ChartVectorReference::Named { name } if name == "w"));
         actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "bins/Bin count"));
@@ -1268,8 +1352,8 @@ mod tests {
         let definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Physical(ids[0])] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new(), distribution: None, options: Default::default() };
         let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: Some(evaluation), table: Some(table), definition: Some(definition), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
         let ctx = egui::Context::default(); let mut dialog = CalculationChartDialog::default(); dialog.open();
+        chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         let mut actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
-        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         let control = |actions: &ChartActions, name: &str| actions.controls.iter().find(|(key, _)| key == name).unwrap_or_else(|| panic!("missing {name}: {:?}", actions.controls)).1.center();
         chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "x-menu"));
         actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());

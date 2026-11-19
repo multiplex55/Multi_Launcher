@@ -6261,9 +6261,9 @@ impl LauncherApp {
         let runtime = self.calculation_pad_dialog.chart_runtime(pinned);
         let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let scope = match navigation_owner {
-            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationChart, instance } if owner && popup.is_none() => self.jump_mode_ui.scope_for_navigation_owner(
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationChart, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(
                 super::jump_mode::SurfaceId::dialog("calculation-chart", instance),
-                super::jump_mode::TargetGeneration(instance),
+                self.calculation_chart_dialog.jump_generation(&runtime),
                 "calculation-pad-charts/form", ctx.viewport_id(), navigation_owner, false,
             ),
             _ => None,
@@ -26860,6 +26860,45 @@ mod tests {
         run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
         assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
         assert_eq!(app.calculation_pad_dialog.chart_runtime(false).definition, before);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())]);
+            frame(app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        focus(&mut app, "X vector");
+        assert!(!egui::Popup::is_any_open(&ctx));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        let label = "values (2 values)";
+        let target = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("docked chart X vector option").response_id();
+        assert!(!app.jump_mode_ui.retained_registry().metadata().any(|target| target.label() == "X label"));
+        focus(&mut app, label);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(target));
+        assert_eq!(app.calculation_pad_dialog.chart_runtime(false).definition, before);
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(matches!(
+            app.calculation_pad_dialog.chart_runtime(false).definition.map(|definition| definition.source),
+            Some(crate::calculation_pad::ChartSource::Vectors {
+                x: Some(crate::calculation_pad::ChartVectorReference::Named { name }),
+                ..
+            }) if name == "values"
+        ));
+        if egui::Popup::is_any_open(&ctx) {
+            chord(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        }
         for _ in 0..2 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
         let pop = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Pop Out").unwrap().clipped_rect();
         for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop, pressed), false).drop_without_applying_deltas(); }
@@ -26867,6 +26906,36 @@ mod tests {
         let viewport = super::super::utility_window_host::CalculationChartWindowHost::test_viewport(app.calculation_chart_dialog.epoch());
         for _ in 0..4 { super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || { app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0.drop_without_applying_deltas(); }); }
         assert!(app.calculation_chart_host.test_native_target("X label").is_some());
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        let opener = app.calculation_chart_host.test_native_target("X vector").expect("native X vector opener");
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(opener, pressed));
+        }
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let label = "Indexes 0…N−1";
+        let target = app.calculation_chart_host.test_native_jump().retained_registry()
+            .targets().iter().find(|target| target.metadata().label() == label)
+            .expect("current native index option").response_id();
+        let before = app.calculation_pad_dialog.chart_runtime(false).definition;
+        native(&mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())]);
+        native(&mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+        let hint = app.calculation_chart_host.test_native_jump().active_session()
+            .expect("native chart popup hints").hint_map().assignments().iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("native index hint").hint().as_str().to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(super::immediate_viewport_test_focused_id(), Some((viewport, Some(target))));
+        assert_eq!(app.calculation_pad_dialog.chart_runtime(false).definition, before);
+        native(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)]);
+        native(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)]);
+        assert!(matches!(
+            app.calculation_pad_dialog.chart_runtime(false).definition.map(|definition| definition.source),
+            Some(crate::calculation_pad::ChartSource::Vectors { x: None, .. })
+        ));
         }).unwrap().join().unwrap();
     }
 

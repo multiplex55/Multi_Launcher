@@ -85,6 +85,9 @@ pub(super) trait HostedUtilityDialog: Sized {
     fn target_generation(&self) -> TargetGeneration {
         TargetGeneration(self.session())
     }
+    fn target_generation_for_runtime(&self, _: &Self::Runtime) -> TargetGeneration {
+        self.target_generation()
+    }
     fn parent_targets_allowed(&self, runtime: &Self::Runtime) -> bool;
     fn parent_input_allowed(&self) -> bool;
     fn native_parent_current(
@@ -813,7 +816,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                 .then(|| {
                     self.native_jump.scope_for_viewport_binding(
                         surface.clone(),
-                        dialog.target_generation(),
+                        dialog.target_generation_for_runtime(runtime),
                         dialog.dialog_namespace(),
                         binding,
                     )
@@ -3071,6 +3074,9 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
     }
     fn session(&self) -> u64 {
         self.epoch()
+    }
+    fn target_generation_for_runtime(&self, runtime: &Self::Runtime) -> TargetGeneration {
+        self.jump_generation(runtime)
     }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
         true
