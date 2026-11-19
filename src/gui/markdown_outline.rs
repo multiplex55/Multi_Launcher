@@ -49,6 +49,9 @@ struct OutlineReview {
 }
 
 impl OutlineMoves {
+    pub(super) fn review_request(&self) -> Option<MoveRequest> {
+        self.review.as_ref().map(|review| review.request)
+    }
     pub(super) fn has_review(&self, stamp: OutlineStamp) -> bool {
         self.review
             .as_ref()
@@ -121,6 +124,7 @@ impl OutlineMoves {
         stamp: OutlineStamp,
         headings: &[MarkdownHeading],
         owns_input: bool,
+        mut register: impl FnMut(&egui::Ui, &'static str, &egui::Response),
     ) -> Option<OutlineAction> {
         if let Some(message) = &self.message {
             ui.label(message);
@@ -160,16 +164,14 @@ impl OutlineMoves {
                 });
             let mut result = None;
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(owns_input, egui::Button::new("Confirm section move"))
-                    .clicked()
-                {
+                let confirm = ui.add_enabled(owns_input, egui::Button::new("Confirm section move"));
+                register(ui, "Confirm section move", &confirm);
+                if confirm.clicked() {
                     result = Some(OutlineAction::Confirm(review.request));
                 }
-                if ui
-                    .add_enabled(owns_input, egui::Button::new("Cancel move"))
-                    .clicked()
-                {
+                let cancel = ui.add_enabled(owns_input, egui::Button::new("Cancel move"));
+                register(ui, "Cancel move", &cancel);
+                if cancel.clicked() {
                     result = Some(OutlineAction::Cancel(review.request));
                 }
             });

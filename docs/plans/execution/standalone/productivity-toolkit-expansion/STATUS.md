@@ -110,6 +110,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B3d1 | complete |
 | M12-B3d2 | complete |
 | M12-B3e1 | complete |
+| M12-B3e2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -808,3 +809,8 @@ M12-B3d2 shares NotePanel's prompt coordinator with Save Conflict and plain-link
 The toolbar registers its real Markdown opener, the current Menu and its exact Block snippet or Table submenu. Jump Mode follows only the visible current popup chain, retaining opener provenance through transitions without retaining old target authority. A hint moves focus, and an ordinary activation performs the existing action. Escape dismisses the innermost toolbar submenu and returns focus to its trigger even with Jump Mode off. A height-bounded menu and focused scrolling preserve access in short windows.
 
 Rejected toolbar edits restore the original source plus the exact editor caret, selection and native Undo state. The final focused run passed 8/8 (03d07712-57f9-480c-8c91-472650ff2806), including ordinary keyboard Bold and Undo/Redo, discarded input and Undo history, short-window access, deepest-surface ownership and the existing ComboBox guards. The new root popup test uses real egui responses. Live detached toolbar smoke and the distinct editor context menus remain pending. Evidence is in `target/productivity-toolkit-expansion-evidence/m12-b3e1-toolbar-undo-final.txt`.
+
+
+### M12-B3e2 Inline Note outline review
+
+The real Confirm section move and Cancel move responses are focus-only hint targets on the current NotePanel. Their target generation follows the exact reviewed move, including source revision, presentation, viewport, selected heading, destination and placement. A separate ordinary activation uses the existing retained action and prepared edit. Changing the source retires the review. The focused gate passed 5/5 (9b50a634-15cb-4497-83cc-43db53cf1bbe), including ordinary Confirm and Cancel, revision retirement, and the established Note and Studio Undo checks. Independent scoped review found no actionable defect.

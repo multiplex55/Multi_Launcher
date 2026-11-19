@@ -1461,7 +1461,7 @@ impl MarkdownStudioDialog {
         )).and_then(MarkdownPreviewCache::analysis).filter(|analysis| !analysis.headings.is_empty()) else { return; };
         ui.collapsing("Outline", |ui| {
             let owns_moves = enabled && owns_outline_input(ui);
-            if let Some(action) = self.outline_moves.ui(ui, stamp, &analysis.headings, owns_moves) {
+            if let Some(action) = self.outline_moves.ui(ui, stamp, &analysis.headings, owns_moves, |_, _, _| {}) {
                 *intent = Some(StudioIntent::OutlineMove(action));
             }
             let selected = analysis.headings.iter().position(|heading|

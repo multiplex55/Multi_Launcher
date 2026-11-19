@@ -22256,6 +22256,65 @@ mod tests {
     }
 
     #[test]
+    fn note_panel_outline_review_hint_requires_activation_and_tracks_revision() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            app.note_settings.outline_sidebar_enabled = true;
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.note_panel_default_size = (900.0, 640.0);
+            let mut panel = launcher_show_owner_note("jump-outline-review");
+            panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+            panel.test_outline_review_fixture();
+            app.note_panels.push(panel);
+            let frame = |app: &mut LauncherApp, events| run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+            for _ in 0..5 { frame(&mut app, Vec::new()); }
+            let layer = app.note_panels[0].host_layer_if_root().unwrap();
+            ctx.move_to_top(layer);
+            for _ in 0..4 { frame(&mut app, Vec::new()); }
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let title = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { frame(&mut app, tool_dialog_pointer_events(title, pressed)); }
+            for _ in 0..4 { frame(&mut app, Vec::new()); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Cancel move").cloned().expect("review target");
+            let original = app.note_panels[0].note_content().to_owned();
+            frame(&mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())]);
+            frame(&mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+            let hint = dialog_hint_for_label(&app, "Cancel move");
+            frame(&mut app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.note_panels[0].note_content(), original);
+            assert!(app.note_panels[0].test_outline_review_active());
+            frame(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)]);
+            assert!(!app.note_panels[0].test_outline_review_active());
+            assert_eq!(app.note_panels[0].note_content(), original);
+            frame(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)]);
+            app.note_panels[0].test_outline_review_fixture();
+            for _ in 0..4 { frame(&mut app, Vec::new()); }
+            let confirm = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Confirm section move").cloned().expect("confirm target");
+            frame(&mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())]);
+            frame(&mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+            let hint = dialog_hint_for_label(&app, "Confirm section move");
+            frame(&mut app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(confirm.response_id()));
+            assert_eq!(app.note_panels[0].note_content(), original);
+            frame(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)]);
+            assert!(!app.note_panels[0].test_outline_review_active());
+            assert_ne!(app.note_panels[0].note_content(), original);
+            frame(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)]);
+            app.note_panels[0].test_outline_review_fixture();
+            let generation = app.note_panels[0].jump_generation();
+            app.note_panels[0].replace_content_from_mutation("# Changed".into(), 1.0);
+            assert_ne!(app.note_panels[0].jump_generation(), generation);
+            for _ in 0..3 { frame(&mut app, Vec::new()); }
+            assert!(!app.note_panels[0].test_outline_review_active());
+            assert_eq!(app.note_panels[0].note_content(), "# Changed");
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
     fn note_panel_outline_hint_focuses_before_selection() {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)

@@ -2821,6 +2821,16 @@ impl NotePanel {
                 collapsed,
                 self.selected_outline_heading
                     .map(|position| (position.revision, position.heading_start)),
+                self.outline_moves.review_request().map(|request| (
+                    request.stamp.document,
+                    request.stamp.revision,
+                    request.stamp.host.host as u8,
+                    request.stamp.host.generation,
+                    request.stamp.viewport,
+                    request.selected,
+                    request.destination,
+                    request.placement as u8,
+                )),
             ))
             .value(),
         )
@@ -4273,6 +4283,27 @@ impl NotePanel {
         self.replace_content_after_saved_external_mutation("# One\n# Two".to_owned(), 0.0);
         self.outline_open = true;
         self.show_metadata = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_outline_review_fixture(&mut self) {
+        self.replace_content_after_saved_external_mutation("# Same\nfirst\n# Same\nsecond".to_owned(), 0.0);
+        self.outline_open = true;
+        self.show_metadata = false;
+        let stamp = self.outline_stamp(egui::ViewportId::ROOT);
+        let request = super::markdown_outline::MoveRequest {
+            stamp,
+            selected: 0,
+            destination: 1,
+            placement: crate::notes_markdown::section_move::SectionPlacement::After,
+        };
+        assert!(self.outline_moves.apply_action(stamp, &self.note.content, OutlineAction::Prepare(request)).is_none());
+        assert!(self.outline_moves.has_review(stamp));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_outline_review_active(&self) -> bool {
+        self.outline_moves.review_request().is_some()
     }
 
     #[cfg(test)]
@@ -7562,7 +7593,15 @@ impl NotePanel {
                     let owns_moves = self.defer_host_actions
                         && self.outline_input_unblocked()
                         && owns_outline_input(ui);
-                    if let Some(action) = self.outline_moves.ui(ui, stamp, &analysis.headings, owns_moves) {
+                    let scope = self.jump_scope.clone();
+                    let order = &mut self.jump_order;
+                    if let Some(action) = self.outline_moves.ui(ui, stamp, &analysis.headings, owns_moves, |ui, label, response| {
+                        let identity = if label == "Confirm section move" { "outline-review-confirm" } else { "outline-review-cancel" };
+                        super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, response, identity, label, super::jump_mode::TargetKind::Button, order);
+                        if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass() && !ui.ctx().will_discard() && !ui.clip_rect().contains_rect(response.rect) {
+                            response.scroll_to_me(None);
+                        }
+                    }) {
                         self.pending_host_actions.outline_move = Some(action);
                     }
                     let selection = self.selected_outline_heading
