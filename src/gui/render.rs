@@ -11258,7 +11258,8 @@ impl LauncherApp {
                 let pad_owner = NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationPad, instance: self.calculation_pad_dialog.jump_instance() };
                 let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, pad_owner);
                 let allowed = self.calculation_pad_dialog.jump_parent_available()
-                    && if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
+                    && if self.calculation_pad_dialog.inline_child_owns_root_escape(ctx) { true }
+                    else if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
                         super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
                             Some(focus) == pad_layer || focus.order == egui::Order::Background)
                     };
@@ -12904,6 +12905,7 @@ impl LauncherApp {
                         .embedded_host_owns_root_input(&ctx)
                     && !self.calculation_pad_dialog.reference_owns_root_shortcuts(&ctx)
                     && !self.calculation_pad_dialog.editor_tools_own_root_escape(&ctx)
+                    && !self.calculation_pad_dialog.inline_child_owns_root_escape(&ctx)
                     && !self
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
@@ -13002,6 +13004,7 @@ impl LauncherApp {
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
                     && !self.calculation_pad_dialog.reference_owns_root_shortcuts(&ctx)
+                    && !self.calculation_pad_dialog.inline_child_owns_root_escape(&ctx)
                     && !self
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
@@ -35651,6 +35654,156 @@ mod tests {
 
 
 
+
+
+    #[test]
+    fn calculation_pad_document_decision_hints_and_escape_keep_the_dirty_draft() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "draft = 42";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.calculation_pad_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        app.calculation_pad_dialog.request_close();
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            app.calculation_pad_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        let registry = app.jump_mode_ui.retained_registry();
+        assert_eq!(registry.len(), 3);
+        let discard = registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Discard")
+            .expect("current Pad Discard")
+            .response_id();
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        let escape = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Discard");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(discard));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        arm(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        escape(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            app.calculation_pad_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        app.set_jump_mode_enabled(false);
+        escape(&mut app);
+        assert!(
+            app.calculation_pad_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert!(app.calculation_pad_dialog.open);
+        assert!(app.calculation_pad_dialog.test_is_dirty());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        assert!(app.visible_flag_state());
+
+        app.calculation_pad_dialog
+            .test_apply_save_as("Conflict fixture");
+        let saved = app
+            .calculation_pad_dialog
+            .test_current_document_id()
+            .unwrap();
+        let modified = "draft = 43";
+        app.calculation_pad_dialog.test_replace_source(modified);
+        app.calculation_pad_dialog.test_stage_disk_conflict();
+        app.set_jump_mode_enabled(true);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let registry = app.jump_mode_ui.retained_registry();
+        assert!(
+            registry
+                .metadata()
+                .any(|target| target.label() == "Keep Editing")
+        );
+        assert!(
+            !registry
+                .metadata()
+                .any(|target| target.label() == "Config Menu")
+        );
+        let save_as = registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Save As…")
+            .expect("current conflict offers a safe copy route")
+            .response_id();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Save As…");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(save_as));
+        assert_eq!(
+            app.calculation_pad_dialog.test_current_document_id(),
+            Some(saved)
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(modified));
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Document name")
+        );
+        assert_eq!(
+            app.calculation_pad_dialog.test_current_document_id(),
+            Some(saved)
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(modified));
+    }
 
     #[test]
     fn calculation_pad_config_menu_hints_follow_the_innermost_options() {

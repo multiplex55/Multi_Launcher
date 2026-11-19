@@ -121,6 +121,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B4a2 | complete |
 | M12-B4a3 | complete |
 | M12-B4b1 | complete |
+| M12-B4b2 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -894,3 +895,10 @@ The directly affected existing tests passed 4/4 in d97025b9-981a-47ec-8a26-df8f0
 The existing Config Menu and its actual Document, Calculation, Tools, View, Number format, Source display and Editor options submenus expose the current eligible controls. The exact known menu chain owns hints in docked and detached Pad. Existing settings, evaluation and document effects still require ordinary activation and acceptance. Keyboard opening uses the current editor selection receipt. The existing focused-only pointer selection rule remains intact. Ordinary focus reveals clipped options, and Escape unwinds one menu level even with Jump Mode off.
 
 The initial run included passing source, Escape and accepted preference tests. The final reviewed gate passed 3/3 (a46ea049-1b05-49fb-ba3d-8860378947bf) after restoring the existing pointer restriction and aligning the Word wrap hint label. The actual nested menu fixture verifies focus-only Word wrap, unchanged draft/preferences and successive ordinary Escape handling.
+
+
+### M12-B4b2 Calculation Pad document chooser and decisions
+
+The current typed inline child owns the saved document rows, Save As form, transition decision or disk conflict. Underlying Pad controls are inactive while the child is current. Target identities include the relevant current document, request and inventory. Fresh Escape cancels the child after any active hint session in the actual docked or detached callback. The existing retained document actions still govern changes.
+
+A disk conflict exposes Save As and Keep Editing directly alongside Reload. A dirty transition also retains Save As after a conflict. The first gate passed 5/5 (75ca6fb1-10ce-4829-8a1c-6ea3079fa574). The reviewed gate passed 3/3 (bf4a51a3-db44-4360-98ab-d11676d810cf), including actual Discard focus without execution, successive Escape, conflict Save As focus followed by ordinary form opening, unchanged draft and saved document identity, and the existing real disk-change and blank Save As cases.

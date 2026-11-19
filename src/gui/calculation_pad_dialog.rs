@@ -534,6 +534,25 @@ struct ResultCopyIntent {
     target: ResultCopyTarget,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PadInlineChild {
+    SaveAs,
+    Transition,
+    Chooser,
+    Conflict,
+}
+
+impl PadInlineChild {
+    fn cancel_intent(self) -> DialogIntent {
+        match self {
+            Self::SaveAs => DialogIntent::CancelSaveAs,
+            Self::Transition => DialogIntent::Decision(TransitionDecision::Cancel),
+            Self::Chooser => DialogIntent::HideChooser,
+            Self::Conflict => DialogIntent::DismissConflict,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum DialogIntent {
     New,
@@ -543,6 +562,7 @@ enum DialogIntent {
     OpenSaveAs,
     HideChooser,
     CancelSaveAs,
+    DismissConflict,
     Save,
     SaveAs(String),
     OpenExamples,
@@ -625,12 +645,40 @@ impl CalculationPadDialog {
         }
     }
     pub(super) fn jump_parent_available(&self) -> bool {
+        self.open && self.rename.is_none()
+    }
+    fn inline_child(&self) -> Option<PadInlineChild> {
+        if self.save_as_open {
+            Some(PadInlineChild::SaveAs)
+        } else if self.session.pending_transition().is_some() {
+            Some(PadInlineChild::Transition)
+        } else if self.open_chooser {
+            Some(PadInlineChild::Chooser)
+        } else if self.conflict_document.is_some() {
+            Some(PadInlineChild::Conflict)
+        } else {
+            None
+        }
+    }
+
+    fn stage_inline_child_escape(&self, ctx: &egui::Context, effects: &mut HostEffects) {
+        if !egui::Popup::is_any_open(ctx)
+            && let Some(child) = self.inline_child()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            effects.intent = Some(child.cancel_intent());
+        }
+    }
+    pub(super) fn inline_child_owns_root_escape(&self, ctx: &egui::Context) -> bool {
         self.open
-            && self.session.pending_transition().is_none()
-            && !self.save_as_open
-            && !self.open_chooser
-            && self.conflict_document.is_none()
-            && self.rename.is_none()
+            && self.inline_child().is_some()
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && self.host_layer_if_root().is_some_and(|layer| {
+                super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                    && super::jump_mode::ui::focused_response_layer(ctx)
+                        .is_none_or(|focus| focus == layer)
+            })
     }
     pub(super) fn jump_instance(&self) -> u64 {
         egui::Id::new((
@@ -641,16 +689,38 @@ impl CalculationPadDialog {
         .value()
     }
     pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
-        super::jump_mode::TargetGeneration(
-            egui::Id::new((
-                self.jump_instance(),
-                self.session.revision(),
-                self.session
-                    .evaluation_basis()
-                    .map(|basis| basis.generation),
-            ))
-            .value(),
-        )
+        use std::hash::{Hash, Hasher};
+
+        let mut generation = std::collections::hash_map::DefaultHasher::new();
+        self.jump_instance().hash(&mut generation);
+        self.session.revision().hash(&mut generation);
+        self.session
+            .evaluation_basis()
+            .map(|basis| basis.generation)
+            .hash(&mut generation);
+        let child = self.inline_child();
+        child.hash(&mut generation);
+        match child {
+            Some(PadInlineChild::SaveAs) => self.save_as_name.hash(&mut generation),
+            Some(PadInlineChild::Transition) => {
+                self.conflict_document.hash(&mut generation);
+                if let Some(pending) = self.session.pending_transition() {
+                    std::mem::discriminant(&pending).hash(&mut generation);
+                    if let PendingTransition::Open(id) = pending {
+                        id.hash(&mut generation);
+                    }
+                }
+            }
+            Some(PadInlineChild::Chooser) => {
+                self.saved_documents.len().hash(&mut generation);
+                for document in &self.saved_documents {
+                    document.id.hash(&mut generation);
+                }
+            }
+            Some(PadInlineChild::Conflict) => self.conflict_document.hash(&mut generation),
+            None => {}
+        }
+        super::jump_mode::TargetGeneration(generation.finish())
     }
     pub(super) fn configure_jump(
         &mut self,
@@ -681,8 +751,9 @@ impl CalculationPadDialog {
         label: &str,
         kind: super::jump_mode::TargetKind,
     ) {
+        let parent_active = self.inline_child().is_none();
         super::jump_mode::ui::register_and_apply_target(
-            self.jump_scope.as_ref(),
+            self.jump_scope.as_ref().filter(|_| parent_active),
             ui,
             response,
             id,
@@ -1482,7 +1553,13 @@ impl CalculationPadDialog {
                                 ctx.memory(|memory| memory.top_modal_layer().is_some());
                             let surface_allowed = root_input_allowed && !modal_open;
                             body_authorized = pass_authorized && surface_allowed;
-                            if body_authorized && !self.root_jump_active { self.stage_completion_escape(ctx, &mut effects); }
+                            if body_authorized && !self.root_jump_active {
+                                if self.inline_child_owns_root_escape(ctx) {
+                                    self.stage_inline_child_escape(ctx, &mut effects);
+                                } else if self.inline_child().is_none() {
+                                    self.stage_completion_escape(ctx, &mut effects);
+                                }
+                            }
                             self.draw_host_contents(
                                 ui,
                                 ctx,
@@ -1584,12 +1661,18 @@ impl CalculationPadDialog {
                             || child.memory(|memory| memory.focused())
                                 .and_then(|id| child_ctx.read_response(id))
                                 .is_some_and(|response| response.layer_id == child.layer_id());
-                        let local_editor_escape = actions_allowed && !popup_open && !native_jump_owns_escape && (independent || !self.root_jump_active) && self.editor_tools.open
+                        let local_editor_escape = actions_allowed && self.inline_child().is_none() && !popup_open && !native_jump_owns_escape && (independent || !self.root_jump_active) && self.editor_tools.open
                             && (independent || local_tools_focus)
                             && child.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                         let mut effects = self.empty_host_effects(viewport_id);
-                        if actions_allowed && !native_jump_owns_escape && (independent || !self.root_jump_active) { self.stage_completion_escape(&child_ctx, &mut effects); }
-                        let keyboard_close_requested = if actions_allowed && !popup_open && !native_jump_owns_escape && (independent || !self.root_jump_active) {
+                        if actions_allowed
+                            && !native_jump_owns_escape
+                            && (independent || (!self.root_jump_active && self.inline_child_owns_root_escape(&child_ctx)))
+                        {
+                            self.stage_inline_child_escape(&child_ctx, &mut effects);
+                        }
+                        if actions_allowed && self.inline_child().is_none() && !native_jump_owns_escape && (independent || !self.root_jump_active) { self.stage_completion_escape(&child_ctx, &mut effects); }
+                        let keyboard_close_requested = if actions_allowed && self.inline_child().is_none() && !popup_open && !native_jump_owns_escape && (independent || !self.root_jump_active) {
                             child.input_mut(|input| {
                                 input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                                     || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
@@ -2237,8 +2320,16 @@ impl CalculationPadDialog {
                 }
             };
         }
+        let parent_active = self.inline_child().is_none();
         ui.horizontal_wrapped(|ui| {
+            if !parent_active {
+                ui.disable();
+            }
             let _menu = ui.menu_button("Config Menu", |ui| {
+                if !parent_active {
+                    ui.close();
+                    return;
+                }
                 let dismissed = super::native_keyboard::dismiss_owned_submenu_on_escape(ui);
                 let mut order = 0;
                 let document_scope = config_scope
@@ -2958,7 +3049,7 @@ impl CalculationPadDialog {
                 }
             });
             super::jump_mode::ui::register_and_apply_menu_anchor(
-                self.jump_scope.as_ref(),
+                self.jump_scope.as_ref().filter(|_| parent_active),
                 ui,
                 &_menu.response,
                 "config",
@@ -3287,11 +3378,12 @@ impl CalculationPadDialog {
         }
         let content_rect = ui.clip_rect();
         let editor_id = egui::Id::new("calculation-pad-source");
+        let parent_active = self.inline_child().is_none();
         effects.source_editor_id = Some(editor_id);
-        if source_focus_allowed && self.focus_source {
+        if source_focus_allowed && parent_active && self.focus_source {
             effects.source_focus_requested = true;
         }
-        if actions_allowed && self.session.pending_transition().is_none()
+        if actions_allowed && parent_active
             && let Some(pending) = self.deferred_projected_input.as_ref()
             && pending.host == identity
             && Some(pending.basis) == effects.document_basis
@@ -3306,8 +3398,7 @@ impl CalculationPadDialog {
                 .id_salt("calculation-pad-window-content")
                 .max_height(content_rect.height())
                 .show(ui, |ui| {
-                    if actions_allowed && self.session.pending_transition().is_none()
-                        && !egui::Popup::is_any_open(ctx)
+                    if actions_allowed && parent_active && !egui::Popup::is_any_open(ctx)
                     {
                         effects.editor_history_action =
                             self.take_editor_history_shortcut(ui, editor_id);
@@ -3323,7 +3414,7 @@ impl CalculationPadDialog {
                         &mut fold_request, identity, viewport_id, effects,
                     );
                     let popup_owns_input = popup_was_open || egui::Popup::is_any_open(ui.ctx());
-                    if actions_allowed && !popup_owns_input && self.session.pending_transition().is_none()
+                    if actions_allowed && parent_active && !popup_owns_input
                         && ui.memory(|memory| memory.has_focus(editor_id))
                         && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2))
                         && let Some(selection) = egui::widgets::text_edit::TextEditState::load(ctx, editor_id).and_then(|state| state.cursor.char_range())
@@ -3336,12 +3427,14 @@ impl CalculationPadDialog {
                     if !popup_owns_input && effects.config_editor_focus.is_none() {
                         effects.config_editor_focus = Some(None);
                     }
-                    ui.add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
+                    ui.add_enabled_ui(parent_active, |ui| {
                         self.panels_ui(ui, &source, evaluation.as_deref(), &mut view, effects);
                     });
                     if view != self.pad_view || effects.input_commit.is_some() || effects.input_config_commit.is_some() { effects.pad_view = Some(view); }
                     let mut tools = effects.editor_tools.clone().unwrap_or_else(|| self.editor_tools.clone());
-                    self.editor_tools_ui(ui, editor_id, &source, &mut tools, effects, popup_owns_input);
+                    ui.add_enabled_ui(parent_active, |ui| {
+                        self.editor_tools_ui(ui, editor_id, &source, &mut tools, effects, popup_owns_input || !parent_active);
+                    });
                     self.rename_ui(ui, effects);
                     if tools != self.editor_tools { effects.editor_tools = Some(tools); }
                     let mut completion = effects.completion.clone().unwrap_or_else(|| self.completion.clone());
@@ -3351,7 +3444,7 @@ impl CalculationPadDialog {
                         editor_id,
                         source,
                         evaluation.as_deref(),
-                        source_focus_allowed,
+                        source_focus_allowed && parent_active,
                         &mut staged_save_as_name,
                         &mut effects.source_focus_requested,
                         &mut effects.edited_source,
@@ -5051,14 +5144,27 @@ impl CalculationPadDialog {
         viewport_id: egui::ViewportId,
     ) {
 
+        let active_child = self.inline_child();
         if let Some(error) = self.error.as_deref() {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(ui.visuals().error_fg_color, error);
-                if let Some(id) = self.conflict_document
-                    && self.session.pending_transition().is_none()
-                    && ui.button("Reload saved version…").clicked()
-                {
-                    *intent = Some(DialogIntent::Open(id));
+                if let Some(id) = self.conflict_document && self.session.pending_transition().is_none() {
+                    let conflict_active = active_child == Some(PadInlineChild::Conflict);
+                    let scope = self.jump_scope.as_ref().filter(|_| conflict_active);
+                    for (key, label, action) in [
+                        ("child/conflict/reload", "Reload saved version…", DialogIntent::Open(id)),
+                        ("child/conflict/save-as", "Save As…", DialogIntent::OpenSaveAs),
+                        ("child/conflict/cancel", "Keep Editing", DialogIntent::DismissConflict),
+                    ] {
+                        let response = ui.add_enabled(conflict_active, egui::Button::new(label));
+                        super::jump_mode::ui::register_and_apply_target(
+                            scope, ui, &response, key, label, super::jump_mode::TargetKind::Button,
+                            &mut self.jump_order,
+                        );
+                        if response.clicked() {
+                            *intent = Some(action);
+                        }
+                    }
                 }
                 if self.conflict_document.is_some() {
                     ui.label("Save As keeps this draft; Keep Editing cancels the close request.");
@@ -5069,17 +5175,20 @@ impl CalculationPadDialog {
         }
 
         if self.open_chooser {
-            self.document_chooser_ui(ui, intent);
+            ui.add_enabled_ui(self.inline_child() == Some(PadInlineChild::Chooser), |ui| self.document_chooser_ui(ui, intent));
         }
         if self.save_as_open {
-            Self::save_as_ui(ui, staged_save_as_name, intent);
+            self.save_as_ui(ui, staged_save_as_name, intent);
         }
 
         if let Some(pending) = self.session.pending_transition() {
-            self.pending_transition_ui(ui, pending, intent);
+            ui.add_enabled_ui(self.inline_child() == Some(PadInlineChild::Transition), |ui| self.pending_transition_ui(ui, pending, intent));
         }
 
         ui.separator();
+        if self.inline_child().is_some() {
+            ui.disable();
+        }
         let available_height = ui.available_height().max(120.0);
         let available_width = ui.available_width();
         let orientation = if available_width >= 680.0 {
@@ -6459,13 +6568,19 @@ impl CalculationPadDialog {
     }
 
     fn document_chooser_ui(&mut self, ui: &mut egui::Ui, intent: &mut Option<DialogIntent>) {
+        let scope = self.jump_scope.clone().filter(|_| self.inline_child() == Some(PadInlineChild::Chooser));
+        let mut order = self.jump_order;
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.strong("Saved Calculation Pads");
-                if ui.small_button("Refresh").clicked() {
+                let refresh = ui.small_button("Refresh");
+                super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &refresh, "child/documents/refresh", "Refresh", super::jump_mode::TargetKind::Button, &mut order);
+                if refresh.clicked() {
                     *intent = Some(DialogIntent::RefreshDocuments);
                 }
-                if ui.small_button("Hide").clicked() {
+                let hide = ui.small_button("Hide");
+                super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &hide, "child/documents/hide", "Hide", super::jump_mode::TargetKind::Button, &mut order);
+                if hide.clicked() {
                     *intent = Some(DialogIntent::HideChooser);
                 }
             });
@@ -6481,24 +6596,33 @@ impl CalculationPadDialog {
                             "{}  ·  {} lines  ·  {} bytes",
                             document.name, document.line_count, document.source_bytes
                         );
-                        if ui.selectable_label(false, text).clicked() {
+                        let response = ui.selectable_label(false, text);
+                        super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &response, format!("child/documents/{:?}", document.id), &document.name, super::jump_mode::TargetKind::Button, &mut order);
+                        if response.clicked() {
                             *intent = Some(DialogIntent::Open(document.id));
                         }
                     }
                 });
         });
+        self.jump_order = order;
     }
 
-    fn save_as_ui(ui: &mut egui::Ui, save_as_name: &mut String, intent: &mut Option<DialogIntent>) {
+    fn save_as_ui(&mut self, ui: &mut egui::Ui, save_as_name: &mut String, intent: &mut Option<DialogIntent>) {
+        let scope = self.jump_scope.clone().filter(|_| self.inline_child() == Some(PadInlineChild::SaveAs));
         ui.group(|ui| {
             ui.strong("Save Calculation Pad As");
             ui.horizontal_wrapped(|ui| {
                 ui.label("Document name");
-                ui.text_edit_singleline(save_as_name);
-                if ui.button("Save Copy").clicked() {
+                let name = ui.text_edit_singleline(save_as_name);
+                super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &name, "child/save-as/name", "Document name", super::jump_mode::TargetKind::TextEntry, &mut self.jump_order);
+                let save = ui.button("Save Copy");
+                super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &save, "child/save-as/save", "Save Copy", super::jump_mode::TargetKind::Button, &mut self.jump_order);
+                if save.clicked() {
                     *intent = Some(DialogIntent::SaveAs(save_as_name.clone()));
                 }
-                if ui.button("Cancel").clicked() {
+                let cancel = ui.button("Cancel");
+                super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &cancel, "child/save-as/cancel", "Cancel", super::jump_mode::TargetKind::Button, &mut self.jump_order);
+                if cancel.clicked() {
                     *intent = Some(DialogIntent::CancelSaveAs);
                 }
             });
@@ -6511,6 +6635,7 @@ impl CalculationPadDialog {
         transition: PendingTransition,
         intent: &mut Option<DialogIntent>,
     ) {
+        let scope = self.jump_scope.clone().filter(|_| self.inline_child() == Some(PadInlineChild::Transition));
         let description = match transition {
             PendingTransition::New => "Save changes before creating a new pad?",
             PendingTransition::Open(_) => "Save changes before opening the selected pad?",
@@ -6520,10 +6645,23 @@ impl CalculationPadDialog {
             ui.strong("Unsaved changes");
             ui.label(description);
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                let save = ui.button("Save");
+                super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &save, "child/transition/save", "Save", super::jump_mode::TargetKind::Button, &mut self.jump_order);
+                if save.clicked() {
                     *intent = Some(DialogIntent::Decision(TransitionDecision::Save));
                 }
+                if self.conflict_document.is_some() {
+                    let save_as = ui.button("Save As…");
+                    super::jump_mode::ui::register_and_apply_target(
+                        scope.as_ref(), ui, &save_as, "child/transition/save-as", "Save As…",
+                        super::jump_mode::TargetKind::Button, &mut self.jump_order,
+                    );
+                    if save_as.clicked() {
+                        *intent = Some(DialogIntent::OpenSaveAs);
+                    }
+                }
                 let discard = ui.button("Discard");
+                super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &discard, "child/transition/discard", "Discard", super::jump_mode::TargetKind::Button, &mut self.jump_order);
                 #[cfg(test)]
                 {
                     self.test_discard_rect = Some(discard.rect);
@@ -6532,6 +6670,7 @@ impl CalculationPadDialog {
                     *intent = Some(DialogIntent::Decision(TransitionDecision::Discard));
                 }
                 let keep_editing = ui.button("Keep Editing");
+                super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, &keep_editing, "child/transition/cancel", "Keep Editing", super::jump_mode::TargetKind::Button, &mut self.jump_order);
                 #[cfg(test)]
                 if ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_keep_editing_rect = Some(keep_editing.rect);
@@ -6574,6 +6713,7 @@ impl CalculationPadDialog {
             }
             DialogIntent::HideChooser => self.open_chooser = false,
             DialogIntent::CancelSaveAs => self.save_as_open = false,
+            DialogIntent::DismissConflict => self.clear_feedback(),
             DialogIntent::Save => self.save_current(),
             DialogIntent::SaveAs(name) => self.save_as(&name),
             DialogIntent::OpenExamples => self.open_examples(),
@@ -6894,6 +7034,12 @@ impl CalculationPadDialog {
     #[cfg(test)]
     pub(crate) fn test_examples_copy_rect(&self) -> Option<egui::Rect> {
         self.test_examples_copy_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stage_disk_conflict(&mut self) {
+        let id = self.session.current_id().expect("test Pad has a saved document");
+        self.set_error(SessionError::Store(PadStoreError::DiskConflict(id)));
     }
 
     #[cfg(test)]
