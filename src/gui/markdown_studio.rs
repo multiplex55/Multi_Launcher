@@ -1471,7 +1471,7 @@ impl MarkdownStudioDialog {
                 sibling_requests(&analysis.headings, selected, stamp).map(|request|
                     request.filter(|request| self.outline_moves.can_move(*request, source)))
             } else { [None, None] };
-            if let Some(action) = move_buttons(ui, up, down) {
+            if let Some(action) = move_buttons(ui, up, down, |_, _, _| {}) {
                 *intent = Some(StudioIntent::OutlineMove(action));
             }
             for (index, heading) in analysis.headings.iter().enumerate() {

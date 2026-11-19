@@ -2720,6 +2720,8 @@ impl NotePanel {
     }
 
     pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
+        let mut collapsed: Vec<_> = self.collapsed_sections.iter().collect();
+        collapsed.sort_unstable();
         super::jump_mode::TargetGeneration(
             egui::Id::new((
                 self.prompt_identity,
@@ -2729,6 +2731,9 @@ impl NotePanel {
                 self.note_find.is_open(),
                 self.show_metadata,
                 self.outline_open,
+                &self.outline_filter,
+                collapsed,
+                self.selected_outline_heading.map(|position| (position.revision, position.heading_start)),
             ))
             .value(),
         )
@@ -2748,8 +2753,8 @@ impl NotePanel {
         &mut self,
         ui: &egui::Ui,
         response: &egui::Response,
-        identity: &'static str,
-        label: &'static str,
+        identity: impl AsRef<str>,
+        label: impl Into<String>,
         kind: super::jump_mode::TargetKind,
     ) {
         super::jump_mode::ui::register_and_apply_target(
@@ -4158,6 +4163,18 @@ impl NotePanel {
 
     pub(crate) fn note_content_clone_for_mutation(&self) -> Note {
         self.note.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_outline_fixture(&mut self) {
+        self.replace_content_after_saved_external_mutation("# One\n# Two".to_owned(), 0.0);
+        self.outline_open = true;
+        self.show_metadata = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_outline_selection(&self) -> Option<usize> {
+        self.selected_outline_heading.map(|position| position.heading_start)
     }
 
     #[cfg(test)]
@@ -7179,15 +7196,17 @@ impl NotePanel {
                     ui.set_width(outline_width);
                     ui.horizontal(|ui| {
                         ui.label("Outline");
-                        ui.add(
+                        let width = ui.add(
                             egui::DragValue::new(&mut self.outline_width)
                                 .range(120.0..=360.0)
                                 .speed(4.0)
                                 .prefix("width "),
                         );
+                        self.jump_target(ui, &width, "outline-width", "Outline width", super::jump_mode::TargetKind::TextEntry);
                     });
                     self.outline_width = self.outline_width.clamp(120.0, 360.0);
-                    ui.text_edit_singleline(&mut self.outline_filter);
+                    let filter = ui.text_edit_singleline(&mut self.outline_filter);
+                    self.jump_target(ui, &filter, "outline-filter", "Filter outline", super::jump_mode::TargetKind::TextEntry);
                     let stamp = self.outline_stamp(ui.ctx().viewport_id());
                     let owns_moves = self.defer_host_actions
                         && self.outline_input_unblocked()
@@ -7205,7 +7224,14 @@ impl NotePanel {
                         sibling_requests(&analysis.headings, selection, stamp).map(|request|
                             request.filter(|request| self.outline_moves.can_move(*request, &self.note.content)))
                     } else { [None, None] };
-                    if let Some(action) = move_buttons(ui, up, down) {
+                    if let Some(action) = move_buttons(ui, up, down, |ui, label, response| {
+                        let identity = if label == "Move up" {
+                            "outline-up"
+                        } else {
+                            "outline-down"
+                        };
+                        self.jump_target(ui, response, identity, label, super::jump_mode::TargetKind::Button);
+                    }) {
                         self.pending_host_actions.outline_move = Some(action);
                     }
                     if rows.is_empty() {
@@ -7227,10 +7253,12 @@ impl NotePanel {
                                 ui.small(marker);
                             }
                             let selected = selection == Some(row.heading_index);
-                            let (response, action) = outline_row(
-                                ui, &row.title, selected, stamp, row.heading_index, allow_moves,
-                                |request| self.outline_moves.can_move(request, &self.note.content),
-                            );
+                            let (response, action) = ui.scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((stamp.document, stamp.revision, row.heading_start))),
+                                |ui| outline_row(ui, &row.title, selected, stamp, row.heading_index, allow_moves,
+                                    |request| self.outline_moves.can_move(request, &self.note.content)),
+                            ).inner;
+                            self.jump_target(ui, &response, format!("outline-row/{}", row.heading_start), format!("Heading {}", row.title), super::jump_mode::TargetKind::Selectable);
                             if owns_moves { self.outline_moves.reveal_moved_row(stamp, row.heading_start, &response); }
                             if response.clicked() {
                                 self.handle_outline_row_click(&row, ui.ctx(), response.clicked_by(egui::PointerButton::Primary));
@@ -19531,6 +19559,10 @@ More text.
         panel.last_textedit_id = Some(egui::Id::new("outline-selection-editor"));
         let outline_row = egui::Id::new("outline-selection-row");
         ctx.memory_mut(|memory| memory.request_focus(outline_row));
+        let original_generation = panel.jump_generation();
+        panel.outline_filter = "B".to_owned();
+        assert_ne!(panel.jump_generation(), original_generation);
+        let filtered_generation = panel.jump_generation();
         let analysis = analyze_markdown(source);
         let rows = NotePanel::outline_rows_from_headings(
             "note", source, &analysis.headings, &analysis.sections, &HashSet::new(), 6, false, "B",
@@ -19540,6 +19572,7 @@ More text.
         assert_eq!(ctx.memory(|memory| memory.focused()), Some(outline_row));
         assert!(!panel.focus_textedit_next_frame);
         assert_eq!(panel.selected_outline_heading.unwrap().heading_start, source.find("# B").unwrap());
+        assert_ne!(panel.jump_generation(), filtered_generation);
         ctx.end_pass().drop_without_applying_deltas();
     }
 

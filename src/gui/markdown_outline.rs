@@ -309,14 +309,14 @@ pub(super) fn move_buttons(
     ui: &mut egui::Ui,
     up: Option<MoveRequest>,
     down: Option<MoveRequest>,
+    mut observe: impl FnMut(&egui::Ui, &'static str, &egui::Response),
 ) -> Option<OutlineAction> {
     let mut selected_action = None;
     ui.horizontal_wrapped(|ui| {
         for (heading, action) in [("Move up", up), ("Move down", down)] {
-            if ui
-                .add_enabled(action.is_some(), egui::Button::new(heading))
-                .clicked()
-            {
+            let response = ui.add_enabled(action.is_some(), egui::Button::new(heading));
+            observe(ui, heading, &response);
+            if response.clicked() {
                 selected_action = action.map(OutlineAction::Prepare);
             }
         }

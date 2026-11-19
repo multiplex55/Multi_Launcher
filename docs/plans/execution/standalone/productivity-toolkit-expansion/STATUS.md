@@ -102,6 +102,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-B2b | complete |
 | M12-B3a1 | complete |
 | M12-B3a2 | complete |
+| M12-B3b1 | complete |
 | M12-B | pending |
 | M13-A | pending |
 
@@ -772,3 +773,6 @@ M12-B3a1 wires the live docked NotePanel to its exact retained owner. Editor and
 
 
 M12-B3a2 binds each detached NotePanel to its exact native viewport and foreground editor, with registration-only replay and independent root fallback. The final retained test passed in e3c15c91-24c2-48db-aa94-13ef5d6efd99. It starts with Find focused in a viewport that fits both controls, moves focus to the source using a hint, enters Unicode and a normal newline, preserves the launcher query, and waits for the edited target generation before verifying that Escape cancels Jump with Find still open. The scoped initial runs also passed the docked source, native form and layer-inventory tests. This is retained egui viewport evidence.
+
+
+M12-B3b1 registers the current outline width, filter, headings and enabled Move buttons under the existing NotePanel owner. Stable heading IDs use the source offset and revision. Filter, collapse and selected-subject changes retire the Jump generation. Existing scope and Undo checks passed 4/4 in 0776c3ad-d1e8-4609-b697-ba64f4975f93. The retained hint case passed in 501d71b7-8350-48e0-a92d-6c619af3c541 after initializing the synthetic note through its normal content revision and showing both headings in the fixture window. The hint focused the exact row. Enter then selected it with the draft unchanged.
