@@ -93,7 +93,6 @@ mod note_graph_dialog;
 pub(crate) mod note_mutation;
 mod note_panel;
 mod notes_dialog;
-mod numpad_navigation;
 mod ocr;
 mod ocr_view;
 mod paste_sequence_dialog;
@@ -106,6 +105,7 @@ mod mouse_form_host;
 mod qa_framebuffer;
 mod qr_dialog;
 mod query_history;
+mod query_navigation;
 mod query_observation;
 mod radial_actions;
 mod radial_editor;
@@ -313,9 +313,6 @@ use fst::Map;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use numpad_navigation::{
-    LauncherNumpadNavigation, NativeNumpadKeyStateProbe, consume_physical_numpad_navigation,
-};
 use once_cell::sync::Lazy;
 use query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 #[cfg(test)]
@@ -4899,8 +4896,9 @@ impl LauncherApp {
             }
             egui::Key::PageUp => {
                 if !self.results.is_empty() {
+                    let max = self.results.len() - 1;
                     self.selected = match self.selected {
-                        Some(i) => Some(i.saturating_sub(self.page_jump)),
+                        Some(i) => Some(i.saturating_sub(self.page_jump).min(max)),
                         None => Some(0),
                     };
                 }

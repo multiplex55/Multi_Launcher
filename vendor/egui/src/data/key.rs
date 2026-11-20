@@ -117,6 +117,12 @@ pub enum Key {
     /// `9` (from main row or numpad)
     Num9,
 
+    // Distinct keypad positions for native `Event::Key::physical_key`.
+    Numpad2,
+    Numpad4,
+    Numpad6,
+    Numpad8,
+
     // ----------------------------------------------
     // Letters:
     A, // Used for cmd+A (select All)
@@ -287,6 +293,10 @@ impl Key {
         Self::Num7,
         Self::Num8,
         Self::Num9,
+        Self::Numpad2,
+        Self::Numpad4,
+        Self::Numpad6,
+        Self::Numpad8,
         // Letters:
         Self::A,
         Self::B,
@@ -420,12 +430,16 @@ impl Key {
             "0" | "Digit0" | "Numpad0" => Self::Num0,
             "1" | "Digit1" | "Numpad1" => Self::Num1,
             "2" | "Digit2" | "Numpad2" => Self::Num2,
+            "PhysicalNumpad2" => Self::Numpad2,
             "3" | "Digit3" | "Numpad3" => Self::Num3,
             "4" | "Digit4" | "Numpad4" => Self::Num4,
+            "PhysicalNumpad4" => Self::Numpad4,
             "5" | "Digit5" | "Numpad5" => Self::Num5,
             "6" | "Digit6" | "Numpad6" => Self::Num6,
+            "PhysicalNumpad6" => Self::Numpad6,
             "7" | "Digit7" | "Numpad7" => Self::Num7,
             "8" | "Digit8" | "Numpad8" => Self::Num8,
+            "PhysicalNumpad8" => Self::Numpad8,
             "9" | "Digit9" | "Numpad9" => Self::Num9,
 
             "a" | "A" | "KeyA" => Self::A,
@@ -596,6 +610,10 @@ impl Key {
             Self::Num7 => "7",
             Self::Num8 => "8",
             Self::Num9 => "9",
+            Self::Numpad2 => "PhysicalNumpad2",
+            Self::Numpad4 => "PhysicalNumpad4",
+            Self::Numpad6 => "PhysicalNumpad6",
+            Self::Numpad8 => "PhysicalNumpad8",
 
             Self::A => "A",
             Self::B => "B",

@@ -1,6 +1,7 @@
 #[cfg(feature = "qa-framebuffer-capture")]
 use super::qa_framebuffer::{RootListDiagnostic, VisibleRowDiagnostic};
 use super::*;
+use super::query_navigation::take_query_navigation;
 
 use super::screenshot_countdown::NATIVE_POLL_INTERVAL;
 use crate::gui::jump_mode::ui::NavigationOwner;
@@ -380,6 +381,7 @@ pub(super) struct RootListGeometryCache {
     content_x_offset: f32,
     content_width: f32,
     result_generation: u64,
+    last_revealed_selection: Option<(usize, f32)>,
     last_grid_mode: Option<bool>,
     popup_owner: Option<(u64, usize)>,
     popup_response: Option<egui::Response>,
@@ -427,6 +429,7 @@ impl Default for RootListGeometryCache {
             content_x_offset: 0.0,
             content_width: 0.0,
             result_generation: 0,
+            last_revealed_selection: None,
             last_grid_mode: None,
             popup_owner: None,
             popup_response: None,
@@ -446,6 +449,7 @@ impl Default for RootListGeometryCache {
 impl RootListGeometryCache {
     fn invalidate_geometry(&mut self) {
         self.key = None;
+        self.last_revealed_selection = None;
         self.row_tops.clear();
         self.row_heights.clear();
         self.row_x_offsets.clear();
@@ -475,6 +479,14 @@ impl RootListGeometryCache {
 
     pub(super) fn result_generation(&self) -> u64 {
         self.result_generation
+    }
+
+    fn selection_to_reveal(&mut self, selected: Option<usize>, view_height: f32) -> Option<usize> {
+        // Reissuing a centered target for the last row restarts the animation
+        // after egui has already clamped it to the bottom of the scroll area.
+        let target = selected.map(|index| (index, view_height));
+        let previous = std::mem::replace(&mut self.last_revealed_selection, target);
+        selected.filter(|_| previous != target)
     }
 
     #[cfg(feature = "qa-framebuffer-capture")]
@@ -596,6 +608,7 @@ impl RootListGeometryCache {
         if self.key.as_ref() == Some(&key) {
             return false;
         }
+        self.last_revealed_selection = None;
 
         let mut track_c_timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::RootGeometryCold,
@@ -727,6 +740,7 @@ impl RootListGeometryCache {
         if self.key.as_ref() == Some(&key) {
             return false;
         }
+        self.last_revealed_selection = None;
 
         let mut track_c_timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::RootGeometryCold,
@@ -3755,6 +3769,26 @@ struct RootQueryEditorPresentation {
     search_icon_rect: egui::Rect,
 }
 
+const ROOT_QUERY_EVENT_FILTER: egui::EventFilter = egui::EventFilter {
+    horizontal_arrows: true,
+    vertical_arrows: true,
+    tab: false,
+    escape: false,
+};
+
+fn request_root_query_focus(response: &egui::Response) {
+    response.request_focus();
+    retain_root_query_arrow_focus(response);
+}
+
+fn retain_root_query_arrow_focus(response: &egui::Response) {
+    // TextEdit is already drawn. Install its filter now so the very next
+    // arrow doesn't become an egui directional focus transfer.
+    response.ctx.memory_mut(|memory| {
+        memory.set_focus_lock_filter(response.id, ROOT_QUERY_EVENT_FILTER);
+    });
+}
+
 fn show_root_query_editor(
     ui: &mut egui::Ui,
     query: &mut String,
@@ -3792,6 +3826,7 @@ fn show_root_query_editor(
                 .hint_text("Search…")
                 .margin(margin)
                 .interactive(interactive)
+                .event_filter(ROOT_QUERY_EVENT_FILTER)
                 .return_key(
                     (!retain_focus_on_enter).then_some(egui::KeyboardShortcut::new(
                         egui::Modifiers::NONE,
@@ -10797,6 +10832,39 @@ impl LauncherApp {
             )
     }
 
+    fn query_session_allows_workflow(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        geometry: Option<QueryShowGeometry>,
+        accepted_mouse_interaction: bool,
+        owner_transition_pending: bool,
+    ) -> bool {
+        let Some(session) = self.query_focus_session.as_ref() else {
+            return false;
+        };
+        if session.origin != super::QueryFocusOrigin::Mouse {
+            return true;
+        }
+        self.query_focus_mouse_session_has_keyboard_authority(
+            ctx,
+            root_visible,
+            geometry,
+            accepted_mouse_interaction,
+            false,
+        ) && (!self.jump_mode_enabled()
+            || (!owner_transition_pending
+                && self.jump_mode_ui.frame_navigation_owner()
+                    == crate::gui::jump_mode::ui::NavigationOwner::Root)
+            || !self.query_focus_mouse_session_owns_ordinary_root_keyboard(
+                ctx,
+                root_visible,
+                geometry,
+                accepted_mouse_interaction,
+                false,
+            ))
+    }
+
     fn jump_mode_unsupported_panel_open(&self) -> bool {
         Self::TRACKED_PANELS
             .iter()
@@ -11665,7 +11733,7 @@ impl LauncherApp {
         let selection_changed = self.selected != Some(index);
         self.selected = Some(index);
         if let Some(query_response) = query_response {
-            query_response.request_focus();
+            request_root_query_focus(query_response);
         }
         if selection_changed {
             ctx.request_repaint();
@@ -12498,10 +12566,11 @@ impl LauncherApp {
                 {
                     self.query_focus_session = None;
                 }
-            let query_navigation_allowed = (ordinary_root_query_allowed
-                && self.query_focus_ordinary_context().as_ref()
-                    .is_none_or(|context| context.ordinary_panel_layers.is_empty()))
-                || query_focus_session_active;
+                let ordinary_panel_open = self
+                    .query_focus_ordinary_context()
+                    .is_some_and(|context| !context.ordinary_panel_layers.is_empty());
+                let query_navigation_allowed = (ordinary_root_query_allowed && !ordinary_panel_open)
+                    || query_focus_session_active;
                 let pending_show_can_enable_query = !root_navigation_allowed
                     && self.pending_show_query_focus_can_enable_query(
                         &ctx,
@@ -12517,15 +12586,27 @@ impl LauncherApp {
                     || notes_query_bridge_candidate
                     || self.query_mouse_focus_available(&ctx, previous_query_geometry));
                 let query_owned_focus = query_navigation_allowed
-                    && ui.ctx().memory(|memory| memory.has_focus(input_id));
-                let numpad_navigation = if first_ui_pass && query_navigation_allowed {
-                    ui.ctx().input_mut(|input| {
-                        consume_physical_numpad_navigation(
-                            query_owned_focus,
-                            input,
-                            &NativeNumpadKeyStateProbe,
+                    && ctx.memory(|memory| memory.has_focus(input_id))
+                    && ctx.input(|input| input.focused);
+                let query_navigation = if first_ui_pass
+                    && query_owned_focus
+                    && query_editor_interactive
+                    && !action_sheet_blocks_launcher_input
+                    && self.jump_mode_ui.active_session().is_none()
+                    && if ordinary_panel_open {
+                        self.query_session_allows_workflow(
+                            &ctx,
+                            frame_logic.should_be_visible,
+                            previous_query_geometry,
+                            false,
+                            owner_transition_pending,
                         )
-                    })
+                    } else {
+                        ordinary_root_query_allowed
+                    }
+                {
+                    let grid = self.resolved_grid_layout && !self.results.is_empty();
+                    ctx.input_mut(|input| take_query_navigation(input, grid))
                 } else {
                     Vec::new()
                 };
@@ -12699,7 +12780,7 @@ impl LauncherApp {
                 let show_focus_requested = show_query_focus_revision.is_some()
                     && !query_response.has_focus();
                 if programmatic_query_focus_requested || show_focus_requested {
-                    query_response.request_focus();
+                    request_root_query_focus(&query_response);
                 }
                 if show_query_focus_revision.is_some()
                     && let (Some(root_identity), Some(ordinary_context)) = (
@@ -12759,45 +12840,15 @@ impl LauncherApp {
                     clip_rect: query_clip_rect,
                     layer_id: query_response.layer_id,
                 };
-                let query_focus_mouse_keyboard_authority = self
-                    .query_focus_mouse_session_has_keyboard_authority(
-                        &ctx,
-                        frame_logic.should_be_visible,
-                        Some(query_response_geometry),
-                        current_query_mouse_focus_accepted,
-                        false,
-                    );
-                let query_focus_mouse_root_authority = self
-                    .query_focus_mouse_session_owns_ordinary_root_keyboard(
-                        &ctx,
-                        frame_logic.should_be_visible,
-                        Some(query_response_geometry),
-                        current_query_mouse_focus_accepted,
-                        false,
-                    );
-                let query_focus_mouse_root_owner_current = !self.jump_mode_enabled()
-                    || (!owner_transition_pending
-                        && self.jump_mode_ui.frame_navigation_owner()
-                            == crate::gui::jump_mode::ui::NavigationOwner::Root);
-                let query_focus_session_keyboard_authority =
-                    self.query_focus_session.as_ref().is_some_and(|session| {
-                        match session.origin {
-                            super::QueryFocusOrigin::Mouse => {
-                                query_focus_mouse_keyboard_authority
-                                    && (!query_focus_mouse_root_authority
-                                        || query_focus_mouse_root_owner_current)
-                            }
-                            super::QueryFocusOrigin::Show | super::QueryFocusOrigin::Hint { .. } => {
-                                query_focus_session_valid
-                            }
-                        }
-                    });
-                let query_workflow_allowed = if self
-                    .query_focus_ordinary_context()
-                    .as_ref()
-                    .is_some_and(|context| !context.ordinary_panel_layers.is_empty())
-                {
-                    query_focus_session_valid && query_focus_session_keyboard_authority
+                let query_workflow_allowed = if ordinary_panel_open {
+                    query_focus_session_valid
+                        && self.query_session_allows_workflow(
+                            &ctx,
+                            frame_logic.should_be_visible,
+                            Some(query_response_geometry),
+                            current_query_mouse_focus_accepted,
+                            owner_transition_pending,
+                        )
                 } else {
                     ordinary_root_query_allowed
                 };
@@ -12833,10 +12884,10 @@ impl LauncherApp {
 
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
-                    && query_workflow_allowed
+                    && query_has_focus
                 {
-                    for direction in numpad_navigation {
-                        self.handle_key(direction.navigation_key());
+                    for key in query_navigation {
+                        self.handle_key(key);
                     }
                 }
 
@@ -13054,26 +13105,6 @@ impl LauncherApp {
                     ctx.input_mut(|input| input.consume_key(modifiers, egui::Key::W));
                 }
 
-                if first_ui_pass
-                    && !action_sheet_blocks_launcher_input
-                    && query_workflow_allowed
-                    && history_direction.is_none()
-                    && Self::launcher_query_keyboard_enabled(query_has_focus)
-                {
-                    for key in [
-                        egui::Key::ArrowDown,
-                        egui::Key::ArrowUp,
-                        egui::Key::PageDown,
-                        egui::Key::PageUp,
-                        egui::Key::ArrowLeft,
-                        egui::Key::ArrowRight,
-                    ] {
-                        if ctx.input(|i| i.key_pressed(key)) {
-                            self.handle_key(key);
-                        }
-                    }
-                }
-
                 let tab = query_autocomplete_tab_consumed
                     || ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 #[cfg(feature = "qa-framebuffer-capture")]
@@ -13165,6 +13196,7 @@ impl LauncherApp {
                     } = query_registration
                     {
                         directive.apply_to_response(&query_response);
+                        retain_root_query_arrow_focus(&query_response);
                     }
                 }
                 let notes_query_geometry = QueryShowGeometry {
@@ -13201,6 +13233,7 @@ impl LauncherApp {
                     )
                 {
                     directive.apply_to_response(&query_response);
+                    retain_root_query_arrow_focus(&query_response);
                     if query_response.has_focus()
                         && ctx.memory(|memory| memory.has_focus(query_input_id))
                         && let (Some(root_identity), Some(ordinary_context)) = (
@@ -13392,8 +13425,11 @@ impl LauncherApp {
                                 if !self.root_list_geometry.owned_context_menu_is_open() {
                                     self.root_list_geometry.clear_popup_owner();
                                 }
+                                let selected =
+                                    self.selected.filter(|index| *index < self.results.len());
                                 if let Some(selected) =
-                                    self.selected.filter(|index| *index < self.results.len())
+                                    self.root_list_geometry
+                                        .selection_to_reveal(selected, viewport.height())
                                 {
                                     let column = selected % cols;
                                     let row = selected / cols;
@@ -13580,9 +13616,12 @@ impl LauncherApp {
                                 if !self.root_list_geometry.owned_context_menu_is_open() {
                                     self.root_list_geometry.clear_popup_owner();
                                 }
-                                if let Some(selected) = self
+                                let selected = self
                                     .selected
-                                    .filter(|index| *index < self.root_list_geometry.row_tops.len())
+                                    .filter(|index| *index < self.root_list_geometry.row_tops.len());
+                                if let Some(selected) =
+                                    self.root_list_geometry
+                                        .selection_to_reveal(selected, viewport.height())
                                 {
                                     let selected_rect = egui::Rect::from_min_size(
                                         content_origin
@@ -18645,10 +18684,6 @@ mod tests {
     }
 
     use crate::{
-        gui::numpad_navigation::{
-            LauncherNumpadNavigation, NumpadKeyStateProbe, PhysicalDigitKeyState,
-            PhysicalNumpadKey, consume_physical_numpad_navigation,
-        },
         mkmacro::{LauncherCommandBroker, LauncherCommandResponse, RunControl},
         plugin::{Plugin, PluginManager},
         settings::Settings,
@@ -75968,6 +76003,17 @@ mod tests {
                     ctx.memory(|memory| memory.has_focus(query_id)),
                     "{panel:?}, Jump {jump}"
                 );
+                app.results = two_results();
+                app.invalidate_root_list_results();
+                app.selected = None;
+                notes_query_mouse_run_frame(
+                    &mut app,
+                    &ctx,
+                    screen,
+                    digit_press(egui::Key::Num2, egui::Key::Numpad2, "2"),
+                );
+                assert_eq!(app.selected, Some(0), "{panel:?}, Jump {jump}");
+                assert_eq!(app.query, "root query");
                 notes_query_mouse_type(&mut app, &ctx, screen, "λ🙂");
                 assert!(
                     app.query.contains("λ🙂"),
@@ -78677,10 +78723,17 @@ mod tests {
         app.results = two_results();
         app.invalidate_root_list_results();
         assert!(app.open_action_sheet_for_index(0));
-        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+        let selected = app.selected;
+        let input = egui::RawInput {
+            events: digit_press(egui::Key::Num2, egui::Key::Numpad2, "2"),
+            ..actual_query_input(true)
+        };
+        app.run_root_frame_for_test(&ctx, input, false)
             .0
             .drop_without_applying_deltas();
         assert!(app.action_sheet.is_open());
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.query, "pending caret");
         assert!(app.move_cursor_end);
         app.close_action_sheet();
         focus_launcher_query(&ctx, &mut app);
@@ -78828,212 +78881,6 @@ mod tests {
         assert!(!app.move_cursor_end);
         assert_eq!(app.visibility_revision.current(), revision);
         assert!(app.test_recorded_history_queries.is_empty());
-    }
-
-    struct FakeNumpadProbe {
-        down: Option<PhysicalNumpadKey>,
-        top_row_down: bool,
-        calls: Cell<usize>,
-    }
-
-    impl NumpadKeyStateProbe for FakeNumpadProbe {
-        fn state(&self, key: PhysicalNumpadKey) -> PhysicalDigitKeyState {
-            self.calls.set(self.calls.get() + 1);
-            PhysicalDigitKeyState {
-                numpad_down: self.down == Some(key),
-                top_row_down: self.top_row_down,
-            }
-        }
-    }
-
-    fn render_query_text_edit_frame(
-        ctx: &egui::Context,
-        app: &mut LauncherApp,
-        request_focus: bool,
-        probe: &impl NumpadKeyStateProbe,
-    ) -> (bool, Vec<LauncherNumpadNavigation>) {
-        let mut focused = false;
-        let mut routed = Vec::new();
-        let mut root_ui = test_root_ui(ctx, egui::Id::new("numpad-query-routing-root"));
-        egui::CentralPanel::default().show(&mut root_ui, |ui| {
-            let input_id = egui::Id::new("numpad_routing_query_input");
-            let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
-            routed = ui.ctx().input_mut(|input| {
-                consume_physical_numpad_navigation(query_owned_focus, input, probe)
-            });
-
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut app.query)
-                    .id(input_id)
-                    .desired_width(f32::INFINITY),
-            );
-            if request_focus {
-                response.request_focus();
-            }
-            focused = response.has_focus();
-            for direction in routed.iter().copied() {
-                app.handle_key(direction.navigation_key());
-            }
-        });
-        (focused, routed)
-    }
-
-    fn run_two_frame_query_routing(
-        key: egui::Key,
-        digit: &str,
-        down: Option<PhysicalNumpadKey>,
-        top_row_down: bool,
-        selected: usize,
-    ) -> (LauncherApp, Vec<LauncherNumpadNavigation>, usize) {
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        app.query = "note".into();
-        app.results = (0..8)
-            .map(|index| Action {
-                label: format!("Result {index}"),
-                desc: "Test".into(),
-                action: format!("test:{index}"),
-                args: None,
-            })
-            .collect();
-        app.resolved_grid_layout = true;
-        app.query_results_layout.cols = 3;
-        app.selected = Some(selected);
-        let probe = FakeNumpadProbe {
-            down,
-            top_row_down,
-            calls: Cell::new(0),
-        };
-
-        ctx.begin_pass(egui::RawInput::default());
-        let (focused, routed) = render_query_text_edit_frame(&ctx, &mut app, true, &probe);
-        assert!(focused);
-        assert!(routed.is_empty());
-        ctx.end_pass().drop_without_applying_deltas();
-
-        let input_id = egui::Id::new("numpad_routing_query_input");
-        ctx.data_mut(|data| {
-            let state = data
-                .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(input_id);
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(app.query.chars().count()),
-                )));
-        });
-
-        ctx.begin_pass(egui::RawInput {
-            events: vec![
-                key_press(key, egui::Modifiers::NONE),
-                egui::Event::Text(digit.into()),
-            ],
-            ..Default::default()
-        });
-        let (focused, routed) = render_query_text_edit_frame(&ctx, &mut app, false, &probe);
-        assert!(focused);
-        ctx.end_pass().drop_without_applying_deltas();
-        (app, routed, probe.calls.get())
-    }
-
-    #[test]
-    fn focused_query_text_edit_routes_all_physical_numpad_directions_without_typing() {
-        for (key, digit, physical, selected, expected_selected, expected_direction) in [
-            (
-                egui::Key::Num8,
-                "8",
-                PhysicalNumpadKey::Num8,
-                4,
-                1,
-                LauncherNumpadNavigation::Up,
-            ),
-            (
-                egui::Key::Num2,
-                "2",
-                PhysicalNumpadKey::Num2,
-                1,
-                4,
-                LauncherNumpadNavigation::Down,
-            ),
-            (
-                egui::Key::Num4,
-                "4",
-                PhysicalNumpadKey::Num4,
-                4,
-                3,
-                LauncherNumpadNavigation::Left,
-            ),
-            (
-                egui::Key::Num6,
-                "6",
-                PhysicalNumpadKey::Num6,
-                4,
-                5,
-                LauncherNumpadNavigation::Right,
-            ),
-        ] {
-            let (app, routed, calls) =
-                run_two_frame_query_routing(key, digit, Some(physical), false, selected);
-            assert_eq!(routed, vec![expected_direction]);
-            assert_eq!(calls, 1);
-            assert_eq!(app.query, "note");
-            assert_eq!(app.selected, Some(expected_selected));
-        }
-    }
-
-    #[test]
-    fn focused_query_text_edit_preserves_all_top_row_navigation_digits_as_text() {
-        for (key, digit) in [
-            (egui::Key::Num8, "8"),
-            (egui::Key::Num2, "2"),
-            (egui::Key::Num4, "4"),
-            (egui::Key::Num6, "6"),
-        ] {
-            let (app, routed, calls) = run_two_frame_query_routing(key, digit, None, false, 4);
-            assert_eq!(app.query, format!("note{digit}"));
-            assert_eq!(app.selected, Some(4));
-            assert!(routed.is_empty());
-            assert_eq!(calls, 1);
-        }
-    }
-
-    #[test]
-    fn focused_query_preserves_ambiguous_digit_when_top_row_and_keypad_are_both_down() {
-        let (app, routed, calls) = run_two_frame_query_routing(
-            egui::Key::Num8,
-            "8",
-            Some(PhysicalNumpadKey::Num8),
-            true,
-            4,
-        );
-        assert_eq!(app.query, "note8");
-        assert_eq!(app.selected, Some(4));
-        assert!(routed.is_empty());
-        assert_eq!(calls, 1);
-    }
-
-    #[test]
-    fn numpad_routing_leaves_query_history_shortcuts_available() {
-        let ctx = egui::Context::default();
-        ctx.begin_pass(egui::RawInput {
-            events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
-            ..Default::default()
-        });
-        let probe = FakeNumpadProbe {
-            down: Some(PhysicalNumpadKey::Num8),
-            top_row_down: false,
-            calls: Cell::new(0),
-        };
-
-        assert_eq!(
-            ctx.input_mut(|input| consume_physical_numpad_navigation(true, input, &probe)),
-            Vec::new()
-        );
-        assert_eq!(probe.calls.get(), 0);
-        assert_eq!(
-            ctx.input_mut(|input| LauncherApp::consume_query_history_shortcut(true, input)),
-            Some(QueryHistoryDirection::Older)
-        );
-        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -79306,6 +79153,298 @@ mod tests {
         let mut app = new_app(ctx);
         app.plugins.register(Box::new(FakePlugin));
         app
+    }
+
+    #[test]
+    fn root_query_navigation_delivers_rapid_arrows_and_pages_without_tab() {
+        run_root_query_navigation_test(check_rapid_arrows_and_pages_without_tab);
+    }
+
+    fn check_rapid_arrows_and_pages_without_tab() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.plugins.register(Box::new(FakePlugin));
+        app.enabled_plugins = None;
+        app.page_jump = 2;
+        app.query_autocomplete = false;
+        app.test_skip_history_persistence = true;
+        app.query.clear();
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        let query_id = egui::Id::new("query_input");
+        let mut frame_index = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, frame_index, 960.0, 640.0, events)
+                .drop_without_applying_deltas();
+            frame_index += 1;
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        };
+        use egui::Key;
+        let key = |key| key_press(key, egui::Modifiers::NONE);
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::Text("note list".into())]);
+        assert_eq!(app.query, "note list");
+        assert_eq!(app.results.len(), 3);
+        assert_eq!(app.selected, None);
+
+        frame(&mut app, digit_press(Key::Num2, Key::Numpad2, "2"));
+        assert_eq!(app.query, "note list");
+        assert_eq!(app.selected, Some(0));
+        frame(&mut app, vec![key(Key::ArrowDown), key(Key::ArrowDown)]);
+        assert_eq!(app.selected, Some(2));
+        frame(&mut app, vec![key(Key::ArrowUp), key(Key::ArrowUp)]);
+        assert_eq!(app.selected, Some(0));
+
+        app.selected = None;
+        frame(&mut app, vec![key(Key::PageDown)]);
+        assert_eq!(app.selected, Some(0));
+        frame(&mut app, vec![key(Key::PageDown), key(Key::PageDown)]);
+        assert_eq!(app.selected, Some(2));
+        frame(&mut app, vec![key(Key::PageUp), key(Key::PageUp)]);
+        assert_eq!(app.selected, Some(0));
+        run_root_list_frame(
+            &ctx,
+            &mut app,
+            frame_index,
+            960.0,
+            640.0,
+            vec![key(Key::PageDown), key(Key::Enter)],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.test_last_activation
+                .as_ref()
+                .map(|(action, source)| (action.action.as_str(), *source)),
+            Some(("note:open:gamma", ActivationSource::Enter))
+        );
+    }
+
+    fn physical_key_press(key: egui::Key, physical: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(physical),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn digit_press(key: egui::Key, physical: egui::Key, digit: &str) -> Vec<egui::Event> {
+        vec![
+            physical_key_press(key, physical),
+            egui::Event::Text(digit.into()),
+            key_release(key, egui::Modifiers::NONE),
+        ]
+    }
+
+    #[test]
+    fn root_query_navigation_preserves_editing_and_distinguishes_grid_directions() {
+        run_root_query_navigation_test(check_editing_and_grid_directions);
+    }
+
+    fn check_editing_and_grid_directions() {
+        use egui::Key;
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) =
+            root_list_test_app(&ctx, (0..12).map(root_list_action).collect());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        app.query_autocomplete = false;
+        let query_id = egui::Id::new("query_input");
+        let mut frame_index = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, frame_index, 960.0, 640.0, events)
+                .drop_without_applying_deltas();
+            frame_index += 1;
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        };
+        frame(&mut app, vec![]);
+        // Num Lock off: the logical arrow should work, even though the
+        // physical position is on the keypad.
+        frame(
+            &mut app,
+            vec![physical_key_press(Key::ArrowDown, Key::Numpad2)],
+        );
+        assert_eq!(app.selected, Some(0));
+        let left = key_press(Key::ArrowLeft, egui::Modifiers::NONE);
+        frame(&mut app, vec![left]);
+        assert_eq!(app.selected, Some(0));
+        let cursor = || {
+            egui::TextEdit::load_state(&ctx, query_id)
+                .unwrap()
+                .cursor
+                .char_range()
+                .unwrap()
+        };
+        assert_eq!(cursor().primary.index.0, app.query.chars().count() - 1);
+
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        for (events, expected) in [
+            (digit_press(Key::Num2, Key::Numpad2, "2"), 3),
+            (digit_press(Key::Num6, Key::Numpad6, "6"), 4),
+            (
+                vec![physical_key_press(Key::ArrowRight, Key::ArrowRight)],
+                5,
+            ),
+            (digit_press(Key::Num4, Key::Numpad4, "4"), 4),
+            (vec![physical_key_press(Key::ArrowLeft, Key::Numpad4)], 3),
+            (digit_press(Key::Num8, Key::Numpad8, "8"), 0),
+        ] {
+            let before = cursor();
+            frame(&mut app, events);
+            assert_eq!(app.selected, Some(expected));
+            assert_eq!(cursor(), before);
+        }
+        frame(
+            &mut app,
+            vec![key_press(Key::ArrowLeft, egui::Modifiers::SHIFT)],
+        );
+        assert_ne!(cursor().primary, cursor().secondary);
+        let mut digits = Vec::new();
+        for (key, digit) in [
+            (Key::Num2, "2"),
+            (Key::Num4, "4"),
+            (Key::Num6, "6"),
+            (Key::Num8, "8"),
+        ] {
+            digits.extend(digit_press(key, key, digit));
+        }
+        frame(&mut app, digits);
+        assert_eq!(app.query, "root list fixtu2468e");
+
+        let draft = app.query.clone();
+        let first = app
+            .query_history
+            .older(&draft, || vec!["newer query".into(), "older query".into()])
+            .unwrap();
+        app.apply_history_query(first);
+        let ctrl = |key| key_press(key, egui::Modifiers::CTRL);
+        frame(&mut app, vec![ctrl(Key::ArrowUp)]);
+        assert_eq!(app.query, "older query");
+        frame(&mut app, vec![ctrl(Key::ArrowDown)]);
+        assert_eq!(app.query, "newer query");
+        frame(&mut app, vec![ctrl(Key::ArrowDown)]);
+        assert_eq!(app.query, draft);
+    }
+
+    #[test]
+    fn root_query_navigation_reveals_the_bottom_once_and_keeps_it_stable() {
+        run_root_query_navigation_test(check_page_navigation_bottom_reveal);
+    }
+
+    fn check_page_navigation_bottom_reveal() {
+        use egui::{Key, Modifiers};
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) =
+            root_list_test_app(&ctx, (0..80).map(root_list_action).collect());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        app.page_jump = 200;
+        let mut next_frame = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, next_frame, 960.0, 420.0, events)
+                .drop_without_applying_deltas();
+            next_frame += 1;
+        };
+        frame(&mut app, vec![]);
+        frame(
+            &mut app,
+            vec![
+                key_press(Key::PageDown, Modifiers::NONE),
+                key_press(Key::PageDown, Modifiers::NONE),
+            ],
+        );
+        assert_eq!(app.selected, Some(79));
+        for _ in 0..30 {
+            frame(&mut app, vec![]);
+        }
+        let bottom_row_top = |app: &LauncherApp| {
+            let viewport = app.test_root_scroll_viewport_rect.unwrap();
+            let (_, row) = app
+                .test_root_rendered_row_rects
+                .iter()
+                .find(|(index, _)| *index == 79)
+                .expect("the selected bottom row is rendered");
+            assert!(viewport.contains_rect(*row));
+            row.top()
+        };
+        let settled = bottom_row_top(&app);
+        for _ in 0..4 {
+            frame(&mut app, vec![key_press(Key::PageDown, Modifiers::NONE)]);
+            assert_eq!(app.selected, Some(79));
+            assert_eq!(bottom_row_top(&app), settled);
+        }
+        frame(&mut app, vec![key_press(Key::PageUp, Modifiers::NONE)]);
+        assert_eq!(app.selected, Some(0));
+    }
+
+    fn run_root_query_navigation_test(check: fn()) {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(check)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn root_query_navigation_leaves_docked_settings_in_control_and_resumes_after_close() {
+        run_root_query_navigation_test(check_docked_settings_ownership);
+    }
+
+    fn check_docked_settings_ownership() {
+        use egui::{Key, Modifiers};
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "ordinary tool query");
+        let screen = egui::vec2(1600.0, 1200.0);
+        app.show_settings = true;
+        app.settings_editor.settings_search_query = "settings draft".into();
+        launcher_show_owner_seed_window_position_at(
+            &ctx,
+            crate::gui::jump_mode::ui::settings_layer_id(),
+            "Settings",
+            screen,
+            egui::pos2(600.0, 700.0),
+        );
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        let (settings_id, settings_rect) = app.settings_editor.test_search_query_response.unwrap();
+        notes_query_mouse_click(&mut app, &ctx, screen, settings_rect);
+        assert!(ctx.memory(|memory| memory.has_focus(settings_id)));
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            digit_press(Key::Num2, Key::Numpad2, "2"),
+        );
+        assert!(app.settings_editor.settings_search_query.contains('2'));
+        assert_eq!(app.query, "ordinary tool query");
+        assert_eq!(app.selected, None);
+
+        app.force_close_panel(Panel::Settings);
+        for _ in 0..3 {
+            notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+        }
+        let query_id = egui::Id::new("query_input");
+        let query_rect = ctx.read_response(query_id).unwrap().rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, query_rect);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        app.results = two_results();
+        app.invalidate_root_list_results();
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![key_press(Key::PageDown, Modifiers::NONE)],
+        );
+        assert_eq!(app.selected, Some(0));
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
     }
 
     fn query_request(id: u64, query: &str) -> crate::mkmacro::LauncherCommandRequest {
