@@ -1,462 +1,598 @@
-\# OpenCode Goal — Launcher Query ↔ Results NumPad Navigation
+# OpenCode Goal: Nextest Failure Recovery and Clipboard Modify Regression
 
+**Repository:** `multiplex55/Multi_Launcher`  
+**Agent:** OpenCode Build  
+**Model:** GPT  
+**Priority:** High  
+**Execution:** Autonomous, iterative, narrowly scoped  
+**Branch:** Create a new branch from the current HEAD  
+**Completion requirement:** All runnable tests pass, and Clipboard Modify works correctly.
 
+---
 
-\*\*Suggested filename:\*\* `OPENCODE\_GOAL\_LAUNCHER\_QUERY\_ROUNDTRIP.md`
+## 1. Objective
 
+Resolve the failures identified in the latest full Cargo Nextest run and repair a separate regression affecting the Clipboard Modify plugin.
 
+Keep iterating through diagnosis, focused fixes, testing, and verification until the failures have been resolved.
 
-\*\*Repository:\*\* `multiplex55/Multi\_Launcher`  
+**This is a bug-fixing and regression-recovery task, not a feature-development task.**
 
-\*\*Reference commit:\*\* `67587a6527d27bedf8fcded0f27f741a6a25f91f`  
+Make the smallest changes required to restore correct behavior. Avoid broad refactoring, architectural redesign, unrelated cleanup, dependency upgrades, or changes that could destabilize existing functionality.
 
-\*\*Reference branch:\*\* `fix/launcher-query-result-navigation`  
+### Starting failure summary
 
-\*\*Priority:\*\* High  
+The latest full test execution reported:
 
-\*\*Scope:\*\* Main launcher query input and its search-result list/grid only
+```text
+9253 tests run
+8795 passed
+458 failed
+67 skipped
 
+456 ABORT: Windows stack overflow (0xC00000FD)
+2 FAIL: Ordinary test failures
+```
 
+Most failed tests terminate with:
 
-\## 1. Objective
+```text
+Recursion too deep; the stack overflowed.
+(os error 1001)
+```
 
+The failures are heavily concentrated in GUI-related tests but also occur across other modules, including command dispatch, note operations, OCR, settings persistence, and integration tests.
 
+**Do not assume that 456 stack overflows represent 456 independent bugs.**
 
-Fix the remaining inconsistent keyboard navigation between the main launcher query field and the search results displayed directly underneath it.
+Investigate whether they share a common cause, particularly test-thread stack size, large GUI fixtures, stack-allocated application state, recursive initialization, or a recent regression affecting shared test setup.
 
+The two ordinary test failures must also be resolved.
 
+Separately, users are experiencing a live Clipboard Modify regression:
 
-The previous fix improved physical NumPad recognition and result selection, but users still report needing to press Tab before they can navigate results.
+```text
+Permanent("The clipboard could not be accessed.")
+```
 
+This must be investigated and corrected independently of the test failures.
 
+---
 
-The core requirement is:
+## 2. Start Conditions — Git Setup
 
+Before making any code changes:
 
+1. Read `AGENTS.md` and applicable project instructions.
+2. Confirm the existing repository directory.
+3. Identify the currently checked-out branch.
+4. Record the exact current HEAD SHA.
+5. Inspect `git status` for uncommitted or untracked changes.
+6. Fetch the latest remote refs without changing the current branch's HEAD.
+7. Create a **new branch directly from the original current HEAD**.
 
-\*\*The user must be able to navigate freely between the main query input and its results using only the NumPad, without Tab, regardless of the search query or active list/grid layout.\*\*
+Suggested name:
 
+`fix/nextest-stack-overflows-and-clipboard`
 
+If the branch name already exists, choose a unique suffix rather than resetting or overwriting another branch.
 
-This is a narrowly scoped regression fix. Do not expand it into a general keyboard-navigation overhaul.
+### Git restrictions
 
+- Use the existing checkout.
+- Do not create worktrees or additional clones.
+- Do not branch from `master` unless it is the currently checked-out branch.
+- Do not reset, force-push, squash, or rebase unrelated work.
+- Do not discard uncommitted changes.
+- If existing local modifications cannot be safely isolated, stop and report the conflict rather than overwriting them.
+- Commit small, logically grouped changes.
+- Attempt a normal push after each successful checkpoint.
+- Do not merge into `master`.
 
+Record the starting branch and SHA in the final handoff.
 
-\## 2. Reproduction
+---
 
+## 3. Phase A — Diagnose the 456 Stack Overflow Aborts
 
+**Priority: Highest**
 
-\### Primary: `mm`
+### A1. Establish a reproducible baseline
 
+Inspect the existing test configuration and representative failing tests.
 
+Start with a small selection that covers different modules:
 
-1\. Open Multi Launcher.
+```text
+gui::render::tests::keyboard_navigation_is_consistent_between_grid_and_list_modes
 
-2\. Type `mm` into the main query.
+gui::render::tests::root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection
 
-3\. Leave keyboard focus in the query input.
+gui::actions::tests::specialized_actions_ignore_query_override_before_dispatch
 
-4\. Press NumPad 2 (Down).
+gui::notes_dialog::tests::quick_notes_wrap_links_preserves_open_panel_and_view_mode
 
-5\. Expected: The first `mm` result immediately becomes selected.
+settings_save::tests::hidden_settings_editor_completes_and_a_second_save_uses_the_new_baseline
 
-6\. Continue pressing NumPad 2/8 to move through the results.
+hide_after_run_not_for_calc_copy
+```
 
-7\. From the first selected result, press NumPad 8 to return to the query-input state.
+Run tests individually to identify whether the same failure occurs without other tests running concurrently.
 
-8\. Press NumPad 2 again to reenter the results.
+Record:
 
+- Exact failure signature
+- Whether the failure is deterministic
+- Stack configuration
+- Test profile
+- Rust/Cargo/Nextest versions
+- Relevant environment variables
+- Whether the failure occurs during application construction, rendering, execution, or teardown
 
+Do not immediately modify hundreds of tests.
 
-No Tab should be required at any point.
+### A2. Investigate test-stack requirements
 
+Specifically evaluate whether the tests exceed the default Windows test-thread stack size.
 
+As a diagnostic, compare normal execution with a larger Rust thread stack.
 
-\### Additional scenarios
+For PowerShell:
 
+```powershell
+$env:RUST_MIN_STACK = "16777216"
+```
 
+This provides a 16 MiB minimum stack for threads where Rust's stack-size setting applies.
 
-Repeat with:
+Test representative failures under both configurations.
 
+If needed, test a larger bounded stack size to determine whether the issue is insufficient stack capacity or genuine unbounded recursion.
 
+**A larger stack making a test pass is diagnostic evidence, not automatically a complete fix.**
 
-\- `note list`
+Determine whether the underlying cause is:
 
-\- `fileops`
+- Legitimately large application or GUI test fixtures
+- Excessive stack allocation
+- Accidental recursion
+- Shared test initialization
+- Unexpected test-runner or build-profile behavior
+- Another independently verified cause
 
-\- `downloads`
+Do not blindly increase stack limits or add arbitrary recursion guards.
 
-\- A query with one result
+### A3. Implement the minimum correction
 
-\- A query with many results
+Prefer a localized solution that addresses the shared cause.
 
-\- A query with zero results
+Examples of acceptable solutions, if supported by evidence:
 
-\- A generic non-plugin query
+- Correcting a shared test fixture that creates unnecessarily large stack allocations.
+- Moving demonstrably oversized fixture storage to the heap.
+- Correcting unintended recursive initialization.
+- Adjusting an explicitly documented test-runner stack requirement when that is genuinely appropriate.
+- Fixing a small shared helper causing the repeated failures.
 
-\- Grid layout enabled and disabled
+Do not rewrite `LauncherApp` or restructure the GUI architecture merely to address test-stack failures.
 
+Do not modify production application behavior to accommodate an incorrectly configured test environment.
 
+### A4. Validate the shared fix
 
-\*\*The query must not determine whether keyboard navigation works.\*\*
+After applying the correction:
 
+1. Rerun the initial representative failing tests.
+2. Run a targeted selection across the major affected GUI modules.
+3. Verify that unrelated tests still pass.
+4. Compare normal stack settings against any required override.
+5. Determine whether the fix resolves the broader stack-overflow cluster.
 
+If a documented test environment setting is genuinely required, make the supported test command explicit. Prefer a solution that allows the ordinary repository test workflow to succeed without undocumented shell configuration.
 
-Use actual `mm` plugin results in at least one focused regression test. Do not rely exclusively on a synthetic `note list` provider.
+Do not proceed to hundreds of individual test edits until the shared-cause investigation is complete.
 
+---
 
+## 4. Phase B — Resolve the Two Ordinary Test Failures
 
-\## 3. Required behavior
+These tests failed normally rather than aborting with stack overflows.
 
+### B1. Calculation Pad host migration
 
+```text
+gui::calculation_pad_dialog::tests::
+studio_usability_calculation_host_migration_preserves_cached_session_and_pending_decision
+```
 
-\### A. Query → results
+Investigate:
 
+- Cached Calculation Pad session preservation
+- Docked versus detached host transitions
+- Pending confirmation or decision state
+- Any recent changes affecting host migration
+- Whether the existing test expectation still describes the intended behavior
 
+Correct the smallest verified defect.
 
-\- NumPad Down selects the first result if nothing is selected.
+Do not weaken session-preservation guarantees simply to make the assertion pass.
 
-\- Subsequent Down presses move through the results.
+### B2. Openable panel tracking
 
-\- NumPad Up moves toward the first result.
+```text
+gui::tests::tracked_openable_panels_count_as_any_panel_open
+```
 
-\- Every accepted key press should produce exactly one intended navigation step.
+Investigate:
 
-\- Rapid presses and repeats should not silently disappear.
+- Panel-open tracking
+- Newly introduced utility panels
+- Detached versus docked state
+- Whether the panel inventory has changed
+- Whether test fixtures or tracking logic need updating
 
-\- Navigation must work immediately after typing a query.
+If the test is outdated because a valid new panel was added, update the assertion or fixture to reflect the intended contract.
 
-\- The user must not need to Tab into the result list.
+If production tracking is incorrect, fix the implementation.
 
-\- The selected result must be visually highlighted and scrolled into view.
+Do not merely remove an assertion or ignore a panel to produce a passing result.
 
+### B3. Verify both tests
 
+Run each test individually.
 
-\### B. Results → query
+Confirm the corrected behavior using targeted related tests.
 
+Only change test expectations when supported by a clearly established intended behavior.
 
+---
 
-\- When the first result is selected, pressing NumPad Up again returns to the query-input state.
+## 5. Phase C — Fix Clipboard Modify Regression
 
-\- Returning to the query clears the result selection and makes the query immediately editable.
+**Priority: High — affects live application functionality**
 
-\- Pressing NumPad Down again selects the first result.
+### C1. Reproduce the issue
 
-\- This round trip must be repeatable indefinitely.
+Users report that opening or using Clipboard Modify produces:
 
-\- If a result button has actual egui keyboard focus because the user previously pressed Tab, NumPad navigation must still provide a path back to the main query.
+```text
+Permanent("The clipboard could not be accessed.")
+```
 
-\- The query's existing text, caret and selection must remain intact during navigation.
+Expected behavior:
 
+1. Copy ordinary text in Windows.
+2. Open Multi Launcher.
+3. Launch Clipboard Modify.
+4. The copied text should load successfully.
+5. Apply a simple transformation.
+6. Preview and commit the transformed text.
+7. Verify the clipboard contains the intended result.
+8. Verify Undo restores the previous clipboard content.
 
+The operation should not fail permanently when the Windows clipboard is accessible.
 
-Prefer retaining the query TextEdit as the primary text-entry owner while using the existing `selected` result state for navigation. Do not force focus through every virtualized result button unless current code evidence shows that this is necessary.
+### C2. Inspect relevant implementation
 
+Start with:
 
+```text
+src/platform/protected_clipboard.rs
+src/clipboard_modify/clipboard.rs
+src/gui/clipboard_modify_dialog.rs
+src/clipboard_modify/coordinator.rs
+```
 
-\### C. Left/Right behavior
+Follow the actual call chain through Clipboard Modify and its clipboard backend.
 
+The current source includes these important boundaries:
 
+- `read_clipboard()` in the protected clipboard layer
+- Windows Runtime clipboard access through `Clipboard::GetContent()`
+- WinRT apartment initialization
+- Error classification into Busy, Unavailable and other states
+- Clipboard Modify's conversion of protected clipboard errors into `ClipboardError::Permanent`
+- Bounded retry behavior in `ClipboardService`
 
-For grid layout:
+The displayed error is consistent with `ClipboardError::Unavailable` being converted into a permanent Clipboard Modify error.
 
+**Investigate the exact failing Windows API operation rather than assuming the clipboard is genuinely unavailable.**
 
+### C3. Identify the root cause
 
-\- NumPad Left/Right move between result columns.
+Determine whether the failure is caused by:
 
-\- Existing row/column boundaries remain respected.
+- Incorrect WinRT initialization or threading assumptions
+- Windows clipboard contention
+- Incorrect error classification
+- A transient condition treated as permanent
+- Protected clipboard access interacting incorrectly with ordinary text
+- A recent change to clipboard privacy handling
+- Clipboard access occurring on an inappropriate thread
+- Another verified cause
 
-\- Entering and leaving the result selection must not require Tab.
+Capture useful error classifications or HRESULT codes where appropriate, without logging clipboard contents.
 
+### C4. Correct the regression
 
+Implement the smallest safe fix that restores ordinary text clipboard access.
 
-For list layout:
+Required behavior:
 
+- Ordinary text loads reliably.
+- Transient clipboard contention is handled with bounded retries where appropriate.
+- Permanent failures remain correctly classified.
+- Non-text clipboard data is not mistaken for ordinary text.
+- Clipboard Modify never silently overwrites clipboard contents when a read fails.
+- Undo and conflict-confirmation behavior remain correct.
+- Protected/private clipboard items remain private.
+- Password Generator privacy protections are preserved.
+- Clipboard History does not accidentally persist protected clipboard contents.
+- No infinite retries, busy loops, or UI-thread blocking.
 
+If considering a fallback clipboard-reading mechanism, ensure it does not bypass private-item detection or leak protected data.
 
-\- NumPad Right may enter the results from the query.
+Avoid broad clipboard subsystem changes unless the existing shared implementation is conclusively responsible.
 
-\- NumPad Left returns from a selected result to the query.
+### C5. Add focused regression coverage
 
-\- These must not interfere with ordinary query typing.
+Add or adjust narrowly scoped tests for:
 
-\- Standard Left/Right arrow keys retain their existing query-caret editing behavior when applicable.
+1. Reading ordinary Windows clipboard text.
+2. Correct classification of clipboard access errors.
+3. Bounded retries for transient failures.
+4. Handling genuinely inaccessible clipboard state.
+5. Preserving source data after failed reads.
+6. Correct preview, commit and Undo behavior.
+7. Protected clipboard and password privacy guarantees.
 
+Use deterministic mock backends for failure classification and retry tests.
 
+When an interactive Windows desktop is available, perform a real clipboard smoke test using disposable, non-sensitive text.
 
-Distinguish physical NumPad arrows from the main keyboard's arrow and number keys where the native event provides that information.
+Do not report native functionality as verified if only mocks were exercised.
 
+---
 
+## 6. Phase D — Iterative Verification
 
-\### D. Page Up / Page Down
+After Phases A–C:
 
+### D1. Run targeted tests first
 
+Run the focused tests associated with the changes.
 
-Preserve the previous fix's Page Up/Down support.
+Avoid repeatedly running the entire 9,000-plus-test suite after every small edit.
 
+Fix failures in the smallest possible related group.
 
+### D2. Run the complete Nextest suite
 
-\- Work from the focused query without Tab.
+Once the focused tests pass, execute:
 
-\- Navigate by the configured `page\_jump` amount.
+```powershell
+cargo nextest run --no-fail-fast
+```
 
-\- Clamp to valid results.
+If compilation resource pressure prevents running it, use justified bounded build/test concurrency, and record the configuration.
 
-\- Scroll the selected result into view.
+Do not confuse compilation problems with test failures.
 
-\- Do not introduce repeated scrolling, bottom-edge flickering or unnecessary repainting.
+### D3. Analyze remaining failures
 
+If any tests still fail:
 
+1. Capture the exact failing test names and error messages.
+2. Group failures by root cause.
+3. Determine whether they relate to the current fixes.
+4. Reproduce the relevant test individually.
+5. Implement the smallest correct change.
+6. Rerun the focused tests.
+7. Repeat full-suite verification when the remaining group is resolved.
 
-\### E. Keyboard ownership and event integrity
+Continue iterating until the complete suite passes or a clearly documented blocker prevents safe completion.
 
+**Do not stop simply because the original 456 stack overflows have disappeared if other tests remain failing.**
 
+However, if solving a remaining failure requires a substantial architectural redesign, unrelated feature implementation, or destructive change, stop that part of the work and report the blocker instead of expanding the task without authorization.
 
-Investigate the existing routing in:
+### D4. Test integrity requirements
 
+Do not achieve a passing result by:
 
+- Deleting tests.
+- Adding `#[ignore]` to failing tests.
+- Broadening test filters to exclude failures.
+- Suppressing panics or errors without correcting their cause.
+- Weakening assertions without evidence.
+- Adding arbitrary sleeps or excessively long timeouts.
+- Increasing retries merely to conceal deterministic failures.
+- Altering production behavior solely to satisfy incorrect tests.
+- Silently changing the test environment between comparison runs.
 
-\- `src/gui/query\_navigation.rs`
+The 67 originally skipped tests are not failures. Preserve existing legitimate skips and do not add new skips to hide problems.
 
-\- `src/gui/render.rs`
+---
 
-\- `src/gui/mod.rs`
+## 7. Scope Boundaries
 
-\- The native physical-key mapping introduced by the previous fix
+### Allowed
 
+- Shared test-harness corrections.
+- Minimal GUI fixture and initialization corrections.
+- Fixes directly related to failing assertions.
+- Clipboard Modify regression corrections.
+- Focused test updates.
+- Small related documentation or configuration changes required to make verification repeatable.
 
+### Not allowed
 
-Specifically investigate:
+- New application features.
+- Major GUI refactoring.
+- egui/eframe migrations or version upgrades.
+- Broad dependency updates.
+- Rewriting the clipboard architecture.
+- Large performance optimization efforts.
+- Unrelated formatting or Clippy cleanup.
+- Unrelated changes to plugins or settings.
+- Changes to normal application behavior without a demonstrated regression.
 
+Keep all modifications directly traceable to the supplied failures or clipboard regression.
 
+---
 
-1\. Why `query\_owned\_focus` sometimes prevents navigation.
+## 8. Checkpoints and Git Workflow
 
-2\. Whether input events are removed before later focus/ownership checks reject dispatch.
+Use small, reviewable checkpoints.
 
-3\. Whether list-mode and grid-mode handling produce different entry behavior.
+### M0 — Baseline and classification
 
-4\. Whether `selected` and egui widget focus can become inconsistent.
+- Record starting Git state.
+- Create the new branch.
+- Reproduce representative failures.
+- Identify shared versus independent causes.
+- Record findings.
 
-5\. Whether result refreshes reset selection unexpectedly.
+### M1 — Stack-overflow recovery
 
-6\. Whether keyboard ownership changes after Tab or UI transitions.
+- Resolve the shared stack-overflow cause.
+- Pass representative affected tests.
+- Confirm broader related coverage.
+- Commit and push.
 
+### M2 — Ordinary assertion fixes
 
+- Resolve both specifically named test failures.
+- Run relevant focused tests.
+- Commit and push.
 
-An event must not be consumed and silently discarded because the dispatch conditions differ from the conditions used to capture it.
+### M3 — Clipboard Modify recovery
 
+- Repair the live clipboard regression.
+- Pass focused unit tests.
+- Perform native Windows verification if available.
+- Commit and push.
 
+### M4 — Full-suite verification
 
-Use one consistent, authoritative navigation-ownership decision for each accepted input event, or another equally narrow correction grounded in the actual cause.
+- Run complete Nextest.
+- Address remaining failures.
+- Repeat targeted/full verification as appropriate.
+- Commit and push any final minimal corrections.
 
+Checkpoint order may be adjusted if dependencies require it, but preserve the same narrow scope.
 
+Do not commit unrelated generated build artifacts or logs containing sensitive data.
 
-Do not broadly bypass legitimate modal, popup, utility or Jump Mode keyboard ownership.
+If pushing fails, retain the local commits and report the failure. Do not force-push.
 
+---
 
+## 9. Progress Reporting
 
-\## 4. Preserve existing behavior
+Maintain a concise progress record in:
 
+`docs/plans/execution/standalone/nextest-clipboard-recovery/STATUS.md`
 
+Record:
 
-\- Normal search text editing, caret movement and selection
+- Starting branch and SHA
+- Current checkpoint
+- Confirmed root causes
+- Files changed
+- Test commands executed
+- Passing/failing counts
+- Remaining work
+- Blockers
+- Commit SHAs
+- Push status
 
-\- Top-row digit input, including 2/4/6/8
+Keep the document factual and brief.
 
-\- Ctrl+Up/Down query history
+Do not create a large planning framework or numerous additional documentation files.
 
-\- Autocomplete and Tab behavior
+---
 
-\- Existing Enter result activation
+## 10. Stop Conditions
 
-\- Jump Mode, including Shift+Space
+### Successful completion
 
-\- List/grid layout configuration
+Declare the goal **COMPLETE** only when all of the following are true:
 
-\- Root query usability beside popped-out dialogs
+1. The original stack-overflow failures have been resolved.
+2. Both ordinary test failures pass.
+3. The full Nextest suite completes with zero `FAIL` and zero `ABORT` results.
+4. No tests were newly ignored or excluded to obtain that result.
+5. Clipboard Modify successfully reads ordinary clipboard text.
+6. Clipboard Modify transformations, commit and Undo work.
+7. Protected clipboard and history privacy guarantees remain intact.
+8. Focused regression coverage passes.
+9. All task changes have been committed.
+10. The final branch has been pushed successfully.
 
-\- Existing result filtering, ranking, scrolling and virtualization
+If actual native Clipboard Modify verification is unavailable, explicitly mark it unverified rather than claiming full acceptance.
 
-\- Existing focus behavior of unrelated utility dialogs
+### Blocked completion
 
+Declare the goal **BLOCKED**, not complete, if:
 
+- A required failure cannot be reproduced because of an environmental limitation.
+- Windows-native validation is essential but unavailable.
+- A remaining failure requires major unrelated architectural work.
+- The appropriate fix cannot be established without risking existing functionality.
+- Required dependencies, permissions, or tooling are unavailable.
 
-No new global hotkeys, keyboard hooks, framework upgrades or unrelated refactoring.
+Report the blocker, the evidence collected, and the smallest recommended next action.
 
+Do not fabricate passing results or silently omit unresolved failures.
 
+### Prohibited stopping behavior
 
-Avoid additional changes to vendored egui/eframe unless the actual failure conclusively requires one.
+Do not stop merely because:
 
+- The first representative test passes.
+- The stack-overflow count decreases.
+- The two ordinary failures are fixed.
+- Clipboard Modify passes mock tests but still fails in the application.
+- A checkpoint is completed while other in-scope failures remain.
 
+Continue through the established checkpoints until the completion or blocked conditions are reached.
 
-\## 5. Focused tests only
+---
 
+## 11. Final Handoff
 
+When finished, report:
 
-Add a small group of regression tests using the real root query rendering/event path.
+**Git**
+- Original branch and HEAD
+- New working branch
+- Final commit SHA
+- Push status
 
+**Root causes**
+- Shared cause of the stack overflows
+- Cause of each ordinary assertion failure
+- Cause of Clipboard Modify's permanent access error
 
+**Changes**
+- Files modified
+- Brief explanation of each fix
+- Why the changes are narrowly scoped
 
-Required checks:
+**Verification**
+- Original Nextest results: 8,795 passed / 458 failed / 67 skipped
+- Final complete Nextest results
+- Test environment and stack settings used
+- Clipboard Modify verification results
+- Remaining failures or limitations
 
+**Status**
+- COMPLETE or BLOCKED
+- Any specific outstanding issues
 
+Do not merge into `master`.
 
-1\. `mm` → NumPad Down immediately selects result zero without Tab.
+Do not begin any unrelated work after completion.
 
-2\. Repeated Down/Up navigation advances and returns to the query.
-
-3\. After returning to the query, Down reenters the list.
-
-4\. Num Lock on/off and physical NumPad distinction.
-
-5\. List-mode NumPad Left/Right behavior.
-
-6\. Grid-mode directional navigation.
-
-7\. Page Up/Down selection and scrolling.
-
-8\. Result selection and focus remain coherent across search changes.
-
-9\. Ctrl+Up/Down, autocomplete, ordinary editing and top-row digits remain functional.
-
-10\. Modal and popup ownership prevents inappropriate root navigation.
-
-
-
-Include at least one test proving \*\*both directions\*\* of navigation through real widget focus and selected-result state.
-
-
-
-A test that only calls `handle\_key()` is insufficient.
-
-
-
-Where practical, use one real Windows desktop smoke test for `mm` and `note list`. If native interaction is unavailable, report it honestly rather than marking it verified.
-
-
-
-\*\*Do not run:\*\*
-
-
-
-\- Full Nextest suite
-
-\- Full Clippy campaign
-
-\- Release builds
-
-\- Broad GUI automation
-
-\- Unrelated integration tests
-
-\- Large refactoring or performance projects
-
-
-
-Use only focused test filters and required compilation.
-
-
-
-\## 6. Acceptance criteria
-
-
-
-The goal is complete when:
-
-
-
-\- Typing `mm`, then immediately pressing NumPad Down selects the first result.
-
-\- NumPad movement works regardless of query or list/grid mode.
-
-\- NumPad Up from the first result returns to the query.
-
-\- Repeated transitions require no Tab.
-
-\- The query remains editable and its text is preserved.
-
-\- All accepted keys are dispatched exactly once.
-
-\- No events silently disappear during a focus transition.
-
-\- Result scrolling remains stable.
-
-\- Existing keyboard ownership and editing behavior remain intact.
-
-\- Relevant focused tests pass.
-
-
-
-\## 7. Git and delivery
-
-
-
-This is a fresh follow-up task to the previous navigation fix.
-
-
-
-Use the existing checkout and verify the latest actual local/remote predecessor before branching. The last inspected fix tip is `67587a6527d27bedf8fcded0f27f741a6a25f91f`.
-
-
-
-Suggested new branch:
-
-
-
-`fix/launcher-query-numpad-roundtrip`
-
-
-
-Create it directly from the verified preceding fix tip, not from `master`.
-
-
-
-If it already exists and clearly represents this exact task, resume safely.
-
-
-
-\- No worktrees or auxiliary clones.
-
-\- No unrelated merges, rebases, resets or force pushes.
-
-\- Preserve all existing user changes.
-
-\- Keep implementation and tests to one or two small commits.
-
-\- Attempt a normal push after each commit.
-
-\- Do not merge to `master`.
-
-
-
-\## 8. Final report
-
-
-
-Provide a concise handoff containing:
-
-
-
-\- Confirmed root cause
-
-\- Why the previous fix was insufficient
-
-\- Exact new behavior
-
-\- Files modified
-
-\- Focused test commands and outcomes
-
-\- Any unverified native behavior
-
-\- Branch name and final SHA
-
-\- Push status
-
-
-
-\*\*Stop after this fix. Do not start additional features.\*\*
-
-
-
+**Execute autonomously through implementation and verification, not merely investigation or planning.**
