@@ -1,8 +1,15 @@
 use eframe::egui::{Event, InputState, Key, Modifiers};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum QueryNavigation {
+    Move(Key),
+    EnterResults,
+    ReturnToQuery,
+}
+
 /// Claim only result navigation, leaving the remaining events for the editor.
 /// The native backend preserves keypad positions independently of Num Lock.
-pub(super) fn take_query_navigation(input: &mut InputState, grid: bool) -> Vec<Key> {
+pub(super) fn take_query_navigation(input: &mut InputState, grid: bool) -> Vec<QueryNavigation> {
     let mut navigation = Vec::new();
     let mut paired_digit = None;
     input.events.retain(|event| {
@@ -22,24 +29,27 @@ pub(super) fn take_query_navigation(input: &mut InputState, grid: bool) -> Vec<K
             return true;
         };
         let direction = match (key, physical_key) {
-            (Key::Num2, Some(Key::Numpad2)) => (Key::ArrowDown, "2"),
-            (Key::Num4, Some(Key::Numpad4)) => (Key::ArrowLeft, "4"),
-            (Key::Num6, Some(Key::Numpad6)) => (Key::ArrowRight, "6"),
-            (Key::Num8, Some(Key::Numpad8)) => (Key::ArrowUp, "8"),
+            (Key::Num2 | Key::ArrowDown, Some(Key::Numpad2)) => (Key::ArrowDown, "2"),
+            (Key::Num4 | Key::ArrowLeft, Some(Key::Numpad4)) => (Key::ArrowLeft, "4"),
+            (Key::Num6 | Key::ArrowRight, Some(Key::Numpad6)) => (Key::ArrowRight, "6"),
+            (Key::Num8 | Key::ArrowUp, Some(Key::Numpad8)) => (Key::ArrowUp, "8"),
             (Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown, _) => {
-                navigation.push(key);
+                navigation.push(QueryNavigation::Move(key));
                 return false;
             }
             (Key::ArrowLeft | Key::ArrowRight, _) if grid => {
-                navigation.push(key);
+                navigation.push(QueryNavigation::Move(key));
                 return false;
             }
             _ => return true,
         };
-        paired_digit = Some(direction.1);
-        if grid || matches!(direction.0, Key::ArrowUp | Key::ArrowDown) {
-            navigation.push(direction.0);
-        }
+        paired_digit =
+            matches!(key, Key::Num2 | Key::Num4 | Key::Num6 | Key::Num8).then_some(direction.1);
+        navigation.push(match direction.0 {
+            Key::ArrowLeft if !grid => QueryNavigation::ReturnToQuery,
+            Key::ArrowRight if !grid => QueryNavigation::EnterResults,
+            key => QueryNavigation::Move(key),
+        });
         false
     });
     navigation
@@ -76,7 +86,7 @@ mod tests {
         let expected = ctx.input(|input| input.events[1..].to_vec());
         assert_eq!(
             ctx.input_mut(|input| take_query_navigation(input, false)),
-            [Key::ArrowDown]
+            [QueryNavigation::Move(Key::ArrowDown)]
         );
         ctx.input(|input| assert_eq!(input.events, expected));
         ctx.end_pass().drop_without_applying_deltas();

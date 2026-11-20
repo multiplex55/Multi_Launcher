@@ -1,7 +1,7 @@
 #[cfg(feature = "qa-framebuffer-capture")]
 use super::qa_framebuffer::{RootListDiagnostic, VisibleRowDiagnostic};
 use super::*;
-use super::query_navigation::take_query_navigation;
+use super::query_navigation::{QueryNavigation, take_query_navigation};
 
 use super::screenshot_countdown::NATIVE_POLL_INTERVAL;
 use crate::gui::jump_mode::ui::NavigationOwner;
@@ -386,6 +386,9 @@ pub(super) struct RootListGeometryCache {
     popup_owner: Option<(u64, usize)>,
     popup_response: Option<egui::Response>,
     pending_popup_cleanup: Option<egui::Response>,
+    // Actual button responses from the last rendered pass. Invalidation retires
+    // them with their result generation, so Tab focus cannot target stale rows.
+    rendered_result_ids: Vec<(usize, egui::Id)>,
     #[cfg(test)]
     rebuild_count: u64,
     #[cfg(test)]
@@ -434,6 +437,7 @@ impl Default for RootListGeometryCache {
             popup_owner: None,
             popup_response: None,
             pending_popup_cleanup: None,
+            rendered_result_ids: Vec::new(),
             #[cfg(test)]
             rebuild_count: 0,
             #[cfg(test)]
@@ -448,6 +452,7 @@ impl Default for RootListGeometryCache {
 
 impl RootListGeometryCache {
     fn invalidate_geometry(&mut self) {
+        self.rendered_result_ids.clear();
         self.key = None;
         self.last_revealed_selection = None;
         self.row_tops.clear();
@@ -12588,8 +12593,17 @@ impl LauncherApp {
                 let query_owned_focus = query_navigation_allowed
                     && ctx.memory(|memory| memory.has_focus(input_id))
                     && ctx.input(|input| input.focused);
+                let focused_result = ctx.memory(|memory| memory.focused()).and_then(|focused| {
+                    self.root_list_geometry
+                        .rendered_result_ids
+                        .iter()
+                        .find(|(index, id)| *id == focused && *index < self.results.len())
+                        .map(|(index, _)| *index)
+                });
                 let query_navigation = if first_ui_pass
-                    && query_owned_focus
+                    && query_navigation_allowed
+                    && (query_owned_focus || focused_result.is_some())
+                    && ctx.input(|input| input.focused)
                     && query_editor_interactive
                     && !action_sheet_blocks_launcher_input
                     && self.jump_mode_ui.active_session().is_none()
@@ -12610,6 +12624,18 @@ impl LauncherApp {
                 } else {
                     Vec::new()
                 };
+                if !query_navigation.is_empty() {
+                    if let Some(index) = focused_result {
+                        self.selected = Some(index);
+                        // Reclaim text entry before TextEdit can collapse its
+                        // unfocused caret/selection. Do not synthesize Tab.
+                        ctx.memory_mut(|memory| memory.request_focus(input_id));
+                    }
+                    ctx.memory_mut(|memory| {
+                        memory.move_focus(egui::FocusDirection::None);
+                        memory.set_focus_lock_filter(input_id, ROOT_QUERY_EVENT_FILTER);
+                    });
+                }
 
                 // Capture cursor state before TextEdit processing: an
                 // unfocused widget can collapse a selection while a delayed
@@ -12618,6 +12644,9 @@ impl LauncherApp {
                 // delayed frames share the same original caret state.
                 let query_cursor_before_show_focus = self
                     .pending_show_query_focus
+                    .and_then(|_| egui::TextEdit::load_state(ui.ctx(), input_id))
+                    .and_then(|state| state.cursor.char_range());
+                let query_cursor_before_result_focus = focused_result
                     .and_then(|_| egui::TextEdit::load_state(ui.ctx(), input_id))
                     .and_then(|state| state.cursor.char_range());
                 if let (Some(pending), Some(cursor_range)) = (
@@ -12634,10 +12663,20 @@ impl LauncherApp {
                     input_id,
                     self.query_scale,
                     !action_sheet_blocks_launcher_input && query_editor_interactive,
-                    query_owned_focus,
+                    query_owned_focus || !query_navigation.is_empty(),
                 )
                 .output;
                 let query_text_edited = query_output.response.changed();
+                if !query_output.response.has_focus()
+                    && !query_text_edited
+                    && let Some(cursor_range) = query_cursor_before_result_focus
+                {
+                    // Tab may leave a real result focused for many frames.
+                    // TextEdit's unfocused rendering must not erase the
+                    // selection before a later NumPad return to the query.
+                    query_output.state.cursor.set_char_range(Some(cursor_range));
+                    query_output.state.clone().store(ui.ctx(), input_id);
+                }
                 current_query_geometry = Some(QueryShowGeometry {
                     rect: query_output.response.rect,
                     clip_rect: query_clip_rect,
@@ -12882,12 +12921,24 @@ impl LauncherApp {
                     self.navigate_query_history(direction);
                 }
 
-                if first_ui_pass
-                    && !action_sheet_blocks_launcher_input
-                    && query_has_focus
-                {
-                    for key in query_navigation {
-                        self.handle_key(key);
+                // Capture above is the authoritative ownership decision. A
+                // TextEdit focus transition must not discard accepted events.
+                if !query_navigation.is_empty() {
+                    for navigation in query_navigation {
+                        match navigation {
+                            QueryNavigation::Move(key) => {
+                                self.handle_key(key);
+                            }
+                            QueryNavigation::EnterResults => {
+                                if self.selected.is_none() && !self.results.is_empty() {
+                                    self.selected = Some(0);
+                                }
+                            }
+                            QueryNavigation::ReturnToQuery => self.selected = None,
+                        }
+                    }
+                    if !query_response.has_focus() {
+                        request_root_query_focus(&query_response);
                     }
                 }
 
@@ -13271,6 +13322,7 @@ impl LauncherApp {
                 self.render_root_toasts(ui, bounds);
             }
 
+            self.root_list_geometry.rendered_result_ids.clear();
             if use_dashboard {
                 if first_ui_pass && !self.suggestions.is_empty() {
                     self.autocomplete_index = 0;
@@ -13544,6 +13596,9 @@ impl LauncherApp {
                                             .push((idx, action.action.clone()));
                                         #[cfg(test)]
                                         self.test_root_rendered_row_ids.push((idx, resp.id));
+                                        self.root_list_geometry
+                                            .rendered_result_ids
+                                            .push((idx, resp.id));
                                         #[cfg(test)]
                                         self.test_root_rendered_row_rects.push((idx, resp.rect));
                                         rows_built = rows_built.saturating_add(1);
@@ -13791,6 +13846,9 @@ impl LauncherApp {
                                     self.test_root_rendered_rows.push((idx, a.action.clone()));
                                     #[cfg(test)]
                                     self.test_root_rendered_row_ids.push((idx, resp.id));
+                                    self.root_list_geometry
+                                        .rendered_result_ids
+                                        .push((idx, resp.id));
                                     #[cfg(test)]
                                     self.test_root_rendered_row_rects.push((idx, resp.rect));
                                     rows_built = rows_built.saturating_add(1);
@@ -79153,6 +79211,226 @@ mod tests {
         let mut app = new_app(ctx);
         app.plugins.register(Box::new(FakePlugin));
         app
+    }
+
+    #[test]
+    fn root_query_navigation_mm_numpad_roundtrip_without_tab() {
+        run_root_query_navigation_test(check_mm_numpad_roundtrip_without_tab);
+    }
+
+    fn check_mm_numpad_roundtrip_without_tab() {
+        use egui::Key;
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.plugins
+            .register(Box::new(crate::plugins::multi_manager::MultiManagerPlugin));
+        app.enabled_plugins = None;
+        app.query.clear();
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        let query_id = egui::Id::new("query_input");
+        let mut frame_index = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, frame_index, 960.0, 640.0, events)
+                .drop_without_applying_deltas();
+            frame_index += 1;
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::Text("mm".into())]);
+        assert_eq!(app.query, "mm");
+        assert!(app.results.len() > 2);
+        assert!(
+            app.results
+                .iter()
+                .all(|action| action.action.starts_with("mm:"))
+        );
+        assert!(!app.resolved_grid_layout);
+        let cursor = || {
+            egui::TextEdit::load_state(&ctx, query_id)
+                .unwrap()
+                .cursor
+                .char_range()
+                .unwrap()
+        };
+        let before = cursor();
+        for _ in 0..3 {
+            for (events, expected) in [
+                (digit_press(Key::Num2, Key::Numpad2, "2"), Some(0)),
+                (digit_press(Key::Num2, Key::Numpad2, "2"), Some(1)),
+                (digit_press(Key::Num8, Key::Numpad8, "8"), Some(0)),
+                (digit_press(Key::Num8, Key::Numpad8, "8"), None),
+            ] {
+                frame(&mut app, events);
+                assert_eq!(app.selected, expected);
+                assert_eq!(app.query, "mm");
+                assert_eq!(cursor(), before);
+            }
+        }
+        for (events, expected) in [
+            (digit_press(Key::Num6, Key::Numpad6, "6"), Some(0)),
+            (digit_press(Key::Num4, Key::Numpad4, "4"), None),
+            (
+                vec![physical_key_press(Key::ArrowRight, Key::Numpad6)],
+                Some(0),
+            ),
+            (
+                vec![physical_key_press(Key::ArrowLeft, Key::Numpad4)],
+                None,
+            ),
+        ] {
+            frame(&mut app, events);
+            assert_eq!(app.selected, expected);
+            assert_eq!(cursor(), before);
+        }
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+        for (key, physical, expected) in [
+            (Key::ArrowDown, Key::Numpad2, Some(0)),
+            (Key::ArrowRight, Key::Numpad6, Some(1)),
+            (Key::ArrowDown, Key::Numpad2, Some(4)),
+            (Key::ArrowLeft, Key::Numpad4, Some(3)),
+            (Key::ArrowUp, Key::Numpad8, Some(0)),
+            (Key::ArrowUp, Key::Numpad8, None),
+            (Key::ArrowDown, Key::Numpad2, Some(0)),
+        ] {
+            frame(&mut app, vec![physical_key_press(key, physical)]);
+            assert_eq!(app.selected, expected);
+            assert_eq!(cursor(), before);
+        }
+        frame(&mut app, vec![egui::Event::Text(" settings".into())]);
+        assert_eq!(app.query, "mm settings");
+        assert_eq!(app.selected, None);
+        assert_eq!(app.results.len(), 1);
+        frame(
+            &mut app,
+            vec![physical_key_press(Key::ArrowDown, Key::Numpad2)],
+        );
+        assert_eq!(app.selected, Some(0));
+        frame(
+            &mut app,
+            vec![physical_key_press(Key::ArrowUp, Key::Numpad8)],
+        );
+        assert_eq!(app.selected, None);
+        frame(&mut app, vec![egui::Event::Text(" nonexistent".into())]);
+        assert!(app.results.is_empty());
+        frame(&mut app, digit_press(Key::Num2, Key::Numpad2, "2"));
+        assert_eq!(app.selected, None);
+        assert_eq!(app.query, "mm settings nonexistent");
+    }
+
+    #[test]
+    fn root_query_navigation_recovers_real_tab_focus_and_keeps_accepted_events() {
+        run_root_query_navigation_test(check_tab_focus_and_accepted_events);
+    }
+
+    fn check_tab_focus_and_accepted_events() {
+        use egui::{Key, Modifiers};
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.plugins
+            .register(Box::new(crate::plugins::multi_manager::MultiManagerPlugin));
+        app.enabled_plugins = None;
+        app.query.clear();
+        app.query_autocomplete = false;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        let query_id = egui::Id::new("query_input");
+        let mut frame_index = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, frame_index, 960.0, 640.0, events)
+                .drop_without_applying_deltas();
+            frame_index += 1;
+        };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::Text("mm".into())]);
+        frame(&mut app, vec![key_press(Key::ArrowLeft, Modifiers::SHIFT)]);
+        let cursor = || {
+            egui::TextEdit::load_state(&ctx, query_id)
+                .unwrap()
+                .cursor
+                .char_range()
+                .unwrap()
+        };
+        let before = cursor();
+        assert_ne!(before.primary, before.secondary);
+        frame(&mut app, vec![key_press(Key::Tab, Modifiers::NONE)]);
+        let focused = ctx.memory(|memory| memory.focused()).unwrap();
+        assert!(
+            app.test_root_rendered_row_ids
+                .iter()
+                .any(|(_, id)| *id == focused)
+        );
+        for _ in 0..3 {
+            frame(&mut app, vec![]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(focused));
+            assert_eq!(cursor(), before);
+        }
+        // Actual widget focus, not merely selected-result state, must return.
+        frame(&mut app, digit_press(Key::Num8, Key::Numpad8, "8"));
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        assert_eq!(app.selected, None);
+        assert_eq!(cursor(), before);
+        assert_eq!(app.query, "mm");
+
+        // TextEdit handles Tab after capture; it must not silently discard an
+        // already accepted navigation event when its focus changes.
+        let mut events = vec![key_press(Key::Tab, Modifiers::NONE)];
+        events.extend(digit_press(Key::Num2, Key::Numpad2, "2"));
+        frame(&mut app, events);
+        assert_eq!(app.selected, Some(0));
+        frame(&mut app, digit_press(Key::Num8, Key::Numpad8, "8"));
+        assert_eq!(app.selected, None);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+    }
+
+    #[test]
+    fn root_query_navigation_respects_popup_and_modal_ownership() {
+        run_root_query_navigation_test(check_navigation_popup_and_modal_ownership);
+    }
+
+    fn check_navigation_popup_and_modal_ownership() {
+        use egui::Key;
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, vec![])
+            .drop_without_applying_deltas();
+        let query = app.query.clone();
+        egui::Popup::open_id(&ctx, egui::Id::new("navigation-foreign-popup"));
+        run_root_list_frame(
+            &ctx,
+            &mut app,
+            1,
+            960.0,
+            640.0,
+            digit_press(Key::Num2, Key::Numpad2, "2"),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.selected, None);
+        assert_eq!(app.query, query);
+        egui::Popup::close_all(&ctx);
+        app.confirm_modal
+            .open_custom("Navigation test", "Do not activate");
+        run_root_list_frame(
+            &ctx,
+            &mut app,
+            2,
+            960.0,
+            640.0,
+            vec![physical_key_press(Key::ArrowDown, Key::Numpad2)],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.selected, None);
+        assert_eq!(app.query, query);
+        assert!(app.confirm_modal.is_open());
     }
 
     #[test]

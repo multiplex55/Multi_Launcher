@@ -4853,12 +4853,12 @@ impl LauncherApp {
                 if !self.results.is_empty() {
                     let max = self.results.len() - 1;
                     self.selected = match self.selected {
+                        Some(0) | None => None,
                         Some(i) if self.resolved_grid_layout => {
                             Some(move_to(i, -(cols as isize), max))
                         }
                         Some(i) if i > 0 => Some(i - 1),
                         Some(i) => Some(i.min(max)),
-                        None => Some(0),
                     };
                 }
                 None
