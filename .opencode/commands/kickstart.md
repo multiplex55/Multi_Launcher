@@ -1,21 +1,11 @@
 ---
-description: Execute a Goal and Kickstart
-agent: build
+description: Execute an approved goal/kickstart through planner, implementer, and reviewer.
+agent: orchestrator
+subagent: false
 ---
 
-Read the Kickstart document at:
+Read the goal and kickstart document(s) named below from the current repository. Treat them as the authoritative scope and execution instructions.
 
 $ARGUMENTS
 
-Use your file-reading tools to read the document
-and the companion Goal that it references.
-
-Follow all instructions and constraints in both files.
-
-Complete the implementation, focused verification,
-and Git workflow.
-
-Do not stop after planning.
-Do not perform unrelated work or broad test runs.
-
-Report the final results and commit SHA.
+Follow the orchestrator's milestone pipeline. Delegate each milestone to the configured specialists, await each completion report, verify gates, and continue through the approved milestones unless the goal defines a stop or approval gate. Do not re-plan an already approved implementation pipeline unnecessarily.
