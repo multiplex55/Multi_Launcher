@@ -2,20 +2,120 @@ use std::collections::HashMap;
 
 use super::{MarkdownHeading, parse::LineSpan};
 
-pub(crate) fn parse_headings(lines: &[LineSpan<'_>], code_lines: &[bool]) -> Vec<MarkdownHeading> {
-    let mut seen_anchors = HashMap::new();
+pub(crate) fn parse_headings(content: &str, lines: &[LineSpan<'_>]) -> Vec<MarkdownHeading> {
+    parse_heading_events(content, lines, false)
+}
 
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| !code_lines.get(*idx).copied().unwrap_or(false))
-        .filter_map(|(idx, line)| parse_heading(idx, line))
-        .map(|mut heading| {
-            heading.normalized_anchor =
-                unique_anchor(&heading.normalized_anchor, &mut seen_anchors);
-            heading
-        })
-        .collect()
+pub(crate) fn structural_headings(content: &str) -> Vec<MarkdownHeading> {
+    let lines = super::parse::line_spans(content);
+    parse_heading_events(content, &lines, true)
+}
+
+fn parse_heading_events(
+    content: &str,
+    lines: &[LineSpan<'_>],
+    include_empty: bool,
+) -> Vec<MarkdownHeading> {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let start = initial_metadata_end(content);
+    let mut seen_anchors = HashMap::new();
+    let mut headings = Vec::new();
+    let mut depth = 0usize;
+    for (event, range) in Parser::new_ext(
+        &content[start..],
+        Options::ENABLE_TABLES
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_FOOTNOTES,
+    )
+    .into_offset_iter()
+    {
+        match event {
+            Event::Start(tag) => {
+                if let Tag::Heading { level, .. } = tag
+                    && depth == 0
+                {
+                    let parsed_begin = start + range.start;
+                    let line_index = lines.partition_point(|line| line.end <= parsed_begin);
+                    if let Some(line) = lines.get(line_index) {
+                        let begin = line.start;
+                        let mut end = start + range.end;
+                        if end > begin && content.as_bytes().get(end - 1) != Some(&b'\n') {
+                            end = content[end..]
+                                .find('\n')
+                                .map_or(content.len(), |n| end + n + 1);
+                        }
+                        let level = level as u8;
+                        // The parser's heading event spans the underline for setext.
+                        let atx = start + range.end <= line.end;
+                        let title = if atx {
+                            parse_heading(line_index, line)
+                                .map(|heading| heading.title)
+                                .unwrap_or_default()
+                        } else {
+                            let raw = &content[begin..end];
+                            let mut rows: Vec<&str> = raw.lines().collect();
+                            rows.pop(); // The parser authenticated this last line as the underline.
+                            rows.into_iter()
+                                .map(str::trim)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        };
+                        if include_empty || !title.is_empty() {
+                            let anchor = normalize_anchor(&title);
+                            let normalized_anchor = if title.is_empty() {
+                                String::new()
+                            } else {
+                                unique_anchor(&anchor, &mut seen_anchors)
+                            };
+                            headings.push(MarkdownHeading {
+                                level,
+                                title,
+                                normalized_anchor,
+                                line_index,
+                                byte_range: begin..end,
+                            });
+                        }
+                    }
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    headings
+}
+
+pub(crate) fn initial_metadata_end(content: &str) -> usize {
+    let mut lines = content.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return 0;
+    };
+    if first.trim_end_matches(['\r', '\n']) != "---" {
+        return 0;
+    }
+    let mut end = first.len();
+    let mut mapping = false;
+    for line in lines {
+        end += line.len();
+        let text = line.trim_end_matches(['\r', '\n']);
+        if text == "---" {
+            return if mapping { end } else { 0 };
+        }
+        if !text.starts_with('#')
+            && !text.starts_with(char::is_whitespace)
+            && text
+                .split_once(':')
+                .is_some_and(|(key, _)| !key.trim().is_empty())
+        {
+            mapping = true;
+        }
+        if text.trim().is_empty() && !mapping {
+            return 0;
+        }
+    }
+    0
 }
 
 fn parse_heading(line_index: usize, line: &LineSpan<'_>) -> Option<MarkdownHeading> {
@@ -118,13 +218,13 @@ mod tests {
 
     fn parse(content: &str) -> Vec<MarkdownHeading> {
         let lines = line_spans(content);
-        let code_lines = vec![false; lines.len()];
-        parse_headings(&lines, &code_lines)
+        parse_headings(content, &lines)
     }
 
     fn parse_with_code_mask(content: &str, code_lines: &[bool]) -> Vec<MarkdownHeading> {
         let lines = line_spans(content);
-        parse_headings(&lines, code_lines)
+        let _ = code_lines;
+        parse_headings(content, &lines)
     }
 
     #[test]

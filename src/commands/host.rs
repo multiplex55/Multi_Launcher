@@ -63,6 +63,7 @@ pub trait DialogCommandHost {
     fn open_date_time_studio_dialog(&mut self) {}
     fn open_diagram_studio_dialog(&mut self) {}
     fn open_markdown_studio_dialog(&mut self) {}
+    fn open_password_generator_dialog(&mut self) {}
     fn open_help_dialog(&mut self);
     fn open_timer_dialog(&mut self);
     fn open_alarm_dialog(&mut self);
@@ -75,6 +76,9 @@ pub trait DialogCommandHost {
     }
     fn open_hash_generator_dialog(&mut self) {}
     fn open_activity_dialog(&mut self) {}
+    fn open_file_operations_center_dialog(&mut self) {}
+    fn open_downloads_triage_dialog(&mut self) {}
+    fn open_notification_inbox_dialog(&mut self) {}
     fn open_file_lock_dialog(&mut self, _path: Option<&std::path::Path>) {}
     fn run_paste_sequence(
         &mut self,
@@ -323,6 +327,16 @@ pub trait HeadlessCommandHost {
     fn preserve_command(&self) -> bool;
     fn current_query(&self) -> &str;
     fn launcher_should_refocus(&self) -> bool;
+
+    fn copy_generated_password(
+        &mut self,
+        _length: usize,
+    ) -> Result<crate::platform::protected_clipboard::CopyStatus, super::CommandError> {
+        Err(super::CommandError::new(
+            "password",
+            "Private password copying requires the launcher interface.",
+        ))
+    }
 
     fn copy_snippet_text(&mut self, text: &str) -> anyhow::Result<()> {
         crate::actions::clipboard::set_text(text)

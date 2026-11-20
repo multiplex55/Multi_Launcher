@@ -58,7 +58,7 @@ pub(crate) fn parse_callouts_from_lines(
     out
 }
 
-fn callout_header(line: &str) -> Option<(String, String)> {
+pub(crate) fn callout_header(line: &str) -> Option<(String, String)> {
     let text = blockquote_text(line)?;
     let rest = text.strip_prefix("[!")?;
     let close = rest.find(']')?;

@@ -600,6 +600,12 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
         let step = &frame.plan.instructions[frame.pc].step;
         match result {
             Ok(()) => {
+                if matches!(&step.action, MkAction::Notify(_)) {
+                    (self.observe)(
+                        frame.context,
+                        ExecutionEvent::NotificationSubmitted { step_id: step.id },
+                    );
+                }
                 frame
                     .variables
                     .insert("last_action_success".into(), MkValue::Boolean(true));
@@ -836,6 +842,72 @@ mod tests {
             text: value.into(),
             mode: MkTextMode::Type,
         })
+    }
+
+    #[test]
+    fn notification_inbox_macro_only_reports_successful_notify_attempts() {
+        let notify = MkAction::Notify(MkNotifyPayload {
+            title: "PRIVATE_TITLE".into(),
+            description: "PRIVATE_BODY".into(),
+            ..MkNotifyPayload::default()
+        });
+        let mut repeated = step(1, notify.clone());
+        repeated.repeat = 3;
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let events = Mutex::new(Vec::new());
+        Executor::new(fake.backends(), control)
+            .execute(
+                &plan(vec![repeated]),
+                ExecutionOptions::normal(),
+                &|event| events.lock().unwrap().push(event),
+            )
+            .unwrap();
+        let events = events.into_inner().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    ExecutionEvent::NotificationSubmitted { step_id: 1 }
+                ))
+                .count(),
+            3
+        );
+        let metadata = events
+            .iter()
+            .filter(|event| matches!(event, ExecutionEvent::NotificationSubmitted { .. }))
+            .collect::<Vec<_>>();
+        assert!(!format!("{metadata:?}").contains("PRIVATE"));
+
+        let fake = Arc::new(FakeBackend::default());
+        fake.fail(
+            "notification",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "failure"),
+        );
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let events = Mutex::new(Vec::new());
+        let mut failed = step(2, notify);
+        failed.on_error = MkErrorPolicy::Retry(MkRetry {
+            attempts: 3,
+            delay_ms: 0,
+        });
+        assert!(
+            Executor::new(fake.backends(), control)
+                .execute(&plan(vec![failed]), ExecutionOptions::normal(), &|event| {
+                    events.lock().unwrap().push(event)
+                })
+                .is_err()
+        );
+        assert!(
+            !events
+                .into_inner()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::NotificationSubmitted { .. }))
+        );
     }
 
     #[test]

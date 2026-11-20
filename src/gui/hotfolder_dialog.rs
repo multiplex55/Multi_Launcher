@@ -2,6 +2,10 @@
 //! state; every persistent or runtime transition is returned as a typed
 //! request to the app-owned driver.
 
+use super::jump_mode::{
+    TargetKind,
+    ui::{JumpModeScope, register_and_apply_target},
+};
 use crate::gui::hotfolder_runtime::{
     HotFolderCapabilityInputs, HotFolderDriverSnapshot, HotFolderEnablePreview,
     evaluate_sample_conditions,
@@ -21,6 +25,27 @@ use std::thread;
 use std::time::SystemTime;
 
 const HISTORY_ROWS: usize = 128;
+
+fn reveal_hotfolder_target(
+    scope: Option<&JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: TargetKind,
+    order: &mut u64,
+) {
+    register_and_apply_target(scope, ui, response, identity, label, kind, order);
+    if response.enabled()
+        && response.gained_focus()
+        && ui.is_visible()
+        && !ui.is_sizing_pass()
+        && !ui.ctx().will_discard()
+        && !ui.clip_rect().contains_rect(response.rect)
+    {
+        response.scroll_to_me(None);
+    }
+}
 
 #[derive(Clone)]
 pub(crate) enum HotFolderDialogAction {
@@ -54,6 +79,11 @@ pub(crate) enum HotFolderDialogAction {
     Pause,
     Resume,
     ClearHistory,
+    ChoosePath {
+        editor_id: u128,
+        draft_revision: u64,
+        kind: HotFolderPathKind,
+    },
     TestRule {
         editor_id: u128,
         rule: HotFolderRule,
@@ -61,6 +91,13 @@ pub(crate) enum HotFolderDialogAction {
         event: HotFolderEventKind,
         draft_revision: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HotFolderPathKind {
+    WatchedDirectory,
+    DestinationDirectory,
+    SampleFile,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,6 +115,7 @@ pub(crate) enum PendingKind {
     CancelEnable,
 }
 
+#[derive(Clone)]
 struct PendingRequest {
     request_id: u64,
     kind: PendingKind,
@@ -121,6 +159,7 @@ impl ActionChoice {
     }
 }
 
+#[derive(Clone)]
 struct RuleEditor {
     editor_id: u128,
     mode: EditMode,
@@ -206,9 +245,10 @@ struct SampleTestResult {
 /// watcher or executor handle.
 pub(crate) struct HotFolderDialog {
     pub(crate) open: bool,
+    jump_epoch: u64,
     editor: Option<RuleEditor>,
-    picker_targets: Option<Vec<ResolvedActionTarget>>,
-    picker_macros: Option<MkMacroDocument>,
+    picker_targets: Option<Arc<[ResolvedActionTarget]>>,
+    picker_macros: Option<Arc<MkMacroDocument>>,
     pending: Option<PendingRequest>,
     error: Option<String>,
     notice: Option<String>,
@@ -219,12 +259,16 @@ pub(crate) struct HotFolderDialog {
     test_job: Option<SampleTestJob>,
     test_result: Option<SampleTestResult>,
     next_editor_id: u128,
+    popup_anchors: Vec<(egui::Id, egui::LayerId)>,
+    popup_viewport: Option<egui::ViewportId>,
+    pending_frame: Option<Box<HotFolderFrame>>,
 }
 
 impl Default for HotFolderDialog {
     fn default() -> Self {
         Self {
             open: false,
+            jump_epoch: 0,
             editor: None,
             picker_targets: None,
             picker_macros: None,
@@ -238,15 +282,189 @@ impl Default for HotFolderDialog {
             test_job: None,
             test_result: None,
             next_editor_id: 1,
+            popup_anchors: Vec::new(),
+            popup_viewport: None,
+            pending_frame: None,
         }
     }
 }
 
+struct HotFolderViewSnapshot {
+    open: bool,
+    editor: Option<RuleEditor>,
+    picker_targets: Option<Arc<[ResolvedActionTarget]>>,
+    picker_macros: Option<Arc<MkMacroDocument>>,
+    pending: Option<PendingRequest>,
+    error: Option<String>,
+    notice: Option<String>,
+    delete_confirmation: Option<(u64, HotFolderRule)>,
+    undo_delete: Option<HotFolderRule>,
+    clear_history_confirmation: bool,
+    show_full_paths: bool,
+    test_result: Option<SampleTestResult>,
+    next_editor_id: u128,
+    popup_anchors: Vec<(egui::Id, egui::LayerId)>,
+    popup_viewport: Option<egui::ViewportId>,
+}
+
+struct HotFolderFrame {
+    pass: super::utility_host::ViewportPassProvenance,
+    session: u64,
+    store_revision: Option<u64>,
+    view: HotFolderViewSnapshot,
+    actions: Vec<HotFolderDialogAction>,
+}
+
 impl HotFolderDialog {
+    fn retire_stale_sample_job(&mut self) {
+        if self.test_job.as_ref().is_some_and(|job| {
+            !self.open
+                || self.editor.as_ref().is_none_or(|editor| {
+                    editor.editor_id != job.editor_id || editor.draft_revision != job.draft_revision
+                })
+        }) {
+            self.retire_sample_test();
+        }
+    }
+    fn capture_view(&self) -> HotFolderViewSnapshot {
+        HotFolderViewSnapshot {
+            open: self.open,
+            editor: self.editor.clone(),
+            picker_targets: self.picker_targets.clone(),
+            picker_macros: self.picker_macros.clone(),
+            pending: self.pending.clone(),
+            error: self.error.clone(),
+            notice: self.notice.clone(),
+            delete_confirmation: self.delete_confirmation.clone(),
+            undo_delete: self.undo_delete.clone(),
+            clear_history_confirmation: self.clear_history_confirmation,
+            show_full_paths: self.show_full_paths,
+            test_result: self.test_result.clone(),
+            next_editor_id: self.next_editor_id,
+            popup_anchors: self.popup_anchors.clone(),
+            popup_viewport: self.popup_viewport,
+        }
+    }
+    fn restore_view(&mut self, state: HotFolderViewSnapshot) {
+        self.open = state.open;
+        self.editor = state.editor;
+        self.picker_targets = state.picker_targets;
+        self.picker_macros = state.picker_macros;
+        self.pending = state.pending;
+        self.error = state.error;
+        self.notice = state.notice;
+        self.delete_confirmation = state.delete_confirmation;
+        self.undo_delete = state.undo_delete;
+        self.clear_history_confirmation = state.clear_history_confirmation;
+        self.show_full_paths = state.show_full_paths;
+        self.test_result = state.test_result;
+        self.next_editor_id = state.next_editor_id;
+        self.popup_anchors = state.popup_anchors;
+        self.popup_viewport = state.popup_viewport;
+    }
+    pub(super) fn owns_inline_escape(&self, snapshot: &HotFolderDriverSnapshot) -> bool {
+        self.delete_confirmation.is_some()
+            || self.clear_history_confirmation
+            || self.editor.as_ref().is_some_and(|editor| editor.picker_open)
+            || (self.editor.is_none() && !snapshot.enable_previews.is_empty())
+    }
+
+    pub(super) fn owned_popup_layer(
+        &self,
+        ctx: &egui::Context,
+        base: egui::LayerId,
+    ) -> Option<egui::LayerId> {
+        if self.popup_viewport != Some(ctx.viewport_id()) {
+            return None;
+        }
+        self.popup_anchors.iter().find_map(|(id, layer)| {
+            if *layer != base
+                || !ctx
+                    .read_response(*id)
+                    .is_some_and(|response| response.enabled() && response.layer_id == base)
+            {
+                return None;
+            }
+            let popup = id.with("popup");
+            egui::Popup::is_id_open(ctx, popup)
+                .then_some(egui::LayerId::new(egui::Order::Foreground, popup))
+        })
+    }
+    pub(super) fn editor_is_current(&self, editor_id: u128, revision: u64) -> bool {
+        self.open
+            && self.editor.as_ref().is_some_and(|editor| {
+                editor.editor_id == editor_id && editor.draft_revision == revision
+            })
+    }
+
+    pub(super) fn complete_path_choice(
+        &mut self,
+        editor_id: u128,
+        revision: u64,
+        kind: HotFolderPathKind,
+        path: Option<PathBuf>,
+    ) -> bool {
+        let Some(editor) = self.editor.as_mut().filter(|editor| {
+            self.open && editor.editor_id == editor_id && editor.draft_revision == revision
+        }) else {
+            return false;
+        };
+        let Some(path) = path else {
+            return true;
+        };
+        match kind {
+            HotFolderPathKind::WatchedDirectory => editor.draft.watched_root = path,
+            HotFolderPathKind::DestinationDirectory => match &mut editor.draft.action {
+                RuleAction::Copy { destination } | RuleAction::Move { destination } => {
+                    *destination = path
+                }
+                _ => return false,
+            },
+            HotFolderPathKind::SampleFile => editor.sample_path = Some(path),
+        }
+        editor.changed();
+        self.test_result = None;
+        true
+    }
     pub(crate) fn open(&mut self) {
+        if !self.open {
+            self.jump_epoch = self.jump_epoch.wrapping_add(1).max(1);
+        }
         self.open = true;
     }
 
+    pub(crate) fn jump_generation(&self, snapshot: &HotFolderDriverSnapshot) -> u64 {
+        let preview = snapshot
+            .enable_previews
+            .iter()
+            .find(|preview| {
+                self.editor
+                    .as_ref()
+                    .is_none_or(|editor| editor.draft.id == preview.rule.id)
+            })
+            .map(|p| (p.request_id, p.resulting_revision));
+        egui::Id::new((
+            self.jump_epoch,
+            snapshot.store.as_ref().map(|s| s.revision),
+            preview,
+            self.delete_confirmation
+                .as_ref()
+                .map(|(revision, rule)| (*revision, rule.id.as_str())),
+            self.clear_history_confirmation,
+            self.editor
+                .as_ref()
+                .map(|e| (e.editor_id, e.draft_revision, e.picker_open)),
+        ))
+        .value()
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_clear_confirmation(&mut self, value: bool) {
+        self.clear_history_confirmation = value;
+    }
+    #[cfg(test)]
+    pub(super) fn test_clear_confirmation(&self) -> bool {
+        self.clear_history_confirmation
+    }
     pub(crate) fn needs_picker_snapshot(&self) -> bool {
         self.open
             && self
@@ -278,8 +496,8 @@ impl HotFolderDialog {
         targets: Vec<ResolvedActionTarget>,
         macros: MkMacroDocument,
     ) {
-        self.picker_targets = Some(targets);
-        self.picker_macros = Some(macros);
+        self.picker_targets = Some(targets.into());
+        self.picker_macros = Some(Arc::new(macros));
     }
 
     pub(crate) fn note_request(
@@ -302,15 +520,87 @@ impl HotFolderDialog {
         self.pending = None;
     }
 
-    pub(crate) fn ui(
+    pub(super) fn poll_background(&mut self, snapshot: &HotFolderDriverSnapshot) {
+        self.poll_sample_test();
+        self.poll_acknowledgement(snapshot);
+    }
+
+    pub(super) fn stage_root(
         &mut self,
         ctx: &egui::Context,
         snapshot: &HotFolderDriverSnapshot,
+        owner: bool,
+        first: bool,
+        scope: Option<&JumpModeScope>,
+    ) {
+        if !self.open {
+            return;
+        }
+        let admitting = owner && first && !ctx.will_discard();
+        let before = self.capture_view();
+        // Drawing edits a candidate; only the live dialog owns a sample receiver.
+        let sample_job = self.test_job.take();
+        let actions = self.draw(ctx, snapshot, owner, admitting, scope);
+        if admitting && !ctx.will_discard() {
+            self.pending_frame = Some(Box::new(HotFolderFrame {
+                pass: super::utility_host::ViewportPassProvenance::current(
+                    ctx,
+                    egui::ViewportId::ROOT,
+                ),
+                session: self.jump_epoch,
+                store_revision: snapshot.store.as_ref().map(|store| store.revision),
+                view: self.capture_view(),
+                actions,
+            }));
+        }
+        self.restore_view(before);
+        self.test_job = sample_job;
+    }
+
+    pub(super) fn complete_root(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Option<(Vec<HotFolderDialogAction>, Option<u64>)> {
+        let frame = *self.pending_frame.take()?;
+        if !self.open || frame.session != self.jump_epoch || !frame.pass.was_retained(ctx) {
+            return None;
+        }
+        self.restore_view(frame.view);
+        self.retire_stale_sample_job();
+        Some((frame.actions, frame.store_revision))
+    }
+
+    #[cfg(test)]
+    pub(super) fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &HotFolderDriverSnapshot,
+        owner: bool,
+        first: bool,
+        scope: Option<&JumpModeScope>,
+    ) -> Vec<HotFolderDialogAction> {
+        if first {
+            self.poll_background(snapshot);
+        }
+        self.draw(
+            ctx,
+            snapshot,
+            owner,
+            owner && first && !ctx.will_discard(),
+            scope,
+        )
+    }
+
+    fn draw(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &HotFolderDriverSnapshot,
+        owner: bool,
+        interactive: bool,
+        scope: Option<&JumpModeScope>,
     ) -> Vec<HotFolderDialogAction> {
         let mut actions = Vec::new();
-        self.poll_sample_test();
-        self.poll_acknowledgement(snapshot);
-        if !snapshot.loaded && self.open && self.pending.is_none() {
+        if interactive && !snapshot.loaded && self.open && self.pending.is_none() {
             actions.push(HotFolderDialogAction::EnsureLoaded);
             self.pending = Some(PendingRequest {
                 request_id: 0,
@@ -332,137 +622,306 @@ impl HotFolderDialog {
         let mut window_open = self.open;
         egui::Window::new("Hot Folder Manager")
             .id(egui::Id::new("hotfolder_manager_window"))
-
             .resizable(true)
             .default_size([940.0, 660.0])
             .min_width(680.0)
             .min_height(420.0)
-            .show_utility(ctx, "hotfolder-manager", egui::Id::new("Hot Folder Manager"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from([940.0, 660.0])), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(680.0, 420.0)), |ui| {
-                if !snapshot.plugin_enabled {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Hot Folder is disabled in Plugins. Stored rule intent is retained.",
-                    );
-                } else if snapshot.paused {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Paused — no new file events are admitted.",
-                    );
-                }
-                if let Some(error) = snapshot.error.as_deref() {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
-                if let Some(error) = self.error.as_deref() {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
-                if let Some(notice) = self.notice.as_deref() {
-                    ui.colored_label(egui::Color32::LIGHT_GREEN, notice);
-                }
-                if let Some(pending) = &self.pending
-                    && pending.request_id != 0
-                {
-                    ui.label("Applying control; waiting for the runtime acknowledgement…");
-                }
-
-                ui.horizontal(|ui| {
-                    if snapshot.plugin_enabled {
-                        if snapshot.paused {
-                            if ui.button("Resume").clicked() {
-                                actions.push(HotFolderDialogAction::Resume);
-                            }
-                        } else if ui.button("Pause").clicked() {
-                            actions.push(HotFolderDialogAction::Pause);
+            .vscroll(true)
+            .show_utility(
+                ctx,
+                "hotfolder-manager",
+                egui::Id::new("Hot Folder Manager"),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from([940.0, 660.0]),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::vec2(680.0, 420.0))
+                .with_maximum(ctx.content_rect().size()),
+                |ui| {
+                    let mut order = 0;
+                    let child = preview
+                        .as_ref()
+                        .filter(|_| self.editor.is_none())
+                        .map(|p| format!("enable/{}/{}", p.rule.id.as_str(), p.request_id))
+                        .or_else(|| {
+                            self.delete_confirmation.as_ref().map(|(revision, rule)| {
+                                format!("delete/{}/{}", rule.id.as_str(), revision)
+                            })
+                        })
+                        .or_else(|| {
+                            self.clear_history_confirmation
+                                .then(|| "clear-history".to_owned())
+                        });
+                    if let Some(child) = child {
+                        let child_scope = scope.map(|scope| scope.child_namespace(&child));
+                        if let Some(preview) = preview.as_ref().filter(|_| self.editor.is_none()) {
+                            self.render_strong_confirmation(
+                                ui,
+                                preview,
+                                &mut actions,
+                                child_scope.as_ref(),
+                                interactive,
+                                &mut order,
+                            );
+                        } else if let Some((revision, rule)) = self.delete_confirmation.clone() {
+                            ui.label(format!("Delete rule ‘{}’?", rule.name));
+                            ui.horizontal(|ui| {
+                                let confirm = ui.button("Delete Rule");
+                                reveal_hotfolder_target(
+                                    child_scope.as_ref(),
+                                    ui,
+                                    &confirm,
+                                    "confirm",
+                                    "Delete Rule",
+                                    TargetKind::Button,
+                                    &mut order,
+                                );
+                                if interactive && confirm.clicked() {
+                                    actions.push(HotFolderDialogAction::Delete {
+                                        expected_revision: revision,
+                                        rule,
+                                    });
+                                    self.delete_confirmation = None;
+                                }
+                                let cancel = ui.button("Cancel Delete");
+                                reveal_hotfolder_target(
+                                    child_scope.as_ref(),
+                                    ui,
+                                    &cancel,
+                                    "cancel",
+                                    "Cancel Delete",
+                                    TargetKind::Button,
+                                    &mut order,
+                                );
+                                if interactive && cancel.clicked() {
+                                    self.delete_confirmation = None;
+                                }
+                            });
+                        } else {
+                            ui.label(
+                                "Clear terminal history; recovery and dedupe records stay intact.",
+                            );
+                            ui.horizontal(|ui| {
+                                let confirm = ui.button("Clear Terminal History");
+                                reveal_hotfolder_target(
+                                    child_scope.as_ref(),
+                                    ui,
+                                    &confirm,
+                                    "confirm",
+                                    "Clear Terminal History",
+                                    TargetKind::Button,
+                                    &mut order,
+                                );
+                                if interactive && confirm.clicked() {
+                                    actions.push(HotFolderDialogAction::ClearHistory);
+                                    self.clear_history_confirmation = false;
+                                }
+                                let cancel = ui.button("Keep History");
+                                reveal_hotfolder_target(
+                                    child_scope.as_ref(),
+                                    ui,
+                                    &cancel,
+                                    "cancel",
+                                    "Keep History",
+                                    TargetKind::Button,
+                                    &mut order,
+                                );
+                                if interactive && cancel.clicked() {
+                                    self.clear_history_confirmation = false;
+                                }
+                            });
                         }
+                        if interactive
+                            && !egui::Popup::is_any_open(ctx)
+                            && ctx.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            })
+                        {
+                            if let Some(preview) =
+                                preview.as_ref().filter(|_| self.editor.is_none())
+                            {
+                                actions
+                                    .push(HotFolderDialogAction::CancelEnable(preview.request_id));
+                            } else if self.delete_confirmation.is_some() {
+                                self.delete_confirmation = None;
+                            } else {
+                                self.clear_history_confirmation = false;
+                            }
+                        }
+                        return;
                     }
-                    if ui.button("New Rule").clicked() && self.pending.is_none() {
-                        self.begin_new(snapshot.store.as_ref().map_or(0, |store| store.revision));
+                    if !snapshot.plugin_enabled {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "Hot Folder is disabled in Plugins. Stored rule intent is retained.",
+                        );
+                    } else if snapshot.paused {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "Paused — no new file events are admitted.",
+                        );
                     }
-                    if let Some(rule) = self.undo_delete.as_ref()
-                        && ui.button("Undo Delete").clicked()
+                    if let Some(error) = snapshot.error.as_deref() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    }
+                    if let Some(error) = self.error.as_deref() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    }
+                    if let Some(notice) = self.notice.as_deref() {
+                        ui.colored_label(egui::Color32::LIGHT_GREEN, notice);
+                    }
+                    if let Some(pending) = &self.pending
+                        && pending.request_id != 0
                     {
-                        actions.push(HotFolderDialogAction::UndoDelete(rule.clone()));
+                        ui.label("Applying control; waiting for the runtime acknowledgement…");
                     }
-                });
 
-                if let Some(store) = snapshot.store.as_ref() {
-                    ui.label(format!(
-                        "Rules: {} · quarantined rows: {} · revision {}",
-                        store.rules.len(),
-                        store.quarantined_rows.len(),
-                        store.revision
-                    ));
-                    if let Some(reason) = store.write_block_reason() {
-                        ui.colored_label(egui::Color32::LIGHT_RED, reason);
-                    }
-                    if !store.quarantined_rows.is_empty() {
-                        egui::CollapsingHeader::new("Quarantine diagnostics (raw rows preserved)")
+                    let manager_scope = if self.editor.is_none() { scope } else { None };
+                    ui.add_enabled_ui(self.editor.is_none(), |ui| {
+                        ui.horizontal(|ui| {
+                            if snapshot.plugin_enabled {
+                                if snapshot.paused {
+                                    let clicked = {
+                                        let response = ui.button("Resume");
+                                        reveal_hotfolder_target(
+                                            manager_scope,
+                                            ui,
+                                            &response,
+                                            "resume",
+                                            "Resume",
+                                            TargetKind::Button,
+                                            &mut order,
+                                        );
+                                        interactive && response.clicked()
+                                    };
+                                    if clicked {
+                                        actions.push(HotFolderDialogAction::Resume);
+                                    }
+                                } else {
+                                    let response = ui.button("Pause");
+                                    reveal_hotfolder_target(
+                                        manager_scope,
+                                        ui,
+                                        &response,
+                                        "pause",
+                                        "Pause",
+                                        TargetKind::Button,
+                                        &mut order,
+                                    );
+                                    if interactive && response.clicked() {
+                                        actions.push(HotFolderDialogAction::Pause);
+                                    }
+                                }
+                            }
+                            let clicked = {
+                                let response = ui.add_enabled(
+                                    self.pending.is_none(),
+                                    egui::Button::new("New Rule"),
+                                );
+                                reveal_hotfolder_target(
+                                    scope,
+                                    ui,
+                                    &response,
+                                    "new",
+                                    "New Rule",
+                                    TargetKind::Button,
+                                    &mut order,
+                                );
+                                interactive && response.clicked()
+                            };
+                            if clicked {
+                                self.begin_new(
+                                    snapshot.store.as_ref().map_or(0, |store| store.revision),
+                                );
+                            }
+                            if let Some(rule) = self.undo_delete.as_ref()
+                                && {
+                                    let response = ui.button("Undo Delete");
+                                    reveal_hotfolder_target(
+                                        manager_scope,
+                                        ui,
+                                        &response,
+                                        "undo",
+                                        "Undo Delete",
+                                        TargetKind::Button,
+                                        &mut order,
+                                    );
+                                    interactive && response.clicked()
+                                }
+                            {
+                                actions.push(HotFolderDialogAction::UndoDelete(rule.clone()));
+                            }
+                        })
+                    });
+
+                    if let Some(store) = snapshot.store.as_ref() {
+                        ui.label(format!(
+                            "Rules: {} · quarantined rows: {} · revision {}",
+                            store.rules.len(),
+                            store.quarantined_rows.len(),
+                            store.revision
+                        ));
+                        if let Some(reason) = store.write_block_reason() {
+                            ui.colored_label(egui::Color32::LIGHT_RED, reason);
+                        }
+                        if !store.quarantined_rows.is_empty() {
+                            egui::CollapsingHeader::new(
+                                "Quarantine diagnostics (raw rows preserved)",
+                            )
                             .show(ui, |ui| {
                                 for row in &store.quarantined_rows {
                                     ui.label(row.diagnostic.as_str());
                                 }
                             });
-                    }
-                    ui.separator();
-                    if self.editor.is_some() {
-                        self.render_editor(ui, store.revision, &mut actions);
-                    } else {
-                        self.render_rules(ui, snapshot, &mut actions);
-                    }
-                } else {
-                    ui.label("Loading stored rules…");
-                }
-
-                ui.separator();
-                self.render_runtime_status(ui, snapshot);
-                ui.separator();
-                self.render_history(ui, snapshot);
-
-                if let Some(preview) = preview.as_ref()
-                    && self.editor.is_none()
-                {
-                    ui.separator();
-                    self.render_strong_confirmation(ui, preview, &mut actions);
-                }
-                if let Some((revision, rule)) = self.delete_confirmation.clone() {
-                    ui.separator();
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        format!("Delete rule ‘{}’? It will be disabled and removed from the stored list.", rule.name),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui.button("Delete Rule").clicked() {
-                            actions.push(HotFolderDialogAction::Delete {
-                                expected_revision: revision,
-                                rule: rule.clone(),
+                        }
+                        ui.separator();
+                        if self.editor.is_some() {
+                            ui.add_enabled_ui(owner, |ui| {
+                                self.render_editor(
+                                    ui,
+                                    store.revision,
+                                    &mut actions,
+                                    scope,
+                                    interactive,
+                                    &mut order,
+                                )
                             });
-                            self.delete_confirmation = None;
+                        } else {
+                            self.render_rules(
+                                ui,
+                                snapshot,
+                                &mut actions,
+                                scope,
+                                interactive,
+                                &mut order,
+                            );
                         }
-                        if ui.button("Cancel Delete").clicked() {
-                            self.delete_confirmation = None;
-                        }
-                    });
-                }
-                if self.clear_history_confirmation {
+                    } else {
+                        ui.label("Loading stored rules…");
+                    }
+
                     ui.separator();
-                    ui.label("Clear terminal history from display and durable history. Recovery and dedupe records stay intact.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Clear Terminal History").clicked() {
-                            actions.push(HotFolderDialogAction::ClearHistory);
-                            self.clear_history_confirmation = false;
-                        }
-                        if ui.button("Keep History").clicked() {
-                            self.clear_history_confirmation = false;
-                        }
+                    self.render_runtime_status(ui, snapshot);
+                    ui.separator();
+                    ui.add_enabled_ui(self.editor.is_none(), |ui| {
+                        self.render_history(ui, snapshot, manager_scope, interactive, &mut order)
                     });
-                }
-            });
-        self.open = window_open;
+                },
+            );
+        if interactive {
+            self.open = window_open;
+        }
 
         let cancellation_pending = self
             .pending
             .as_ref()
             .is_some_and(|pending| pending.kind == PendingKind::CancelEnable);
-        if (was_open && !self.open || self.editor.is_some())
+        if interactive
+            && (was_open && !self.open || self.editor.is_some())
             && !cancellation_pending
             && let Some(preview) = preview
         {
@@ -549,6 +1008,17 @@ impl HotFolderDialog {
         self.error = None;
     }
 
+    pub(super) fn open_inbox_rule(&mut self, revision: u64, rule: HotFolderRule) -> bool {
+        if let Some(editor) = &self.editor {
+            return editor.draft.id == rule.id;
+        }
+        if self.pending.is_some() {
+            return false;
+        }
+        self.begin_edit(revision, rule);
+        true
+    }
+
     fn begin_edit(&mut self, revision: u64, rule: HotFolderRule) {
         self.editor = Some(RuleEditor::new(
             self.allocate_editor_id(),
@@ -581,6 +1051,9 @@ impl HotFolderDialog {
         ui: &mut egui::Ui,
         snapshot: &HotFolderDriverSnapshot,
         actions: &mut Vec<HotFolderDialogAction>,
+        scope: Option<&JumpModeScope>,
+        interactive: bool,
+        order: &mut u64,
     ) {
         let Some(store) = snapshot.store.as_ref() else {
             return;
@@ -594,46 +1067,101 @@ impl HotFolderDialog {
             .max_height(220.0)
             .show(ui, |ui| {
                 for rule in &store.rules {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.strong(rule.name.as_str());
-                            let state = if !rule.enabled {
-                                "Disabled"
-                            } else if snapshot.paused {
-                                "Paused"
-                            } else {
-                                "Enabled"
-                            };
-                            ui.label(state);
-                            ui.label(action_summary(&rule.action));
-                        });
-                        ui.label(format!("Watching: {}", rule.watched_root.display()));
-                        ui.label(rule_scope_summary(rule));
-                        ui.horizontal(|ui| {
-                            if ui.button("Edit").clicked() && self.pending.is_none() {
-                                self.begin_edit(store.revision, rule.clone());
-                            }
-                            if snapshot.plugin_enabled && rule.enabled {
-                                if ui.button("Disable").clicked() {
-                                    actions.push(HotFolderDialogAction::Disable {
-                                        expected_revision: store.revision,
-                                        rule_id: rule.id.clone(),
-                                    });
+                    ui.push_id(("hotfolder-rule", rule.id.as_str()), |ui| {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.strong(rule.name.as_str());
+                                let state = if !rule.enabled {
+                                    "Disabled"
+                                } else if snapshot.paused {
+                                    "Paused"
+                                } else {
+                                    "Enabled"
+                                };
+                                ui.label(state);
+                                ui.label(action_summary(&rule.action));
+                            });
+                            ui.label(format!("Watching: {}", rule.watched_root.display()));
+                            ui.label(rule_scope_summary(rule));
+                            ui.horizontal(|ui| {
+                                let clicked = {
+                                    let response = ui.add_enabled(
+                                        self.pending.is_none(),
+                                        egui::Button::new("Edit"),
+                                    );
+                                    reveal_hotfolder_target(
+                                        scope,
+                                        ui,
+                                        &response,
+                                        format!("rule/{}/edit", rule.id.as_str()),
+                                        format!("Edit {}", rule.name),
+                                        TargetKind::Button,
+                                        order,
+                                    );
+                                    interactive && response.clicked()
+                                };
+                                if clicked {
+                                    self.begin_edit(store.revision, rule.clone());
                                 }
-                            } else if snapshot.plugin_enabled
-                                && !rule.enabled
-                                && !snapshot.paused
-                                && snapshot.enable_previews.is_empty()
-                                && ui.button("Enable…").clicked()
-                            {
-                                actions.push(HotFolderDialogAction::PrepareEnable {
-                                    expected_revision: store.revision,
-                                    rule_id: rule.id.clone(),
-                                });
-                            }
-                            if ui.button("Delete…").clicked() {
-                                self.delete_confirmation = Some((store.revision, rule.clone()));
-                            }
+                                if snapshot.plugin_enabled && rule.enabled {
+                                    let clicked = {
+                                        let response = ui.button("Disable");
+                                        reveal_hotfolder_target(
+                                            scope,
+                                            ui,
+                                            &response,
+                                            format!("rule/{}/disable", rule.id.as_str()),
+                                            format!("Disable {}", rule.name),
+                                            TargetKind::Button,
+                                            order,
+                                        );
+                                        interactive && response.clicked()
+                                    };
+                                    if clicked {
+                                        actions.push(HotFolderDialogAction::Disable {
+                                            expected_revision: store.revision,
+                                            rule_id: rule.id.clone(),
+                                        });
+                                    }
+                                } else if snapshot.plugin_enabled
+                                    && !rule.enabled
+                                    && !snapshot.paused
+                                    && snapshot.enable_previews.is_empty()
+                                {
+                                    let response = ui.button("Enable…");
+                                    reveal_hotfolder_target(
+                                        scope,
+                                        ui,
+                                        &response,
+                                        format!("rule/{}/enable", rule.id.as_str()),
+                                        format!("Enable {}", rule.name),
+                                        TargetKind::Button,
+                                        order,
+                                    );
+                                    if interactive && response.clicked() {
+                                        actions.push(HotFolderDialogAction::PrepareEnable {
+                                            expected_revision: store.revision,
+                                            rule_id: rule.id.clone(),
+                                        });
+                                    }
+                                }
+                                let clicked = {
+                                    let response = ui.button("Delete…");
+                                    reveal_hotfolder_target(
+                                        scope,
+                                        ui,
+                                        &response,
+                                        format!("rule/{}/delete", rule.id.as_str()),
+                                        format!("Delete {}", rule.name),
+                                        TargetKind::Button,
+                                        order,
+                                    );
+                                    interactive && response.clicked()
+                                };
+                                if clicked {
+                                    self.delete_confirmation = Some((store.revision, rule.clone()));
+                                }
+                            });
                         });
                     });
                 }
@@ -645,10 +1173,60 @@ impl HotFolderDialog {
         ui: &mut egui::Ui,
         current_revision: u64,
         actions: &mut Vec<HotFolderDialogAction>,
+        scope: Option<&JumpModeScope>,
+        interactive: bool,
+        order: &mut u64,
     ) {
         let Some(mut editor) = self.editor.take() else {
             return;
         };
+        let editor_scope =
+            scope.map(|scope| scope.child_namespace(format!("editor/{}", editor.editor_id)));
+        let scope = editor_scope.as_ref();
+        if editor.picker_open {
+            let child = scope.map(|scope| scope.child_namespace("action-picker"));
+            render_action_picker(
+                ui,
+                &mut editor,
+                self.picker_targets.as_deref().unwrap_or_default(),
+                self.picker_macros.as_deref(),
+                child.as_ref(),
+                order,
+            );
+            let cancel = ui.button("Close target picker");
+            reveal_hotfolder_target(
+                child.as_ref(),
+                ui,
+                &cancel,
+                "close",
+                "Close target picker",
+                TargetKind::Button,
+                order,
+            );
+            if interactive
+                && (cancel.clicked()
+                    || ui.ctx().input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    }))
+            {
+                editor.picker_open = false;
+            }
+            if !editor.picker_open {
+                self.picker_targets = None;
+                self.picker_macros = None;
+            }
+            self.editor = Some(editor);
+            return;
+        }
+        self.popup_anchors.clear();
+        self.popup_viewport = Some(ui.ctx().viewport_id());
+        macro_rules! target {
+            ($ui:expr, $response:expr, $id:expr, $label:expr, $kind:expr) => {{
+                let response = $response;
+                reveal_hotfolder_target(scope, $ui, &response, $id, $label, $kind, order);
+                response
+            }};
+        }
         let old_draft = editor.draft.clone();
         let old_glob = editor.glob_text.clone();
         let old_extensions = editor.extensions_text.clone();
@@ -670,72 +1248,158 @@ impl HotFolderDialog {
             .num_columns(2)
             .show(ui, |ui| {
                 ui.label("Rule name");
-                ui.text_edit_singleline(&mut editor.draft.name);
+                target!(
+                    ui,
+                    ui.text_edit_singleline(&mut editor.draft.name),
+                    "name",
+                    "Rule name",
+                    TargetKind::TextEntry
+                );
                 ui.end_row();
 
                 ui.label("Watched directory");
                 ui.horizontal(|ui| {
                     ui.label(editor.draft.watched_root.display().to_string());
-                    if ui.button("Choose directory…").clicked() {
+                    if target!(
+                        ui,
+                        ui.button("Choose directory…"),
+                        "watched",
+                        "Choose watched directory",
+                        TargetKind::Button
+                    )
+                    .clicked()
+                    {
                         requested_picker = Some(0_u8);
                     }
                 });
                 ui.end_row();
 
                 ui.label("Trigger");
-                egui::ComboBox::from_id_salt("hotfolder_trigger")
+                let popup_scope = scope.map(|scope| scope.combo_popup_scope("trigger"));
+                let trigger = egui::ComboBox::from_id_salt("hotfolder_trigger")
                     .selected_text(match editor.draft.trigger {
                         RuleTrigger::NewFile => "New file",
                         RuleTrigger::ModifiedFile => "Modified file",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut editor.draft.trigger,
-                            RuleTrigger::NewFile,
-                            "New file",
-                        );
-                        ui.selectable_value(
-                            &mut editor.draft.trigger,
-                            RuleTrigger::ModifiedFile,
-                            "Modified file",
-                        );
-                    });
+                        for (value, label) in [
+                            (RuleTrigger::NewFile, "New file"),
+                            (RuleTrigger::ModifiedFile, "Modified file"),
+                        ] {
+                            let response = ui
+                                .push_id(label, |ui| {
+                                    ui.selectable_value(&mut editor.draft.trigger, value, label)
+                                })
+                                .inner;
+                            reveal_hotfolder_target(
+                                popup_scope.as_ref(),
+                                ui,
+                                &response,
+                                format!("option/{label}"),
+                                label,
+                                TargetKind::Selectable,
+                                order,
+                            );
+                        }
+                    })
+                    .response;
+                reveal_hotfolder_target(
+                    scope,
+                    ui,
+                    &trigger,
+                    "trigger",
+                    "Trigger",
+                    TargetKind::ComboBox,
+                    order,
+                );
+                self.popup_anchors.push((trigger.id, trigger.layer_id));
                 ui.end_row();
 
                 ui.label("Filename glob (* and ?)");
-                ui.text_edit_singleline(&mut editor.glob_text);
+                target!(
+                    ui,
+                    ui.text_edit_singleline(&mut editor.glob_text),
+                    "glob",
+                    "Filename glob",
+                    TargetKind::TextEntry
+                );
                 ui.end_row();
 
                 ui.label("Extensions (comma separated)");
-                ui.text_edit_singleline(&mut editor.extensions_text);
+                target!(
+                    ui,
+                    ui.text_edit_singleline(&mut editor.extensions_text),
+                    "extensions",
+                    "Extensions",
+                    TargetKind::TextEntry
+                );
                 ui.end_row();
 
                 ui.label("Scope");
                 ui.vertical(|ui| {
-                    ui.checkbox(&mut editor.draft.include_subfolders, "Include subfolders");
-                    ui.checkbox(
-                        &mut editor.draft.include_temporary_files,
-                        "Include .part and .crdownload files",
+                    target!(
+                        ui,
+                        ui.checkbox(&mut editor.draft.include_subfolders, "Include subfolders"),
+                        "subfolders",
+                        "Include subfolders",
+                        TargetKind::Checkbox
+                    );
+                    target!(
+                        ui,
+                        ui.checkbox(
+                            &mut editor.draft.include_temporary_files,
+                            "Include .part and .crdownload files"
+                        ),
+                        "temporary",
+                        "Include temporary files",
+                        TargetKind::Checkbox
                     );
                 });
                 ui.end_row();
 
                 ui.label("Settle policy");
                 ui.horizontal(|ui| {
-                    ui.add(
+                    let response = ui.add(
                         egui::DragValue::new(&mut editor.draft.settle.sample_interval_ms)
                             .range(50..=5000)
                             .suffix(" ms interval"),
                     );
-                    ui.add(
+                    reveal_hotfolder_target(
+                        scope,
+                        ui,
+                        &response,
+                        "settle-interval",
+                        "Sample interval",
+                        TargetKind::TextEntry,
+                        order,
+                    );
+                    let response = ui.add(
                         egui::DragValue::new(&mut editor.draft.settle.stable_observations)
                             .range(2..=10)
                             .suffix(" stable observations"),
                     );
-                    ui.add(
+                    reveal_hotfolder_target(
+                        scope,
+                        ui,
+                        &response,
+                        "settle-observations",
+                        "Stable observations",
+                        TargetKind::TextEntry,
+                        order,
+                    );
+                    let response = ui.add(
                         egui::DragValue::new(&mut editor.draft.settle.timeout_ms)
                             .range(100..=30000)
                             .suffix(" ms timeout"),
+                    );
+                    reveal_hotfolder_target(
+                        scope,
+                        ui,
+                        &response,
+                        "settle-timeout",
+                        "Settle timeout",
+                        TargetKind::TextEntry,
+                        order,
                     );
                 });
                 ui.end_row();
@@ -749,9 +1413,14 @@ impl HotFolderDialog {
                         ActionChoice::RegisteredAction,
                         ActionChoice::MkMacro,
                     ] {
-                        if ui
-                            .selectable_label(editor.action_choice == choice, choice.label())
-                            .clicked()
+                        if target!(
+                            ui,
+                            ui.selectable_label(editor.action_choice == choice, choice.label()),
+                            format!("action/{}", choice.label()),
+                            choice.label(),
+                            TargetKind::Selectable
+                        )
+                        .clicked()
                         {
                             select_action_choice(&mut editor, choice);
                         }
@@ -767,7 +1436,15 @@ impl HotFolderDialog {
                         ui.label("Destination directory");
                         ui.horizontal(|ui| {
                             ui.label(destination.display().to_string());
-                            if ui.button("Choose directory…").clicked() {
+                            if target!(
+                                ui,
+                                ui.button("Choose directory…"),
+                                "destination",
+                                "Choose destination directory",
+                                TargetKind::Button
+                            )
+                            .clicked()
+                            {
                                 requested_picker = Some(1);
                             }
                         });
@@ -775,10 +1452,22 @@ impl HotFolderDialog {
                     }
                     (RuleAction::Rename { prefix, suffix }, ActionChoice::Rename) => {
                         ui.label("Rename prefix");
-                        ui.text_edit_singleline(prefix);
+                        target!(
+                            ui,
+                            ui.text_edit_singleline(prefix),
+                            "rename-prefix",
+                            "Rename prefix",
+                            TargetKind::TextEntry
+                        );
                         ui.end_row();
                         ui.label("Rename suffix");
-                        ui.text_edit_singleline(suffix);
+                        target!(
+                            ui,
+                            ui.text_edit_singleline(suffix),
+                            "rename-suffix",
+                            "Rename suffix",
+                            TargetKind::TextEntry
+                        );
                         ui.end_row();
                     }
                     (
@@ -789,7 +1478,15 @@ impl HotFolderDialog {
                         ui.label("Exact action");
                         ui.horizontal(|ui| {
                             ui.label(action_summary(&editor.draft.action));
-                            if ui.button("Choose exact current target…").clicked() {
+                            if target!(
+                                ui,
+                                ui.button("Choose exact current target…"),
+                                "choose-target",
+                                "Choose exact target",
+                                TargetKind::Button
+                            )
+                            .clicked()
+                            {
                                 editor.picker_open = !editor.picker_open;
                                 if !editor.picker_open {
                                     self.picker_targets = None;
@@ -810,69 +1507,63 @@ impl HotFolderDialog {
                 }
             });
 
-        if editor.picker_open {
-            render_action_picker(
-                ui,
-                &mut editor,
-                self.picker_targets.as_deref().unwrap_or_default(),
-                self.picker_macros.as_ref(),
-            );
-            if !editor.picker_open {
-                self.picker_targets = None;
-                self.picker_macros = None;
-            }
-        }
-        if let Some(field) = requested_picker {
-            match field {
-                0 => {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        editor.draft.watched_root = path;
-                    }
-                }
-                1 => {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder()
-                        && let RuleAction::Copy { destination } | RuleAction::Move { destination } =
-                            &mut editor.draft.action
-                    {
-                        *destination = path;
-                    }
-                }
-                _ => {}
-            }
-        }
-
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Sample file (read-only metadata only)");
-            if ui.button("Choose sample file…").clicked()
-                && let Some(path) = rfd::FileDialog::new().pick_file()
+            if target!(
+                ui,
+                ui.button("Choose sample file…"),
+                "sample",
+                "Choose sample file",
+                TargetKind::Button
+            )
+            .clicked()
             {
-                editor.sample_path = Some(path);
+                requested_picker = Some(2);
             }
             ui.label(editor.sample_path.as_ref().map_or_else(
                 || "No sample selected".into(),
                 |path| path.display().to_string(),
             ));
         });
-        egui::ComboBox::from_id_salt("hotfolder_test_event")
+        let popup_scope = scope.map(|scope| scope.combo_popup_scope("sample-event"));
+        let sample_event = egui::ComboBox::from_id_salt("hotfolder_test_event")
             .selected_text(event_label(editor.sample_event))
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut editor.sample_event,
+                for value in [
                     HotFolderEventKind::Created,
-                    "Created",
-                );
-                ui.selectable_value(
-                    &mut editor.sample_event,
                     HotFolderEventKind::Modified,
-                    "Modified",
-                );
-                ui.selectable_value(
-                    &mut editor.sample_event,
                     HotFolderEventKind::RenamedTo,
-                    "Renamed to",
-                );
-            });
+                ] {
+                    let label = event_label(value);
+                    let response = ui
+                        .push_id(label, |ui| {
+                            ui.selectable_value(&mut editor.sample_event, value, label)
+                        })
+                        .inner;
+                    reveal_hotfolder_target(
+                        popup_scope.as_ref(),
+                        ui,
+                        &response,
+                        format!("option/{label}"),
+                        label,
+                        TargetKind::Selectable,
+                        order,
+                    );
+                }
+            })
+            .response;
+        reveal_hotfolder_target(
+            scope,
+            ui,
+            &sample_event,
+            "sample-event",
+            "Sample event",
+            TargetKind::ComboBox,
+            order,
+        );
+        self.popup_anchors
+            .push((sample_event.id, sample_event.layer_id));
 
         editor.validate();
         if let Some(error) = editor.validation_error.as_deref() {
@@ -895,14 +1586,19 @@ impl HotFolderDialog {
 
         ui.horizontal(|ui| {
             let saving = self.pending.is_some();
-            if ui
-                .add_enabled(
+            if target!(
+                ui,
+                ui.add_enabled(
                     !saving
                         && editor.validation_error.is_none()
                         && editor.expected_revision == current_revision,
                     egui::Button::new("Save Disabled Rule"),
-                )
-                .clicked()
+                ),
+                "save",
+                "Save Disabled Rule",
+                TargetKind::Button
+            )
+            .clicked()
             {
                 let mut rule = editor.draft.clone();
                 rule.enabled = false;
@@ -917,20 +1613,36 @@ impl HotFolderDialog {
                     },
                 });
             }
-            if ui
-                .add_enabled(
+            if target!(
+                ui,
+                ui.add_enabled(
                     !saving && editor.sample_path.is_some(),
                     egui::Button::new("Test Rule (zero effects)"),
-                )
-                .clicked()
+                ),
+                "test",
+                "Test Rule (zero effects)",
+                TargetKind::Button
+            )
+            .clicked()
                 && let Some(action) = sample_test_action(&editor)
             {
                 actions.push(action);
             }
-            if ui
-                .add_enabled(!saving, egui::Button::new("Cancel Draft"))
-                .clicked()
-            {
+            let cancel = target!(
+                ui,
+                ui.add_enabled(!saving, egui::Button::new("Cancel Draft")),
+                "cancel",
+                "Cancel Draft",
+                TargetKind::Button
+            );
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::new("test_hotfolder_editor_cancel"),
+                    (cancel.id, cancel.rect, ui.clip_rect()),
+                )
+            });
+            if cancel.clicked() {
                 cancel_draft = true;
                 self.picker_targets = None;
                 self.picker_macros = None;
@@ -942,11 +1654,22 @@ impl HotFolderDialog {
         {
             self.render_test_result(ui, result);
         }
+        if interactive && let Some(field) = requested_picker {
+            let kind = match field {
+                0 => HotFolderPathKind::WatchedDirectory,
+                1 => HotFolderPathKind::DestinationDirectory,
+                _ => HotFolderPathKind::SampleFile,
+            };
+            actions.push(HotFolderDialogAction::ChoosePath {
+                editor_id: editor.editor_id,
+                draft_revision: editor.draft_revision,
+                kind,
+            });
+        }
         if !cancel_draft {
             self.editor = Some(editor);
         } else {
             self.editor = None;
-            self.retire_sample_test();
         }
     }
 
@@ -1050,17 +1773,44 @@ impl HotFolderDialog {
         }
     }
 
-    fn render_history(&mut self, ui: &mut egui::Ui, snapshot: &HotFolderDriverSnapshot) {
+    fn render_history(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &HotFolderDriverSnapshot,
+        scope: Option<&JumpModeScope>,
+        interactive: bool,
+        order: &mut u64,
+    ) {
         ui.horizontal(|ui| {
             ui.heading("Terminal history");
-            ui.checkbox(&mut self.show_full_paths, "Show full paths");
-            if ui
-                .add_enabled(
-                    snapshot.execution.is_some(),
-                    egui::Button::new("Clear History…"),
-                )
-                .clicked()
-            {
+            let mut show = self.show_full_paths;
+            let response = ui.checkbox(&mut show, "Show full paths");
+            reveal_hotfolder_target(
+                scope,
+                ui,
+                &response,
+                "history/paths",
+                "Show full paths",
+                TargetKind::Checkbox,
+                order,
+            );
+            if interactive {
+                self.show_full_paths = show;
+            }
+            let clear = ui.add_enabled(
+                snapshot.execution.is_some(),
+                egui::Button::new("Clear History…"),
+            );
+            reveal_hotfolder_target(
+                scope,
+                ui,
+                &clear,
+                "history/clear",
+                "Clear History",
+                TargetKind::Button,
+                order,
+            );
+            if interactive && clear.clicked() {
                 self.clear_history_confirmation = true;
             }
         });
@@ -1136,6 +1886,9 @@ impl HotFolderDialog {
         ui: &mut egui::Ui,
         preview: &HotFolderEnablePreview,
         actions: &mut Vec<HotFolderDialogAction>,
+        scope: Option<&JumpModeScope>,
+        interactive: bool,
+        order: &mut u64,
     ) {
         ui.group(|ui| {
             ui.colored_label(egui::Color32::YELLOW, "Confirm this exact unattended action");
@@ -1151,13 +1904,9 @@ impl HotFolderDialog {
                 ui.label(format!("Capability: {enablement:?}"));
             }
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        self.pending.is_none(),
-                        egui::Button::new("Confirm Enable"),
-                    )
-                    .clicked()
-                {
+                let confirm = ui.add_enabled(self.pending.is_none(), egui::Button::new("Confirm Enable"));
+                reveal_hotfolder_target(scope, ui, &confirm, "confirm", "Confirm Enable", TargetKind::Button, order);
+                if interactive && confirm.clicked() {
                     let confirmation = StrongActionConfirmation::from_explicit_confirmation(
                         preview.rule.id.clone(),
                         preview.resulting_revision,
@@ -1168,13 +1917,9 @@ impl HotFolderDialog {
                         confirmation,
                     });
                 }
-                if ui
-                    .add_enabled(
-                        self.pending.is_none(),
-                        egui::Button::new("Cancel Enable"),
-                    )
-                    .clicked()
-                {
+                let cancel = ui.add_enabled(self.pending.is_none(), egui::Button::new("Cancel Enable"));
+                reveal_hotfolder_target(scope, ui, &cancel, "cancel", "Cancel Enable", TargetKind::Button, order);
+                if interactive && cancel.clicked() {
                     actions.push(HotFolderDialogAction::CancelEnable(preview.request_id));
                 }
             });
@@ -1413,6 +2158,8 @@ fn render_action_picker(
     editor: &mut RuleEditor,
     targets: &[ResolvedActionTarget],
     macros: Option<&MkMacroDocument>,
+    scope: Option<&JumpModeScope>,
+    order: &mut u64,
 ) {
     ui.group(|ui| {
         ui.label("Select an exact current target. Unavailable or interactive actions cannot be enabled.");
@@ -1429,7 +2176,9 @@ fn render_action_picker(
                         let target_ref = target.target.persistent_ref();
                         ui.push_id(format!("hotfolder-target-{target_ref:?}"), |ui| {
                             let detail = format!("{} · {:?}", target.selected_action.label, target_ref);
-                            if ui.button(detail).clicked() {
+                            let response = ui.button(detail);
+                            reveal_hotfolder_target(scope, ui, &response, format!("launcher/{target_ref:?}"), "Select launcher action", TargetKind::Button, order);
+                            if response.clicked() {
                                 editor.draft.action = action;
                                 editor.picker_open = false;
                                 editor.changed();
@@ -1442,6 +2191,7 @@ fn render_action_picker(
                 if let Some(macros) = macros {
                     egui::ScrollArea::vertical().max_height(170.0).show(ui, |ui| {
                         for macro_ in &macros.macros {
+                            ui.push_id(("macro", macro_.id), |ui| {
                             let binding = crate::hotfolder::bind_mkmacro_action(macros, macro_.id);
                             let label = format!(
                                 "ID {} · {}{}",
@@ -1453,6 +2203,7 @@ fn render_action_picker(
                                 binding.is_ok() && macro_.enabled,
                                 egui::Button::new(label),
                             );
+                            reveal_hotfolder_target(scope, ui, &response, format!("macro/{}", macro_.id), format!("Select macro {}", macro_.name), TargetKind::Button, order);
                             match binding {
                                 Ok(action) if response.clicked() => {
                                     editor.draft.action = action;
@@ -1464,6 +2215,7 @@ fn render_action_picker(
                                 }
                                 _ => {}
                             }
+                            });
                         }
                     });
                 } else {
@@ -1473,9 +2225,6 @@ fn render_action_picker(
             _ => {
                 ui.label("Choose Registered launcher action or MkMacro to open this exact-target picker.");
             }
-        }
-        if ui.button("Close Picker").clicked() {
-            editor.picker_open = false;
         }
     });
 }
@@ -1621,6 +2370,110 @@ mod m10e_editor_fixtures {
     }
 
     #[test]
+    fn hotfolder_tab_reveals_the_clipped_editor_footer() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let mut dialog = HotFolderDialog::default();
+        dialog.open();
+        dialog.begin_new(0);
+        let snapshot = HotFolderDriverSnapshot {
+            loaded: true,
+            store: Some(crate::hotfolder::HotFolderRulesSnapshot::for_preview(
+                dialog.editor.as_ref().unwrap().draft.clone(),
+            )),
+            ..Default::default()
+        };
+        let frame = |dialog: &mut HotFolderDialog, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(720.0, 410.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let actions = dialog.ui(ui.ctx(), &snapshot, true, true, None);
+                    assert!(actions.is_empty());
+                },
+            )
+            .drop_without_applying_deltas();
+            ctx.data(|data| {
+                data.get_temp::<(egui::Id, egui::Rect, egui::Rect)>(egui::Id::new(
+                    "test_hotfolder_editor_cancel",
+                ))
+                .unwrap()
+            })
+        };
+        let mut initial = frame(&mut dialog, Vec::new());
+        for _ in 0..3 {
+            initial = frame(&mut dialog, Vec::new());
+        }
+        let (cancel, rect, clip) = initial;
+        assert!(!clip.contains_rect(rect), "the footer starts off screen");
+        let key = |pressed| egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for _ in 0..48 {
+            frame(&mut dialog, vec![key(true)]);
+            frame(&mut dialog, vec![key(false)]);
+            if ctx.memory(|memory| memory.focused()) == Some(cancel) {
+                break;
+            }
+        }
+        let (_, rect, clip) = frame(&mut dialog, Vec::new());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(cancel));
+        assert!(clip.contains_rect(rect), "the focused footer is revealed");
+        assert!(dialog.editor.is_some(), "focus does not dismiss the draft");
+    }
+
+    #[test]
+    fn hotfolder_editor_popup_and_path_ticket_are_bound() {
+        let ctx = egui::Context::default();
+        let mut dialog = HotFolderDialog::default();
+        dialog.open();
+        dialog.begin_new(0);
+        let (id, revision) = {
+            let editor = dialog.editor.as_ref().unwrap();
+            (editor.editor_id, editor.draft_revision)
+        };
+        let mut actions = Vec::new();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            dialog.render_editor(ui, 0, &mut actions, None, true, &mut 0);
+        })
+        .drop_without_applying_deltas();
+        let (anchor, base) = dialog.popup_anchors[0];
+        egui::Popup::open_id(&ctx, anchor.with("popup"));
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            dialog.render_editor(ui, 0, &mut actions, None, true, &mut 0);
+        })
+        .drop_without_applying_deltas();
+        assert!(dialog.owned_popup_layer(&ctx, base).is_some());
+        assert!(dialog.complete_path_choice(
+            id,
+            revision,
+            HotFolderPathKind::WatchedDirectory,
+            Some(PathBuf::from(r"C:\watched"))
+        ));
+        assert!(!dialog.complete_path_choice(
+            id,
+            revision,
+            HotFolderPathKind::SampleFile,
+            Some(PathBuf::from(r"C:\old.txt"))
+        ));
+        assert!(actions.is_empty());
+    }
+
+    #[test]
     fn m10e_test_rule_reads_sample_metadata_without_live_runtime_effects() {
         let fixture_parent = std::env::current_dir()
             .expect("resolve repository root")
@@ -1723,7 +2576,7 @@ mod m10e_editor_fixtures {
         let mut rendered_actions = Vec::new();
         context
             .run_ui(egui::RawInput::default(), |ctx| {
-                rendered_actions = dialog.ui(ctx, &before);
+                rendered_actions = dialog.ui(ctx, &before, true, true, None);
             })
             .drop_without_applying_deltas();
         assert!(
@@ -1744,7 +2597,7 @@ mod m10e_editor_fixtures {
             let snapshot = driver.snapshot();
             context
                 .run_ui(egui::RawInput::default(), |ctx| {
-                    let _ = dialog.ui(ctx, &snapshot);
+                    let _ = dialog.ui(ctx, &snapshot, true, true, None);
                 })
                 .drop_without_applying_deltas();
             std::thread::yield_now();

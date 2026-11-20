@@ -1,6 +1,5 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use rand::distr::Alphanumeric;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::sync::Mutex;
@@ -34,6 +33,14 @@ impl Default for RandomPlugin {
 impl Plugin for RandomPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
+        if trimmed.eq_ignore_ascii_case("password") {
+            return vec![Action {
+                label: "Open Password Generator".into(),
+                desc: "Generate passwords and passphrases".into(),
+                action: "password:generator".into(),
+                args: None,
+            }];
+        }
         let rest = if let Some(r) = crate::common::strip_prefix_ci(trimmed, "rand ") {
             r
         } else if let Some(r) = crate::common::strip_prefix_ci(trimmed, "random ") {
@@ -87,23 +94,17 @@ impl Plugin for RandomPlugin {
                 if parts.len() != 2 {
                     return Vec::new();
                 }
-                if let Ok(len) = parts[1].parse::<usize>() {
-                    let mut rng = match self.rng.lock() {
-                        Ok(rng) => rng,
-                        Err(err) => {
-                            tracing::error!(?err, "random plugin rng lock poisoned");
-                            return Vec::new();
-                        }
-                    };
-                    let pw: String = (&mut *rng)
-                        .sample_iter(Alphanumeric)
-                        .take(len)
-                        .map(char::from)
-                        .collect();
+                let raw = parts[1];
+                if !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Vec::new();
+                }
+                if let Ok(length) = raw.parse::<usize>()
+                    && crate::password_generator::PASSWORD_LENGTH_RANGE.contains(&length)
+                {
                     return vec![Action {
-                        label: pw.clone(),
-                        desc: "Random password".into(),
-                        action: format!("clipboard:{pw}"),
+                        label: "Generate and copy password".into(),
+                        desc: format!("Password length: {length}"),
+                        action: format!("password:copy:{length}"),
                         args: None,
                     }];
                 }
@@ -140,6 +141,12 @@ impl Plugin for RandomPlugin {
                 args: None,
             },
             Action {
+                label: "password".into(),
+                desc: "Open Password Generator".into(),
+                action: "query:password".into(),
+                args: None,
+            },
+            Action {
                 label: "rand pw <len>".into(),
                 desc: "Random password".into(),
                 action: "query:rand pw ".into(),
@@ -153,6 +160,26 @@ impl Plugin for RandomPlugin {
 mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn password_generator_discovery_is_an_exact_payload_free_open() {
+        let plugin = RandomPlugin::from_seed(7);
+        let result = plugin.search(" PASSWORD ");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].action, "password:generator");
+        assert!(result[0].args.is_none());
+        assert_eq!(
+            crate::commands::parse_action(&result[0]).unwrap(),
+            crate::commands::Command::Dialog(crate::commands::DialogCommand::PasswordGenerator)
+        );
+        assert!(plugin.search("password extra").is_empty());
+        assert!(
+            plugin
+                .commands()
+                .iter()
+                .any(|command| command.action == "query:password")
+        );
+    }
 
     #[test]
     fn poisoned_rng_lock_falls_back_without_panic() {

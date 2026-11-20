@@ -6,7 +6,7 @@
 use crate::hotfolder::{
     ActionCapability, ActionEnablement, ConfigurationFingerprint, HotFolderCapabilityContext,
     HotFolderEnableRequest, HotFolderEventKind, HotFolderExecutionControl,
-    HotFolderExecutionEngine, HotFolderExecutionProgress, HotFolderExecutionSnapshot,
+    HotFolderExecutionEngine, HotFolderExecutionProgress, HotFolderExecutionSnapshot, HotFolderRunDisposition,
     HotFolderRule, HotFolderRuntimeSnapshot, HotFolderStoreError, HotFolderWatchService,
     RootAvailability, RuleAction, RuleId, StrongActionConfirmation, evaluate_action_capability,
     evaluate_rule_conditions,
@@ -201,21 +201,23 @@ impl HotFolderRuntimeDriver {
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
     ) -> Self {
-        Self::new_with_optional_activity(data_root, adapter, None)
+        Self::new_with_optional_activity(data_root, adapter, None, None)
     }
 
     pub(crate) fn new_with_activity(
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
         activity_center: crate::activity::ActivityCenter,
+        inbox: Option<crate::notifications::InboxPublisher>,
     ) -> Self {
-        Self::new_with_optional_activity(data_root, adapter, Some(activity_center))
+        Self::new_with_optional_activity(data_root, adapter, Some(activity_center), inbox)
     }
 
     fn new_with_optional_activity(
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
         activity_center: Option<crate::activity::ActivityCenter>,
+        inbox: Option<crate::notifications::InboxPublisher>,
     ) -> Self {
         let repair_store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
         let (sender, receiver) = mpsc::sync_channel(DRIVER_QUEUE_CAPACITY);
@@ -237,6 +239,7 @@ impl HotFolderRuntimeDriver {
                     worker_shutdown,
                     worker_snapshot,
                     activity_center,
+                    inbox,
                 )
             })
             .expect("Hot Folder app driver thread must start");
@@ -783,6 +786,7 @@ fn driver_main(
     shutdown_requested: Arc<AtomicBool>,
     published: Arc<RwLock<HotFolderDriverSnapshot>>,
     activity_center: Option<crate::activity::ActivityCenter>,
+    inbox: Option<crate::notifications::InboxPublisher>,
 ) {
     let mut store_loaded = false;
     let mut inputs = HotFolderCapabilityInputs::empty();
@@ -880,8 +884,14 @@ fn driver_main(
                     engine.run_next_ready(watcher, &store, &context)
                 })
             });
-            if let Err(error) = result {
-                last_error = Some(format!("Hot Folder execution failed: {error:?}"));
+            match result {
+                Ok(Some(HotFolderRunDisposition::Executed(receipt))) => {
+                    if let Some(inbox) = &inbox {
+                        crate::notifications::publish_hot_folder(inbox, &receipt);
+                    }
+                }
+                Err(error) => last_error = Some(format!("Hot Folder execution failed: {error:?}")),
+                _ => {}
             }
         }
         publish_driver_snapshot(
@@ -1441,7 +1451,39 @@ impl super::LauncherApp {
         self.egui_ctx.request_repaint();
     }
 
-    pub(crate) fn render_hotfolder_manager(&mut self, ctx: &eframe::egui::Context, dispatch: bool) {
+    fn hotfolder_manager_owner_current(
+        &self,
+        ctx: &eframe::egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        let layer = eframe::egui::LayerId::new(
+            eframe::egui::Order::Middle,
+            eframe::egui::Id::new("hotfolder_manager_window"),
+        );
+        let popup = self.hotfolder_dialog.owned_popup_layer(ctx, layer);
+        self.hotfolder_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            && (!eframe::egui::Popup::is_any_open(ctx) || popup.is_some())
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer
+                    || Some(focus) == popup
+                    || focus.order == eframe::egui::Order::Background
+            })
+    }
+
+    pub(super) fn hotfolder_inline_owns_escape(
+        &self,
+        ctx: &eframe::egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        self.hotfolder_manager_owner_current(ctx, root_visible)
+            && self
+                .hotfolder_dialog
+                .owns_inline_escape(&self.hotfolder_runtime.snapshot())
+    }
+
+    pub(crate) fn render_hotfolder_manager(&mut self, ctx: &eframe::egui::Context, first: bool) {
         let snapshot = self.hotfolder_runtime.snapshot();
         let root_visible = self.visible_flag.load(std::sync::atomic::Ordering::Relaxed);
         if !self
@@ -1450,22 +1492,103 @@ impl super::LauncherApp {
         {
             return;
         }
-        if self.hotfolder_dialog.needs_picker_snapshot() {
+        if first {
+            self.hotfolder_dialog.poll_background(&snapshot);
+        }
+        if first && self.hotfolder_dialog.needs_picker_snapshot() {
             let inputs = self.hotfolder_capability_inputs();
             self.hotfolder_dialog
                 .set_picker_snapshot(inputs.launcher_targets, inputs.mkmacro_document);
         }
-        let actions = self.hotfolder_dialog.ui(ctx, &snapshot);
-        if dispatch {
-            self.dispatch_hotfolder_dialog_actions(
-                actions,
-                snapshot.store.as_ref().map(|s| s.revision),
-            );
+        let owner = self.hotfolder_manager_owner_current(ctx, root_visible);
+        let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match nav {
+            super::jump_mode::ui::NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::HotFolder,
+                instance,
+            } if owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("hotfolder-manager", instance),
+                super::jump_mode::TargetGeneration(
+                    self.hotfolder_dialog.jump_generation(&snapshot),
+                ),
+                "hotfolder-manager/form",
+                ctx.viewport_id(),
+                nav,
+                false,
+            ),
+            _ => None,
+        }
+        .map(|scope| {
+            if first && !ctx.will_discard() {
+                scope
+            } else {
+                scope.registration_only()
+            }
+        });
+        self.hotfolder_dialog
+            .stage_root(ctx, &snapshot, owner, first, scope.as_ref());
+    }
+
+    pub(super) fn complete_hotfolder_manager(&mut self, ctx: &eframe::egui::Context) {
+        if let Some((actions, revision)) = self.hotfolder_dialog.complete_root(ctx) {
+            self.dispatch_hotfolder_dialog_actions(ctx, actions, revision);
+        }
+    }
+
+    fn choose_hotfolder_path(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        editor_id: u128,
+        draft_revision: u64,
+        kind: super::hotfolder_dialog::HotFolderPathKind,
+    ) {
+        use super::hotfolder_dialog::HotFolderPathKind;
+
+        if !self
+            .hotfolder_dialog
+            .editor_is_current(editor_id, draft_revision)
+        {
+            return;
+        }
+        #[cfg(windows)]
+        let (hwnd, generation) = self.root_window_bridge.identity();
+        #[cfg(windows)]
+        let picker = {
+            let parent = std::num::NonZeroIsize::new(hwnd as isize)
+                .filter(|_| self.launcher_hwnd == Some(hwnd))
+                .filter(|_| self.root_window_bridge.is_current(hwnd, generation));
+            let Some(parent) = parent else {
+                self.hotfolder_dialog.submission_failed(
+                    "Cannot verify the Hot Folder picker window. Focus the manager and try again.",
+                );
+                return;
+            };
+            rfd::FileDialog::new().set_parent(&super::add_action_dialog::NativeDialogParent(parent))
+        };
+        #[cfg(not(windows))]
+        let picker = rfd::FileDialog::new();
+
+        let path = match kind {
+            HotFolderPathKind::WatchedDirectory | HotFolderPathKind::DestinationDirectory => {
+                picker.pick_folder()
+            }
+            HotFolderPathKind::SampleFile => picker.pick_file(),
+        };
+        #[cfg(windows)]
+        if !self.root_window_bridge.is_current(hwnd, generation) {
+            return;
+        }
+        if self
+            .hotfolder_dialog
+            .complete_path_choice(editor_id, draft_revision, kind, path)
+        {
+            ctx.request_repaint();
         }
     }
 
     fn dispatch_hotfolder_dialog_actions(
         &mut self,
+        ctx: &eframe::egui::Context,
         actions: Vec<super::hotfolder_dialog::HotFolderDialogAction>,
         current_revision: Option<u64>,
     ) {
@@ -1583,6 +1706,10 @@ impl super::LauncherApp {
                     PendingKind::ClearHistory,
                     None,
                 ),
+                Action::ChoosePath { editor_id, draft_revision, kind } => {
+                    self.choose_hotfolder_path(ctx, editor_id, draft_revision, kind);
+                    continue;
+                }
                 Action::TestRule {
                     editor_id,
                     rule,
@@ -2185,7 +2312,7 @@ mod m10e_driver_lifecycle_fixtures {
         let frame_started = Instant::now();
         dialog_context
             .run_ui(eframe::egui::RawInput::default(), |ctx| {
-                let _ = dialog.ui(ctx, &live);
+                let _ = dialog.ui(ctx, &live, true, true, None);
             })
             .drop_without_applying_deltas();
         assert!(
@@ -2256,7 +2383,7 @@ mod m10e_driver_lifecycle_fixtures {
         let cancellation_frame_started = Instant::now();
         dialog_context
             .run_ui(eframe::egui::RawInput::default(), |ctx| {
-                let _ = dialog.ui(ctx, &cancellation_snapshot);
+                let _ = dialog.ui(ctx, &cancellation_snapshot, true, true, None);
             })
             .drop_without_applying_deltas();
         assert!(

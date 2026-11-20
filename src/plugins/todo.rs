@@ -426,6 +426,25 @@ pub fn append_todo(
     Ok(())
 }
 
+/// Atomically record a deterministic task from one Inbox fact.
+pub(crate) fn insert_notification_task(path: &str, id: &str, text: String) -> anyhow::Result<()> {
+    update_todos(path, move |todos| {
+        if todos.iter().any(|todo| todo.id == id) {
+            return Ok(false);
+        }
+        todos.push(TodoEntry {
+            id: id.into(),
+            text,
+            done: false,
+            priority: 0,
+            tags: Vec::new(),
+            entity_refs: Vec::new(),
+        });
+        Ok(true)
+    })?;
+    Ok(())
+}
+
 /// Remove the todo at `index` from the list stored at `path`.
 pub fn remove_todo(path: &str, index: usize) -> anyhow::Result<()> {
     update_todos(path, move |todos| {

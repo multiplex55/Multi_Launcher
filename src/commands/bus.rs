@@ -139,6 +139,8 @@ mod tests {
         refocus: bool,
         headless_calls: usize,
         headless_failure: bool,
+        protected_password_calls: Vec<usize>,
+        protected_password_failure: bool,
         headless_commands: Vec<(Command, Action)>,
         dialog_calls: usize,
         settings_search_queries: Vec<String>,
@@ -538,7 +540,43 @@ mod tests {
             false
         }
     }
+    #[test]
+    fn legacy_password_dispatch_uses_private_effect_and_skips_retention() {
+        use crate::commands::{ClipboardCommand, FavoriteLogPolicy, ToastPolicy};
+
+        let mut host = FakeHost::default();
+        let request = invocation(Command::Clipboard(ClipboardCommand::CopyGeneratedPassword {
+            length: 12,
+        }));
+        let outcome = CommandBus.dispatch(&request, &mut host).unwrap();
+        assert_eq!(host.protected_password_calls, vec![12]);
+        assert_eq!(host.headless_calls, 0);
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+        assert_eq!(outcome.favorite_log, FavoriteLogPolicy::None);
+        assert_eq!(
+            outcome.toasts,
+            vec![ToastPolicy::Success("Copied a password privately.".into())]
+        );
+        host.protected_password_failure = true;
+        let failed = CommandBus.dispatch(&request, &mut host).unwrap_err();
+        assert_eq!(host.protected_password_calls, vec![12, 12]);
+        assert_eq!(host.headless_calls, 0);
+        assert_eq!(failed.message, "Private copy was refused.");
+        assert!(failed.favorite.is_none());
+    }
+
     impl HeadlessCommandHost for FakeHost {
+        fn copy_generated_password(
+            &mut self,
+            length: usize,
+        ) -> Result<crate::platform::protected_clipboard::CopyStatus, CommandError> {
+            self.protected_password_calls.push(length);
+            if self.protected_password_failure {
+                return Err(CommandError::new("password", "Private copy was refused."));
+            }
+            Ok(crate::platform::protected_clipboard::CopyStatus::AcceptedAndPersisted)
+        }
+
         fn execute_headless_command(
             &mut self,
             command: &Command,

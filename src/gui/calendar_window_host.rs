@@ -98,6 +98,74 @@ pub(super) struct CalendarHostSpec {
     pub size: egui::Vec2,
     pub minimum: egui::Vec2,
 }
+pub(super) struct CalendarJumpConfig<'a> {
+    pub kind: super::jump_mode::ui::NavigationDialogKind,
+    pub instance: Option<u64>,
+    pub root_scope: Option<&'a super::jump_mode::ui::JumpModeScope>,
+    pub launcher: &'a super::jump_mode::ui::JumpModeUi,
+    pub enabled: bool,
+    pub root_active: bool,
+}
+pub(super) struct CalendarTargets<'a> {
+    scope: Option<&'a super::jump_mode::ui::JumpModeScope>,
+    order: u64,
+}
+impl<'a> CalendarTargets<'a> {
+    pub fn new(scope: Option<&'a super::jump_mode::ui::JumpModeScope>) -> Self {
+        Self { scope, order: 0 }
+    }
+    pub fn focus(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: impl AsRef<str>,
+        label: impl Into<String>,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.scope,
+            ui,
+            response,
+            id,
+            label,
+            kind,
+            &mut self.order,
+        );
+        Self::reveal(ui, response);
+    }
+    pub fn popup(&self, anchor: &str) -> Option<super::jump_mode::ui::JumpModeScope> {
+        self.scope.map(|scope| scope.combo_popup_scope(anchor))
+    }
+    pub fn option(
+        &mut self,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: &str,
+        label: &str,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            scope,
+            ui,
+            response,
+            id,
+            label,
+            super::jump_mode::TargetKind::Button,
+            &mut self.order,
+        );
+        Self::reveal(ui, response);
+    }
+    fn reveal(ui: &egui::Ui, response: &egui::Response) {
+        if response.enabled()
+            && response.gained_focus()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+        {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
+    }
+}
 struct CalendarFrame<D, A> {
     draft: D,
     actions: A,
@@ -118,6 +186,8 @@ pub(super) struct CalendarWindowHost<D, A> {
     focus_pending: bool,
     epoch: Option<u64>,
     owned_popup: Option<(egui::ViewportId, egui::Id)>,
+    jump: Box<super::jump_mode::ui::JumpModeUi>,
+    jump_frame: Option<u64>,
     #[cfg(test)]
     test_controls: [Option<CalendarControl>; 3],
 }
@@ -133,6 +203,8 @@ impl<D, A> Default for CalendarWindowHost<D, A> {
             focus_pending: false,
             epoch: None,
             owned_popup: None,
+            jump: Box::default(),
+            jump_frame: None,
             #[cfg(test)]
             test_controls: [None; 3],
         }
@@ -231,6 +303,8 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         inherited: bool,
     ) {
         if self.host.transition(desired) {
+            self.jump.cancel_all();
+            self.jump_frame = None;
             close_bound_popup(ctx, self.owned_popup.take());
             self.focus_pending = true;
         }
@@ -286,6 +360,8 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         }
     }
     pub fn retire(&mut self, ctx: &egui::Context, spec: &CalendarHostSpec, epoch: u64) {
+        self.jump.cancel_all();
+        self.jump_frame = None;
         close_bound_popup(ctx, self.owned_popup.take());
         if self.host.presentation() == UtilityPresentation::Popout {
             let identity = Self::identity(spec, self.host.identity(), self.epoch.unwrap_or(epoch));
@@ -318,6 +394,7 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         root_owner: bool,
         input_allowed: bool,
         root_shortcut: bool,
+        jump: Option<CalendarJumpConfig<'_>>,
         popup_anchors: fn(&D) -> &[CalendarPopupAnchor],
         mut render: F,
     ) where
@@ -328,6 +405,8 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
             bool,
             Option<&mut egui::Ui>,
             UtilityPresentation,
+            Option<&super::jump_mode::ui::JumpModeScope>,
+            bool,
         ) -> A,
     {
         if let Some(previous) = self.pending.take()
@@ -340,6 +419,8 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
             return;
         }
         let stale_popup = if let Some(old_epoch) = self.epoch.filter(|old| *old != epoch) {
+            self.jump.cancel_all();
+            self.jump_frame = None;
             if self.host.presentation() == UtilityPresentation::Popout {
                 super::utility_dialog_size::close_native_utility_geometry_viewport(
                     ctx,
@@ -376,7 +457,23 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
                             || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                     });
                 let start = ctx.output(|o| o.commands.len());
-                let mut actions = render(dialog, ctx, allowed, first, None, host.host);
+                let scope = jump.as_ref().and_then(|j| j.root_scope).map(|s| {
+                    if first && !ctx.will_discard() {
+                        s.clone()
+                    } else {
+                        s.registration_only()
+                    }
+                });
+                let mut actions = render(
+                    dialog,
+                    ctx,
+                    allowed,
+                    first,
+                    None,
+                    host.host,
+                    scope.as_ref(),
+                    jump.as_ref().is_some_and(|j| j.root_active),
+                );
                 self.owned_popup = open_popup_id(popup_anchors(dialog), ctx, spec.layer, epoch)
                     .map(|id| (ctx.viewport_id(), id));
                 let captured = take_copies(ctx, start);
@@ -430,6 +527,70 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
                 } else {
                     root_owner && input_allowed
                 };
+                let mut binding = None;
+                let mut navigation = super::jump_mode::ui::NavigationOwner::Blocked;
+                if native && let Some(config) = jump.as_ref() {
+                    let (chord, alphabet) = config.launcher.configuration();
+                    self.jump.set_configuration(chord, alphabet);
+                    self.jump.set_enabled(config.enabled);
+                    let frame = c.cumulative_frame_nr();
+                    if self.jump_frame != Some(frame) {
+                        self.jump.begin_frame();
+                        self.jump_frame = Some(frame);
+                    }
+                    binding = config.instance.map(|instance| {
+                        super::jump_mode::ui::NavigationViewportBinding {
+                            viewport: spec.viewport,
+                            owner: super::jump_mode::ui::NavigationOwner::Dialog {
+                                kind: config.kind,
+                                instance,
+                            },
+                            base_layer: parent,
+                        }
+                    });
+                    if let Some(bound) = binding {
+                        navigation = self.jump.update_navigation_owner_for_viewport(
+                            &c,
+                            bound,
+                            allowed && config.enabled,
+                        );
+                        self.jump.handle_viewport_input(
+                            &c,
+                            bound.owner == navigation,
+                            child_first,
+                            spec.viewport,
+                        );
+                    }
+                    self.jump.begin_ui_pass();
+                }
+                let native_scope = binding
+                    .filter(|b| b.owner == navigation)
+                    .and_then(|b| {
+                        let config = jump.as_ref()?;
+                        self.jump.scope_for_viewport_binding(
+                            super::jump_mode::SurfaceId::dialog(
+                                config.kind.surface_kind(),
+                                config.instance.unwrap_or_default(),
+                            ),
+                            super::jump_mode::TargetGeneration(epoch),
+                            spec.key,
+                            b,
+                        )
+                    })
+                    .map(|scope| {
+                        if child_first && !c.will_discard() {
+                            scope
+                        } else {
+                            scope.registration_only()
+                        }
+                    });
+                let embedded_scope = jump.as_ref().and_then(|j| j.root_scope).map(|s| {
+                    if child_first && !c.will_discard() {
+                        s.clone()
+                    } else {
+                        s.registration_only()
+                    }
+                });
                 if native && child_first && child.input(|i| i.viewport().close_requested()) {
                     child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     if !pinned {
@@ -440,6 +601,7 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
                     && (native || root_shortcut)
                     && allowed
                     && !pinned
+                    && (!native || self.jump.active_session().is_none())
                     && !egui::Popup::is_any_open(&c)
                     && c.input_mut(|i| {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
@@ -456,10 +618,47 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
                             child_first,
                             Some(ui),
                             host.host,
+                            native_scope.as_ref(),
+                            self.jump.active_session().is_some(),
                         ));
                     });
                 } else {
-                    result = Some(render(dialog, &c, allowed, child_first, None, host.host));
+                    result = Some(render(
+                        dialog,
+                        &c,
+                        allowed,
+                        child_first,
+                        None,
+                        host.host,
+                        embedded_scope.as_ref(),
+                        jump.as_ref().is_some_and(|j| j.root_active),
+                    ));
+                }
+                if native && let Some(config) = jump.as_ref() {
+                    self.jump.finish_ui_pass();
+                    if let Some(bound) = binding {
+                        let current = self.jump.update_navigation_owner_for_viewport(
+                            &c,
+                            bound,
+                            allowed && config.enabled,
+                        );
+                        if self.jump.prepare_pass_for_viewport(
+                            &c,
+                            bound,
+                            current,
+                            allowed && config.enabled,
+                        ) {
+                            super::jump_mode::paint::paint(&c, &self.jump);
+                        }
+                        if !c.will_discard() {
+                            self.jump.complete_frame_for_viewport(
+                                &c,
+                                bound,
+                                current,
+                                allowed && config.enabled,
+                            );
+                        }
+                    }
                 }
                 let captured = take_copies(&c, start);
                 self.owned_popup = open_popup_id(popup_anchors(dialog), &c, parent, epoch)
@@ -553,6 +752,8 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         if let Some(next) = request
             && self.host.transition(next)
         {
+            self.jump.cancel_all();
+            self.jump_frame = None;
             let key = crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
             super::utility_host::remember_presentation(ctx, key, next);
             close_bound_popup(ctx, self.owned_popup.take());
@@ -573,7 +774,11 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
             );
         }
         let receipt = super::utility_host::AcceptedParentOpen::from_retained(
-            ctx, frame.host, frame.epoch, frame.root, frame.owner,
+            ctx,
+            frame.host,
+            frame.epoch,
+            frame.root,
+            frame.owner,
         )?;
         if !frame.actions.is_closing() {
             self.apply_deferred(ctx, spec, open, epoch);

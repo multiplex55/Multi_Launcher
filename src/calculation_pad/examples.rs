@@ -15,11 +15,12 @@ pub(crate) struct CalculationExampleGroup {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ExampleExpectation {
+pub(super) enum ExampleExpectation {
     Scalar(f64),
     ApproximateScalar(f64),
     ScalarWithSkipped(f64),
     ScalarWithDiagnostic { value: f64, line: usize, message: &'static str },
+    Boolean(bool),
     Vector(&'static [f64]),
     Physical {
         value: f64,
@@ -40,6 +41,15 @@ enum ExampleExpectation {
 }
 
 impl CalculationExample {
+    pub(super) const fn new(
+        title: &'static str,
+        source: &'static str,
+        explanation: &'static str,
+        expected: ExampleExpectation,
+    ) -> Self {
+        Self { title, source, explanation, expected }
+    }
+
     pub(crate) fn matches(&self, group: &str, query: &str) -> bool {
         let query = query.trim().to_lowercase();
         query.is_empty()
@@ -58,6 +68,7 @@ impl CalculationExample {
                 format!("{} (line {}: {message})", format_number(value).unwrap_or_default(), line + 1)
             }
             ExampleExpectation::ApproximateScalar(value) => format!("≈ {}", format_number(value).unwrap_or_default()),
+            ExampleExpectation::Boolean(value) => value.to_string(),
             ExampleExpectation::Vector(values) => format!(
                 "[{}]",
                 values
@@ -315,6 +326,36 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
     CalculationExampleGroup {
         title: "Vectors",
         examples: &[
+            CalculationExample {
+                title: "Fit and predict from paired vectors",
+                source: "x = [1, 2, 3]\ny = [3, 5, 7]\nslope = regression_slope(x, y)\nintercept = regression_intercept(x, y)\npredict_linear(x, y, 4)",
+                explanation: "The fitted line has slope 2 and intercept 1. Predictions outside the observed range are extrapolated estimates.",
+                expected: ExampleExpectation::Scalar(9.0),
+            },
+            CalculationExample {
+                title: "Quantiles and sample variance",
+                source: "values = [1, 2, 3, 4]\nlower_quartile = quantile(values, 0.25)\nmedian_value = percentile(values, 50)\nvariance_population(values)",
+                explanation: "The lower quartile is 1.75, the median is 2.5, and the population variance is 1.25. variance_sample and stdev_sample use the sample denominator.",
+                expected: ExampleExpectation::Scalar(1.25),
+            },
+            CalculationExample {
+                title: "Cumulative and rolling calculations",
+                source: "values = [10, 20, 15, 30]\ntotals = cumsum(values)\nchanges = diff(values)\nrolling_average(values, 2)",
+                explanation: "Cumulative totals are [10, 30, 45, 75], adjacent differences are [10, -5, 15], and the rolling average uses complete trailing windows.",
+                expected: ExampleExpectation::Vector(&[15.0, 17.5, 22.5]),
+            },
+            CalculationExample {
+                title: "Filter and map with explicit formula parameters",
+                source: "values = [7, 2, 7, 4, 10]\nthreshold = 5\nfactor = 2\nfn above(value, limit) = value > limit\nfn scale(value, multiplier) = value * multiplier\nselected = filter(values, above, threshold)\ndoubled = map(values, scale, factor)\nmatching_count = count_if(values, above, threshold)\nfind_indices(values, above, threshold)",
+                explanation: "Callbacks receive each element and explicit extra arguments. The filtered values are [7, 7, 10], doubled values are [14, 4, 14, 8, 20], and count is 3.",
+                expected: ExampleExpectation::Vector(&[0.0, 2.0, 4.0]),
+            },
+            CalculationExample {
+                title: "Sort and retain distinct values",
+                source: "values = [7, 2, 7, 4, 10]\nascending = sort(values)\ndescending = sort_desc(values)\nunique(values)",
+                explanation: "sort and sort_desc return ordered copies. unique preserves the first occurrence of each value; values is unchanged.",
+                expected: ExampleExpectation::Vector(&[7.0, 2.0, 4.0, 10.0]),
+            },
             CalculationExample {
                 title: "Build two 1,024-point datasets",
                 source: "x_values = []\ny_values = []\n\nfor i in range(1024):\n    x_values = append(x_values, i)\n    y_values = append(y_values, i * i)\n\npoint_count = len(y_values)\nlargest = max(y_values)\naverage_value = average(y_values)",
@@ -708,7 +749,7 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             CalculationExample {
                 title: "Conditional expression in a calculation",
                 source: "price = 100\ndiscount = if(price >= 100, 10, 0)\nprice - discount",
-                explanation: "if(condition, true value, false value) selects a value inside an expression. Multiline if statements are unsupported.",
+                explanation: "if(condition, true value, false value) selects a value inside an expression. The separate if/elif/else block syntax chooses which indented statements execute.",
                 expected: ExampleExpectation::Scalar(90.0),
             },
             CalculationExample {
@@ -865,154 +906,162 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
 pub(crate) const EXAMPLE_GROUPS: &[CalculationExampleGroup] = EXAMPLES;
 
 #[cfg(test)]
+pub(super) fn assert_example(example: &CalculationExample) {
+    use crate::calculation_pad::{CalculationDocument, CalculationValue, DiagnosticKind, LineOutcome};
+
+    let document = CalculationDocument::new(example.source);
+    let evaluation = document.evaluate();
+    if !matches!(example.expected, ExampleExpectation::ErrorContains(_)) {
+        if let ExampleExpectation::ScalarWithDiagnostic { line, message, .. } = example.expected {
+            assert!(matches!(&evaluation.lines[line].outcome, LineOutcome::Error(diagnostic) if diagnostic.to_string().contains(message)), "{} must report its documented diagnostic", example.title);
+        }
+        if matches!(example.expected, ExampleExpectation::ScalarWithSkipped(_)) {
+            assert!(
+                evaluation.lines.iter().any(|line| matches!(
+                    &line.outcome,
+                    LineOutcome::Error(diagnostic)
+                        if matches!(diagnostic.kind, DiagnosticKind::NotExecuted)
+                )),
+                "{} must contain a skipped row",
+                example.title
+            );
+        }
+        assert!(
+            evaluation.lines.iter().enumerate().all(|(index, line)| match &line.outcome {
+                LineOutcome::Error(diagnostic) => matches!(
+                    (example.expected, &diagnostic.kind),
+                    (
+                        ExampleExpectation::ScalarWithSkipped(_),
+                        DiagnosticKind::NotExecuted
+                    )
+                ) || matches!(example.expected, ExampleExpectation::ScalarWithDiagnostic { line, message, .. } if index == line && diagnostic.to_string().contains(message)),
+                _ => true,
+            }),
+            "{} has an invalid source line",
+            example.title
+        );
+    }
+    let outcome = evaluation
+        .lines
+        .iter()
+        .rev()
+        .find(|line| !matches!(line.outcome, LineOutcome::Blank | LineOutcome::Comment))
+        .map(|line| &line.outcome)
+        .expect("each example has a result line");
+
+    match (example.expected, outcome) {
+        (ExampleExpectation::Boolean(expected), LineOutcome::Value(CalculationValue::Boolean(actual))) => {
+            assert_eq!(*actual, expected, "{}", example.title);
+        }
+        (
+            ExampleExpectation::Scalar(expected)
+            | ExampleExpectation::ScalarWithSkipped(expected)
+            | ExampleExpectation::ScalarWithDiagnostic { value: expected, .. },
+            LineOutcome::Value(CalculationValue::Scalar(actual)),
+        ) => {
+            let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
+            assert!((actual - expected).abs() <= tolerance, "{}", example.title);
+        }
+        (ExampleExpectation::ApproximateScalar(expected), LineOutcome::Value(CalculationValue::ApproximateScalar(actual))) => {
+            assert_eq!(*actual, expected, "{}", example.title);
+        }
+        (ExampleExpectation::Exact(expected), LineOutcome::Value(actual @ CalculationValue::Exact(_))) => {
+            assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
+        }
+        (ExampleExpectation::Calendar(expected), LineOutcome::Value(actual @ CalculationValue::Calendar(_))) => {
+            assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
+        }
+        (
+            ExampleExpectation::Vector(expected),
+            LineOutcome::Value(CalculationValue::Vector(actual)),
+        ) => {
+            assert_eq!(actual.components(), expected, "{}", example.title);
+        }
+        (
+            ExampleExpectation::Physical {
+                value: expected,
+                unit: expected_unit,
+            },
+            LineOutcome::Value(CalculationValue::PhysicalQuantity {
+                value, unit, ..
+            }),
+        ) => {
+            assert_eq!(*unit, expected_unit, "{}", example.title);
+            assert!((*value - expected).abs() <= 1e-10, "{}", example.title);
+        }
+        (
+            ExampleExpectation::ExactBase(expected),
+            LineOutcome::Value(CalculationValue::ExactBase { digits, .. }),
+        ) => {
+            assert_eq!(digits, expected, "{}", example.title);
+        }
+        (
+            ExampleExpectation::ExactInteger {
+                mode: expected_mode,
+                value: expected_value,
+            },
+            LineOutcome::Value(CalculationValue::Integer(actual)),
+        ) => {
+            assert_eq!(
+                actual.mode().type_name(),
+                expected_mode,
+                "{}",
+                example.title
+            );
+            assert_eq!(
+                actual.formatted_decimal(),
+                expected_value,
+                "{}",
+                example.title
+            );
+        }
+        (
+            ExampleExpectation::Dimensional {
+                formatted_result: expected_result,
+                approximate: expected_approximation,
+            },
+            LineOutcome::Value(actual @ CalculationValue::DimensionalQuantity(_)),
+        ) => {
+            assert_eq!(
+                actual.formatted_result().as_deref(),
+                Some(expected_result),
+                "{}",
+                example.title
+            );
+            assert_eq!(
+                actual.is_approximate(),
+                expected_approximation,
+                "{}",
+                example.title
+            );
+        }
+        (
+            ExampleExpectation::ErrorContains(expected),
+            LineOutcome::Error(diagnostic),
+        ) => {
+            assert!(
+                diagnostic.to_string().contains(expected),
+                "{}: {diagnostic}",
+                example.title
+            );
+        }
+        (expected, actual) => {
+            panic!("{}: expected {expected:?}, got {actual:?}", example.title)
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{EXAMPLE_GROUPS, ExampleExpectation};
-    use crate::calculation_pad::{
-        CalculationDocument, CalculationValue, DiagnosticKind, LineOutcome,
-    };
+    use super::{EXAMPLE_GROUPS, assert_example};
+    use crate::calculation_pad::{CalculationDocument, CalculationValue, LineOutcome};
 
     #[test]
     fn shared_examples_evaluate_to_their_documented_results() {
         let mut checked = 0;
         for group in EXAMPLE_GROUPS {
             for example in group.examples {
-                let document = CalculationDocument::new(example.source);
-                let evaluation = document.evaluate();
-                if !matches!(example.expected, ExampleExpectation::ErrorContains(_)) {
-                    if let ExampleExpectation::ScalarWithDiagnostic { line, message, .. } = example.expected {
-                        assert!(matches!(&evaluation.lines[line].outcome, LineOutcome::Error(diagnostic) if diagnostic.to_string().contains(message)), "{} must report its documented diagnostic", example.title);
-                    }
-                    if matches!(example.expected, ExampleExpectation::ScalarWithSkipped(_)) {
-                        assert!(
-                            evaluation.lines.iter().any(|line| matches!(
-                                &line.outcome,
-                                LineOutcome::Error(diagnostic)
-                                    if matches!(diagnostic.kind, DiagnosticKind::NotExecuted)
-                            )),
-                            "{} must contain a skipped row",
-                            example.title
-                        );
-                    }
-                    assert!(
-                        evaluation.lines.iter().enumerate().all(|(index, line)| match &line.outcome {
-                            LineOutcome::Error(diagnostic) => matches!(
-                                (example.expected, &diagnostic.kind),
-                                (
-                                    ExampleExpectation::ScalarWithSkipped(_),
-                                    DiagnosticKind::NotExecuted
-                                )
-                            ) || matches!(example.expected, ExampleExpectation::ScalarWithDiagnostic { line, message, .. } if index == line && diagnostic.to_string().contains(message)),
-                            _ => true,
-                        }),
-                        "{} has an invalid source line",
-                        example.title
-                    );
-                }
-                let outcome = evaluation
-                    .lines
-                    .iter()
-                    .rev()
-                    .find(|line| !matches!(line.outcome, LineOutcome::Blank | LineOutcome::Comment))
-                    .map(|line| &line.outcome)
-                    .expect("each example has a result line");
-
-                match (example.expected, outcome) {
-                    (
-                        ExampleExpectation::Scalar(expected)
-                        | ExampleExpectation::ScalarWithSkipped(expected)
-                        | ExampleExpectation::ScalarWithDiagnostic { value: expected, .. },
-                        LineOutcome::Value(CalculationValue::Scalar(actual)),
-                    ) => {
-                        let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
-                        assert!((actual - expected).abs() <= tolerance, "{}", example.title);
-                    }
-                    (ExampleExpectation::ApproximateScalar(expected), LineOutcome::Value(CalculationValue::ApproximateScalar(actual))) => {
-                        assert_eq!(*actual, expected, "{}", example.title);
-                    }
-                    (ExampleExpectation::Exact(expected), LineOutcome::Value(actual @ CalculationValue::Exact(_))) => {
-                        assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
-                    }
-                    (ExampleExpectation::Calendar(expected), LineOutcome::Value(actual @ CalculationValue::Calendar(_))) => {
-                        assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
-                    }
-                    (
-                        ExampleExpectation::Vector(expected),
-                        LineOutcome::Value(CalculationValue::Vector(actual)),
-                    ) => {
-                        assert_eq!(actual.components(), expected, "{}", example.title);
-                    }
-                    (
-                        ExampleExpectation::Physical {
-                            value: expected,
-                            unit: expected_unit,
-                        },
-                        LineOutcome::Value(CalculationValue::PhysicalQuantity {
-                            value, unit, ..
-                        }),
-                    ) => {
-                        assert_eq!(*unit, expected_unit, "{}", example.title);
-                        assert!((*value - expected).abs() <= 1e-10, "{}", example.title);
-                    }
-                    (
-                        ExampleExpectation::ExactBase(expected),
-                        LineOutcome::Value(CalculationValue::ExactBase { digits, .. }),
-                    ) => {
-                        assert_eq!(digits, expected, "{}", example.title);
-                    }
-                    (
-                        ExampleExpectation::ExactInteger {
-                            mode: expected_mode,
-                            value: expected_value,
-                        },
-                        LineOutcome::Value(CalculationValue::Integer(actual)),
-                    ) => {
-                        assert_eq!(
-                            actual.mode().type_name(),
-                            expected_mode,
-                            "{}",
-                            example.title
-                        );
-                        assert_eq!(
-                            actual.formatted_decimal(),
-                            expected_value,
-                            "{}",
-                            example.title
-                        );
-                    }
-                    (
-                        ExampleExpectation::Dimensional {
-                            formatted_result: expected_result,
-                            approximate: expected_approximation,
-                        },
-                        LineOutcome::Value(actual @ CalculationValue::DimensionalQuantity(_)),
-                    ) => {
-                        assert_eq!(
-                            actual.formatted_result().as_deref(),
-                            Some(expected_result),
-                            "{}",
-                            example.title
-                        );
-                        assert_eq!(
-                            actual.is_approximate(),
-                            expected_approximation,
-                            "{}",
-                            example.title
-                        );
-                    }
-                    (
-                        ExampleExpectation::ErrorContains(expected),
-                        LineOutcome::Error(diagnostic),
-                    ) => {
-                        assert!(
-                            diagnostic.to_string().contains(expected),
-                            "{}: {diagnostic}",
-                            example.title
-                        );
-                    }
-                    (expected, actual) => {
-                        panic!("{}: expected {expected:?}, got {actual:?}", example.title)
-                    }
-                }
+                assert_example(example);
                 checked += 1;
             }
         }
@@ -1065,7 +1114,7 @@ mod tests {
             "permutations",
             "map_range",
             "discounted_price",
-            "append", "concat", "insert", "set_at", "remove_at", "pop", "get", "first", "last", "len", "slice", "reverse",
+            "append", "concat", "insert", "set_at", "remove_at", "pop", "get", "first", "last", "len", "slice", "reverse", "sort", "sort_desc", "unique",
         ] {
             assert!(
                 EXAMPLE_GROUPS.iter().any(|group| group

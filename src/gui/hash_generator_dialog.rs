@@ -122,6 +122,9 @@ impl HashGeneratorDialogState {
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch
     }
+    pub(super) fn jump_generation(&self) -> u64 {
+        self.generation
+    }
 
     #[cfg(test)]
     pub(crate) fn test_control(&self, name: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
@@ -477,6 +480,7 @@ impl HashGeneratorDialogState {
         first: bool,
         child: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> HashHostActions {
         if self.popup_host != Some(runtime.host) {
             self.popup_anchors.clear();
@@ -491,6 +495,7 @@ impl HashGeneratorDialogState {
         };
         let mut intents = Vec::new();
         let mut request = None;
+        let mut close_requested = false;
         let mut open = self.open;
         let mut focus = false;
         let focus_delivered = allowed
@@ -501,6 +506,7 @@ impl HashGeneratorDialogState {
             ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("hash_generator_text")));
         }
         let mut popup_anchors = Vec::new();
+        let mut order = 0;
         #[cfg(test)]
         let mut test_controls = Vec::new();
         let mut body = |ui: &mut egui::Ui| {
@@ -508,6 +514,26 @@ impl HashGeneratorDialogState {
             let active = interactive && first && !ctx.will_discard();
             let (button, next) =
                 super::utility_host::presentation_button(ui, presentation, interactive);
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &button,
+                "presentation",
+                "Dock or pop out",
+                super::jump_mode::TargetKind::Button,
+                &mut order,
+            );
+            let close = ui.add_enabled(interactive, egui::Button::new("Close"));
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &close,
+                "close",
+                "Close Hash Generator",
+                super::jump_mode::TargetKind::Button,
+                &mut order,
+            );
+            close_requested |= active && close.clicked();
             #[cfg(test)]
             test_controls.push(("host".into(), button.rect, ui.clip_rect(), button.enabled()));
             if active && button.clicked() {
@@ -520,6 +546,8 @@ impl HashGeneratorDialogState {
                     &mut intents,
                     &mut focus,
                     &mut popup_anchors,
+                    scope,
+                    &mut order,
                     #[cfg(test)]
                     &mut test_controls,
                 )
@@ -558,7 +586,7 @@ impl HashGeneratorDialogState {
             epoch: self.epoch,
             generation: self.generation,
             host_request: request,
-            close: !open || self.close_requested,
+            close: !open || self.close_requested || close_requested,
             draft,
             intents: if first && allowed && !ctx.will_discard() {
                 intents
@@ -649,10 +677,13 @@ impl HashGeneratorDialogState {
         intents: &mut Vec<HashIntent>,
         focus: &mut bool,
         popup_anchors: &mut Vec<(egui::Id, egui::LayerId)>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
         #[cfg(test)] test_controls: &mut Vec<(String, egui::Rect, egui::Rect, bool)>,
     ) {
         ui.horizontal_wrapped(|ui| {
             let mut mode = draft.mode;
+            let popup_scope = scope.map(|scope| scope.combo_popup_scope("mode"));
             let mode_response = egui::ComboBox::from_id_salt("hash_source_mode")
                 .selected_text(mode_label(mode))
                 .show_ui(ui, |ui| {
@@ -663,6 +694,15 @@ impl HashGeneratorDialogState {
                     ] {
                         let _response =
                             ui.selectable_value(&mut mode, candidate, mode_label(candidate));
+                        super::jump_mode::ui::register_and_apply_target(
+                            popup_scope.as_ref(),
+                            ui,
+                            &_response,
+                            format!("mode/{}", mode_label(candidate)),
+                            mode_label(candidate),
+                            super::jump_mode::TargetKind::Selectable,
+                            order,
+                        );
                         #[cfg(test)]
                         test_controls.push((
                             format!("mode/{}", mode_label(candidate)),
@@ -672,6 +712,15 @@ impl HashGeneratorDialogState {
                         ));
                     }
                 });
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &mode_response.response,
+                "mode",
+                "Source mode",
+                super::jump_mode::TargetKind::ComboBox,
+                order,
+            );
             popup_anchors.push((mode_response.response.id, mode_response.response.layer_id));
             #[cfg(test)]
             test_controls.push((
@@ -683,6 +732,7 @@ impl HashGeneratorDialogState {
             draft.mode = mode;
 
             let mut algorithm = draft.algorithm;
+            let popup_scope = scope.map(|scope| scope.combo_popup_scope("algorithm"));
             let algorithm_response = egui::ComboBox::from_id_salt("hash_algorithm")
                 .selected_text(algorithm.name())
                 .show_ui(ui, |ui| {
@@ -693,6 +743,15 @@ impl HashGeneratorDialogState {
                     ] {
                         let _response =
                             ui.selectable_value(&mut algorithm, candidate, candidate.name());
+                        super::jump_mode::ui::register_and_apply_target(
+                            popup_scope.as_ref(),
+                            ui,
+                            &_response,
+                            format!("algorithm/{}", candidate.name()),
+                            candidate.name(),
+                            super::jump_mode::TargetKind::Selectable,
+                            order,
+                        );
                         #[cfg(test)]
                         test_controls.push((
                             format!("algorithm/{}", candidate.name()),
@@ -702,6 +761,15 @@ impl HashGeneratorDialogState {
                         ));
                     }
                 });
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &algorithm_response.response,
+                "algorithm",
+                "Algorithm",
+                super::jump_mode::TargetKind::ComboBox,
+                order,
+            );
             popup_anchors.push((
                 algorithm_response.response.id,
                 algorithm_response.response.layer_id,
@@ -715,11 +783,33 @@ impl HashGeneratorDialogState {
             ));
             draft.algorithm = algorithm;
 
-            if ui.button("Load Clipboard").clicked() {
+            let load = ui.button("Load Clipboard");
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &load,
+                "clipboard",
+                "Load clipboard",
+                super::jump_mode::TargetKind::Button,
+                order,
+            );
+            if load.clicked() {
                 intents.push(HashIntent::Clipboard);
             }
-            if draft.mode == HashInputMode::File && ui.button("Choose File…").clicked() {
-                intents.push(HashIntent::PickFile);
+            if draft.mode == HashInputMode::File {
+                let choose = ui.button("Choose File…");
+                super::jump_mode::ui::register_and_apply_target(
+                    scope,
+                    ui,
+                    &choose,
+                    "file",
+                    "Choose file",
+                    super::jump_mode::TargetKind::Button,
+                    order,
+                );
+                if choose.clicked() {
+                    intents.push(HashIntent::PickFile);
+                }
             }
         });
 
@@ -737,6 +827,15 @@ impl HashGeneratorDialogState {
                         .font(egui::TextStyle::Monospace)
                         .desired_width(f32::INFINITY)
                         .hint_text("Enter text to hash"),
+                );
+                super::jump_mode::ui::register_and_apply_target(
+                    scope,
+                    ui,
+                    &_response,
+                    "text",
+                    "Text input",
+                    super::jump_mode::TargetKind::TextEntry,
+                    order,
                 );
                 #[cfg(test)]
                 test_controls.push((
@@ -780,6 +879,15 @@ impl HashGeneratorDialogState {
                     .hint_text("Paste expected hexadecimal digest"),
             );
             let _ = response;
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &response,
+                "expected",
+                "Expected digest",
+                super::jump_mode::TargetKind::TextEntry,
+                order,
+            );
         });
 
         if let Some(notice) = draft.algorithm.security_notice() {
@@ -788,19 +896,42 @@ impl HashGeneratorDialogState {
 
         ui.horizontal_wrapped(|ui| {
             let calculate = ui.add_enabled(self.job.is_none(), egui::Button::new("Calculate"));
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &calculate,
+                "calculate",
+                "Calculate",
+                super::jump_mode::TargetKind::Button,
+                order,
+            );
             if calculate.clicked() {
                 intents.push(HashIntent::Calculate);
             }
-            if ui
-                .add_enabled(self.is_running(), egui::Button::new("Cancel"))
-                .clicked()
-            {
+            let cancel = ui.add_enabled(self.is_running(), egui::Button::new("Cancel"));
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &cancel,
+                "cancel",
+                "Cancel calculation",
+                super::jump_mode::TargetKind::Button,
+                order,
+            );
+            if cancel.clicked() {
                 intents.push(HashIntent::Cancel);
             }
-            if ui
-                .add_enabled(self.can_copy_digest(), egui::Button::new("Copy Digest"))
-                .clicked()
-            {
+            let copy = ui.add_enabled(self.can_copy_digest(), egui::Button::new("Copy Digest"));
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &copy,
+                "copy",
+                "Copy digest",
+                super::jump_mode::TargetKind::Button,
+                order,
+            );
+            if copy.clicked() {
                 intents.push(HashIntent::Copy);
             }
         });
@@ -1289,7 +1420,17 @@ mod tests {
                 },
                 |ui| {
                     manager.begin_frame(ui.ctx()).unwrap();
-                    let _ = dialog.render_host(ui.ctx(), &super::HashRuntime { host: crate::gui::utility_host::UtilityHostState::docked().identity() }, true, true, None, crate::gui::utility_host::UtilityPresentation::Docked);
+                    let _ = dialog.render_host(
+                        ui.ctx(),
+                        &super::HashRuntime {
+                            host: crate::gui::utility_host::UtilityHostState::docked().identity(),
+                        },
+                        true,
+                        true,
+                        None,
+                        crate::gui::utility_host::UtilityPresentation::Docked,
+                        None,
+                    );
                 },
             );
             output.drop_without_applying_deltas();

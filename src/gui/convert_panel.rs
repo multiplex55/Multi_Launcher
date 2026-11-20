@@ -1,5 +1,9 @@
 mod preferences;
 
+use super::jump_mode::{
+    TargetKind,
+    ui::{JumpModeScope, register_and_apply_target},
+};
 use crate::unit_conversion::{self, Category, ConversionError, ConversionOutcome, Unit};
 use eframe::egui;
 use preferences::{DisplayPreferences, NumberFormat, PreferencesState};
@@ -370,6 +374,7 @@ struct RootEffects {
     favorite_limit_hit: bool,
     window_open: bool,
     effect: Option<ConvertPanelEffect>,
+    popup_anchors: Vec<(egui::Id, egui::LayerId)>,
 }
 
 /// Unit conversion controls and presentation state. Preference IO is configured
@@ -387,6 +392,9 @@ pub struct ConvertPanel {
     copy_feedback: Option<Result<(), String>>,
     pending_root_effects: Option<RootEffects>,
     host_close_requested: bool,
+    jump_generation: u64,
+    popup_anchors: Vec<(egui::Id, egui::LayerId)>,
+    popup_viewport: Option<egui::ViewportId>,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -434,6 +442,9 @@ impl Default for ConvertPanel {
             copy_feedback: None,
             pending_root_effects: None,
             host_close_requested: false,
+            jump_generation: 0,
+            popup_anchors: Vec::new(),
+            popup_viewport: None,
             #[cfg(test)]
             test_window_rect: None,
             #[cfg(test)]
@@ -481,6 +492,9 @@ impl ConvertPanel {
 
     /// Open the panel and focus the value input once.
     pub fn open(&mut self) {
+        if !self.open {
+            self.jump_generation = self.jump_generation.wrapping_add(1);
+        }
         self.open = true;
         self.host_close_requested = false;
         self.focus_input = true;
@@ -493,11 +507,49 @@ impl ConvertPanel {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn test_category_label(&self) -> &'static str {
+        self.category.label()
+    }
+
+    pub(super) fn jump_generation(&self) -> u64 {
+        self.jump_generation
+    }
+    pub(super) fn owned_popup_layer(
+        &self,
+        ctx: &egui::Context,
+        base: egui::LayerId,
+    ) -> Option<egui::LayerId> {
+        if self.popup_viewport != Some(ctx.viewport_id()) {
+            return None;
+        }
+        self.popup_anchors.iter().find_map(|(id, layer)| {
+            if *layer != base
+                || !ctx
+                    .read_response(*id)
+                    .is_some_and(|r| r.enabled() && r.layer_id == base)
+            {
+                return None;
+            }
+            let popup = id.with("popup");
+            egui::Popup::is_id_open(ctx, popup)
+                .then_some(egui::LayerId::new(egui::Order::Foreground, popup))
+        })
+    }
     /// Draw the panel and return deferred clipboard or preference effects.
     pub(crate) fn ui(
         &mut self,
         ctx: &egui::Context,
         first_ui_pass: bool,
+    ) -> Option<ConvertPanelEffect> {
+        self.ui_with_jump(ctx, first_ui_pass, true, None)
+    }
+    pub(super) fn ui_with_jump(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        owner: bool,
+        scope: Option<&JumpModeScope>,
     ) -> Option<ConvertPanelEffect> {
         #[cfg(test)]
         {
@@ -526,6 +578,8 @@ impl ConvertPanel {
         let mut focus_add_target = false;
         let mut favorite_limit_hit = false;
         let mut effect = None;
+        let mut anchors = Vec::new();
+        let mut order = 0;
         let content_rect = ctx.content_rect();
         let min_size = egui::vec2(390.0, 300.0).min(content_rect.size());
         let output = egui::Window::new("Convert")
@@ -536,9 +590,12 @@ impl ConvertPanel {
             .min_size(min_size)
             .max_size(content_rect.size())
             .show(ctx, |ui| {
-                authorized_pass =
-                    first_ui_pass && !ctx.will_discard() && ui.is_visible() && !ui.is_sizing_pass();
-                ui.add_enabled_ui(authorized_pass, |ui| {
+                authorized_pass = owner
+                    && first_ui_pass
+                    && !ctx.will_discard()
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass();
+                ui.add_enabled_ui(owner, |ui| {
                     let scroll_output = egui::ScrollArea::vertical()
                         .id_salt("convert-panel-content")
                         .max_height(content_rect.height())
@@ -546,6 +603,9 @@ impl ConvertPanel {
                             self.contents_ui(
                                 ui,
                                 authorized_pass,
+                                scope,
+                                &mut order,
+                                &mut anchors,
                                 &mut input,
                                 &mut from_filter,
                                 &mut to_filter,
@@ -594,7 +654,8 @@ impl ConvertPanel {
                 || focus_requested
                 || focus_add_target
                 || favorite_limit_hit
-                || effect.is_some()))
+                || effect.is_some()
+                || anchors != self.popup_anchors))
             || close_requested
         {
             self.pending_root_effects = Some(RootEffects {
@@ -614,6 +675,7 @@ impl ConvertPanel {
                 favorite_limit_hit,
                 window_open: window_open && !close_requested,
                 effect,
+                popup_anchors: anchors,
             });
         }
 
@@ -649,6 +711,16 @@ impl ConvertPanel {
             || effects.effect.is_some()
             || effects.favorite_limit_hit
             || !effects.window_open;
+        if self.category != effects.category
+            || self.targets != effects.targets
+            || self.from_filter != effects.from_filter
+            || self.to_filter != effects.to_filter
+            || self.preferences.current.favorites != effects.preferences.favorites
+        {
+            self.jump_generation = self.jump_generation.wrapping_add(1);
+        }
+        self.popup_anchors = effects.popup_anchors;
+        self.popup_viewport = Some(ctx.viewport_id());
         self.input = effects.input;
         self.from_filter = effects.from_filter;
         self.to_filter = effects.to_filter;
@@ -689,6 +761,9 @@ impl ConvertPanel {
         &mut self,
         ui: &mut egui::Ui,
         authorized_pass: bool,
+        scope: Option<&JumpModeScope>,
+        order: &mut u64,
+        anchors: &mut Vec<(egui::Id, egui::LayerId)>,
         input: &mut String,
         from_filter: &mut String,
         to_filter: &mut String,
@@ -717,7 +792,17 @@ impl ConvertPanel {
         let previous_category = *category;
         responsive_row(ui, wide_layout, |ui| {
             ui.label("Category");
-            let category_response = category_selector(ui, category, wide_layout);
+            let category_response = category_selector(ui, category, wide_layout, scope, order);
+            register_and_apply_target(
+                scope,
+                ui,
+                &category_response,
+                "category",
+                "Category",
+                TargetKind::ComboBox,
+                order,
+            );
+            anchors.push((category_response.id, category_response.layer_id));
             if category_response.gained_focus() {
                 category_response.scroll_to_me(Some(egui::Align::Center));
             }
@@ -727,7 +812,18 @@ impl ConvertPanel {
 
             ui.separator();
             ui.label("Number format");
-            let format_response = number_format_selector(ui, preferences, wide_layout);
+            let format_response =
+                number_format_selector(ui, preferences, wide_layout, scope, order);
+            register_and_apply_target(
+                scope,
+                ui,
+                &format_response,
+                "format",
+                "Number format",
+                TargetKind::ComboBox,
+                order,
+            );
+            anchors.push((format_response.id, format_response.layer_id));
             if format_response.gained_focus() {
                 format_response.scroll_to_me(Some(egui::Align::Center));
             }
@@ -753,6 +849,15 @@ impl ConvertPanel {
                 })
                 .inner
             };
+            register_and_apply_target(
+                scope,
+                ui,
+                &digits_response,
+                format!("digits_response-{:016x}", digits_response.id.value()),
+                "Digits",
+                TargetKind::TextEntry,
+                order,
+            );
             if digits_response.gained_focus() {
                 digits_response.scroll_to_me(Some(egui::Align::Center));
             }
@@ -779,6 +884,15 @@ impl ConvertPanel {
                     .id(id)
                     .desired_width(ui.available_width())
                     .hint_text("Enter a value or supported expression"),
+            );
+            register_and_apply_target(
+                scope,
+                ui,
+                &input_response,
+                format!("input_response-{:016x}", input_response.id.value()),
+                "Value",
+                TargetKind::TextEntry,
+                order,
             );
             if input_response.gained_focus() {
                 input_response.scroll_to_me(Some(egui::Align::Center));
@@ -807,6 +921,15 @@ impl ConvertPanel {
                         .desired_width(responsive_control_width(ui, wide_layout, 120.0))
                         .hint_text("unit or alias"),
                 );
+                register_and_apply_target(
+                    scope,
+                    ui,
+                    &from_search,
+                    format!("from_search-{:016x}", from_search.id.value()),
+                    "From search",
+                    TargetKind::TextEntry,
+                    order,
+                );
                 if from_search.gained_focus() {
                     from_search.scroll_to_me(Some(egui::Align::Center));
                 }
@@ -814,15 +937,39 @@ impl ConvertPanel {
                 self.test_control_rects
                     .push(("from search".to_owned(), from_search.rect));
 
+                let from_scope = scope.map(|scope| scope.combo_popup_scope("from/unit"));
                 let from_combo = egui::ComboBox::from_id_salt("convert_from_unit")
                     .width(responsive_control_width(ui, wide_layout, 155.0))
                     .selected_text(from.map_or("Select unit", PanelUnit::label))
                     .show_ui(ui, |ui| {
                         for option in &from_options {
-                            ui.selectable_value(from, Some(*option), option.label());
+                            let response = ui
+                                .push_id(("from-option", *option), |ui| {
+                                    ui.selectable_value(from, Some(*option), option.label())
+                                })
+                                .inner;
+                            register_and_apply_target(
+                                from_scope.as_ref(),
+                                ui,
+                                &response,
+                                format!("option/{option:?}"),
+                                option.label(),
+                                TargetKind::Selectable,
+                                order,
+                            );
                         }
                     })
                     .response;
+                register_and_apply_target(
+                    scope,
+                    ui,
+                    &from_combo,
+                    "from/unit",
+                    "From unit",
+                    TargetKind::ComboBox,
+                    order,
+                );
+                anchors.push((from_combo.id, from_combo.layer_id));
                 if from_combo.gained_focus() {
                     from_combo.scroll_to_me(Some(egui::Align::Center));
                 }
@@ -835,10 +982,23 @@ impl ConvertPanel {
                 let favorites_response = favorite_selector(
                     ui,
                     "convert_from_favorites",
+                    "from/favorites",
                     from,
                     &favorites,
                     favorites_width,
+                    scope,
+                    order,
                 );
+                register_and_apply_target(
+                    scope,
+                    ui,
+                    &favorites_response,
+                    "from/favorites",
+                    "Favorites",
+                    TargetKind::ComboBox,
+                    order,
+                );
+                anchors.push((favorites_response.id, favorites_response.layer_id));
                 if favorites_response.gained_focus() {
                     favorites_response.scroll_to_me(Some(egui::Align::Center));
                 }
@@ -854,6 +1014,15 @@ impl ConvertPanel {
                             |ui| ui.small_button(if favorite { "★" } else { "☆" }),
                         )
                         .inner;
+                    register_and_apply_target(
+                        scope,
+                        ui,
+                        &toggle_response,
+                        format!("toggle_response-{:016x}", toggle_response.id.value()),
+                        "Toggle favorite",
+                        TargetKind::Button,
+                        order,
+                    );
                     if toggle_response.gained_focus() {
                         toggle_response.scroll_to_me(Some(egui::Align::Center));
                     }
@@ -877,6 +1046,15 @@ impl ConvertPanel {
                         .desired_width(responsive_control_width(ui, wide_layout, 150.0))
                         .hint_text("unit or alias"),
                 );
+                register_and_apply_target(
+                    scope,
+                    ui,
+                    &to_search,
+                    format!("to_search-{:016x}", to_search.id.value()),
+                    "To search",
+                    TargetKind::TextEntry,
+                    order,
+                );
                 if to_search.gained_focus() {
                     to_search.scroll_to_me(Some(egui::Align::Center));
                 }
@@ -894,6 +1072,9 @@ impl ConvertPanel {
                         ui.group(|ui| {
                             responsive_row(ui, wide_layout, |ui| {
                                 ui.label(format!("Target {}", index + 1));
+                                let target_anchor = format!("target/{index}/unit");
+                                let target_scope =
+                                    scope.map(|scope| scope.combo_popup_scope(&target_anchor));
                                 let target_combo =
                                     egui::ComboBox::from_id_salt(("convert_to_unit", index))
                                         .width(responsive_control_width(ui, wide_layout, 180.0))
@@ -902,14 +1083,40 @@ impl ConvertPanel {
                                         )
                                         .show_ui(ui, |ui| {
                                             for option in &to_options {
-                                                ui.selectable_value(
-                                                    &mut target,
-                                                    Some(*option),
+                                                let response = ui
+                                                    .push_id(("to-option", *option), |ui| {
+                                                        ui.selectable_value(
+                                                            &mut target,
+                                                            Some(*option),
+                                                            option.label(),
+                                                        )
+                                                    })
+                                                    .inner;
+                                                register_and_apply_target(
+                                                    target_scope.as_ref(),
+                                                    ui,
+                                                    &response,
+                                                    format!(
+                                                        "to-option-{:016x}",
+                                                        response.id.value()
+                                                    ),
                                                     option.label(),
+                                                    TargetKind::Selectable,
+                                                    order,
                                                 );
                                             }
                                         })
                                         .response;
+                                register_and_apply_target(
+                                    scope,
+                                    ui,
+                                    &target_combo,
+                                    format!("target/{index}/unit"),
+                                    "Target unit",
+                                    TargetKind::ComboBox,
+                                    order,
+                                );
+                                anchors.push((target_combo.id, target_combo.layer_id));
                                 if target_combo.gained_focus() {
                                     target_combo.scroll_to_me(Some(egui::Align::Center));
                                 }
@@ -923,10 +1130,23 @@ impl ConvertPanel {
                                 let favorites_response = favorite_selector(
                                     ui,
                                     ("convert_to_favorites", index),
+                                    &format!("target/{index}/favorites"),
                                     &mut target,
                                     &favorites,
                                     favorites_width,
+                                    scope,
+                                    order,
                                 );
+                                register_and_apply_target(
+                                    scope,
+                                    ui,
+                                    &favorites_response,
+                                    format!("target/{index}/favorites"),
+                                    "Favorites",
+                                    TargetKind::ComboBox,
+                                    order,
+                                );
+                                anchors.push((favorites_response.id, favorites_response.layer_id));
                                 if favorites_response.gained_focus() {
                                     favorites_response.scroll_to_me(Some(egui::Align::Center));
                                 }
@@ -953,6 +1173,18 @@ impl ConvertPanel {
                                             },
                                         )
                                         .inner;
+                                    register_and_apply_target(
+                                        scope,
+                                        ui,
+                                        &toggle_response,
+                                        format!(
+                                            "toggle_response-{:016x}",
+                                            toggle_response.id.value()
+                                        ),
+                                        "Toggle favorite",
+                                        TargetKind::Button,
+                                        order,
+                                    );
                                     if toggle_response.gained_focus() {
                                         toggle_response.scroll_to_me(Some(egui::Align::Center));
                                     }
@@ -977,6 +1209,15 @@ impl ConvertPanel {
                                             |ui| ui.button("Swap"),
                                         )
                                         .inner;
+                                    register_and_apply_target(
+                                        scope,
+                                        ui,
+                                        &swap,
+                                        format!("swap-{:016x}", swap.id.value()),
+                                        "Swap units",
+                                        TargetKind::Button,
+                                        order,
+                                    );
                                     if swap.gained_focus() {
                                         swap.scroll_to_me(Some(egui::Align::Center));
                                     }
@@ -1000,6 +1241,15 @@ impl ConvertPanel {
                                                 |ui| ui.small_button("Remove"),
                                             )
                                             .inner;
+                                        register_and_apply_target(
+                                            scope,
+                                            ui,
+                                            &remove,
+                                            format!("remove-{:016x}", remove.id.value()),
+                                            "Remove target",
+                                            TargetKind::Button,
+                                            order,
+                                        );
                                         if remove.gained_focus() {
                                             remove.scroll_to_me(Some(egui::Align::Center));
                                         }
@@ -1043,6 +1293,15 @@ impl ConvertPanel {
                     },
                 )
                 .inner;
+            register_and_apply_target(
+                scope,
+                ui,
+                &add_target,
+                format!("add_target-{:016x}", add_target.id.value()),
+                "Add target",
+                TargetKind::Button,
+                order,
+            );
             if add_target.gained_focus() {
                 add_target.scroll_to_me(Some(egui::Align::Center));
             }
@@ -1101,6 +1360,15 @@ impl ConvertPanel {
                                                         |ui| ui.small_button("Copy"),
                                                     )
                                                     .inner;
+                                                register_and_apply_target(
+                                                    scope,
+                                                    ui,
+                                                    &copy,
+                                                    format!("copy-{:016x}", copy.id.value()),
+                                                    "Copy result",
+                                                    TargetKind::Button,
+                                                    order,
+                                                );
                                                 if copy.gained_focus() {
                                                     copy.scroll_to_me(Some(egui::Align::Center));
                                                     outer_scroll_target = Some(copy.rect);
@@ -1168,6 +1436,15 @@ impl ConvertPanel {
                 }
                 response
             },
+        );
+        register_and_apply_target(
+            scope,
+            ui,
+            &save.inner,
+            "save-preferences",
+            "Save Preferences",
+            TargetKind::Button,
+            order,
         );
         #[cfg(test)]
         {
@@ -1289,13 +1566,29 @@ fn category_selector(
     ui: &mut egui::Ui,
     category: &mut PanelCategory,
     wide: bool,
+    scope: Option<&JumpModeScope>,
+    order: &mut u64,
 ) -> egui::Response {
+    let popup_scope = scope.map(|scope| scope.combo_popup_scope("category"));
     egui::ComboBox::from_id_salt("convert_category")
         .width(responsive_control_width(ui, wide, 180.0))
         .selected_text(category.label())
         .show_ui(ui, |ui| {
             for option in category_options() {
-                ui.selectable_value(category, option, option.label());
+                let response = ui
+                    .push_id(("category-option", option.label()), |ui| {
+                        ui.selectable_value(category, option, option.label())
+                    })
+                    .inner;
+                register_and_apply_target(
+                    popup_scope.as_ref(),
+                    ui,
+                    &response,
+                    format!("option/{option:?}"),
+                    option.label(),
+                    TargetKind::Selectable,
+                    order,
+                );
             }
         })
         .response
@@ -1305,13 +1598,29 @@ fn number_format_selector(
     ui: &mut egui::Ui,
     preferences: &mut DisplayPreferences,
     wide: bool,
+    scope: Option<&JumpModeScope>,
+    order: &mut u64,
 ) -> egui::Response {
+    let popup_scope = scope.map(|scope| scope.combo_popup_scope("format"));
     egui::ComboBox::from_id_salt("convert_number_format")
         .width(responsive_control_width(ui, wide, 145.0))
         .selected_text(preferences.number_format.label())
         .show_ui(ui, |ui| {
             for format in NumberFormat::ALL {
-                ui.selectable_value(&mut preferences.number_format, *format, format.label());
+                let response = ui
+                    .push_id(("format-option", format.label()), |ui| {
+                        ui.selectable_value(&mut preferences.number_format, *format, format.label())
+                    })
+                    .inner;
+                register_and_apply_target(
+                    popup_scope.as_ref(),
+                    ui,
+                    &response,
+                    format!("option/{}", format.label()),
+                    format.label(),
+                    TargetKind::Selectable,
+                    order,
+                );
             }
         })
         .response
@@ -1320,17 +1629,34 @@ fn number_format_selector(
 fn favorite_selector(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
+    anchor: &str,
     selected: &mut Option<PanelUnit>,
     favorites: &[PanelUnit],
     width: f32,
+    scope: Option<&JumpModeScope>,
+    order: &mut u64,
 ) -> egui::Response {
+    let popup_scope = scope.map(|scope| scope.combo_popup_scope(anchor));
     ui.add_enabled_ui(!favorites.is_empty(), |ui| {
         egui::ComboBox::from_id_salt(id)
             .width(width)
             .selected_text("Favorites")
             .show_ui(ui, |ui| {
                 for favorite in favorites {
-                    ui.selectable_value(selected, Some(*favorite), favorite.label());
+                    let response = ui
+                        .push_id(("favorite-option", *favorite), |ui| {
+                            ui.selectable_value(selected, Some(*favorite), favorite.label())
+                        })
+                        .inner;
+                    register_and_apply_target(
+                        popup_scope.as_ref(),
+                        ui,
+                        &response,
+                        format!("option/{favorite:?}"),
+                        favorite.label(),
+                        TargetKind::Selectable,
+                        order,
+                    );
                 }
             })
             .response

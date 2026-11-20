@@ -1,3 +1,7 @@
+use super::jump_mode::{
+    TargetKind,
+    ui::{JumpModeScope, register_and_apply_target},
+};
 use super::utility_host::UtilityPresentation;
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
@@ -309,6 +313,7 @@ impl QrDialogState {
     pub(super) fn render_host(
         &mut self,
         ctx: &egui::Context,
+        scope: Option<&JumpModeScope>,
         owner: bool,
         first: bool,
         child: Option<&mut egui::Ui>,
@@ -377,11 +382,23 @@ impl QrDialogState {
             let active =
                 owner && first && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard();
             let (button, request) =
-                super::utility_host::presentation_button(ui, presentation, active);
-            if button.clicked() {
+                super::utility_host::presentation_button(ui, presentation, owner);
+            let mut order = 0;
+            register_and_apply_target(
+                scope,
+                ui,
+                &button,
+                "presentation",
+                "Change window presentation",
+                TargetKind::Button,
+                &mut order,
+            );
+            if active && button.clicked() {
                 actions.host_request = Some(request);
             }
-            ui.add_enabled_ui(active, |ui| self.body(ui, &mut actions));
+            ui.add_enabled_ui(owner, |ui| {
+                self.body(ui, &mut actions, scope, &mut order, active)
+            });
         };
         if let Some(ui) = child {
             body(ui);
@@ -513,7 +530,21 @@ impl QrDialogState {
         (!changed && self.raster.is_some()) || (changed && !source.is_empty())
     }
 
-    fn body(&mut self, ui: &mut egui::Ui, actions: &mut QrActions) {
+    fn body(
+        &mut self,
+        ui: &mut egui::Ui,
+        actions: &mut QrActions,
+        scope: Option<&JumpModeScope>,
+        order: &mut u64,
+        allow_focus: bool,
+    ) {
+        macro_rules! target {
+            ($ui:expr, $response:expr, $id:expr, $label:expr, $kind:expr) => {{
+                let response = $response;
+                register_and_apply_target(scope, $ui, &response, $id, $label, $kind, order);
+                response
+            }};
+        }
         let mut close = false;
         egui::ScrollArea::vertical()
             .id_salt("qr_contents")
@@ -527,6 +558,7 @@ impl QrDialogState {
                             .desired_rows(5)
                             .hint_text("Enter or paste text to generate a QR code."),
                     );
+                    register_and_apply_target(scope, ui, &response, "source", "Text or URL", TargetKind::TextEntry, order);
                     ui.ctx().output_mut(|output| {
                         let mut index = output_start;
                         while index < output.commands.len() {
@@ -535,12 +567,12 @@ impl QrDialogState {
                             } else { index += 1; }
                         }
                     });
-                    if actions.focus_source && ui.is_enabled() { response.request_focus(); actions.focus_source = false; }
+                    if actions.focus_source && allow_focus && ui.is_enabled() { response.request_focus(); actions.focus_source = false; }
                     ui.horizontal(|ui| {
-                        if ui.button("Paste").clicked() {
+                        if target!(ui, ui.button("Paste"), "paste", "Paste text", TargetKind::Button).clicked() {
                             actions.action = Some(QrAction::Paste);
                         }
-                        if ui.add_enabled(!actions.source.is_empty(), egui::Button::new("Copy Text")).clicked() {
+                        if target!(ui, ui.add_enabled(!actions.source.is_empty(), egui::Button::new("Copy Text")), "copy-text", "Copy text", TargetKind::Button).clicked() {
                             actions.action = Some(QrAction::CopyText);
                         }
                     });
@@ -558,10 +590,12 @@ impl QrDialogState {
                             ui.horizontal_wrapped(|ui| {
                                 for level in [QrErrorCorrection::Low, QrErrorCorrection::Medium,
                                     QrErrorCorrection::Quartile, QrErrorCorrection::High] {
-                                    ui.selectable_value(&mut selected, level, level.label());
+                                    let response = ui.selectable_value(&mut selected, level, level.label());
+                                    register_and_apply_target(scope, ui, &response, format!("correction/{:?}", level), format!("Error correction {}", level.label()), TargetKind::Selectable, order);
                                 }
                             });
                         });
+                    register_and_apply_target(scope, ui, &advanced.header_response, "advanced", "Advanced", TargetKind::Button, order);
                     if advanced.header_response.clicked() {
                         actions.advanced = !actions.advanced;
                     }
@@ -590,10 +624,10 @@ impl QrDialogState {
                     }
                     ui.horizontal(|ui| {
                         let valid = self.export_candidate_enabled(&actions.source, actions.correction);
-                        if ui.add_enabled(valid, egui::Button::new("Copy QR")).clicked() {
+                        if target!(ui, ui.add_enabled(valid, egui::Button::new("Copy QR")), "copy-qr", "Copy QR", TargetKind::Button).clicked() {
                             actions.action = Some(QrAction::CopyQr);
                         }
-                        if ui.add_enabled(valid, egui::Button::new("Save PNG")).clicked() {
+                        if target!(ui, ui.add_enabled(valid, egui::Button::new("Save PNG")), "save-png", "Save PNG", TargetKind::Button).clicked() {
                             actions.action = Some(QrAction::SavePng);
                         }
                     });
@@ -604,7 +638,7 @@ impl QrDialogState {
                             Err(message) => { ui.colored_label(ui.visuals().error_fg_color, message); }
                         }
                     }
-                    close = ui.button("Close").clicked();
+                    close = target!(ui, ui.button("Close"), "close", "Close", TargetKind::Button).clicked();
                 });
         if close {
             actions.close = true;

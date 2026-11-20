@@ -35,7 +35,7 @@ pub(crate) fn editor_loop_header(source: &str) -> bool {
 pub(crate) fn editor_control_keyword(source: &str) -> Option<&'static str> {
     loops::editor_control_keyword(source)
 }
-pub(crate) use script::{FUNCTIONS, function_signature_help};
+pub(crate) use script::{FUNCTIONS, function_signature_help, is_vector_callback};
 pub(crate) use script::{MAX_WORK, MAX_SEQUENCE_ELEMENTS, MAX_VECTOR_COMPONENT_WORK};
 pub(crate) use loops::{MAX_LOOP_ITERATIONS, MAX_LOOP_DEPTH, MAX_BLOCK_DEPTH};
 
@@ -112,6 +112,28 @@ pub(crate) fn editor_function_scope(source: &str, caret: usize) -> EditorFunctio
             keyword_range, name_range, parameter_ranges, body_ranges, valid });
     }
     scope
+}
+
+pub(crate) fn editor_callback_ranges(source: &str) -> Vec<Range<usize>> {
+    let analysis = syntax::SourceAnalysis::new(source);
+    let (functions, _, _) = script::build_functions(&analysis);
+    let mut ranges = Vec::new();
+    for (line, row) in analysis.rows.iter().enumerate() {
+        if row.owner.is_some() || row.diagnostic.is_some() { continue; }
+        let visible = functions.partition_point(|function| function.line < line);
+        if visible == 0 { continue; }
+        let body_start = script::declaration_header(&row.text)
+            .and_then(Result::ok)
+            .and_then(|header| header.body_start)
+            .unwrap_or(0);
+        for range in script::callback_ranges(&row.text[body_start..], &functions[..visible]) {
+            let range = range.start + body_start..range.end + body_start;
+            if functions[..visible].iter().any(|function| function.name == row.text[range.clone()]) {
+                ranges.extend(mapped_ranges(row, range));
+            }
+        }
+    }
+    ranges
 }
 
 /// Names visible before the caret, without evaluating the document.
@@ -4456,6 +4478,269 @@ mod tests {
         for (line, expected) in [(7, 20.0), (8, 10.0), (9, 30.0), (10, 3.0), (14, 4.0),
             (16, 11.0), (20, 8.0), (21, 0.0), (22, 0.0)] {
             assert_eq!(scalar(&evaluation, line), expected, "line {}", line + 1);
+        }
+    }
+
+    #[test]
+    fn vector_sort_and_unique_work_in_both_evaluator_routes() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let full = vec!["7"; 1024].join(",");
+            let source = format!(concat!(
+                "v = [7, 2, 7, 4, 10]\nalias = v\n",
+                "sort(v)\nSORT_DESC(v)\nunique(v)\nv\nalias\n",
+                "sort([])\nsort_desc([])\nunique([])\nsort([1])\n",
+                "full = [{}]\nlen(sort(full))\nunique(full)\n",
+                "sort(3)\nsort(v, v)\nunique(true)\n",
+                "v = sort(3)\nlen(v)\n"
+            ), full) + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for (line, expected) in [
+                (2, "[2, 4, 7, 7, 10]"), (3, "[10, 7, 7, 4, 2]"),
+                (4, "[7, 2, 4, 10]"), (5, "[7, 2, 7, 4, 10]"),
+                (6, "[7, 2, 7, 4, 10]"), (7, "[]"), (8, "[]"),
+                (9, "[]"), (10, "[1]"), (13, "[7]"),
+            ] {
+                assert_eq!(formatted(&evaluation, line), expected, "line {}", line + 1);
+            }
+            assert_eq!(scalar(&evaluation, 12), 1024.0);
+            for line in [14, 15, 16, 17] {
+                assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
+            }
+            assert_eq!(scalar(&evaluation, 18), 5.0);
+        }
+    }
+
+    #[test]
+    fn cumulative_and_rolling_vectors_follow_complete_window_semantics() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "v = [10, 20, 15, 30]\n",
+                "cumsum(v)\ncumprod([2, 3, 4])\ndiff(v)\npercent_changes(v)\n",
+                "rolling_sum(v, 2)\nrolling_average(v, 2)\n",
+                "rolling_min(v, 2)\nrolling_max(v, 2)\n",
+                "rolling_sum(v, 1)\nrolling_average(v, 4)\nrolling_max(v, 5)\n",
+                "rolling_sum(v, 1e100)\ncumsum([])\ncumprod([])\ndiff([1])\n",
+                "percent_changes([])\nrolling_sum([], 1)\nv\npercent_changes([-10, -5])\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for (line, expected) in [
+                (1, "[10, 30, 45, 75]"), (2, "[2, 6, 24]"), (3, "[10, -5, 15]"),
+                (4, "[1, -0.25, 1]"), (5, "[30, 35, 45]"), (6, "[15, 17.5, 22.5]"),
+                (7, "[10, 15, 15]"), (8, "[20, 20, 30]"), (9, "[10, 20, 15, 30]"),
+                (10, "[18.75]"), (11, "[]"), (12, "[]"), (13, "[]"),
+                (14, "[]"), (15, "[]"), (16, "[]"), (17, "[]"),
+                (18, "[10, 20, 15, 30]"), (19, "[-0.5]"),
+            ] {
+                assert_eq!(formatted(&evaluation, line), expected, "line {}", line + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn univariate_statistics_validate_ranges_and_preserve_old_statistics() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "v = [1, 2, 3, 4]\nquantile(v, 0.25)\npercentile(v, 50)\n",
+                "variance_population(v)\nvariance_sample(v)\nstdev_sample(v)\nstdev(v)\n",
+                "quantile(v, 0)\npercentile(v, 100)\nvariance_population([5])\n",
+                "quantile([], 0.5)\nvariance_population([])\nvariance_sample([1])\n",
+                "stdev_sample([1])\nquantile(v, -0.1)\nquantile(v, 1.1)\n",
+                "percentile(v, 101)\nquantile(v, true)\nvariance_sample(range(3))\n",
+                "quantile(v, u8(1))\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert_eq!(scalar(&evaluation, 1), 1.75);
+            assert_eq!(scalar(&evaluation, 2), 2.5);
+            assert!((scalar(&evaluation, 3) - 1.25).abs() < 1e-12);
+            assert!((scalar(&evaluation, 4) - 5.0 / 3.0).abs() < 1e-12);
+            assert!((scalar(&evaluation, 5) - (5.0_f64 / 3.0).sqrt()).abs() < 1e-12);
+            assert!((scalar(&evaluation, 6) - 1.25_f64.sqrt()).abs() < 1e-12);
+            assert_eq!(scalar(&evaluation, 7), 1.0);
+            assert_eq!(scalar(&evaluation, 8), 4.0);
+            assert_eq!(scalar(&evaluation, 9), 0.0);
+            for line in 10..=19 {
+                assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn paired_statistics_execute_in_both_routes_with_precise_degenerate_errors() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "x = [1, 2, 3]\ny = [3, 5, 7]\n",
+                "covariance_population(x, y)\ncovariance_sample(x, y)\n",
+                "correlation(x, y)\nregression_slope(x, y)\n",
+                "regression_intercept(x, y)\nregression_r2(x, y)\npredict_linear(x, y, 4)\n",
+                "correlation(x, [3, 2, 1])\nregression_r2(x, [1, 2, 4])\n",
+                "regression_slope(x, [7, 7, 7])\nregression_intercept(x, [7, 7, 7])\n",
+                "predict_linear(x, [7, 7, 7], 4)\nregression_r2(x, [7, 7, 7])\n",
+                "correlation(x, [7, 7, 7])\nregression_slope([2, 2], [1, 2])\n",
+                "covariance_population([], [])\ncorrelation([1], [2])\n",
+                "covariance_sample(x, [1, 2])\npredict_linear(x, y, true)\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for (line, expected) in [(2, 4.0 / 3.0), (3, 2.0), (4, 1.0), (5, 2.0),
+                (6, 1.0), (7, 1.0), (8, 9.0), (9, -1.0), (10, 27.0 / 28.0),
+                (11, 0.0), (12, 7.0), (13, 7.0)] {
+                assert!((scalar(&evaluation, line) - expected).abs() < 1e-12, "line {}", line + 1);
+            }
+            for line in 14..=20 {
+                assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn previous_local_statistic_names_preserve_function_precedence() {
+        let document = CalculationDocument::new("fn quantile(a, b, c) = a + b + c\nquantile(1, 2, 3)\nQUANTILE([1, 2], 0.5)");
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 1), 6.0);
+        assert_eq!(scalar(&evaluation, 2), 1.5);
+    }
+
+    #[test]
+    fn cumulative_and_rolling_failures_do_not_publish_partial_vectors() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "v = [10, 0, 20]\n",
+                "rolling_sum(v, 0)\nrolling_sum(v, -1)\nrolling_sum(v, 1.5)\n",
+                "rolling_sum([], 0)\nrolling_sum(v, true)\nrolling_sum(v, u8(1))\n",
+                "percent_changes(v)\npercent_changes([-0.0, 1])\n",
+                "cumsum([1e308, 1e308])\ncumprod([1e308, 2])\n",
+                "diff([-1e308, 1e308])\nrolling_sum([1e308, 1e308], 2)\n",
+                "v = percent_changes(v)\nlen(v)\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for line in 1..=13 {
+                assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}: {:?}", line + 1, evaluation.lines[line].outcome);
+            }
+            assert_eq!(scalar(&evaluation, 14), 3.0);
+        }
+    }
+
+    #[test]
+    fn previously_declared_rolling_names_remain_local_functions() {
+        let document = CalculationDocument::new("fn rolling_sum(a, b, c) = a + b + c\nrolling_sum(1, 2, 3)\nROLLING_SUM([1, 2], 2)");
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 1), 6.0);
+        assert_eq!(formatted(&evaluation, 2), "[3]");
+    }
+
+    #[test]
+    fn vector_callback_transforms_and_dependencies_follow_formula_scope() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "values = [7, 2, 7, 4, 10]\nthreshold = 5\nfactor = 2\n",
+                "fn above(value, limit) = value > limit\n",
+                "fn scale(value, multiplier) = value * multiplier\n",
+                "filter(values, above, threshold)\nmap(values, scale, factor)\n",
+                "count_if(values, above, threshold)\nfind_indices(values, above, threshold)\n",
+                "map([], scale, factor)\nvalues\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for (line, expected) in [(5, "[7, 7, 10]"), (6, "[14, 4, 14, 8, 20]"),
+                (8, "[0, 2, 4]"), (9, "[]"), (10, "[7, 2, 7, 4, 10]")] {
+                assert_eq!(formatted(&evaluation, line), expected);
+            }
+            assert_eq!(scalar(&evaluation, 7), 3.0);
+            assert!(evaluation.lines[5].dependency_indices.contains(&3));
+            assert!(evaluation.lines[5].dependency_indices.contains(&1));
+            assert!(evaluation.lines[9].dependency_indices.contains(&4));
+        }
+    }
+
+    #[test]
+    fn callback_records_nested_definitions_only_when_called() {
+        let document = CalculationDocument::new(concat!(
+            "fn inner(v) = v * 2\nfn outer(v) = inner(v) + 1\n",
+            "map([], outer)\nmap([2], outer)\n"
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(formatted(&evaluation, 2), "[]");
+        assert!(evaluation.lines[2].dependency_indices.contains(&1));
+        assert!(!evaluation.lines[2].dependency_indices.contains(&0));
+        assert_eq!(formatted(&evaluation, 3), "[5]");
+        assert!(evaluation.lines[3].dependency_indices.contains(&0));
+        assert!(evaluation.lines[3].dependency_indices.contains(&1));
+    }
+
+    #[test]
+    fn vector_callbacks_validate_even_empty_and_preserve_binding_on_failure() {
+        let source = concat!(
+            "fn twice(v) = v * 2\nfn bad(v) = v\nfn broken(v) = 1 / (v - 2)\n",
+            "v = [1, 2, 3]\nmap([], missing)\nmap([], twice, 1)\n",
+            "filter(v, bad)\nmap(v, bad)\n",
+            "v = map(v, broken)\nlen(v)\n"
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for line in [4, 5, 6, 8] {
+            assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
+        }
+        assert_eq!(formatted(&evaluation, 7), "[1, 2, 3]");
+        assert_eq!(scalar(&evaluation, 9), 3.0);
+        assert!(error_message(&evaluation, 8).contains("index 1"));
+    }
+
+    #[test]
+    fn invalid_callback_setup_preserves_prior_binding_in_both_routes() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "fn one(v) = v\nv = [1]\n",
+                "v = map(v, missing)\nlen(v)\n",
+                "v = map(v, one, 4)\nlen(v)\n",
+                "if(false, map([], missing), 7)\n",
+                "fn invalid(v) = map(v, missing)\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 3), 1.0);
+            assert!(matches!(evaluation.lines[4].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 5), 1.0);
+            assert_eq!(scalar(&evaluation, 6), 7.0);
+            assert!(matches!(evaluation.lines[7].outcome, LineOutcome::Error(_)));
+        }
+    }
+
+    #[test]
+    fn prior_local_callback_operation_names_keep_function_precedence() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = "fn map(a, b) = a + b\nfn filter(a) = a * 2\nmap(2, 3)\nfilter(4)".to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert_eq!(scalar(&evaluation, 2), 5.0);
+            assert_eq!(scalar(&evaluation, 3), 8.0);
+        }
+    }
+
+    #[test]
+    fn old_local_functions_can_shadow_new_vector_names() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = format!(concat!(
+                "fn sort(a, b) = a + b\n",
+                "fn sort_desc(a) = a * 2\n",
+                "fn unique(a) = a - 1\n",
+                "sort(2, 3)\nsort_desc(4)\nunique(6)\n",
+                "SORT([3, 1])\n",
+                "fn reverse(a) = a\n",
+                "fn SORT_DESC(a) = SORT_DESC(a)\n"
+            ),) + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert_eq!(scalar(&evaluation, 3), 5.0);
+            assert_eq!(scalar(&evaluation, 4), 8.0);
+            assert_eq!(scalar(&evaluation, 5), 5.0);
+            assert_eq!(formatted(&evaluation, 6), "[1, 3]");
+            assert!(matches!(evaluation.lines[7].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[8].outcome, LineOutcome::Error(_)));
         }
     }
 

@@ -1,4 +1,4 @@
-use super::jump_mode::ui::{JumpModeScope, NavigationOwner, NavigationViewportBinding};
+use super::jump_mode::ui::{JumpModeScope, JumpModeUi, NavigationOwner, NavigationViewportBinding};
 use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use super::utility_host::{HostIdentity, UtilityPresentation};
 use super::utility_window_host::{HostedUtilityDialog, UtilityWindowHost};
@@ -44,6 +44,7 @@ pub(super) struct FormDraft {
 
 pub(super) trait FormSpec {
     const KIND: FormKind;
+    const NAV: super::jump_mode::ui::NavigationDialogKind;
     const KEY: &'static str;
     const TITLE: &'static str;
 }
@@ -52,16 +53,22 @@ pub(super) struct Link;
 pub(super) struct NewNote;
 impl FormSpec for Table {
     const KIND: FormKind = FormKind::Table;
+    const NAV: super::jump_mode::ui::NavigationDialogKind =
+        super::jump_mode::ui::NavigationDialogKind::NoteFormTable;
     const KEY: &'static str = "note-custom-table-builder";
     const TITLE: &'static str = "Insert custom Markdown table";
 }
 impl FormSpec for Link {
     const KIND: FormKind = FormKind::Link;
+    const NAV: super::jump_mode::ui::NavigationDialogKind =
+        super::jump_mode::ui::NavigationDialogKind::NoteFormLink;
     const KEY: &'static str = "note-insert-link";
     const TITLE: &'static str = "Insert Link";
 }
 impl FormSpec for NewNote {
     const KIND: FormKind = FormKind::NewNote;
+    const NAV: super::jump_mode::ui::NavigationDialogKind =
+        super::jump_mode::ui::NavigationDialogKind::NoteFormNewNote;
     const KEY: &'static str = "note-link-new";
     const TITLE: &'static str = "Link new note";
 }
@@ -124,7 +131,9 @@ impl<K: FormSpec> NoteForm<K> {
         first: bool,
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
+        scope: Option<&JumpModeScope>,
     ) -> FormActions {
+        let mut order = 0;
         let mut draft = self.draft.clone();
         let mut submit = false;
         let mut close = false;
@@ -137,6 +146,15 @@ impl<K: FormSpec> NoteForm<K> {
             ui.horizontal(|ui| {
                 let (host, next) =
                     super::utility_host::presentation_button(ui, presentation, interactive);
+                form_target(
+                    scope,
+                    ui,
+                    &host,
+                    "presentation",
+                    "Dock or pop out",
+                    super::jump_mode::TargetKind::Button,
+                    &mut order,
+                );
                 #[cfg(test)]
                 controls.push(("host".into(), host.rect, ui.clip_rect(), host.enabled()));
                 if first && !ctx.will_discard() && host.clicked() {
@@ -153,25 +171,35 @@ impl<K: FormSpec> NoteForm<K> {
                     .auto_shrink([false, false]).max_height(height).show(ui, |ui| {
                         match K::KIND {
                             FormKind::Table => {
-                                ui.horizontal(|ui| { ui.label("Columns"); ui.add(egui::DragValue::new(&mut draft.columns).range(1..=crate::notes_markdown::MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION)); });
-                                ui.horizontal(|ui| { ui.label("Data rows (excluding header)"); ui.add(egui::DragValue::new(&mut draft.rows).range(1..=crate::notes_markdown::MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION)); });
+                                ui.horizontal(|ui| { ui.label("Columns"); let response = ui.add(egui::DragValue::new(&mut draft.columns).range(1..=crate::notes_markdown::MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION)); form_target(scope, ui, &response, "columns", "Columns", super::jump_mode::TargetKind::Slider, &mut order); });
+                                ui.horizontal(|ui| { ui.label("Data rows (excluding header)"); let response = ui.add(egui::DragValue::new(&mut draft.rows).range(1..=crate::notes_markdown::MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION)); form_target(scope, ui, &response, "rows", "Data rows", super::jump_mode::TargetKind::Slider, &mut order); });
                                 draft.headers.resize_with(draft.columns, String::new);
                                 for (index, header) in draft.headers.iter_mut().enumerate() {
-                                    ui.horizontal(|ui| { ui.label(format!("Column {}", index + 1)); ui.text_edit_singleline(header); });
+                                    let id = egui::Id::new((K::KEY, self.session, "header", index));
+                                    ui.scope_builder(egui::UiBuilder::new().id(id), |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("Column {}", index + 1));
+                                            let response = ui.text_edit_singleline(header);
+                                            form_target(scope, ui, &response, format!("header/{index}"), format!("Column {} header", index + 1), super::jump_mode::TargetKind::TextEntry, &mut order);
+                                        });
+                                    });
                                 }
                             }
                             FormKind::Link => {
                                 ui.label("Text:");
                                 let text = ui.text_edit_singleline(&mut draft.text);
+                                form_target(scope, ui, &text, "text", "Link text", super::jump_mode::TargetKind::TextEntry, &mut order);
                                 #[cfg(test)] controls.push(("text".into(), text.rect, ui.clip_rect(), text.enabled()));
                                 ui.label("URL:");
                                 let url = ui.text_edit_singleline(&mut draft.url);
+                                form_target(scope, ui, &url, "url", "Link URL", super::jump_mode::TargetKind::TextEntry, &mut order);
                                 #[cfg(test)] controls.push(("url".into(), url.rect, ui.clip_rect(), url.enabled()));
                                 if text.changed() || url.changed() { draft.error = None; }
                             }
                             FormKind::NewNote => {
                                 ui.label("New note name");
                                 let text = ui.text_edit_singleline(&mut draft.text);
+                                form_target(scope, ui, &text, "text", "New note name", super::jump_mode::TargetKind::TextEntry, &mut order);
                                 #[cfg(test)] controls.push(("text".into(), text.rect, ui.clip_rect(), text.enabled()));
                                 if text.changed() { draft.error = None; }
                                 if draft.text.trim().is_empty() { ui.weak("Name is required"); }
@@ -183,6 +211,8 @@ impl<K: FormSpec> NoteForm<K> {
                     let enabled = K::KIND != FormKind::NewNote || !draft.text.trim().is_empty();
                     let insert = ui.add_enabled(enabled, egui::Button::new(if K::KIND == FormKind::NewNote { "Link" } else { "Insert" }));
                     let cancel = ui.button("Cancel");
+                    form_target(scope, ui, &insert, "submit", if K::KIND == FormKind::NewNote { "Link" } else { "Insert" }, super::jump_mode::TargetKind::Button, &mut order);
+                    form_target(scope, ui, &cancel, "cancel", "Cancel", super::jump_mode::TargetKind::Button, &mut order);
                     #[cfg(test)] {
                         controls.push(("submit".into(), insert.rect, ui.clip_rect(), insert.enabled()));
                         controls.push(("cancel".into(), cancel.rect, ui.clip_rect(), cancel.enabled()));
@@ -197,25 +227,34 @@ impl<K: FormSpec> NoteForm<K> {
         if let Some(ui) = child {
             contents(ui);
         } else {
-            let output = egui::Window::new(K::TITLE)
+            let mut window = egui::Window::new(K::TITLE)
                 .id(self.layer().id)
                 .resizable(true)
-                .default_size([460.0, 460.0])
-                .min_size([320.0, 220.0])
-                .show_utility(
-                    ctx,
-                    K::KEY,
-                    self.layer().id,
-                    Some(&mut open),
-                    super::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                        super::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
-                            460.0, 460.0,
-                        )),
-                        egui::vec2(320.0, 220.0),
-                        [None, None],
-                    ),
-                    |ui| contents(ui),
-                );
+                .default_size(Self::SIZE)
+                .min_size(Self::MINIMUM);
+            if K::KIND == FormKind::Table {
+                // Keep the initial table builder below the launcher query.
+                // egui retains the position once the user moves the window.
+                let screen = ctx.content_rect();
+                window = window.default_pos(egui::pos2(
+                    screen.left() + 20.0,
+                    (screen.bottom() - Self::SIZE.y - 20.0).max(screen.top()),
+                ));
+            }
+            let output = window.show_utility(
+                ctx,
+                K::KEY,
+                self.layer().id,
+                Some(&mut open),
+                super::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    super::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
+                        460.0, 460.0,
+                    )),
+                    egui::vec2(320.0, 220.0),
+                    [None, None],
+                ),
+                |ui| contents(ui),
+            );
             #[cfg(test)]
             {
                 window_rect = output.map(|output| output.response.rect);
@@ -237,6 +276,26 @@ impl<K: FormSpec> NoteForm<K> {
         }
     }
 }
+fn form_target(
+    scope: Option<&JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    id: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: super::jump_mode::TargetKind,
+    order: &mut u64,
+) {
+    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order);
+    if response.enabled()
+        && response.gained_focus()
+        && ui.is_visible()
+        && !ui.is_sizing_pass()
+        && !ui.ctx().will_discard()
+        && !ui.clip_rect().contains_rect(response.rect)
+    {
+        response.scroll_to_me(None);
+    }
+}
 pub(super) struct FormActions {
     pub session: u64,
     pub draft: FormDraft,
@@ -250,6 +309,7 @@ pub(super) enum FormCommand {
 }
 pub(super) type FormHost<K> = UtilityWindowHost<NoteForm<K>>;
 impl<K: FormSpec> HostedUtilityDialog for NoteForm<K> {
+    const KIND: Option<super::jump_mode::ui::NavigationDialogKind> = Some(K::NAV);
     const KEY: &'static str = K::KEY;
     const TITLE: &'static str = K::TITLE;
     const SIZE: egui::Vec2 = egui::vec2(460.0, 460.0);
@@ -266,8 +326,13 @@ impl<K: FormSpec> HostedUtilityDialog for NoteForm<K> {
     fn dialog_layer(&self) -> egui::LayerId {
         self.layer()
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
+    fn target_generation(&self) -> super::jump_mode::TargetGeneration {
+        let membership = match K::KIND {
+            FormKind::Table => self.draft.columns,
+            FormKind::Link => 0,
+            FormKind::NewNote => usize::from(!self.draft.text.trim().is_empty()),
+        };
+        super::jump_mode::TargetGeneration(egui::Id::new((self.session, membership)).value())
     }
     fn is_open(&self) -> bool {
         self.open
@@ -276,7 +341,7 @@ impl<K: FormSpec> HostedUtilityDialog for NoteForm<K> {
         self.session
     }
     fn parent_targets_allowed(&self, _: &()) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -313,7 +378,7 @@ impl<K: FormSpec> HostedUtilityDialog for NoteForm<K> {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -323,7 +388,7 @@ impl<K: FormSpec> HostedUtilityDialog for NoteForm<K> {
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render(ctx, allowed, first, child, presentation)
+        self.render(ctx, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -346,6 +411,24 @@ impl<K: FormSpec> HostedUtilityDialog for NoteForm<K> {
         None
     }
 }
+
+pub(super) fn root_form_owner<K: FormSpec>(
+    ctx: &egui::Context,
+    host: &FormHost<K>,
+    form: Option<&NoteForm<K>>,
+) -> Option<NavigationOwner> {
+    let form = form.filter(|form| form.open)?;
+    let layer = host.root_layer()?;
+    (ctx.viewport_id() == egui::ViewportId::ROOT
+        && ctx.input(|input| input.focused)
+        && ctx.memory(|memory| memory.top_modal_layer().is_none())
+        && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+        && !egui::Popup::is_any_open(ctx)
+        && super::jump_mode::ui::focused_response_layer(ctx)
+            .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background))
+    .then(|| NoteForm::<K>::navigation_owner(form.session))
+}
+
 pub(super) fn show_form<K: FormSpec>(
     ctx: &egui::Context,
     host: &mut FormHost<K>,
@@ -355,17 +438,30 @@ pub(super) fn show_form<K: FormSpec>(
     root_input: bool,
     native_input: bool,
     root_jump_active: bool,
+    navigation: Option<(&JumpModeUi, NavigationOwner)>,
 ) {
     let Some(form) = form.as_mut() else {
         return;
     };
-    let layer = host.root_layer();
-    let parent_owner = root_input
-        && layer.is_some()
-        && super::jump_mode::ui::visible_top_middle_layer(ctx) == layer
-        && !egui::Popup::is_any_open(ctx)
-        && super::jump_mode::ui::focused_response_layer(ctx)
-            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+    let session = form.session;
+    let current = root_input
+        .then(|| root_form_owner(ctx, host, Some(form)))
+        .flatten();
+    let root_owner = current
+        .filter(|current| navigation.is_some_and(|(_, candidate)| candidate == *current))
+        .unwrap_or(NavigationOwner::Blocked);
+    let scope = navigation
+        .filter(|(jump, _)| jump.is_enabled() && root_owner != NavigationOwner::Blocked)
+        .and_then(|(jump, _)| {
+            jump.scope_for_navigation_owner(
+                form.dialog_surface(session),
+                form.target_generation(),
+                form.dialog_namespace(),
+                ctx.viewport_id(),
+                root_owner,
+                false,
+            )
+        });
     host.show(
         ctx,
         form,
@@ -375,14 +471,14 @@ pub(super) fn show_form<K: FormSpec>(
             root_visible,
             root_input,
             native_input,
-            root_owner: NavigationOwner::Blocked,
-            parent_owner,
+            root_owner,
+            parent_owner: current.is_some(),
             root_jump_active,
             close_shortcut: true,
             allow_os_close: true,
             confirmation_owner: NavigationOwner::Blocked,
-            parent_instance: 0,
-            root_scopes: (None, None),
+            parent_instance: session,
+            root_scopes: (scope.as_ref(), None),
         },
     );
 }
@@ -424,7 +520,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    let _ = form.render(ctx, true, true, None, UtilityPresentation::Docked);
+                    let _ = form.render(ctx, true, true, None, UtilityPresentation::Docked, None);
                 },
             )
             .drop_without_applying_deltas();

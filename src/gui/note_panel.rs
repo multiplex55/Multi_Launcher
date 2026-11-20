@@ -1,3 +1,6 @@
+use super::markdown_outline::{
+    OutlineAction, OutlineMoves, OutlineStamp, move_buttons, outline_row, owns_outline_input, sibling_requests,
+};
 use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
 use crate::diagram::{DiagramSourceCopy, DiagramSourceCopyOrigin};
@@ -483,11 +486,18 @@ struct BacklinkRow {
     todo_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NoteOutlinePosition {
+    revision: u64,
+    heading_start: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NoteOutlineRow {
     level: u8,
     title: String,
-    normalized_anchor: String,
+    heading_index: usize,
+    heading_start: usize,
     line_index: usize,
     char_index: usize,
     collapsible: bool,
@@ -1107,6 +1117,10 @@ pub struct NotePanel {
     deferred_root_open: Option<(String, PathBuf, UtilityPresentation)>,
     active_host_pass: Option<(HostIdentity, ViewportPassProvenance)>,
     active_host_layer: Option<egui::LayerId>,
+    jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    jump_order: u64,
+    native_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    native_jump_frame: Option<u64>,
     accepted_host_effect_receipt: Option<(HostIdentity, Option<ViewportPassProvenance>)>,
     accepted_host_modal_layer: Option<(HostIdentity, Option<egui::LayerId>)>,
     defer_host_actions: bool,
@@ -1117,6 +1131,10 @@ pub struct NotePanel {
     saved_content_baseline: String,
     pending_close_after_save: bool,
     discard_unsaved_prompt: bool,
+    close_prompt_epoch: u64,
+    conflict_prompt_epoch: u64,
+    plain_prompt_epoch: u64,
+    prompt_scope: Option<(NotePrompt, super::jump_mode::ui::JumpModeScope)>,
     link_search: String,
     link_menu_targets: Vec<LinkMenuResult>,
     link_menu_targets_version: Option<u64>,
@@ -1150,8 +1168,9 @@ pub struct NotePanel {
     outline_width: f32,
     split_ratio: f32,
     outline_filter: String,
-    selected_outline_heading: Option<String>,
-    pending_scroll_target: Option<String>,
+    selected_outline_heading: Option<NoteOutlinePosition>,
+    pending_scroll_target: Option<NoteOutlinePosition>,
+    outline_moves: OutlineMoves,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
     show_open_with_menu: bool,
@@ -1190,6 +1209,8 @@ pub struct NotePanel {
     focus_textedit_next_frame: bool,
     markdown_toolbar_popup_was_open: bool,
     markdown_toolbar_owns_selection: bool,
+    editor_context_binding: Option<NoteContextMenu>,
+    image_context_binding: Option<NoteContextMenu>,
     applying_toolbar_markdown_action: bool,
     focus_textedit_after_toolbar_action: bool,
     pending_toolbar_focus_restore: Option<PendingNoteToolbarFocusRestore>,
@@ -1319,6 +1340,38 @@ enum NoteSaveOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NotePrompt {
+    Close,
+    Conflict,
+    PlainLink,
+}
+impl NotePrompt {
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::Conflict => "save-conflict",
+            Self::PlainLink => "plain-link-conversion",
+        }
+    }
+    pub(super) fn kind(self) -> super::jump_mode::ui::NavigationDialogKind {
+        match self {
+            Self::Close => super::jump_mode::ui::NavigationDialogKind::NoteClosePrompt,
+            Self::Conflict => super::jump_mode::ui::NavigationDialogKind::NoteConflictPrompt,
+            Self::PlainLink => super::jump_mode::ui::NavigationDialogKind::NotePlainLinkPrompt,
+        }
+    }
+    pub(super) fn surface(self) -> &'static str {
+        self.kind().surface_kind()
+    }
+}
+#[derive(Clone, Copy)]
+enum PlainLinkAction {
+    Review,
+    Convert,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConflictSaveAction {
     Overwrite,
     SaveAsNew,
@@ -1389,10 +1442,12 @@ struct NotePanelPendingHostActions {
     keep_editing_requested: bool,
     save_and_close_requested: bool,
     conflict_action: Option<ConflictSaveAction>,
+    plain_link_action: Option<PlainLinkAction>,
     external_open: Option<NoteExternalOpen>,
     attachment_picker_requested: bool,
     screenshot_requested: bool,
     clipboard_image: Option<(egui::Id, RgbaImage)>,
+    outline_move: Option<OutlineAction>,
     open_note_slugs: Vec<String>,
     open_image_paths: Vec<PathBuf>,
     open_forms: Vec<super::note_form_dialog::FormOpenRequest>,
@@ -1418,12 +1473,31 @@ struct PendingNotePanelHostFrame {
     actions: NotePanelPendingHostActions,
 }
 
+#[derive(Clone, Copy)]
+struct NoteContextMenu {
+    host: HostIdentity,
+    revision: u64,
+    document: egui::Id,
+    viewport: egui::ViewportId,
+    anchor: egui::Id,
+    keyboard: bool,
+}
+
+struct NoteToolbarEditorCheckpoint {
+    editor: egui::Id,
+    cursor: Option<egui::text::CCursorRange>,
+    undoer: egui::util::undoer::Undoer<(egui::text::CCursorRange, String)>,
+}
+
 struct NotePanelDraftCheckpoint {
     note: Note,
     content_revision: u64,
     saved_content_baseline: String,
     pending_selection: Option<(usize, usize)>,
     pending_cursor_position: Option<usize>,
+    toolbar_editor: Option<NoteToolbarEditorCheckpoint>,
+    selected_outline_heading: Option<NoteOutlinePosition>,
+    pending_scroll_target: Option<NoteOutlinePosition>,
     retained_text_edit_history: Option<RetainedTextEditHistory>,
     replacement_undo_boundaries: Vec<ReplacementUndoBoundary>,
     replacement_redo_boundaries: Vec<ReplacementUndoBoundary>,
@@ -1431,13 +1505,27 @@ struct NotePanelDraftCheckpoint {
 }
 
 impl NotePanelDraftCheckpoint {
-    fn capture(panel: &NotePanel) -> Self {
+    fn capture(panel: &NotePanel, ctx: &egui::Context) -> Self {
         Self {
             note: panel.note.clone(),
             content_revision: panel.note_find.content_revision(),
             saved_content_baseline: panel.saved_content_baseline.clone(),
             pending_selection: panel.pending_selection,
             pending_cursor_position: panel.pending_cursor_position,
+            toolbar_editor: if panel.markdown_toolbar_popup_was_open || panel.editor_context_binding.is_some() {
+                panel.last_textedit_id.and_then(|editor| {
+                    let state = egui::widgets::text_edit::TextEditState::load(ctx, editor)?;
+                    Some(NoteToolbarEditorCheckpoint {
+                        editor,
+                        cursor: state.cursor.char_range(),
+                        undoer: state.undoer(),
+                    })
+                })
+            } else {
+                None
+            },
+            selected_outline_heading: panel.selected_outline_heading,
+            pending_scroll_target: panel.pending_scroll_target,
             retained_text_edit_history: panel.retained_text_edit_history.clone(),
             replacement_undo_boundaries: panel.replacement_undo_boundaries.clone(),
             replacement_redo_boundaries: panel.replacement_redo_boundaries.clone(),
@@ -1445,16 +1533,30 @@ impl NotePanelDraftCheckpoint {
         }
     }
 
-    fn restore(self, panel: &mut NotePanel) {
+    fn restore(self, panel: &mut NotePanel, ctx: &egui::Context) {
+        if panel.note.content != self.note.content
+            && let Some(checkpoint) = self.toolbar_editor
+            && panel.last_textedit_id == Some(checkpoint.editor)
+            && let Some(mut state) =
+                egui::widgets::text_edit::TextEditState::load(ctx, checkpoint.editor)
+        {
+            state.cursor.set_char_range(checkpoint.cursor);
+            state.set_undoer(checkpoint.undoer);
+            state.store(ctx, checkpoint.editor);
+        }
         panel.note = self.note;
         panel.saved_content_baseline = self.saved_content_baseline;
         panel.pending_selection = self.pending_selection;
         panel.pending_cursor_position = self.pending_cursor_position;
+        panel.selected_outline_heading = self.selected_outline_heading;
+        panel.pending_scroll_target = self.pending_scroll_target;
         panel.retained_text_edit_history = self.retained_text_edit_history;
         panel.replacement_undo_boundaries = self.replacement_undo_boundaries;
         panel.replacement_redo_boundaries = self.replacement_redo_boundaries;
         panel.replacement_history_mutation = self.replacement_history_mutation;
-        panel.note_find.restore_content_revision(self.content_revision);
+        panel
+            .note_find
+            .restore_content_revision(self.content_revision);
         panel.note_find_preview = None;
         panel.pending_find_navigation = None;
         panel.fast_derived_dirty = true;
@@ -1483,6 +1585,7 @@ pub(crate) enum NotePanelEffect {
         origin: NoteMermaidOrigin,
     },
     Export(NoteExportRequest),
+    OpenPrint(super::markdown_print::PrintOpen),
 }
 
 pub(super) type NoteOpenSession = (u64, String, PathBuf);
@@ -1678,9 +1781,10 @@ impl NotePanel {
         let filter = filter.trim().to_lowercase();
         headings
             .iter()
-            .filter(|heading| heading.level <= max_depth)
-            .filter(|heading| filter.is_empty() || heading.title.to_lowercase().contains(&filter))
-            .map(|heading| {
+            .enumerate()
+            .filter(|(_, heading)| heading.level <= max_depth)
+            .filter(|(_, heading)| filter.is_empty() || heading.title.to_lowercase().contains(&filter))
+            .map(|(heading_index, heading)| {
                 let section = sections.iter().find(|section| {
                     section.heading.line_index == heading.line_index
                         && section.heading.normalized_anchor == heading.normalized_anchor
@@ -1697,7 +1801,8 @@ impl NotePanel {
                 NoteOutlineRow {
                     level: heading.level,
                     title: heading.title.clone(),
-                    normalized_anchor: heading.normalized_anchor.clone(),
+                    heading_index,
+                    heading_start: heading.byte_range.start,
                     line_index: heading.line_index,
                     char_index: byte_to_char_index(content, heading.byte_range.start),
                     collapsible,
@@ -1796,6 +1901,10 @@ impl NotePanel {
             deferred_root_open: None,
             active_host_pass: None,
             active_host_layer: None,
+            jump_scope: None,
+            jump_order: 0,
+            native_jump: Box::default(),
+            native_jump_frame: None,
             accepted_host_effect_receipt: None,
             accepted_host_modal_layer: None,
             defer_host_actions: false,
@@ -1806,6 +1915,10 @@ impl NotePanel {
             saved_content_baseline,
             pending_close_after_save: false,
             discard_unsaved_prompt: false,
+            close_prompt_epoch: 0,
+            conflict_prompt_epoch: 0,
+            plain_prompt_epoch: 0,
+            prompt_scope: None,
             link_search: String::new(),
             link_menu_targets: Vec::new(),
             link_menu_targets_version: None,
@@ -1841,6 +1954,7 @@ impl NotePanel {
             outline_filter: String::new(),
             selected_outline_heading: None,
             pending_scroll_target: None,
+            outline_moves: OutlineMoves::default(),
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
@@ -1875,6 +1989,8 @@ impl NotePanel {
             focus_textedit_next_frame: false,
             markdown_toolbar_popup_was_open: false,
             markdown_toolbar_owns_selection: false,
+            editor_context_binding: None,
+            image_context_binding: None,
             applying_toolbar_markdown_action: false,
             focus_textedit_after_toolbar_action: false,
             pending_toolbar_focus_restore: None,
@@ -2105,7 +2221,7 @@ impl NotePanel {
                 self.sync_aliases_from_content();
                 self.mark_current_content_saved();
             }
-            Ok(false) => self.overwrite_prompt = true,
+            Ok(false) => self.show_conflict_prompt(),
             Err(err) => app.report_error("note save", format!("Failed to save aliases: {err}")),
         }
     }
@@ -2699,6 +2815,95 @@ impl NotePanel {
         self.host_state.presentation() == UtilityPresentation::Popout
     }
 
+    pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
+        let mut collapsed: Vec<_> = self.collapsed_sections.iter().collect();
+        collapsed.sort_unstable();
+        let backlinks = self.show_metadata.then(|| {
+            let rows = self.backlink_rows_for_active_tab();
+            let page = self
+                .backlink_page
+                .min(rows.len().div_ceil(BACKLINK_PAGE_SIZE).saturating_sub(1));
+            let subjects = rows
+                .iter()
+                .skip(page * BACKLINK_PAGE_SIZE)
+                .take(BACKLINK_PAGE_SIZE)
+                .map(|row| (&row.note_slug, &row.todo_id, &row.type_badge))
+                .collect::<Vec<_>>();
+            (self.backlink_tab as u8, page, subjects)
+        });
+        super::jump_mode::TargetGeneration(
+            egui::Id::new((
+                self.prompt_identity,
+                self.host_state.identity().generation,
+                self.note_find.content_revision(),
+                self.view_mode as u8,
+                self.note_find.is_open(),
+                self.show_metadata,
+                self.outline_open,
+                (self.tags_expanded, self.links_expanded, backlinks),
+                &self.outline_filter,
+                collapsed,
+                self.selected_outline_heading
+                    .map(|position| (position.revision, position.heading_start)),
+                self.outline_moves.review_request().map(|request| (
+                    request.stamp.document,
+                    request.stamp.revision,
+                    request.stamp.host.host as u8,
+                    request.stamp.host.generation,
+                    request.stamp.viewport,
+                    request.selected,
+                    request.destination,
+                    request.placement as u8,
+                )),
+            ))
+            .value(),
+        )
+    }
+
+    pub(super) fn set_jump_scope(&mut self, scope: Option<super::jump_mode::ui::JumpModeScope>) {
+        self.jump_scope = scope;
+        self.jump_order = 0;
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_native_jump(&self) -> &super::jump_mode::ui::JumpModeUi {
+        &self.native_jump
+    }
+
+    fn jump_target(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: impl Into<String>,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.jump_scope.as_ref(),
+            ui,
+            response,
+            identity,
+            label,
+            kind,
+            &mut self.jump_order,
+        );
+        let clip = ui.clip_rect();
+        let clipped = if kind == super::jump_mode::TargetKind::TextEntry {
+            !clip.intersects(response.rect)
+        } else {
+            !clip.contains_rect(response.rect)
+        };
+        if clipped
+            && response.enabled()
+            && response.gained_focus()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+        {
+            response.scroll_to_me(None);
+        }
+    }
+
     pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
         if !self.open {
             return None;
@@ -2720,6 +2925,11 @@ impl NotePanel {
     }
 
     pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
+        if self.root_form_navigation(ctx).is_some()
+            || (self.host_layer_if_root().is_some() && self.prompt_current(ctx).is_some())
+        {
+            return true;
+        }
         if self.host_state.presentation() != UtilityPresentation::Popout
             || ctx.viewport_id() != egui::ViewportId::ROOT
             || !ctx.input(|input| input.focused)
@@ -2788,7 +2998,7 @@ impl NotePanel {
         host_request: Option<UtilityPresentation>,
     ) {
         let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
-        let checkpoint = NotePanelDraftCheckpoint::capture(self);
+        let checkpoint = NotePanelDraftCheckpoint::capture(self, ctx);
         if let Some(content) = edit {
             self.replace_content_from_mutation(content.to_owned(), 0.0);
         }
@@ -2873,6 +3083,7 @@ impl NotePanel {
                     && self.note.content == origin.source_snapshot
             }
             NotePanelEffect::Export(request) => self.export_snapshot_matches(request),
+            NotePanelEffect::OpenPrint(request) => self.open && request.stamp.same_document(&self.print_stamp()),
         };
         if retained && still_matches {
             let mut effect = staged.effect;
@@ -2881,6 +3092,13 @@ impl NotePanel {
                     ctx, self.host_state.identity(),
                     (self.prompt_identity, self.note.slug.clone(), self.note.path.clone()),
                     staged.root_pass, staged.owner_pass.unwrap_or(staged.root_pass),
+                );
+            }
+            if let NotePanelEffect::OpenPrint(request) = &mut effect {
+                request.stamp = self.print_stamp();
+                request.origin = super::utility_host::AcceptedParentOpen::from_retained(
+                    ctx, self.host_state.identity(), request.stamp.clone(), staged.root_pass,
+                    staged.owner_pass.unwrap_or(staged.root_pass),
                 );
             }
             Some(effect)
@@ -2941,7 +3159,7 @@ impl NotePanel {
         if !retained {
             self.accepted_host_effect_receipt = None;
             self.accepted_host_modal_layer = None;
-            frame.draft_checkpoint.restore(self);
+            frame.draft_checkpoint.restore(self, ctx);
             if frame.os_close_requested {
                 ctx.send_viewport_cmd_to(
                     note_panel_viewport_id(panel_identity),
@@ -3021,6 +3239,23 @@ impl NotePanel {
             );
         }
 
+        let outline_stamp = self.outline_stamp(frame.owner_viewport_id);
+        self.outline_moves.retire_stale(outline_stamp);
+        if let Some(action) = frame.actions.outline_move
+            && self.open
+            && app.note_settings.outline_sidebar_enabled
+            && self.outline_open
+            && frame.owner_modal_layer.is_none()
+            && !frame.close_requested
+            && !frame.os_close_requested
+            && !frame.actions.save_requested
+            && !frame.actions.save_and_close_requested
+            && frame.actions.conflict_action.is_none()
+            && frame.actions.host_request.is_none()
+        {
+            self.complete_outline_move(&frame.owner_context, frame.owner_viewport_id, action);
+            ctx.request_repaint_of(frame.owner_viewport_id);
+        }
         let effect = self.on_ui_frame_complete(&frame.owner_context);
         let mut show_root = false;
         if frame.actions.save_alias_metadata_requested {
@@ -3066,6 +3301,17 @@ impl NotePanel {
             self.discard_changes();
         } else if frame.actions.keep_editing_requested {
             self.keep_editing();
+        }
+        if let Some(action) = frame.actions.plain_link_action {
+            match action {
+                PlainLinkAction::Review => {
+                    if !self.start_plain_link_conversion() {
+                        Self::show_no_plain_links_toast(app);
+                    }
+                }
+                PlainLinkAction::Cancel => self.cancel_plain_link_conversion(),
+                PlainLinkAction::Convert => if self.confirm_plain_link_conversion(frame.owner_context.input(|i| i.time)) == PlainLinkConfirmOutcome::NoCandidates { Self::show_no_plain_links_toast(app); },
+            }
         }
         if let Some(action) = frame.actions.conflict_action {
             match action {
@@ -3349,6 +3595,35 @@ impl NotePanel {
         self.markdown_export_feedback = Some((is_error, message));
     }
 
+    fn print_stamp(&self) -> super::markdown_print::DocumentStamp {
+        super::markdown_print::DocumentStamp::Note {
+            panel: self.prompt_identity,
+            host: self.host_state.identity(),
+            slug: self.note.slug.clone(),
+            path: self.note.path.clone(),
+            revision: self.note_find.content_revision(),
+        }
+    }
+
+    pub(super) fn print_draft(&self) -> Option<super::markdown_print::DraftRef<'_>> {
+        self.open.then(|| super::markdown_print::DraftRef {
+            stamp: self.print_stamp(),
+            source: &self.note.content,
+            base: super::markdown_print::AssetBase::Note(crate::plugins::note::notes_dir().join("assets")),
+        })
+    }
+
+    fn stage_print_preview(&mut self, ctx: &egui::Context) {
+        if self.can_stage_markdown_export(ctx) && !ctx.will_discard() {
+            self.pending_root_effect = Some(PendingNoteRootEffect {
+                root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                host: self.active_host_pass.map(|(host, _)| host),
+                owner_pass: self.active_host_pass.map(|(_, pass)| pass),
+                effect: NotePanelEffect::OpenPrint(super::markdown_print::PrintOpen::new(self.print_stamp())),
+            });
+        }
+    }
+
     fn stage_markdown_export(&mut self, ctx: &egui::Context, format: MarkdownExportFormat) {
         if !self.can_stage_markdown_export(ctx) || ctx.will_discard() {
             return;
@@ -3563,7 +3838,7 @@ impl NotePanel {
         let editor_id = matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
             .then_some(self.last_textedit_id)
             .flatten();
-        match self.apply_prepared_source_edit(ctx, editor_id, prepared, None) {
+        match self.apply_prepared_source_edit(ctx, editor_id, prepared, None, true) {
             Ok(true) => {
                 self.active_mermaid_origin = None;
                 self.pending_mermaid_origin = None;
@@ -4042,6 +4317,39 @@ impl NotePanel {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_outline_fixture(&mut self) {
+        self.replace_content_after_saved_external_mutation("# One\n# Two".to_owned(), 0.0);
+        self.outline_open = true;
+        self.show_metadata = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_outline_review_fixture(&mut self) {
+        self.replace_content_after_saved_external_mutation("# Same\nfirst\n# Same\nsecond".to_owned(), 0.0);
+        self.outline_open = true;
+        self.show_metadata = false;
+        let stamp = self.outline_stamp(egui::ViewportId::ROOT);
+        let request = super::markdown_outline::MoveRequest {
+            stamp,
+            selected: 0,
+            destination: 1,
+            placement: crate::notes_markdown::section_move::SectionPlacement::After,
+        };
+        assert!(self.outline_moves.apply_action(stamp, &self.note.content, OutlineAction::Prepare(request)).is_none());
+        assert!(self.outline_moves.has_review(stamp));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_outline_review_active(&self) -> bool {
+        self.outline_moves.review_request().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_outline_selection(&self) -> Option<usize> {
+        self.selected_outline_heading.map(|position| position.heading_start)
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_view_mode(&self) -> NoteViewMode {
         self.view_mode
     }
@@ -4351,6 +4659,9 @@ impl NotePanel {
     pub(crate) fn test_set_overwrite_prompt(&mut self, open: bool) {
         self.overwrite_prompt = open;
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_overwrite_prompt(&self) -> bool { self.overwrite_prompt }
 
     #[cfg(test)]
     pub(crate) fn test_mermaid_open_rect(
@@ -4752,7 +5063,7 @@ impl NotePanel {
                 "the active note editor changed before the edit was applied",
             ));
         }
-        self.apply_prepared_source_edit(ctx, Some(id), prepared, selection_after)
+        self.apply_prepared_source_edit(ctx, Some(id), prepared, selection_after, true)
     }
 
     fn apply_prepared_source_edit(
@@ -4761,6 +5072,7 @@ impl NotePanel {
         editor_id: Option<egui::Id>,
         prepared: PreparedMarkdownEdit,
         selection_after: Option<std::ops::Range<usize>>,
+        focus_editor_after: bool,
     ) -> Result<bool, MarkdownEditError> {
         if editor_id.is_some_and(|id| self.last_textedit_id != Some(id)) {
             return Err(MarkdownEditError::InvalidParameter(
@@ -4811,8 +5123,8 @@ impl NotePanel {
             )
         });
         self.pending_cursor_position = None;
-        let should_focus_editor = editor_id.is_some()
-            || matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split);
+        let should_focus_editor = focus_editor_after
+            && (editor_id.is_some() || matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split));
         if self.applying_toolbar_markdown_action {
             // The top toolbar menu renders before TextEdit. Let the current
             // key event finish in the menu, then request editor focus from its
@@ -4959,6 +5271,34 @@ impl NotePanel {
         }
     }
 
+    pub(super) fn configure_child_forms_jump(
+        &mut self,
+        jump: &super::jump_mode::ui::JumpModeUi,
+        enabled: bool,
+    ) {
+        self.table_form_host.configure_jump(jump, enabled);
+        self.link_form_host.configure_jump(jump, enabled);
+        self.new_note_form_host.configure_jump(jump, enabled);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_link_form_jump(&self) -> &super::jump_mode::ui::JumpModeUi {
+        self.link_form_host.test_native_jump()
+    }
+
+    pub(super) fn root_form_navigation(
+        &self,
+        ctx: &egui::Context,
+    ) -> Option<super::jump_mode::ui::NavigationOwner> {
+        use super::note_form_dialog::root_form_owner;
+        if !self.open {
+            return None;
+        }
+        root_form_owner(ctx, &self.table_form_host, self.table_form.as_ref())
+            .or_else(|| root_form_owner(ctx, &self.link_form_host, self.link_form.as_ref()))
+            .or_else(|| root_form_owner(ctx, &self.new_note_form_host, self.new_note_form.as_ref()))
+    }
+
     pub(super) fn show_child_forms(
         &mut self,
         ctx: &egui::Context,
@@ -4967,6 +5307,7 @@ impl NotePanel {
         root_input: bool,
         native_input: bool,
         jump_active: bool,
+        navigation: Option<(&super::jump_mode::ui::JumpModeUi, super::jump_mode::ui::NavigationOwner)>,
     ) {
         use super::note_form_dialog::show_form;
         show_form(
@@ -4978,6 +5319,7 @@ impl NotePanel {
             root_input,
             native_input,
             jump_active,
+            navigation,
         );
         show_form(
             ctx,
@@ -4988,6 +5330,7 @@ impl NotePanel {
             root_input,
             native_input,
             jump_active,
+            navigation,
         );
         show_form(
             ctx,
@@ -4998,6 +5341,7 @@ impl NotePanel {
             root_input,
             native_input,
             jump_active,
+            navigation,
         );
     }
 
@@ -5366,6 +5710,94 @@ impl NotePanel {
         egui::Id::new(("note-panel-prompt", kind, self.prompt_identity))
     }
 
+    fn show_close_prompt(&mut self) {
+        if !self.discard_unsaved_prompt {
+            self.close_prompt_epoch = self.close_prompt_epoch.wrapping_add(1);
+        }
+        self.discard_unsaved_prompt = true;
+    }
+
+    pub(super) fn prompt_current(&self, ctx: &egui::Context) -> Option<NotePrompt> {
+        [
+            NotePrompt::Close,
+            NotePrompt::Conflict,
+            NotePrompt::PlainLink,
+        ]
+        .into_iter()
+        .find(|prompt| {
+            let active = match prompt {
+                NotePrompt::Close => self.discard_unsaved_prompt,
+                NotePrompt::Conflict => self.overwrite_prompt,
+                NotePrompt::PlainLink => self.pending_plain_link_conversion.is_some(),
+            };
+            let layer = egui::LayerId::new(egui::Order::Middle, self.note_prompt_id(prompt.key()));
+            self.open
+                && active
+                && ctx.input(|input| input.focused)
+                && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                && ctx
+                    .memory(|memory| memory.top_modal_layer())
+                    .is_none_or(|modal| modal == layer)
+                && !egui::Popup::is_any_open(ctx)
+                && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focused| {
+                    focused == layer
+                        || focused.order == egui::Order::Background
+                        || Some(focused) == self.host_layer_if_root()
+                })
+        })
+    }
+    pub(super) fn prompt_generation(
+        &self,
+        prompt: NotePrompt,
+    ) -> super::jump_mode::TargetGeneration {
+        let epoch = match prompt {
+            NotePrompt::Close => self.close_prompt_epoch,
+            NotePrompt::Conflict => self.conflict_prompt_epoch,
+            NotePrompt::PlainLink => self.plain_prompt_epoch,
+        };
+        super::jump_mode::TargetGeneration(
+            egui::Id::new((
+                self.prompt_identity,
+                self.host_state.identity().generation,
+                prompt.key(),
+                epoch,
+                self.note_find.content_revision(),
+            ))
+            .value(),
+        )
+    }
+    fn show_conflict_prompt(&mut self) {
+        if !self.overwrite_prompt {
+            self.conflict_prompt_epoch = self.conflict_prompt_epoch.wrapping_add(1);
+        }
+        self.overwrite_prompt = true;
+    }
+    fn stage_prompt_cancel(&mut self, prompt: NotePrompt) {
+        match prompt {
+            NotePrompt::Close => self.pending_host_actions.keep_editing_requested = true,
+            NotePrompt::Conflict => {
+                self.pending_host_actions.conflict_action = Some(ConflictSaveAction::Cancel)
+            }
+            NotePrompt::PlainLink => {
+                self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Cancel)
+            }
+        }
+    }
+
+    pub(super) fn set_prompt_scope(
+        &mut self,
+        scope: Option<(NotePrompt, super::jump_mode::ui::JumpModeScope)>,
+    ) {
+        self.prompt_scope = scope;
+    }
+
+    fn prompt_scope(&self, prompt: NotePrompt) -> Option<&super::jump_mode::ui::JumpModeScope> {
+        self.prompt_scope
+            .as_ref()
+            .filter(|(owner, _)| *owner == prompt)
+            .map(|(_, scope)| scope)
+    }
+
     fn close_after_successful_save(&mut self, app: &mut LauncherApp) {
         if !self.pending_close_after_save {
             return;
@@ -5403,7 +5835,7 @@ impl NotePanel {
                 NoteSaveOutcome::AwaitingDecision => self.open = true,
                 NoteSaveOutcome::Failed => {
                     self.open = true;
-                    self.discard_unsaved_prompt = true;
+                    self.show_close_prompt();
                 }
             }
         } else if !self.has_unsaved_changes() {
@@ -5412,7 +5844,7 @@ impl NotePanel {
             self.close_panel_and_release_focus(app);
         } else {
             self.open = true;
-            self.discard_unsaved_prompt = true;
+            self.show_close_prompt();
         }
     }
 
@@ -5458,6 +5890,7 @@ impl NotePanel {
             self.pending_plain_link_conversion = None;
             false
         } else {
+            self.plain_prompt_epoch = self.plain_prompt_epoch.wrapping_add(1);
             self.pending_plain_link_conversion =
                 Some(PendingPlainLinkConversion { source, report });
             true
@@ -5481,6 +5914,7 @@ impl NotePanel {
                 self.focus_textedit_next_frame = true;
                 return PlainLinkConfirmOutcome::NoCandidates;
             }
+            self.plain_prompt_epoch = self.plain_prompt_epoch.wrapping_add(1);
             self.pending_plain_link_conversion =
                 Some(PendingPlainLinkConversion { source, report });
             return PlainLinkConfirmOutcome::Refreshed;
@@ -5594,6 +6028,7 @@ impl NotePanel {
         root_input_allowed: bool,
         mut observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
     ) {
+        self.retire_stale_note_contexts(ctx, app.note_images_as_links);
         #[cfg(test)]
         {
             self.test_host_button_id = None;
@@ -5614,7 +6049,7 @@ impl NotePanel {
         let draft_checkpoint = previous_host_frame
             .filter(|_| !first_ui_pass)
             .map(|frame| frame.draft_checkpoint)
-            .unwrap_or_else(|| NotePanelDraftCheckpoint::capture(self));
+            .unwrap_or_else(|| NotePanelDraftCheckpoint::capture(self, ctx));
         let host = self.host_state.identity();
         let mut owner_context = ctx.clone();
         let mut owner_viewport_id = egui::ViewportId::ROOT;
@@ -5631,6 +6066,14 @@ impl NotePanel {
 
         match host.host {
             UtilityPresentation::Docked => {
+                self.native_jump.cancel_all();
+                self.native_jump_frame = None;
+                if pass_authorized && root_input_allowed && self.prompt_current(ctx).is_some()
+                    && app.jump_mode_ui.active_session().is_none()
+                    && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
+                {
+                    if let Some(prompt) = self.prompt_current(ctx) { self.stage_prompt_cancel(prompt); }
+                }
                 callback_observed = true;
                 owner_pass_accepted = pass_authorized;
                 self.active_host_layer = Some(self.show_query_focus_layer());
@@ -5660,6 +6103,7 @@ impl NotePanel {
                         callback_observed = true;
                         callback_class = class;
                         let child_ctx = child.ctx().clone();
+                        self.retire_stale_note_contexts(&child_ctx, app.note_images_as_links);
                         owner_context = child_ctx.clone();
                         let independent = class == egui::ViewportClass::Immediate
                             && child_ctx.viewport_id() == viewport_id;
@@ -5688,11 +6132,108 @@ impl NotePanel {
                         let keyboard_input_allowed = application_input_allowed
                             && focused
                             && (independent || fallback_keyboard_owner);
-                        let shortcuts_allowed = accepted
+                        let mut native_binding = None;
+                        let mut native_jump_owned_escape = false;
+                        let current_prompt = (independent || fallback_keyboard_owner)
+                            .then(|| self.prompt_current(&child_ctx))
+                            .flatten();
+                        let close_current = current_prompt.is_some();
+                        let native_jump_allowed = independent
                             && keyboard_input_allowed
                             && !own_modal_open
+                            && (!close_current || !egui::Popup::is_any_open(&child_ctx));
+                        if independent {
+                            let (chord, alphabet) = app.jump_mode_ui.configuration();
+                            self.native_jump.set_configuration(chord, alphabet);
+                            let enabled = app.jump_mode_enabled();
+                            self.native_jump.set_enabled(enabled);
+                            let frame = child_ctx.cumulative_frame_nr();
+                            if self.native_jump_frame != Some(frame) {
+                                self.native_jump.begin_frame();
+                                self.native_jump_frame = Some(frame);
+                            }
+                            let binding = super::jump_mode::ui::NavigationViewportBinding {
+                                viewport: viewport_id,
+                                owner: super::jump_mode::ui::NavigationOwner::Dialog {
+                                    kind: current_prompt.map_or(
+                                        super::jump_mode::ui::NavigationDialogKind::NotePanel,
+                                        NotePrompt::kind,
+                                    ),
+                                    instance: self.prompt_identity,
+                                },
+                                base_layer: current_prompt.map_or_else(
+                                    egui::LayerId::background,
+                                    |prompt| {
+                                        egui::LayerId::new(
+                                            egui::Order::Middle,
+                                            self.note_prompt_id(prompt.key()),
+                                        )
+                                    },
+                                ),
+                            };
+                            let native_navigation =
+                                self.native_jump.update_navigation_owner_for_viewport(
+                                    &child_ctx,
+                                    binding,
+                                    native_jump_allowed && enabled,
+                                );
+                            native_jump_owned_escape = self.native_jump.active_session().is_some();
+                            self.native_jump.handle_viewport_input(
+                                &child_ctx,
+                                native_navigation == binding.owner,
+                                accepted,
+                                viewport_id,
+                            );
+                            native_jump_owned_escape |= self.native_jump.active_session().is_some();
+                            self.native_jump.begin_ui_pass();
+                            let scope = (native_navigation == binding.owner)
+                                .then(|| {
+                                    self.native_jump.scope_for_viewport_binding(
+                                        super::jump_mode::SurfaceId::dialog(
+                                            current_prompt
+                                                .map_or("note-panel", NotePrompt::surface),
+                                            self.prompt_identity,
+                                        ),
+                                        current_prompt.map_or_else(
+                                            || self.jump_generation(),
+                                            |prompt| self.prompt_generation(prompt),
+                                        ),
+                                        "note-panel",
+                                        binding,
+                                    )
+                                })
+                                .flatten()
+                                .map(|scope| {
+                                    if accepted {
+                                        scope
+                                    } else {
+                                        scope.registration_only()
+                                    }
+                                });
+                            if let Some(prompt) = current_prompt {
+                                self.set_prompt_scope(scope.map(|scope| (prompt, scope)));
+                            } else {
+                                self.set_jump_scope(scope);
+                            }
+                            native_binding = Some(binding);
+                        }
+                        let shortcuts_allowed = accepted
+                            && keyboard_input_allowed
+                            && !native_jump_owned_escape
+                            && !own_modal_open
                             && !egui::Popup::is_any_open(&child_ctx);
-                        if shortcuts_allowed && independent {
+                        if close_current
+                            && shortcuts_allowed
+                            && (independent || app.jump_mode_ui.active_session().is_none())
+                            && child_ctx.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, Key::Escape)
+                            })
+                        {
+                            if let Some(prompt) = current_prompt {
+                                self.stage_prompt_cancel(prompt);
+                            }
+                        }
+                        if shortcuts_allowed && independent && !close_current {
                             let find = child_ctx.input_mut(|input| {
                                 input.consume_key(egui::Modifiers::COMMAND, Key::F)
                             });
@@ -5707,6 +6248,7 @@ impl NotePanel {
                             }
                         }
                         let keyboard_close = shortcuts_allowed
+                            && !close_current
                             && child_ctx.input_mut(|input| {
                                 input.consume_key(egui::Modifiers::NONE, Key::Escape)
                                     || input.consume_key(egui::Modifiers::COMMAND, Key::W)
@@ -5716,9 +6258,7 @@ impl NotePanel {
                         }
                         if independent {
                             owner_pass = Some(child_pass);
-                            native_viewport = Some(
-                                child.input(|input| input.viewport().clone()),
-                            );
+                            native_viewport = Some(child.input(|input| input.viewport().clone()));
                             self.active_host_pass = Some((host, child_pass));
                             self.active_host_layer = Some(egui::LayerId::background());
                             let native_input_allowed = application_input_allowed
@@ -5749,8 +6289,33 @@ impl NotePanel {
                                     && !keyboard_close,
                             );
                             embedded_root_layer = Some(child.layer_id());
-                            embedded_root_focused_id =
-                                child_ctx.memory(|memory| memory.focused());
+                            embedded_root_focused_id = child_ctx.memory(|memory| memory.focused());
+                        }
+                        if let Some(binding) = native_binding {
+                            self.native_jump.finish_ui_pass();
+                            let current = self.native_jump.update_navigation_owner_for_viewport(
+                                &child_ctx,
+                                binding,
+                                native_jump_allowed && app.jump_mode_enabled(),
+                            );
+                            if self.native_jump.prepare_pass_for_viewport(
+                                &child_ctx,
+                                binding,
+                                current,
+                                native_jump_allowed && app.jump_mode_enabled(),
+                            ) {
+                                super::jump_mode::paint::paint(&child_ctx, &self.native_jump);
+                            }
+                            if !child_ctx.will_discard() {
+                                self.native_jump.complete_frame_for_viewport(
+                                    &child_ctx,
+                                    binding,
+                                    current,
+                                    native_jump_allowed && app.jump_mode_enabled(),
+                                );
+                            }
+                            self.set_jump_scope(None);
+                            self.set_prompt_scope(None);
                         }
                         owner_modal_layer =
                             child_ctx.memory(|memory| memory.top_modal_layer());
@@ -5871,6 +6436,7 @@ impl NotePanel {
                         self.outline_filter.clear();
                         self.selected_outline_heading = None;
                         self.pending_scroll_target = None;
+                        self.outline_moves.clear();
                     }
                     if self.fast_derived_dirty {
                         self.refresh_fast_derived();
@@ -5969,6 +6535,7 @@ impl NotePanel {
             let mut dialog_open = true;
             let mut convert = false;
             let mut cancel = false;
+            let mut prompt_order = 0;
             egui::Window::new("Convert plain links?")
                 .id(self.note_prompt_id("plain-link-conversion"))
                 .collapsible(false)
@@ -6000,11 +6567,37 @@ impl NotePanel {
                         ui.end_row();
                     });
                     ui.horizontal(|ui| {
-                        convert = ui.button("Convert").clicked();
-                        cancel = ui.button("Cancel").clicked();
+                        let convert_button = ui.button("Convert");
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::PlainLink),
+                            ui,
+                            &convert_button,
+                            "convert",
+                            "Convert",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
+                        convert = convert_button.clicked();
+                        let cancel_button = ui.button("Cancel");
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::PlainLink),
+                            ui,
+                            &cancel_button,
+                            "cancel",
+                            "Cancel",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
+                        cancel = cancel_button.clicked();
                     });
                 });
-            if cancel || !dialog_open {
+            if self.defer_host_actions {
+                if cancel || !dialog_open {
+                    self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Cancel);
+                } else if convert {
+                    self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Convert);
+                }
+            } else if cancel || !dialog_open {
                 self.cancel_plain_link_conversion();
             } else if convert
                 && self.confirm_plain_link_conversion(ctx.input(|i| i.time))
@@ -6033,6 +6626,7 @@ impl NotePanel {
             let mut save_changes = false;
             let mut discard = false;
             let mut keep_editing = false;
+            let mut prompt_order = 0;
             egui::Window::new("Discard unsaved changes?")
                 .id(self.note_prompt_id("close"))
                 .collapsible(false)
@@ -6049,6 +6643,15 @@ impl NotePanel {
                     ui.horizontal(|ui| {
                         let save = ui.button("Save Changes");
                         let save = widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Close),
+                            ui,
+                            &save,
+                            "save",
+                            "Save Changes",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
                         #[cfg(test)]
                         if ui.is_visible() && !ui.is_sizing_pass() {
                             self.test_save_changes_rect = Some(save.rect);
@@ -6059,6 +6662,15 @@ impl NotePanel {
                             ui,
                             response,
                             ButtonEmphasis::Destructive,
+                        );
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Close),
+                            ui,
+                            &response,
+                            "discard",
+                            "Discard Changes",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
                         );
                         if let Some(observed) = observed_discard {
                             *observed = super::query_observation::observe_note_discard_response(
@@ -6078,6 +6690,15 @@ impl NotePanel {
                             ui,
                             keep_editing_button,
                             ButtonEmphasis::Primary,
+                        );
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Close),
+                            ui,
+                            &keep_editing_response,
+                            "keep",
+                            "Keep Editing",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
                         );
                         #[cfg(feature = "qa-framebuffer-capture")]
                         self.record_note_replace_control(
@@ -6112,6 +6733,7 @@ impl NotePanel {
         if self.overwrite_prompt {
             let mut prompt_open = true;
             let mut selected_action = None;
+            let mut prompt_order = 0;
             egui::Window::new("Note exists")
                 .id(self.note_prompt_id("save-conflict"))
                 .collapsible(false)
@@ -6132,6 +6754,15 @@ impl NotePanel {
                             overwrite,
                             ButtonEmphasis::Destructive,
                         );
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Conflict),
+                            ui,
+                            &overwrite,
+                            "overwrite",
+                            "Overwrite",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
                         #[cfg(test)]
                         if ui.is_visible() && !ui.is_sizing_pass() {
                             self.test_conflict_overwrite_rect = Some(overwrite.rect);
@@ -6142,6 +6773,15 @@ impl NotePanel {
                         let save_as_new = ui.button("Save as New");
                         let save_as_new =
                             widgets::with_button_emphasis(ui, save_as_new, ButtonEmphasis::Primary);
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Conflict),
+                            ui,
+                            &save_as_new,
+                            "save-as-new",
+                            "Save as New",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
                         #[cfg(test)]
                         if ui.is_visible() && !ui.is_sizing_pass() {
                             self.test_conflict_save_as_new_rect = Some(save_as_new.rect);
@@ -6150,6 +6790,15 @@ impl NotePanel {
                             selected_action = Some(ConflictSaveAction::SaveAsNew);
                         }
                         let cancel = ui.button("Cancel");
+                        super::jump_mode::ui::register_and_apply_target(
+                            self.prompt_scope(NotePrompt::Conflict),
+                            ui,
+                            &cancel,
+                            "cancel",
+                            "Cancel",
+                            super::jump_mode::TargetKind::Button,
+                            &mut prompt_order,
+                        );
                         #[cfg(test)]
                         if ui.is_visible() && !ui.is_sizing_pass() {
                             self.test_conflict_cancel_rect = Some(cancel.rect);
@@ -6160,36 +6809,40 @@ impl NotePanel {
                     });
                 });
             if self.defer_host_actions {
-                self.pending_host_actions.conflict_action = selected_action;
+                if let Some(action) =
+                    selected_action.or((!prompt_open).then_some(ConflictSaveAction::Cancel))
+                {
+                    self.pending_host_actions.conflict_action = Some(action);
+                }
             } else {
                 match selected_action {
-                Some(ConflictSaveAction::Overwrite) => {
-                    let candidate = self.note.clone();
-                    self.save_with_overwrite(app, candidate);
-                }
-                Some(ConflictSaveAction::SaveAsNew) => {
-                    let mut candidate = self.note.clone();
-                    candidate.slug.clear();
-                    candidate.path = std::path::PathBuf::new();
-                    self.save_with_overwrite(app, candidate);
-                }
-                Some(ConflictSaveAction::Cancel) if self.pending_close_after_save => {
-                    self.overwrite_prompt = false;
-                    self.keep_editing();
-                }
-                Some(ConflictSaveAction::Cancel) => {
-                    self.overwrite_prompt = false;
-                    self.focus_textedit_next_frame = true;
-                }
-                None if !prompt_open => {
-                    self.overwrite_prompt = false;
-                    if self.pending_close_after_save {
+                    Some(ConflictSaveAction::Overwrite) => {
+                        let candidate = self.note.clone();
+                        self.save_with_overwrite(app, candidate);
+                    }
+                    Some(ConflictSaveAction::SaveAsNew) => {
+                        let mut candidate = self.note.clone();
+                        candidate.slug.clear();
+                        candidate.path = std::path::PathBuf::new();
+                        self.save_with_overwrite(app, candidate);
+                    }
+                    Some(ConflictSaveAction::Cancel) if self.pending_close_after_save => {
+                        self.overwrite_prompt = false;
                         self.keep_editing();
-                    } else {
+                    }
+                    Some(ConflictSaveAction::Cancel) => {
+                        self.overwrite_prompt = false;
                         self.focus_textedit_next_frame = true;
                     }
-                }
-                None => {}
+                    None if !prompt_open => {
+                        self.overwrite_prompt = false;
+                        if self.pending_close_after_save {
+                            self.keep_editing();
+                        } else {
+                            self.focus_textedit_next_frame = true;
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -6219,6 +6872,13 @@ impl NotePanel {
                     UtilityPresentation::Docked => "Dock",
                     UtilityPresentation::Popout => "Pop Out",
                 });
+                self.jump_target(
+                    ui,
+                    &response,
+                    "presentation",
+                    "Dock or pop out",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(test)]
                 if ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_host_button_id = Some(response.id);
@@ -6232,12 +6892,26 @@ impl NotePanel {
             }
             let save = ui.button("Save");
             let save = widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+            self.jump_target(
+                ui,
+                &save,
+                "save",
+                "Save note",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(NoteReplaceControl::Save, &save);
             if save.clicked() {
                 save_now = true;
             }
             let find = ui.button("Find");
+            self.jump_target(
+                ui,
+                &find,
+                "find",
+                "Find in note",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(NoteReplaceControl::FindToggle, &find);
             if find.clicked() {
@@ -6250,6 +6924,13 @@ impl NotePanel {
                 self.build_toolbar_markdown_menu(ui, &ctx, editor_id, app);
             }
             let open_resp = ui.button("Open Externally");
+            self.jump_target(
+                ui,
+                &open_resp,
+                "external",
+                "Open externally",
+                super::jump_mode::TargetKind::Button,
+            );
             let popup_id = open_resp.id.with("open_with_menu");
             if open_resp.clicked() {
                 match app.note_external_open {
@@ -6310,6 +6991,13 @@ impl NotePanel {
             }
             if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split) {
                 let edit = ui.button("Edit");
+                self.jump_target(
+                    ui,
+                    &edit,
+                    "view/edit",
+                    "Edit note",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(feature = "qa-framebuffer-capture")]
                 self.record_note_replace_control(NoteReplaceControl::Edit, &edit);
                 #[cfg(test)]
@@ -6327,6 +7015,13 @@ impl NotePanel {
             }
             if !matches!(self.view_mode, NoteViewMode::Preview) {
                 let render = ui.button("Render");
+                self.jump_target(
+                    ui,
+                    &render,
+                    "view/render",
+                    "Render note",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(feature = "qa-framebuffer-capture")]
                 self.record_note_replace_control(NoteReplaceControl::Render, &render);
                 if render.clicked() {
@@ -6339,13 +7034,28 @@ impl NotePanel {
             }
             if app.note_settings.can_use_split() && !matches!(self.view_mode, NoteViewMode::Split) {
                 let split = ui.button("Split");
+                self.jump_target(
+                    ui,
+                    &split,
+                    "view/split",
+                    "Split note",
+                    super::jump_mode::TargetKind::Button,
+                );
                 #[cfg(feature = "qa-framebuffer-capture")]
                 self.record_note_replace_control(NoteReplaceControl::Split, &split);
                 if split.clicked() {
                     self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Split);
                 }
             }
-            if ui.button(self.details_toggle_label()).clicked() {
+            let details = ui.button(self.details_toggle_label());
+            self.jump_target(
+                ui,
+                &details,
+                "details",
+                "Toggle note details",
+                super::jump_mode::TargetKind::Button,
+            );
+            if details.clicked() {
                 self.set_show_metadata(app, !self.show_metadata);
                 let was_focused = self
                     .last_textedit_id
@@ -6356,20 +7066,52 @@ impl NotePanel {
                 }
             }
             ui.separator();
-            if ui.button("A-").clicked() {
+            let decrease_font = ui.button("A-");
+            self.jump_target(
+                ui,
+                &decrease_font,
+                "font/decrease",
+                "Decrease note font",
+                super::jump_mode::TargetKind::Button,
+            );
+            if decrease_font.clicked() {
                 app.note_font_size = (app.note_font_size - 1.0).max(8.0);
             }
-            if ui.button("A+").clicked() {
+            let increase_font = ui.button("A+");
+            self.jump_target(
+                ui,
+                &increase_font,
+                "font/increase",
+                "Increase note font",
+                super::jump_mode::TargetKind::Button,
+            );
+            if increase_font.clicked() {
                 app.note_font_size += 1.0;
             }
             let sections =
                 self.collapsible_sections(app.note_settings.collapsible_sections_enabled);
             if !sections.is_empty() {
                 ui.separator();
-                if ui.button("Expand all").clicked() {
+                let expand = ui.button("Expand all");
+                self.jump_target(
+                    ui,
+                    &expand,
+                    "sections/expand",
+                    "Expand all sections",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if expand.clicked() {
                     self.expand_all_collapsible_sections(app);
                 }
-                if ui.button("Collapse all").clicked() {
+                let collapse = ui.button("Collapse all");
+                self.jump_target(
+                    ui,
+                    &collapse,
+                    "sections/collapse",
+                    "Collapse all sections",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if collapse.clicked() {
                     self.collapse_all_collapsible_sections(app, &sections);
                 }
             } else if !app.note_settings.collapsible_sections_enabled {
@@ -6383,7 +7125,15 @@ impl NotePanel {
                     "Show Outline"
                 };
 
-                if ui.button(outline_label).clicked() {
+                let outline = ui.button(outline_label);
+                self.jump_target(
+                    ui,
+                    &outline,
+                    "outline/toggle",
+                    outline_label,
+                    super::jump_mode::TargetKind::Button,
+                );
+                if outline.clicked() {
                     self.outline_open = !self.outline_open;
                 }
             }
@@ -6484,6 +7234,13 @@ impl NotePanel {
                     .desired_width(220.0)
                     .hint_text("Find in this note"),
             );
+            self.jump_target(
+                ui,
+                &response,
+                "find/query",
+                "Find query",
+                super::jump_mode::TargetKind::TextEntry,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(NoteReplaceControl::FindQuery, &response);
             find_query_accepted_focus = response.enabled() && response.has_focus();
@@ -6494,13 +7251,36 @@ impl NotePanel {
             let count = self.find_matches().len();
             let current = self.find_current_index().map_or(0, |index| index + 1);
             ui.label(format!("{current}/{count}"));
-            if ui.button("Prev").clicked() {
+            let previous = ui.button("Prev");
+            self.jump_target(
+                ui,
+                &previous,
+                "find/previous",
+                "Previous match",
+                super::jump_mode::TargetKind::Button,
+            );
+            if previous.clicked() {
                 action = Some(FindNavigation::Previous);
             }
-            if ui.button("Next").clicked() {
+            let next = ui.button("Next");
+            self.jump_target(
+                ui,
+                &next,
+                "find/next",
+                "Next match",
+                super::jump_mode::TargetKind::Button,
+            );
+            if next.clicked() {
                 action = Some(FindNavigation::Next);
             }
             let close_response = ui.button("Close");
+            self.jump_target(
+                ui,
+                &close_response,
+                "find/close",
+                "Close Find",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(NoteReplaceControl::FindClose, &close_response);
             if close_response.clicked() {
@@ -6518,6 +7298,13 @@ impl NotePanel {
                             .desired_width(180.0)
                             .hint_text("Replace with"),
                     );
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "find/replacement",
+                        "Replacement text",
+                        super::jump_mode::TargetKind::TextEntry,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(
                         NoteReplaceControl::ReplacementInput,
@@ -6532,6 +7319,13 @@ impl NotePanel {
                     }
                     let has_current = self.find_current_match().is_some();
                     let replace = ui.add_enabled(has_current, egui::Button::new("Replace"));
+                    self.jump_target(
+                        ui,
+                        &replace,
+                        "find/replace",
+                        "Replace current match",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(NoteReplaceControl::ReplaceOne, &replace);
                     #[cfg(test)]
@@ -6543,6 +7337,13 @@ impl NotePanel {
                     }
                     let has_matches = !self.find_matches().is_empty();
                     let replace_all = ui.add_enabled(has_matches, egui::Button::new("Replace All"));
+                    self.jump_target(
+                        ui,
+                        &replace_all,
+                        "find/replace-all",
+                        "Replace all matches",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(NoteReplaceControl::ReplaceAll, &replace_all);
                     #[cfg(test)]
@@ -6554,6 +7355,13 @@ impl NotePanel {
                     }
                 });
             });
+            self.jump_target(
+                ui,
+                &_replace_expander.header_response,
+                "find/replace-options",
+                "Replace options",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(
                 NoteReplaceControl::ReplaceExpander,
@@ -6575,6 +7383,13 @@ impl NotePanel {
                 Some(FindPreviewVisibility::SourceOnly) => {
                     ui.weak("Source match is not displayed in Preview.");
                     let response = ui.button("Reveal in Edit");
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "find/reveal",
+                        "Reveal match in Edit",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(NoteReplaceControl::RevealInEdit, &response);
                     #[cfg(test)]
@@ -6586,6 +7401,13 @@ impl NotePanel {
                 Some(FindPreviewVisibility::Collapsed) => {
                     ui.weak("Match is in a collapsed section.");
                     let response = ui.button("Reveal in Edit");
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "find/reveal",
+                        "Reveal match in Edit",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(feature = "qa-framebuffer-capture")]
                     self.record_note_replace_control(NoteReplaceControl::RevealInEdit, &response);
                     #[cfg(test)]
@@ -6707,6 +7529,60 @@ impl NotePanel {
         }
     }
 
+    fn outline_stamp(&self, viewport: egui::ViewportId) -> OutlineStamp {
+        OutlineStamp {
+            document: egui::Id::new((
+                "note-outline",
+                self.prompt_identity,
+                &self.note.slug,
+                &self.note.path,
+            )),
+            revision: self.note_find.content_revision(),
+            host: self.host_state.identity(),
+            viewport,
+        }
+    }
+
+    fn outline_input_unblocked(&self) -> bool {
+        self.open
+            && !self.discard_unsaved_prompt
+            && !self.overwrite_prompt
+            && self.pending_plain_link_conversion.is_none()
+    }
+
+    fn complete_outline_move(
+        &mut self,
+        ctx: &egui::Context,
+        viewport: egui::ViewportId,
+        action: OutlineAction,
+    ) {
+        if !self.outline_input_unblocked() {
+            return;
+        }
+        let stamp = self.outline_stamp(viewport);
+        let Some(prepared) = self
+            .outline_moves
+            .apply_action(stamp, &self.note.content, action)
+        else {
+            return;
+        };
+        let moved = prepared.moved_selection.start;
+        match self.apply_prepared_source_edit(ctx, None, prepared.edit, Some(moved..moved), false) {
+            Ok(true) => {
+                let current = NoteOutlinePosition {
+                    revision: self.note_find.content_revision(),
+                    heading_start: moved,
+                };
+                self.selected_outline_heading = Some(current);
+                self.pending_scroll_target = Some(current);
+                let scope = self.outline_stamp(viewport);
+                self.outline_moves.record_move(scope, moved);
+            }
+            Ok(false) => {}
+            Err(error) => self.outline_moves.report_error(error),
+        }
+    }
+
     fn render_outline_sidebar(
         &mut self,
         ui: &mut egui::Ui,
@@ -6743,15 +7619,52 @@ impl NotePanel {
                     ui.set_width(outline_width);
                     ui.horizontal(|ui| {
                         ui.label("Outline");
-                        ui.add(
+                        let width = ui.add(
                             egui::DragValue::new(&mut self.outline_width)
                                 .range(120.0..=360.0)
                                 .speed(4.0)
                                 .prefix("width "),
                         );
+                        self.jump_target(ui, &width, "outline-width", "Outline width", super::jump_mode::TargetKind::TextEntry);
                     });
                     self.outline_width = self.outline_width.clamp(120.0, 360.0);
-                    ui.text_edit_singleline(&mut self.outline_filter);
+                    let filter = ui.text_edit_singleline(&mut self.outline_filter);
+                    self.jump_target(ui, &filter, "outline-filter", "Filter outline", super::jump_mode::TargetKind::TextEntry);
+                    let stamp = self.outline_stamp(ui.ctx().viewport_id());
+                    let owns_moves = self.defer_host_actions
+                        && self.outline_input_unblocked()
+                        && owns_outline_input(ui);
+                    let scope = self.jump_scope.clone();
+                    let order = &mut self.jump_order;
+                    if let Some(action) = self.outline_moves.ui(ui, stamp, &analysis.headings, owns_moves, |ui, label, response| {
+                        let identity = if label == "Confirm section move" { "outline-review-confirm" } else { "outline-review-cancel" };
+                        super::jump_mode::ui::register_and_apply_target(scope.as_ref(), ui, response, identity, label, super::jump_mode::TargetKind::Button, order);
+                        if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass() && !ui.ctx().will_discard() && !ui.clip_rect().contains_rect(response.rect) {
+                            response.scroll_to_me(None);
+                        }
+                    }) {
+                        self.pending_host_actions.outline_move = Some(action);
+                    }
+                    let selection = self.selected_outline_heading
+                        .filter(|selected| selected.revision == stamp.revision)
+                        .and_then(|selected| analysis.headings.iter().position(|heading|
+                            heading.byte_range.start == selected.heading_start))
+                        .filter(|&index| rows.iter().any(|row| row.heading_index == index));
+                    let allow_moves = owns_moves && !self.outline_moves.has_review(stamp);
+                    let [up, down] = if allow_moves {
+                        sibling_requests(&analysis.headings, selection, stamp).map(|request|
+                            request.filter(|request| self.outline_moves.can_move(*request, &self.note.content)))
+                    } else { [None, None] };
+                    if let Some(action) = move_buttons(ui, up, down, |ui, label, response| {
+                        let identity = if label == "Move up" {
+                            "outline-up"
+                        } else {
+                            "outline-down"
+                        };
+                        self.jump_target(ui, response, identity, label, super::jump_mode::TargetKind::Button);
+                    }) {
+                        self.pending_host_actions.outline_move = Some(action);
+                    }
                     if rows.is_empty() {
                         if self.outline_filter.is_empty() {
                             ui.label("No headings in this note.");
@@ -6770,10 +7683,19 @@ impl NotePanel {
                                 };
                                 ui.small(marker);
                             }
-                            let selected = self.selected_outline_heading.as_deref()
-                                == Some(row.normalized_anchor.as_str());
-                            if ui.selectable_label(selected, &row.title).clicked() {
-                                self.handle_outline_row_click(&row, ui.ctx());
+                            let selected = selection == Some(row.heading_index);
+                            let (response, action) = ui.scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((stamp.document, stamp.revision, row.heading_start))),
+                                |ui| outline_row(ui, &row.title, selected, stamp, row.heading_index, allow_moves,
+                                    |request| self.outline_moves.can_move(request, &self.note.content)),
+                            ).inner;
+                            self.jump_target(ui, &response, format!("outline-row/{}", row.heading_start), format!("Heading {}", row.title), super::jump_mode::TargetKind::Selectable);
+                            if owns_moves { self.outline_moves.reveal_moved_row(stamp, row.heading_start, &response); }
+                            if response.clicked() {
+                                self.handle_outline_row_click(&row, ui.ctx(), response.clicked_by(egui::PointerButton::Primary));
+                            }
+                            if let Some(action) = action {
+                                self.pending_host_actions.outline_move = Some(action);
                             }
                         });
                     }
@@ -7087,10 +8009,15 @@ impl NotePanel {
         outcome
     }
 
-    fn handle_outline_row_click(&mut self, row: &NoteOutlineRow, ctx: &egui::Context) {
-        self.selected_outline_heading = Some(row.normalized_anchor.clone());
-        self.pending_scroll_target = Some(row.normalized_anchor.clone());
+    fn handle_outline_row_click(&mut self, row: &NoteOutlineRow, ctx: &egui::Context, pointer: bool) {
+        let selected = NoteOutlinePosition {
+            revision: self.note_find.content_revision(),
+            heading_start: row.heading_start,
+        };
+        self.selected_outline_heading = Some(selected);
+        self.pending_scroll_target = Some(selected);
 
+        if !pointer { return; }
         match self.view_mode {
             NoteViewMode::Edit => {
                 self.move_editor_cursor_to(row.char_index, ctx);
@@ -7146,9 +8073,28 @@ impl NotePanel {
                 let threshold = app.note_more_limit;
                 let show_all = self.tags_expanded || tag_count <= threshold;
                 let limit = if show_all { tag_count } else { threshold };
-                for t in self.derived.tags.iter().take(limit) {
-                    if ui.link(format!("#{t}")).clicked() {
-                        app.filter_notes_by_tag(t);
+                let tags: Vec<_> = self.derived.tags.iter().take(limit).cloned().collect();
+                for t in tags {
+                    let token = egui::Id::new(("note-tag", &t)).value();
+                    let response = ui
+                        .scope_builder(
+                            egui::UiBuilder::new().id(egui::Id::new((
+                                "note-tag",
+                                self.prompt_identity,
+                                token,
+                            ))),
+                            |ui| ui.link(format!("#{t}")),
+                        )
+                        .inner;
+                    self.jump_target(
+                        ui,
+                        &response,
+                        format!("details/tag/{token:x}"),
+                        format!("Filter tag {t}"),
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if response.clicked() {
+                        app.filter_notes_by_tag(&t);
                     }
                 }
                 if tag_count > threshold {
@@ -7157,7 +8103,15 @@ impl NotePanel {
                     } else {
                         "... (more)"
                     };
-                    if ui.button(label).clicked() {
+                    let response = ui.button(label);
+                    self.jump_target(
+                        ui,
+                        &response,
+                        "details/tags/more",
+                        "Show more or fewer tags",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if response.clicked() {
                         self.tags_expanded = !self.tags_expanded;
                         if was_focused {
                             self.focus_textedit_next_frame = true;
@@ -7174,45 +8128,93 @@ impl NotePanel {
                     ui.small("None");
                 }
                 for alias in self.note.aliases.clone() {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(&alias);
-                            ui.small(format!("{} · {}", self.note.title, self.note.slug));
-                            if ui.small_button("Remove").clicked() {
-                                self.note.content =
-                                    remove_alias_metadata(&self.note.content, &alias);
-                                self.alias_rename_inputs.remove(&alias);
-                                self.save_alias_metadata_change(app);
-                            }
-                        });
-                        let mut input = self
-                            .alias_rename_inputs
-                            .entry(alias.clone())
-                            .or_insert_with(|| alias.clone())
-                            .clone();
-                        let mut rename_to = None;
-                        ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut input);
-                            if ui.small_button("Rename").clicked() {
-                                rename_to = Some(input.trim().to_string());
-                            }
-                        });
-                        if let Some(renamed) = rename_to {
-                            self.warn_alias_collision(app, &renamed);
-                            self.note.content =
-                                rename_alias_metadata(&self.note.content, &alias, &renamed);
-                            self.alias_rename_inputs.remove(&alias);
-                            self.save_alias_metadata_change(app);
-                        } else {
-                            self.alias_rename_inputs.insert(alias.clone(), input);
-                        }
-                    });
+                    let token = egui::Id::new(("note-alias", &alias)).value();
+                    ui.scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "note-alias",
+                            self.prompt_identity,
+                            token,
+                        ))),
+                        |ui| {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(&alias);
+                                    ui.small(format!("{} · {}", self.note.title, self.note.slug));
+                                    let response = ui.small_button("Remove");
+                                    self.jump_target(
+                                        ui,
+                                        &response,
+                                        format!("details/alias/{token:x}/remove"),
+                                        format!("Remove alias {alias}"),
+                                        super::jump_mode::TargetKind::Button,
+                                    );
+                                    if response.clicked() {
+                                        self.note.content =
+                                            remove_alias_metadata(&self.note.content, &alias);
+                                        self.alias_rename_inputs.remove(&alias);
+                                        self.save_alias_metadata_change(app);
+                                    }
+                                });
+                                let mut input = self
+                                    .alias_rename_inputs
+                                    .entry(alias.clone())
+                                    .or_insert_with(|| alias.clone())
+                                    .clone();
+                                let mut rename_to = None;
+                                ui.horizontal(|ui| {
+                                    let field = ui.text_edit_singleline(&mut input);
+                                    self.jump_target(
+                                        ui,
+                                        &field,
+                                        format!("details/alias/{token:x}/input"),
+                                        format!("Rename alias {alias}"),
+                                        super::jump_mode::TargetKind::TextEntry,
+                                    );
+                                    let response = ui.small_button("Rename");
+                                    self.jump_target(
+                                        ui,
+                                        &response,
+                                        format!("details/alias/{token:x}/rename"),
+                                        format!("Apply alias rename {alias}"),
+                                        super::jump_mode::TargetKind::Button,
+                                    );
+                                    if response.clicked() {
+                                        rename_to = Some(input.trim().to_string());
+                                    }
+                                });
+                                if let Some(renamed) = rename_to {
+                                    self.warn_alias_collision(app, &renamed);
+                                    self.note.content =
+                                        rename_alias_metadata(&self.note.content, &alias, &renamed);
+                                    self.alias_rename_inputs.remove(&alias);
+                                    self.save_alias_metadata_change(app);
+                                } else {
+                                    self.alias_rename_inputs.insert(alias.clone(), input);
+                                }
+                            })
+                        },
+                    );
                 }
             });
             ui.horizontal(|ui| {
                 ui.label("Add alias:");
-                ui.text_edit_singleline(&mut self.new_alias);
-                if ui.button("Add").clicked() {
+                let field = ui.text_edit_singleline(&mut self.new_alias);
+                self.jump_target(
+                    ui,
+                    &field,
+                    "details/alias/new",
+                    "New alias",
+                    super::jump_mode::TargetKind::TextEntry,
+                );
+                let response = ui.button("Add");
+                self.jump_target(
+                    ui,
+                    &response,
+                    "details/alias/add",
+                    "Add alias",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if response.clicked() {
                     let alias = self.new_alias.trim().to_string();
                     if !alias.is_empty() {
                         self.warn_alias_collision(app, &alias);
@@ -7257,9 +8259,29 @@ impl NotePanel {
             for l in all_links.iter().take(limit) {
                 match l {
                     LinkKind::Wiki(s) => {
-                        let (response, actions) = show_wiki_link_actions(ui, s);
+                        let token = egui::Id::new(("note-link-wiki", s)).value();
+                        let (response, actions) = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((
+                                    "note-link-wiki",
+                                    self.prompt_identity,
+                                    token,
+                                ))),
+                                |ui| show_wiki_link_actions(ui, s),
+                            )
+                            .inner;
+                        self.jump_target(
+                            ui,
+                            &response,
+                            format!("details/wiki/{token:x}"),
+                            format!("Open note {s}"),
+                            super::jump_mode::TargetKind::Button,
+                        );
                         #[cfg(test)]
-                        { self.test_wiki_open = Some((response.rect, ui.clip_rect(), response.enabled())); }
+                        {
+                            self.test_wiki_open =
+                                Some((response.rect, ui.clip_rect(), response.enabled()));
+                        }
                         let _ = response;
                         for action in actions {
                             match action {
@@ -7274,7 +8296,24 @@ impl NotePanel {
                         }
                     }
                     LinkKind::Url(label, url) => {
-                        let response = ui.hyperlink_to(label, url);
+                        let token = egui::Id::new(("note-link-url", label, url)).value();
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((
+                                    "note-link-url",
+                                    self.prompt_identity,
+                                    token,
+                                ))),
+                                |ui| ui.hyperlink_to(label, url),
+                            )
+                            .inner;
+                        self.jump_target(
+                            ui,
+                            &response,
+                            format!("details/link/{token:x}"),
+                            format!("Open link {label}"),
+                            super::jump_mode::TargetKind::Button,
+                        );
                         self.retain_hyperlink(ui, &response);
                     }
                 }
@@ -7285,7 +8324,15 @@ impl NotePanel {
                 } else {
                     "... (more)"
                 };
-                if ui.button(label).clicked() {
+                let response = ui.button(label);
+                self.jump_target(
+                    ui,
+                    &response,
+                    "details/links/more",
+                    "Show more or fewer links",
+                    super::jump_mode::TargetKind::Button,
+                );
+                if response.clicked() {
                     self.links_expanded = !self.links_expanded;
                     if was_focused {
                         self.focus_textedit_next_frame = true;
@@ -7342,62 +8389,109 @@ impl NotePanel {
                 BacklinkTab::RelatedNotes,
                 BacklinkTab::Mentions,
             ] {
-                if ui
-                    .selectable_label(self.backlink_tab == tab, tab.label())
-                    .clicked()
-                {
+                let response = ui.selectable_label(self.backlink_tab == tab, tab.label());
+                self.jump_target(
+                    ui,
+                    &response,
+                    format!("backlinks/tab/{}", tab as u8),
+                    tab.label(),
+                    super::jump_mode::TargetKind::Button,
+                );
+                if response.clicked() {
                     self.backlink_tab = tab;
                     self.backlink_page = 0;
                 }
             }
         });
+        let total_pages = self
+            .backlink_rows_for_active_tab()
+            .len()
+            .div_ceil(BACKLINK_PAGE_SIZE);
+        self.backlink_page = self.backlink_page.min(total_pages.saturating_sub(1));
         let rows = self.backlink_rows_for_active_tab();
-        let total_pages = rows.len().div_ceil(BACKLINK_PAGE_SIZE);
         let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
         let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
         if rows.is_empty() {
             ui.small("No backlinks in this category.");
         } else {
             let page_rows: Vec<BacklinkRow> = rows[page_start..page_end].to_vec();
-            for (idx, row) in page_rows.iter().enumerate() {
-                ui.push_id(("backlink_row", idx, page_start), |ui| {
-                    let resp = ui.selectable_label(false, &row.title);
-                    if resp.clicked() {
-                        if let Some(slug) = &row.note_slug {
-                            self.activate_note_reference(app, slug);
-                        } else if let Some(todo_id) = &row.todo_id {
-                            self.activate_todo_reference(app, todo_id);
+            for row in &page_rows {
+                let token =
+                    egui::Id::new(("backlink", &row.note_slug, &row.todo_id, &row.type_badge))
+                        .value();
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new((
+                        "backlink_row",
+                        self.prompt_identity,
+                        token,
+                    ))),
+                    |ui| {
+                        let resp = ui.selectable_label(false, &row.title);
+                        self.jump_target(
+                            ui,
+                            &resp,
+                            format!("backlinks/row/{token:x}"),
+                            format!("Backlink {}", row.title),
+                            super::jump_mode::TargetKind::Button,
+                        );
+                        if resp.clicked() {
+                            if let Some(slug) = &row.note_slug {
+                                self.activate_note_reference(app, slug);
+                            } else if let Some(todo_id) = &row.todo_id {
+                                self.activate_todo_reference(app, todo_id);
+                            }
                         }
-                    }
-                    if resp.has_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && let Some(slug) = &row.note_slug
-                    {
-                        self.activate_note_reference(app, slug);
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.small(format!("[{}]", row.type_badge));
-                        ui.small(format!("updated {}", row.updated));
-                        ui.small(format!("reason: {}", row.reason));
-                    });
-                    ui.small(&row.snippet);
-                    if ui.button("Open").clicked() {
-                        if let Some(slug) = &row.note_slug {
-                            self.activate_note_reference(app, slug);
-                        } else if let Some(todo_id) = &row.todo_id {
-                            self.activate_todo_reference(app, todo_id);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.small(format!("[{}]", row.type_badge));
+                            ui.small(format!("updated {}", row.updated));
+                            ui.small(format!("reason: {}", row.reason));
+                        });
+                        ui.small(&row.snippet);
+                        let open = ui.button("Open");
+                        self.jump_target(
+                            ui,
+                            &open,
+                            format!("backlinks/open/{token:x}"),
+                            format!("Open backlink {}", row.title),
+                            super::jump_mode::TargetKind::Button,
+                        );
+                        if open.clicked() {
+                            if let Some(slug) = &row.note_slug {
+                                self.activate_note_reference(app, slug);
+                            } else if let Some(todo_id) = &row.todo_id {
+                                self.activate_todo_reference(app, todo_id);
+                            }
                         }
-                    }
-                });
+                    },
+                );
                 ui.separator();
             }
             if total_pages > 1 {
                 ui.horizontal(|ui| {
-                    if ui.button("Prev").clicked() && self.backlink_page > 0 {
+                    let prev = ui.add_enabled(self.backlink_page > 0, egui::Button::new("Prev"));
+                    self.jump_target(
+                        ui,
+                        &prev,
+                        "backlinks/prev",
+                        "Previous backlinks page",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if prev.clicked() && self.backlink_page > 0 {
                         self.backlink_page -= 1;
                     }
                     ui.small(format!("Page {}/{}", self.backlink_page + 1, total_pages));
-                    if ui.button("Next").clicked() && self.backlink_page + 1 < total_pages {
+                    let next = ui.add_enabled(
+                        self.backlink_page + 1 < total_pages,
+                        egui::Button::new("Next"),
+                    );
+                    self.jump_target(
+                        ui,
+                        &next,
+                        "backlinks/next",
+                        "Next backlinks page",
+                        super::jump_mode::TargetKind::Button,
+                    );
+                    if next.clicked() && self.backlink_page + 1 < total_pages {
                         self.backlink_page += 1;
                     }
                 });
@@ -7541,6 +8635,14 @@ impl NotePanel {
         };
         let response = output.response.response;
         debug_assert_eq!(response.id, editor_id);
+        super::jump_mode::ui::register_and_apply_menu_anchor(
+            self.jump_scope.as_ref(), ui, &response, "source", "Note source editor",
+            super::jump_mode::ui::MenuAnchorKind::Context(super::jump_mode::TargetKind::TextEntry), &mut self.jump_order,
+        );
+        if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard() && !ui.clip_rect().intersects(response.rect) {
+            response.scroll_to_me(None);
+        }
         #[cfg(feature = "qa-framebuffer-capture")]
         self.record_note_replace_control(NoteReplaceControl::NoteEditor, &response);
         let active_match = if self.note_find.is_open() {
@@ -7548,7 +8650,8 @@ impl NotePanel {
         } else {
             None
         };
-        let toolbar_selection = if !response.has_focus() && self.markdown_toolbar_owns_selection {
+        let context_selection = self.editor_context_is_open(ui.ctx(), response.id);
+        let toolbar_selection = if !response.has_focus() && (self.markdown_toolbar_owns_selection || context_selection) {
             self.pending_selection
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
                 .map(|(start, end)| start..end)
@@ -7808,12 +8911,13 @@ impl NotePanel {
         } else {
             self.collapsed_sections.clear();
         }
-        if let Some(target) = self.pending_scroll_target.clone()
+        if let Some(target) = self.pending_scroll_target
+            && target.revision == self.note_find.content_revision()
             && let Some(heading) = self
                 .markdown_analysis()
                 .headings
                 .iter()
-                .find(|heading| heading.normalized_anchor == target)
+                .find(|heading| heading.byte_range.start == target.heading_start)
                 .cloned()
         {
             if heading.byte_range.start > 0 {
@@ -7898,6 +9002,7 @@ impl NotePanel {
         let mut last = 0usize;
         let content_clone = self.note.content[render_range.clone()].to_string();
         let mut modified = false;
+        let mut image_width_edit = None;
         for cap in IMAGE_RE.captures_iter(&content_clone) {
             let m = cap.get(0).unwrap();
             let local_range = m.range();
@@ -7918,10 +9023,28 @@ impl NotePanel {
             let width = parsed.width;
             if app.note_images_as_links {
                 let label = if alt.is_empty() { rel } else { alt };
-                let response = ui.link(label);
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "preview-image",
+                            self.prompt_identity,
+                            range.start,
+                        ))),
+                        |ui| ui.link(label),
+                    )
+                    .inner;
+                self.jump_target(
+                    ui,
+                    &response,
+                    format!("preview/image/{}", range.start),
+                    "Open image",
+                    super::jump_mode::TargetKind::Button,
+                );
                 if response.clicked() {
                     if self.defer_host_actions {
-                        self.pending_host_actions.open_image_paths.push(full.clone());
+                        self.pending_host_actions
+                            .open_image_paths
+                            .push(full.clone());
                     } else {
                         app.open_image_panel(&full);
                     }
@@ -7962,14 +9085,47 @@ impl NotePanel {
                 if display.x > max_preview_width {
                     display *= max_preview_width / display.x;
                 }
-                let response = ui.add(
-                    egui::Image::new(&tex)
-                        .fit_to_exact_size(display)
-                        .sense(egui::Sense::click()),
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "preview-image",
+                            self.prompt_identity,
+                            range.start,
+                        ))),
+                        |ui| {
+                            ui.add(
+                                egui::Image::new(&tex)
+                                    .fit_to_exact_size(display)
+                                    .sense(egui::Sense::click()),
+                            )
+                        },
+                    )
+                    .inner;
+                super::jump_mode::ui::register_and_apply_menu_anchor(
+                    self.jump_scope.as_ref(),
+                    ui,
+                    &response,
+                    format!("preview/image/{}", range.start),
+                    "Open image",
+                    super::jump_mode::ui::MenuAnchorKind::Context(
+                        super::jump_mode::TargetKind::Button,
+                    ),
+                    &mut self.jump_order,
                 );
+                if response.gained_focus()
+                    && response.enabled()
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass()
+                    && !ctx.will_discard()
+                    && !ui.clip_rect().contains_rect(response.rect)
+                {
+                    response.scroll_to_me(None);
+                }
                 if response.clicked() {
                     if self.defer_host_actions {
-                        self.pending_host_actions.open_image_paths.push(full.clone());
+                        self.pending_host_actions
+                            .open_image_paths
+                            .push(full.clone());
                     } else {
                         app.open_image_panel(&full);
                     }
@@ -7990,23 +9146,105 @@ impl NotePanel {
                         break;
                     }
                 }
-                response.context_menu(|ui| {
+                let popup_id = response.id.with("popup");
+                if egui::Popup::is_id_open(ctx, popup_id)
+                    && !self.image_context_binding.is_some_and(|binding| {
+                        self.note_context_is_current(binding, ctx.viewport_id(), response.id)
+                    })
+                {
+                    egui::Popup::close_id(ctx, popup_id);
+                }
+                let foreground = super::jump_mode::ui::visible_top_middle_layer(ctx);
+                let current_layer =
+                    if ctx.viewport_id() == note_panel_viewport_id(self.prompt_identity) {
+                        foreground.is_none() && response.layer_id == egui::LayerId::background()
+                    } else {
+                        foreground == Some(response.layer_id)
+                    };
+                let keyboard_open = response.enabled()
+                    && response.has_focus()
+                    && self.owns_keyboard_layer(ctx)
+                    && current_layer
+                    && ctx.input(|input| input.focused)
+                    && !egui::Popup::is_any_open(ctx)
+                    && !ctx.will_discard()
+                    && ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F10));
+                if response.secondary_clicked() || keyboard_open {
+                    self.image_context_binding = Some(NoteContextMenu {
+                        host: self.host_state.identity(),
+                        revision: self.note_find.content_revision(),
+                        document: egui::Id::new((&self.note.slug, &self.note.path)),
+                        viewport: ctx.viewport_id(),
+                        anchor: response.id,
+                        keyboard: keyboard_open,
+                    });
+                }
+                if keyboard_open {
+                    egui::Popup::open_id(ctx, popup_id);
+                }
+                let popup = egui::Popup::context_menu(&response);
+                let popup = if self
+                    .image_context_binding
+                    .is_some_and(|binding| binding.anchor == response.id && binding.keyboard)
+                {
+                    popup.at_position(response.rect.left_top())
+                } else {
+                    popup
+                };
+                let escape = ctx.input(|input| input.key_pressed(Key::Escape));
+                let was_open = egui::Popup::is_id_open(ctx, popup_id);
+                let scope = self
+                    .jump_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope(format!("preview/image/{}", range.start)));
+                let mut order = 0;
+                popup.show(|ui| {
                     let mut w = width.unwrap_or(display.x);
-                    if ui
-                        .add(egui::DragValue::new(&mut w).range(20.0..=4096.0))
-                        .changed()
-                    {
+                    let size = ui.add(egui::DragValue::new(&mut w).range(20.0..=4096.0));
+                    super::jump_mode::ui::register_and_apply_target(
+                        scope.as_ref(),
+                        ui,
+                        &size,
+                        "width",
+                        "Image width",
+                        super::jump_mode::TargetKind::Slider,
+                        &mut order,
+                    );
+                    Self::reveal_focused_menu_item(ui, &size);
+                    if size.changed() {
                         let repl = format!("![{alt}]({rel}|{:.0})", w.round());
                         self.note.content.replace_range(range.clone(), &repl);
                         modified = true;
+                        image_width_edit = Some(response.id);
                     }
-                    if ui.button("Reset size").clicked() {
+                    let reset = ui.button("Reset size");
+                    super::jump_mode::ui::register_and_apply_target(
+                        scope.as_ref(),
+                        ui,
+                        &reset,
+                        "reset",
+                        "Reset size",
+                        super::jump_mode::TargetKind::Button,
+                        &mut order,
+                    );
+                    Self::reveal_focused_menu_item(ui, &reset);
+                    if reset.clicked() {
                         let repl = format!("![{alt}]({rel})");
                         self.note.content.replace_range(range.clone(), &repl);
                         modified = true;
                         ui.close();
                     }
                 });
+                if self
+                    .image_context_binding
+                    .is_some_and(|binding| binding.anchor == response.id)
+                    && !egui::Popup::is_id_open(ctx, popup_id)
+                {
+                    self.image_context_binding = None;
+                    if was_open && escape && response.enabled() && !ctx.will_discard() {
+                        response.request_focus();
+                    }
+                }
                 self.finish_find_preview_segment(ui, &range, &[], response.rect);
             }
             last = local_range.end;
@@ -8021,6 +9259,12 @@ impl NotePanel {
         }
         if modified {
             self.mark_content_changed(ctx.input(|i| i.time));
+            if let Some(image) = image_width_edit
+                && let Some(binding) = self.image_context_binding.as_mut()
+                && binding.anchor == image
+            {
+                binding.revision = self.note_find.content_revision();
+            }
         }
         modified
     }
@@ -8126,9 +9370,10 @@ impl NotePanel {
                 let visible_ranges = self.preview_visible_ranges(&block, app);
                 self.finish_find_preview_segment(ui, &heading_range, &visible_ranges, resp.rect);
             }
-            if self.pending_scroll_target.as_deref()
-                == Some(section.heading.normalized_anchor.as_str())
-            {
+            if self.pending_scroll_target == Some(NoteOutlinePosition {
+                revision: self.note_find.content_revision(),
+                heading_start: section.heading.byte_range.start,
+            }) {
                 ui.scroll_to_rect(resp.rect, Some(egui::Align::Center));
                 self.pending_scroll_target = None;
             }
@@ -8177,7 +9422,28 @@ impl NotePanel {
             .horizontal_top(|ui| {
                 ui.add_space((section.heading.level.saturating_sub(1) as f32) * 10.0);
                 let label = if collapsed { "▶" } else { "▼" };
-                if ui.small_button(label).clicked() {
+                let fold = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "preview-fold",
+                            self.prompt_identity,
+                            section.heading.byte_range.start,
+                        ))),
+                        |ui| ui.small_button(label),
+                    )
+                    .inner;
+                self.jump_target(
+                    ui,
+                    &fold,
+                    format!("preview/fold/{}", section.heading.byte_range.start),
+                    format!(
+                        "{} section {}",
+                        if collapsed { "Expand" } else { "Collapse" },
+                        section.heading.title
+                    ),
+                    super::jump_mode::TargetKind::Button,
+                );
+                if fold.clicked() {
                     if collapsed {
                         self.collapsed_sections.remove(&key);
                     } else {
@@ -8314,6 +9580,48 @@ impl NotePanel {
         });
     }
 
+    fn note_context_is_current(
+        &self,
+        binding: NoteContextMenu,
+        viewport: egui::ViewportId,
+        anchor: egui::Id,
+    ) -> bool {
+        binding.anchor == anchor
+            && binding.viewport == viewport
+            && binding.host == self.host_state.identity()
+            && binding.revision == self.note_find.content_revision()
+            && binding.document == egui::Id::new((&self.note.slug, &self.note.path))
+    }
+
+    fn retire_stale_note_contexts(&mut self, ctx: &egui::Context, images_as_links: bool) {
+        let viewport = ctx.viewport_id();
+        if let Some(binding) = self.editor_context_binding
+            && binding.viewport == viewport
+            && (!self.open
+                || !self.note_context_is_current(binding, viewport, binding.anchor)
+                || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split))
+        {
+            egui::Popup::close_id(ctx, binding.anchor.with("popup"));
+            self.editor_context_binding = None;
+        }
+        if let Some(binding) = self.image_context_binding
+            && binding.viewport == viewport
+            && (!self.open
+                || !self.note_context_is_current(binding, viewport, binding.anchor)
+                || images_as_links
+                || !matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split))
+        {
+            egui::Popup::close_id(ctx, binding.anchor.with("popup"));
+            self.image_context_binding = None;
+        }
+    }
+
+    fn editor_context_is_open(&self, ctx: &egui::Context, editor: egui::Id) -> bool {
+        self.editor_context_binding
+            .is_some_and(|binding| self.note_context_is_current(binding, ctx.viewport_id(), editor))
+            && egui::Popup::is_id_open(ctx, editor.with("popup"))
+    }
+
     fn handle_editor_response(
         &mut self,
         resp: egui::Response,
@@ -8356,10 +9664,26 @@ impl NotePanel {
         }
         let mut state =
             egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
-        let form_owns_selection = self.table_form.as_ref().is_some_and(|form| form.basis.editor == resp.id)
-            || self.link_form.as_ref().is_some_and(|form| form.basis.editor == resp.id)
-            || self.new_note_form.as_ref().is_some_and(|form| form.basis.editor == resp.id);
-        if (self.markdown_toolbar_owns_selection || form_owns_selection) && !resp.has_focus() {
+        let form_owns_selection = self
+            .table_form
+            .as_ref()
+            .is_some_and(|form| form.basis.editor == resp.id)
+            || self
+                .link_form
+                .as_ref()
+                .is_some_and(|form| form.basis.editor == resp.id)
+            || self
+                .new_note_form
+                .as_ref()
+                .is_some_and(|form| form.basis.editor == resp.id);
+        let popup_id = resp.id.with("popup");
+        let context_selection = self.editor_context_is_open(ctx, resp.id);
+        if !context_selection && egui::Popup::is_id_open(ctx, popup_id) {
+            egui::Popup::close_id(ctx, popup_id);
+        }
+        if (self.markdown_toolbar_owns_selection || form_owns_selection || context_selection)
+            && !resp.has_focus()
+        {
             if let Some(cached) = self
                 .pending_selection
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
@@ -8396,11 +9720,38 @@ impl NotePanel {
                 None => self.pending_selection = None,
             }
         }
-        resp.context_menu(|ui| {
-            let ctx2 = ui.ctx().clone();
-            self.build_textedit_menu(ui, &ctx2, resp.id, app);
-        });
-        if resp.has_focus() && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Period)) {
+        let foreground = super::jump_mode::ui::visible_top_middle_layer(ctx);
+        let current_layer = if ctx.viewport_id() == note_panel_viewport_id(self.prompt_identity) {
+            foreground.is_none() && resp.layer_id == egui::LayerId::background()
+        } else {
+            foreground == Some(resp.layer_id)
+        };
+        let keyboard_open = resp.enabled()
+            && resp.has_focus()
+            && self.owns_keyboard_layer(ctx)
+            && current_layer
+            && ctx.input(|input| input.focused)
+            && !egui::Popup::is_any_open(ctx)
+            && !ctx.will_discard()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::Period));
+        if let Some(binding) = self.editor_context_binding
+            && binding.viewport == ctx.viewport_id()
+            && !self.note_context_is_current(binding, ctx.viewport_id(), resp.id)
+        {
+            egui::Popup::close_id(ctx, binding.anchor.with("popup"));
+            self.editor_context_binding = None;
+        }
+        if resp.secondary_clicked() || keyboard_open {
+            self.editor_context_binding = Some(NoteContextMenu {
+                host: self.host_state.identity(),
+                revision: self.note_find.content_revision(),
+                document: egui::Id::new((&self.note.slug, &self.note.path)),
+                viewport: ctx.viewport_id(),
+                anchor: resp.id,
+                keyboard: keyboard_open,
+            });
+        }
+        if keyboard_open {
             // The right-click restoration path may have consumed `state` while
             // storing it. Reloading also snapshots the authoritative live state
             // immediately before the keyboard menu is opened.
@@ -8411,18 +9762,28 @@ impl NotePanel {
             {
                 self.pending_selection = Some(range);
             }
-            let pos = resp.rect.left_top();
-            let _ = egui::Tooltip::always_open(
-                ctx.clone(),
-                resp.layer_id,
-                egui::Id::new("note_ctx_menu"),
-                egui::PopupAnchor::Position(pos),
-            )
-            .show(|ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    self.build_textedit_menu(ui, ctx, resp.id, app);
-                });
-            });
+            egui::Popup::open_id(ctx, popup_id);
+        }
+        let popup = egui::Popup::context_menu(&resp);
+        let popup = if self
+            .editor_context_binding
+            .is_some_and(|binding| binding.keyboard)
+        {
+            popup.at_position(resp.rect.left_top())
+        } else {
+            popup
+        };
+        let escape = ctx.input(|input| input.key_pressed(Key::Escape));
+        let was_open = egui::Popup::is_id_open(ctx, popup_id);
+        popup.show(|ui| {
+            let ctx2 = ui.ctx().clone();
+            self.build_textedit_menu(ui, &ctx2, resp.id, app);
+        });
+        if !egui::Popup::is_id_open(ctx, popup_id) {
+            self.editor_context_binding = None;
+            if was_open && escape && resp.enabled() && !ctx.will_discard() {
+                resp.request_focus();
+            }
         }
         if resp.has_focus() && app.vim_mode {
             self.handle_vim_keys(ctx, resp.id);
@@ -8551,7 +9912,7 @@ impl NotePanel {
                 NoteSaveOutcome::Saved
             }
             Ok(false) => {
-                self.overwrite_prompt = true;
+                self.show_conflict_prompt();
                 if self.pending_close_after_save {
                     self.discard_unsaved_prompt = false;
                 }
@@ -8576,7 +9937,7 @@ impl NotePanel {
                 NoteSaveOutcome::Saved
             }
             Ok(false) => {
-                self.overwrite_prompt = true;
+                self.show_conflict_prompt();
                 NoteSaveOutcome::AwaitingDecision
             }
             Err(error) => {
@@ -8888,7 +10249,13 @@ impl NotePanel {
         }
     }
 
-    fn render_inline_note_text(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, text: &str) {
+    fn render_inline_note_text(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        text: &str,
+        source_start: usize,
+    ) {
         let font = FontId::proportional(effective_note_font_size(ui.ctx(), app.note_font_size));
         #[cfg(test)]
         {
@@ -8928,7 +10295,24 @@ impl NotePanel {
                     .split_once('|')
                     .map(|(target, alias)| (target.trim(), alias.trim()))
                     .unwrap_or_else(|| (link_text.trim(), link_text.trim()));
-                let resp = ui.link(RichText::new(label).font(font.clone()));
+                let offset = source_start + cursor;
+                let resp = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new((
+                            "preview-wiki",
+                            self.prompt_identity,
+                            offset,
+                        ))),
+                        |ui| ui.link(RichText::new(label).font(font.clone())),
+                    )
+                    .inner;
+                self.jump_target(
+                    ui,
+                    &resp,
+                    format!("preview/wiki/{offset}"),
+                    "Open note link",
+                    super::jump_mode::TargetKind::Button,
+                );
                 if resp.clicked() {
                     match resolve_note_query(target) {
                             NoteTarget::Resolved(slug) => self.activate_note_reference(app, &slug),
@@ -8959,11 +10343,29 @@ impl NotePanel {
                     let label = &text[cursor + 1..label_end];
                     let url = &text[url_start..url_end];
                     if url.starts_with("http://") || url.starts_with("https://") {
-                        ui.scope(|ui| {
-                            ui.style_mut().override_font_id = Some(font.clone());
-                            let response = ui.hyperlink_to(label, url);
-                            self.retain_hyperlink(ui, &response);
-                        });
+                        let offset = source_start + cursor;
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((
+                                    "preview-http",
+                                    self.prompt_identity,
+                                    offset,
+                                ))),
+                                |ui| {
+                                    ui.style_mut().override_font_id = Some(font.clone());
+                                    let response = ui.hyperlink_to(label, url);
+                                    self.retain_hyperlink(ui, &response);
+                                    response
+                                },
+                            )
+                            .inner;
+                        self.jump_target(
+                            ui,
+                            &response,
+                            format!("preview/http/{offset}"),
+                            "Open web link",
+                            super::jump_mode::TargetKind::Button,
+                        );
                         cursor = url_end + 1;
                         continue;
                     }
@@ -8977,8 +10379,28 @@ impl NotePanel {
                     .count();
                 if id_len > 0 {
                     let todo_id = &rest[..id_len];
-                    let resp =
-                        ui.link(RichText::new(format!("@todo:{todo_id}")).font(font.clone()));
+                    let offset = source_start + cursor;
+                    let resp = ui
+                        .scope_builder(
+                            egui::UiBuilder::new().id(egui::Id::new((
+                                "preview-todo",
+                                self.prompt_identity,
+                                offset,
+                            ))),
+                            |ui| {
+                                ui.link(
+                                    RichText::new(format!("@todo:{todo_id}")).font(font.clone()),
+                                )
+                            },
+                        )
+                        .inner;
+                    self.jump_target(
+                        ui,
+                        &resp,
+                        format!("preview/todo/{offset}"),
+                        "Open linked todo",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(test)]
                     {
                         self.test_todo_link = Some((resp.rect, ui.clip_rect(), resp.enabled()));
@@ -9009,12 +10431,33 @@ impl NotePanel {
         let output = ui.horizontal_top(|ui| {
             ui.add_space(task_item.indent as f32 * 8.0);
             let mut state = task_item.checked;
-            let resp = ui.add_enabled(interactive, egui::Checkbox::without_text(&mut state));
+            let resp = ui
+                .scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new((
+                        "preview-task",
+                        self.prompt_identity,
+                        task_item.marker_byte_range.start,
+                    ))),
+                    |ui| ui.add_enabled(interactive, egui::Checkbox::without_text(&mut state)),
+                )
+                .inner;
+            self.jump_target(
+                ui,
+                &resp,
+                format!(
+                    "preview/task/{}/{}",
+                    task_item.marker_byte_range.start, task_item.marker_byte_range.end
+                ),
+                format!("Task on line {}", task_item.line_index + 1),
+                super::jump_mode::TargetKind::Checkbox,
+            );
             if interactive && resp.changed() {
                 modified = self.toggle_rendered_checkbox_marker(task_item, ctx.input(|i| i.time));
             }
             ui.add_space(4.0);
-            self.render_inline_note_text(ui, app, task_display_text(task_item));
+            let source_start = task_text_source_range(&self.note.content, task_item)
+                .map_or(task_item.line_byte_range.start, |range| range.start);
+            self.render_inline_note_text(ui, app, task_display_text(task_item), source_start);
         });
         let visible_ranges = task_text_source_range(&self.note.content, task_item)
             .map(|range| inline_note_visible_ranges(&self.note.content, range))
@@ -9106,6 +10549,19 @@ impl NotePanel {
         modified
     }
 
+
+    fn reveal_focused_menu_item(ui: &egui::Ui, response: &egui::Response) {
+        if response.enabled()
+            && response.gained_focus()
+            && ui.is_visible()
+            && !ui.is_sizing_pass()
+            && !ui.ctx().will_discard()
+            && !ui.clip_rect().contains_rect(response.rect)
+        {
+            response.scroll_to_me(None);
+        }
+    }
+
     fn build_textedit_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -9138,8 +10594,53 @@ impl NotePanel {
         if capture_toolbar_widgets {
             self.applying_toolbar_markdown_action = true;
         }
-        let markdown_menu = ui.menu_button("Markdown", |ui| {
-            let add_checkbox = ui.button("Add Checkbox");
+        use super::jump_mode::TargetKind;
+        use super::jump_mode::ui::{
+            MenuAnchorKind, register_and_apply_menu_anchor, register_and_apply_target,
+        };
+
+        let parent_scope = if capture_toolbar_widgets {
+            self.jump_scope.clone()
+        } else {
+            self.jump_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("source"))
+        };
+        let menu_scope = parent_scope
+            .as_ref()
+            .map(|scope| scope.combo_popup_scope("markdown"));
+        macro_rules! target {
+            ($scope:expr, $ui:expr, $response:expr, $order:expr, $key:expr, $label:expr) => {
+                register_and_apply_target(
+                    $scope.as_ref(),
+                    $ui,
+                    &$response,
+                    $key,
+                    $label,
+                    TargetKind::Button,
+                    &mut $order,
+                );
+                Self::reveal_focused_menu_item($ui, &$response);
+            };
+        }
+        macro_rules! button {
+            ($scope:expr, $ui:expr, $order:expr, $key:expr, $label:expr) => {{
+                let response = $ui.button($label);
+                target!($scope, $ui, response, $order, $key, $label);
+                response
+            }};
+        }
+        let dismissed_context = include_context_menus
+            .then(|| super::native_keyboard::dismiss_owned_submenu_on_escape(ui))
+            .flatten();
+        let draw_items = |ui: &mut egui::Ui| {
+            let mut order = 0;
+            let dismissed = if capture_toolbar_widgets {
+                super::native_keyboard::dismiss_owned_submenu_on_escape(ui)
+            } else {
+                dismissed_context
+            };
+            let add_checkbox = button!(menu_scope, ui, order, "checkbox", "Add Checkbox");
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_markdown_tool_rects.push((
@@ -9170,22 +10671,29 @@ impl NotePanel {
                 self.defer_toolbar_editor_focus();
                 ui.close();
             }
-            if ui.button("Insert Timestamp").clicked() {
+            if button!(menu_scope, ui, order, "timestamp", "Insert Timestamp").clicked() {
                 let timestamp = format_note_editor_timestamp_now();
                 self.insert_text_at_cursor_or_selection(ctx, id, &timestamp);
                 ui.close();
             }
-            let insert_link = ui.button("Insert Link...");
+            let insert_link = button!(menu_scope, ui, order, "link", "Insert Link...");
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
-                self.test_markdown_tool_rects.push(("Insert Link...".into(), insert_link.id, insert_link.rect, ui.clip_rect()));
+                self.test_markdown_tool_rects.push((
+                    "Insert Link...".into(),
+                    insert_link.id,
+                    insert_link.rect,
+                    ui.clip_rect(),
+                ));
             }
             if insert_link.clicked() {
                 self.stage_form_open(ctx, id, super::note_form_dialog::FormKind::Link);
                 ui.close();
             }
-            if ui.button("Convert plain links").clicked() {
-                if !self.start_plain_link_conversion() {
+            if button!(menu_scope, ui, order, "plain-links", "Convert plain links").clicked() {
+                if self.defer_host_actions {
+                    self.pending_host_actions.plain_link_action = Some(PlainLinkAction::Review);
+                } else if !self.start_plain_link_conversion() {
                     Self::show_no_plain_links_toast(app);
                 }
                 ui.close();
@@ -9197,6 +10705,14 @@ impl NotePanel {
             let export_allowed = self.can_stage_markdown_export(ctx);
             let export_markdown =
                 ui.add_enabled(export_allowed, egui::Button::new("Export Markdown…"));
+            target!(
+                menu_scope,
+                ui,
+                export_markdown,
+                order,
+                "export-markdown",
+                "Export Markdown…"
+            );
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_markdown_tool_rects.push((
@@ -9211,6 +10727,14 @@ impl NotePanel {
                 ui.close();
             }
             let export_html = ui.add_enabled(export_allowed, egui::Button::new("Export HTML…"));
+            target!(
+                menu_scope,
+                ui,
+                export_html,
+                order,
+                "export-html",
+                "Export HTML…"
+            );
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_markdown_tool_rects.push((
@@ -9224,7 +10748,13 @@ impl NotePanel {
                 self.stage_markdown_export(ctx, MarkdownExportFormat::Html);
                 ui.close();
             }
-            let bold = ui.button("Bold Selection");
+            let print = ui.add_enabled(export_allowed, egui::Button::new("Export / Print…"));
+            target!(menu_scope, ui, print, order, "print", "Export / Print…");
+            if print.clicked() {
+                self.stage_print_preview(ctx);
+                ui.close();
+            }
+            let bold = button!(menu_scope, ui, order, "bold", "Bold Selection");
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_markdown_tool_rects.push((
@@ -9238,27 +10768,31 @@ impl NotePanel {
                 self.apply_wrapped_markdown_format(ctx, id, app, MarkdownInlineFormat::Strong, 2);
                 ui.close();
             }
-            if ui.button("Italic Selection").clicked() {
+            if button!(menu_scope, ui, order, "italic", "Italic Selection").clicked() {
                 self.apply_wrapped_markdown_format(ctx, id, app, MarkdownInlineFormat::Emphasis, 1);
                 ui.close();
             }
-            if ui.button("Strikethrough Selection").clicked() {
+            if button!(menu_scope, ui, order, "strike", "Strikethrough Selection").clicked() {
                 let range = self.current_editor_byte_range(ctx, id);
                 let prepared =
                     prepare_inline_format(&self.note.content, range, MarkdownInlineFormat::Strike);
                 self.report_markdown_edit_result(ctx, id, app, prepared);
                 ui.close();
             }
-            if ui.button("Inline Code").clicked() {
+            if button!(menu_scope, ui, order, "code", "Inline Code").clicked() {
                 let range = self.current_editor_byte_range(ctx, id);
                 let prepared =
                     prepare_inline_format(&self.note.content, range, MarkdownInlineFormat::Code);
                 self.report_markdown_edit_result(ctx, id, app, prepared);
                 ui.close();
             }
-            ui.menu_button("Block snippet", |ui| {
+            let blocks = menu_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("blocks"));
+            let blocks_button = super::native_keyboard::show_submenu(ui, "Block snippet", dismissed, |ui| {
+                let mut order = 0;
                 for (label, level) in [("Heading 1", 1), ("Heading 2", 2), ("Heading 3", 3)] {
-                    if ui.button(label).clicked() {
+                    if button!(blocks, ui, order, format!("heading/{level}"), label).clicked() {
                         let range = self.current_editor_byte_range(ctx, id);
                         let prepared = prepare_block_snippet(
                             &self.note.content,
@@ -9282,7 +10816,7 @@ impl NotePanel {
                     ),
                     ("Wiki link", MarkdownBlockSnippet::WikiLink),
                 ] {
-                    if ui.button(label).clicked() {
+                    if button!(blocks, ui, order, label, label).clicked() {
                         let range = self.current_editor_byte_range(ctx, id);
                         let prepared = prepare_block_snippet(&self.note.content, range, snippet);
                         self.report_markdown_edit_result(ctx, id, app, prepared);
@@ -9290,14 +10824,39 @@ impl NotePanel {
                     }
                 }
             });
-            ui.menu_button("Table", |ui| {
-                if ui.button("Insert 2-column table").clicked() {
+            register_and_apply_menu_anchor(
+                menu_scope.as_ref(),
+                ui,
+                &blocks_button,
+                "blocks",
+                "Block snippet",
+                MenuAnchorKind::Submenu,
+                &mut order,
+            );
+            if capture_toolbar_widgets {
+                Self::reveal_focused_menu_item(ui, &blocks_button);
+            }
+            let table_scope = menu_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("table"));
+            let table_button = super::native_keyboard::show_submenu(ui, "Table", dismissed, |ui| {
+                let mut order = 0;
+                if button!(
+                    table_scope,
+                    ui,
+                    order,
+                    "two-column",
+                    "Insert 2-column table"
+                )
+                .clicked()
+                {
                     let prepared =
                         self.prepare_current_table_edit(ctx, id, TableEditOperation::InsertTable);
                     self.report_markdown_edit_result(ctx, id, app, prepared);
                     ui.close();
                 }
-                let custom_table = ui.button("Insert custom table…");
+                let custom_table =
+                    button!(table_scope, ui, order, "custom", "Insert custom table…");
                 #[cfg(test)]
                 if ui.is_visible() && !ui.is_sizing_pass() {
                     self.test_custom_table_insert_rect = Some(custom_table.rect);
@@ -9309,7 +10868,7 @@ impl NotePanel {
                 let table_context = self.current_table_context(ctx, id);
                 if let Some((table, row, _column)) = table_context {
                     ui.separator();
-                    if ui.button("Insert row below").clicked() {
+                    if button!(table_scope, ui, order, "insert-row", "Insert row below").clicked() {
                         let prepared = self.prepare_current_table_edit(
                             ctx,
                             id,
@@ -9319,13 +10878,29 @@ impl NotePanel {
                         ui.close();
                     }
                     let remove_row = ui.add_enabled(row > 0, egui::Button::new("Remove row"));
+                    target!(
+                        table_scope,
+                        ui,
+                        remove_row,
+                        order,
+                        "remove-row",
+                        "Remove row"
+                    );
                     if remove_row.clicked() {
                         let prepared =
                             self.prepare_current_table_edit(ctx, id, TableEditOperation::RemoveRow);
                         self.report_markdown_edit_result(ctx, id, app, prepared);
                         ui.close();
                     }
-                    if ui.button("Insert column right").clicked() {
+                    if button!(
+                        table_scope,
+                        ui,
+                        order,
+                        "insert-column",
+                        "Insert column right"
+                    )
+                    .clicked()
+                    {
                         let prepared = self.prepare_current_table_edit(
                             ctx,
                             id,
@@ -9337,6 +10912,14 @@ impl NotePanel {
                     let remove_column = ui.add_enabled(
                         table.alignments().len() > 1,
                         egui::Button::new("Remove column"),
+                    );
+                    target!(
+                        table_scope,
+                        ui,
+                        remove_column,
+                        order,
+                        "remove-column",
+                        "Remove column"
                     );
                     if remove_column.clicked() {
                         let prepared = self.prepare_current_table_edit(
@@ -9353,6 +10936,14 @@ impl NotePanel {
                         has_cell_selection,
                         egui::Button::new("Set current cell from selection"),
                     );
+                    target!(
+                        table_scope,
+                        ui,
+                        replace_cell,
+                        order,
+                        "replace-cell",
+                        "Set current cell from selection"
+                    );
                     if replace_cell.clicked() {
                         let prepared = self.prepare_current_table_edit(
                             ctx,
@@ -9364,64 +10955,142 @@ impl NotePanel {
                     }
                 }
             });
+            register_and_apply_menu_anchor(
+                menu_scope.as_ref(),
+                ui,
+                &table_button,
+                "table",
+                "Table",
+                MenuAnchorKind::Submenu,
+                &mut order,
+            );
+            if capture_toolbar_widgets {
+                Self::reveal_focused_menu_item(ui, &table_button);
+            }
             ui.separator();
-            if ui.button("Insert NOTE callout").clicked() {
+            if button!(menu_scope, ui, order, "callout-note", "Insert NOTE callout").clicked() {
                 self.insert_callout(ctx, id, "note");
                 ui.close();
             }
-            if ui.button("Insert WARNING callout").clicked() {
+            if button!(
+                menu_scope,
+                ui,
+                order,
+                "callout-warning",
+                "Insert WARNING callout"
+            )
+            .clicked()
+            {
                 self.insert_callout(ctx, id, "warning");
                 ui.close();
             }
-            if ui.button("Insert TODO callout").clicked() {
+            if button!(menu_scope, ui, order, "callout-todo", "Insert TODO callout").clicked() {
                 self.insert_callout(ctx, id, "todo");
                 ui.close();
             }
-            if ui.button("Wrap selection in callout").clicked() {
+            if button!(
+                menu_scope,
+                ui,
+                order,
+                "callout-selection",
+                "Wrap selection in callout"
+            )
+            .clicked()
+            {
                 self.wrap_selection_in_callout(ctx, id, "note");
                 ui.close();
             }
-        });
+        };
+        let (markdown, toolbar_open) = if capture_toolbar_widgets {
+            let menu = ui.menu_button("Markdown", |ui| {
+                let viewport_height = ui.ctx().content_rect().height();
+                let max_height = (viewport_height - 2.0 * ui.spacing().interact_size.y).max(40.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("note-markdown-toolbar-menu")
+                    .max_height(max_height)
+                    .show(ui, draw_items);
+            });
+            let popup = egui::Popup::default_response_id(&menu.response);
+            let open = menu.inner.is_some() || egui::Popup::is_id_open(ctx, popup);
+            (menu.response, open)
+        } else {
+            (
+                super::native_keyboard::show_submenu(ui, "Markdown", dismissed_context, draw_items),
+                false,
+            )
+        };
         #[cfg(test)]
         if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
-            self.test_markdown_toolbar_menu = Some((
-                markdown_menu.response.id,
-                markdown_menu.response.rect,
-                ui.clip_rect(),
-            ));
+            self.test_markdown_toolbar_menu = Some((markdown.id, markdown.rect, ui.clip_rect()));
         }
+        register_and_apply_menu_anchor(
+            parent_scope.as_ref(),
+            ui,
+            &markdown,
+            "markdown",
+            "Markdown",
+            if capture_toolbar_widgets {
+                MenuAnchorKind::Root
+            } else {
+                MenuAnchorKind::Submenu
+            },
+            &mut self.jump_order,
+        );
         if capture_toolbar_widgets {
-            let popup_id = egui::Popup::default_response_id(&markdown_menu.response);
-            let popup_open =
-                markdown_menu.inner.is_some() || egui::Popup::is_id_open(ctx, popup_id);
-            self.markdown_toolbar_owns_selection = markdown_menu.response.has_focus()
-                || popup_open
+            self.markdown_toolbar_owns_selection = markdown.has_focus()
+                || toolbar_open
                 || self.markdown_toolbar_popup_was_open
                 || self.focus_textedit_after_toolbar_action
                 || self
                     .pending_toolbar_focus_restore
                     .is_some_and(|pending| pending.editor_id == id);
-            self.markdown_toolbar_popup_was_open = popup_open;
+            self.markdown_toolbar_popup_was_open = toolbar_open;
             self.applying_toolbar_markdown_action = false;
         }
         if !include_context_menus {
             return;
         }
 
-        #[cfg(not(test))]
-        let _ = markdown_menu;
+        macro_rules! submenu {
+            ($scope:ident, $key:literal, $label:literal, |$menu_ui:ident| $draw:block) => {{
+                let $scope = parent_scope
+                    .as_ref()
+                    .map(|scope| scope.combo_popup_scope($key));
+                let response = super::native_keyboard::show_submenu(ui, $label, dismissed_context, |$menu_ui| $draw);
+                register_and_apply_menu_anchor(
+                    parent_scope.as_ref(),
+                    ui,
+                    &response,
+                    $key,
+                    $label,
+                    MenuAnchorKind::Submenu,
+                    &mut self.jump_order,
+                );
+                Self::reveal_focused_menu_item(ui, &response);
+            }};
+        }
 
         ui.separator();
-        ui.menu_button("Insert link", |ui| {
+        submenu!(link_scope, "link-notes", "Insert link", |ui| {
+            let mut order = 0;
             ui.set_min_width(200.0);
             ui.horizontal(|ui| {
                 ui.label("Insert link:");
-                if ui.button("Link new").clicked() {
+                if button!(link_scope, ui, order, "new", "Link new").clicked() {
                     self.stage_form_open(ctx, id, super::note_form_dialog::FormKind::NewNote);
                     ui.close();
                 }
             });
-            ui.text_edit_singleline(&mut self.link_search);
+            let search = ui.text_edit_singleline(&mut self.link_search);
+            register_and_apply_target(
+                link_scope.as_ref(),
+                ui,
+                &search,
+                "search",
+                "Find notes to link",
+                TargetKind::TextEntry,
+                &mut order,
+            );
             let results = self.link_menu_results_snapshot();
             egui::ScrollArea::vertical()
                 .max_height(200.0)
@@ -9431,7 +11100,21 @@ impl NotePanel {
                     }
                     for target in &results {
                         let title = target.display_title.clone();
-                        if ui.button(&title).clicked() {
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(ui.id().with(("link", &target.slug))),
+                                |ui| ui.button(&title),
+                            )
+                            .inner;
+                        target!(
+                            link_scope,
+                            ui,
+                            response,
+                            order,
+                            format!("note/{}", target.slug),
+                            &title
+                        );
+                        if response.clicked() {
                             let insert = format!("[[{title}]]");
                             self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                             self.link_search.clear();
@@ -9445,9 +11128,10 @@ impl NotePanel {
                 });
         });
 
-        ui.menu_button("Insert image", |ui| {
+        submenu!(image_scope, "link-images", "Insert image", |ui| {
+            let mut order = 0;
             ui.set_min_width(200.0);
-            if ui.button("Upload...").clicked() {
+            if button!(image_scope, ui, order, "upload", "Upload...").clicked() {
                 if self.defer_host_actions {
                     self.pending_host_actions.attachment_picker_requested = true;
                 } else if let Some(path) = FileDialog::new()
@@ -9466,38 +11150,49 @@ impl NotePanel {
                 }
                 ui.close();
             }
-            if ui.button("Screenshot...").clicked() {
+            if button!(image_scope, ui, order, "screenshot", "Screenshot...").clicked() {
                 if self.defer_host_actions {
                     self.pending_host_actions.screenshot_requested = true;
                     ui.close();
                 } else {
                     match capture(ScreenshotMode::Region, true) {
-                    Ok(path) => {
-                        if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-                            let dest = assets_dir().join(fname);
-                            let result = std::fs::rename(&path, &dest).or_else(|_| {
-                                std::fs::copy(&path, &dest)
-                                    .map(|_| std::fs::remove_file(&path).unwrap_or(()))
-                            });
-                            if let Err(e) = result {
-                                app.report_error(
-                                    "ui operation",
-                                    format!("Failed to save screenshot: {e}"),
-                                );
-                            } else {
-                                let insert = format!("![{0}](assets/{0})", fname);
-                                self.insert_text_at_cursor_or_selection(ctx, id, &insert);
-                                self.image_search.clear();
-                                ui.close();
+                        Ok(path) => {
+                            if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                                let dest = assets_dir().join(fname);
+                                let result = std::fs::rename(&path, &dest).or_else(|_| {
+                                    std::fs::copy(&path, &dest)
+                                        .map(|_| std::fs::remove_file(&path).unwrap_or(()))
+                                });
+                                if let Err(e) = result {
+                                    app.report_error(
+                                        "ui operation",
+                                        format!("Failed to save screenshot: {e}"),
+                                    );
+                                } else {
+                                    let insert = format!("![{0}](assets/{0})", fname);
+                                    self.insert_text_at_cursor_or_selection(ctx, id, &insert);
+                                    self.image_search.clear();
+                                    ui.close();
+                                }
                             }
                         }
-                    }
-                    Err(e) => app.report_error("ui operation", format!("Screenshot failed: {e}")),
+                        Err(e) => {
+                            app.report_error("ui operation", format!("Screenshot failed: {e}"))
+                        }
                     }
                 }
             }
             ui.label("Insert image:");
-            ui.text_edit_singleline(&mut self.image_search);
+            let search = ui.text_edit_singleline(&mut self.image_search);
+            register_and_apply_target(
+                image_scope.as_ref(),
+                ui,
+                &search,
+                "search",
+                "Find images",
+                TargetKind::TextEntry,
+                &mut order,
+            );
             let matcher = SkimMatcherV2::default();
             let filter = self.image_search.to_lowercase();
             let images = image_files();
@@ -9508,7 +11203,21 @@ impl NotePanel {
                         filter.is_empty()
                             || matcher.fuzzy_match(&name.to_lowercase(), &filter).is_some()
                     }) {
-                        if ui.button(&img).clicked() {
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(ui.id().with(("image", &img))),
+                                |ui| ui.button(&img),
+                            )
+                            .inner;
+                        target!(
+                            image_scope,
+                            ui,
+                            response,
+                            order,
+                            format!("image/{img}"),
+                            &img
+                        );
+                        if response.clicked() {
                             let insert = format!("![{0}](assets/{0})", img);
                             self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                             self.image_search.clear();
@@ -9518,7 +11227,8 @@ impl NotePanel {
                 });
         });
 
-        ui.menu_button("Link todo", |ui| {
+        submenu!(todo_scope, "link-todo", "Link todo", |ui| {
+            let mut order = 0;
             ui.label("Select existing todo");
             for todo in load_todos_or_last_good(TODO_FILE).into_iter().take(12) {
                 let todo_id = if todo.id.is_empty() {
@@ -9526,10 +11236,15 @@ impl NotePanel {
                 } else {
                     todo.id.clone()
                 };
-                if ui
-                    .button(format!("@todo:{todo_id} {}", todo.text))
-                    .clicked()
-                {
+                let label = format!("@todo:{todo_id} {}", todo.text);
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(ui.id().with(("todo", &todo_id))),
+                        |ui| ui.button(&label),
+                    )
+                    .inner;
+                target!(todo_scope, ui, response, order, &todo_id, &label);
+                if response.clicked() {
                     let token = format!("@todo:{todo_id}");
                     let mut state =
                         egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
@@ -9562,8 +11277,8 @@ impl NotePanel {
             }
         });
 
-        ui.menu_button("Insert tag", |ui| {
-            if let Some(tag) = insert_tag_menu(ui, &mut self.tag_search) {
+        submenu!(tag_scope, "insert-tag", "Insert tag", |ui| {
+            if let Some(tag) = insert_tag_menu(ui, &mut self.tag_search, tag_scope.as_ref()) {
                 self.insert_text_at_cursor_or_selection(ctx, id, &tag);
             }
         });
@@ -9758,11 +11473,26 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
     response
 }
 
-fn insert_tag_menu(ui: &mut egui::Ui, search: &mut String) -> Option<String> {
+fn insert_tag_menu(
+    ui: &mut egui::Ui,
+    search: &mut String,
+    scope: Option<&super::jump_mode::ui::JumpModeScope>,
+) -> Option<String> {
+    use super::jump_mode::{TargetKind, ui::register_and_apply_target};
     let mut inserted = None;
+    let mut order = 0;
     ui.set_min_width(200.0);
     ui.label("Insert tag:");
-    ui.text_edit_singleline(search);
+    let response = ui.text_edit_singleline(search);
+    register_and_apply_target(
+        scope,
+        ui,
+        &response,
+        "search",
+        "Find tags",
+        TargetKind::TextEntry,
+        &mut order,
+    );
     let matcher = SkimMatcherV2::default();
     let filter = search.to_lowercase();
     let tags = available_tags();
@@ -9772,9 +11502,25 @@ fn insert_tag_menu(ui: &mut egui::Ui, search: &mut String) -> Option<String> {
             for tag in tags.into_iter().filter(|t| {
                 filter.is_empty() || matcher.fuzzy_match(&t.to_lowercase(), &filter).is_some()
             }) {
-                if ui.button(format!("#{tag}")).clicked() {
-                    let insert = format!("#{tag}");
-                    inserted = Some(insert);
+                let label = format!("#{tag}");
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(ui.id().with(("tag", &tag))),
+                        |ui| ui.button(&label),
+                    )
+                    .inner;
+                register_and_apply_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("tag/{tag}"),
+                    &label,
+                    TargetKind::Button,
+                    &mut order,
+                );
+                NotePanel::reveal_focused_menu_item(ui, &response);
+                if response.clicked() {
+                    inserted = Some(label);
                     search.clear();
                     ui.close();
                 }
@@ -13803,6 +15549,26 @@ mod tests {
     }
 
     #[test]
+    fn markdown_print_note_opens_only_after_retained_frame_and_reads_current_draft() {
+        let mut panel = NotePanel::from_note(empty_note("# Saved"));
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            panel.stage_print_preview(ui.ctx());
+            panel.replace_content_from_mutation("# Dirty note".into(), 1.0);
+            assert!(panel.pending_root_effect.is_some());
+        });
+        let Some(NotePanelEffect::OpenPrint(request)) = panel.on_ui_frame_complete(&ctx) else {
+            panic!("Expected a retained Note preview request");
+        };
+        output.drop_without_applying_deltas();
+        let draft = panel.print_draft().unwrap();
+        assert_eq!(draft.source, "# Dirty note");
+        assert!(panel.has_unsaved_changes());
+        assert_eq!(draft.stamp, request.stamp);
+        assert!(request.origin.unwrap().is_current(panel.host_state.identity(), &draft.stamp));
+    }
+
+    #[test]
     fn markdown_export_does_not_stage_an_oversized_note_snapshot() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let oversized = "x".repeat(crate::notes_markdown::MAX_MARKDOWN_SOURCE_BYTES + 1);
@@ -15408,7 +17174,7 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        panel.render_inline_note_text(ui, &mut app, "Inline body [[target|label]]");
+                        panel.render_inline_note_text(ui, &mut app, "Inline body [[target|label]]", 0);
                     });
                 },
             )
@@ -17711,13 +19477,18 @@ mod tests {
     #[test]
     fn outline_state_is_hidden_and_pending_navigation_ignored_when_disabled() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = new_app_in_dir(&ctx, temp.path());
         app.note_settings.outline_sidebar_enabled = false;
         let mut panel = NotePanel::from_note(empty_note("# One\n\n## Two"));
         panel.outline_open = true;
         panel.outline_filter = "two".into();
-        panel.selected_outline_heading = Some("two".into());
-        panel.pending_scroll_target = Some("two".into());
+        let location = super::NoteOutlinePosition {
+            revision: panel.note_find.content_revision(),
+            heading_start: 7,
+        };
+        panel.selected_outline_heading = Some(location);
+        panel.pending_scroll_target = Some(location);
 
         render_panel_once(&ctx, &mut panel, &mut app);
 
@@ -19127,6 +20898,82 @@ More text.
         ctx.end_pass().drop_without_applying_deltas();
     }
 
+
+    #[test]
+    fn outline_move_note_keyboard_selection_preserves_outline_focus() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let source = "# A\n# B";
+        let mut panel = NotePanel::from_note(empty_note(source));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.focus_textedit_next_frame = false;
+        panel.last_textedit_id = Some(egui::Id::new("outline-selection-editor"));
+        let outline_row = egui::Id::new("outline-selection-row");
+        ctx.memory_mut(|memory| memory.request_focus(outline_row));
+        let original_generation = panel.jump_generation();
+        panel.outline_filter = "B".to_owned();
+        assert_ne!(panel.jump_generation(), original_generation);
+        let filtered_generation = panel.jump_generation();
+        let analysis = analyze_markdown(source);
+        let rows = NotePanel::outline_rows_from_headings(
+            "note", source, &analysis.headings, &analysis.sections, &HashSet::new(), 6, false, "B",
+        );
+        assert_eq!(rows[0].heading_index, 1);
+        panel.handle_outline_row_click(&rows[0], &ctx, false);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(outline_row));
+        assert!(!panel.focus_textedit_next_frame);
+        assert_eq!(panel.selected_outline_heading.unwrap().heading_start, source.find("# B").unwrap());
+        assert_ne!(panel.jump_generation(), filtered_generation);
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn outline_move_note_preserves_draft_and_native_undo() {
+        use super::super::markdown_outline::{MoveRequest, OutlineAction};
+        use crate::notes_markdown::section_move::SectionPlacement;
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let original = "Preamble\n\n# One\n## Child\nbody\n# Two\nlast";
+        let expected = "Preamble\n\n# Two\nlast\n# One\n## Child\nbody";
+        let mut panel = NotePanel::from_note(empty_note(original));
+        panel.view_mode = NoteViewMode::Edit;
+        let editor = egui::Id::new("outline-move-note-editor");
+        panel.last_textedit_id = Some(editor);
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+        state.store(&ctx, editor);
+        let stamp = panel.outline_stamp(egui::ViewportId::ROOT);
+        let action = OutlineAction::Prepare(MoveRequest {
+            stamp, selected: 0, destination: 2, placement: SectionPlacement::After,
+        });
+        panel.discard_unsaved_prompt = true;
+        panel.complete_outline_move(&ctx, egui::ViewportId::ROOT, action);
+        assert_eq!(panel.note_content(), original);
+        assert!(panel.replacement_undo_boundaries.is_empty());
+        panel.discard_unsaved_prompt = false;
+        panel.complete_outline_move(&ctx, egui::ViewportId::ROOT, action);
+        assert_eq!(panel.note_content(), expected);
+        assert!(panel.has_unsaved_changes());
+        assert!(!panel.focus_textedit_next_frame);
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+        let functionally_selected = panel.selected_outline_heading.unwrap();
+        assert!(expected[functionally_selected.heading_start..].starts_with("# One"));
+        panel.complete_outline_move(&ctx, egui::ViewportId::ROOT, action);
+        assert_eq!(panel.note_content(), expected);
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        let mut undoer = state.undoer();
+        let cursor = state.cursor.char_range().unwrap();
+        let (_, undo_source) = panel.replacement_history_step(&mut undoer, cursor, ReplacementUndoDirection::Undo).unwrap();
+        assert_eq!(undo_source, original);
+        panel.replacement_history_mutation = Some(ReplacementHistoryMutation::Undo);
+        panel.replace_content_from_mutation(undo_source, 1.0);
+        assert_eq!(panel.note_content(), original);
+        assert!(!panel.has_unsaved_changes());
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
     #[test]
     fn prepared_markdown_tool_edit_is_one_unicode_safe_note_undo_boundary() {
         let ctx = egui::Context::default();
@@ -19336,6 +21183,7 @@ More text.
                         true,
                         true,
                         false,
+                        None,
                     );
                     if discard && !discarded {
                         discarded = true;
@@ -19403,7 +21251,7 @@ More text.
                     ..Default::default()
                 },
                 |ctx| {
-                    panel.show_child_forms(ctx, true, true, true, true, false);
+                    panel.show_child_forms(ctx, true, true, true, true, false, None);
                 },
             )
             .drop_without_applying_deltas();
@@ -20439,6 +22287,29 @@ link://note/central-note
 
         assert_eq!(panel.backlink_tab, BacklinkTab::Mentions);
         assert_eq!(panel.backlink_page, 2);
+    }
+
+    #[test]
+    fn backlink_refresh_clamps_the_page_before_slicing() {
+        let ctx = egui::Context::default();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = new_app_in_dir(&ctx, data.path());
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        panel.backlink_tab = BacklinkTab::RelatedNotes;
+        panel.backlink_page = 2;
+        panel.derived.backlink_rows_related_notes = vec![BacklinkRow {
+            title: "Remaining note".into(),
+            type_badge: "Note".into(),
+            updated: String::new(),
+            snippet: "Linked from here".into(),
+            reason: "Reference".into(),
+            note_slug: Some("remaining".into()),
+            todo_id: None,
+        }];
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            panel.render_backlinks(ui, &mut app);
+        }).drop_without_applying_deltas();
+        assert_eq!(panel.backlink_page, 0);
     }
 
     #[test]

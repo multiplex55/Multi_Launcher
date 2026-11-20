@@ -19,7 +19,7 @@ use super::ArchiveCatalog;
 use super::crc32::Crc32;
 use super::model::{ArchiveEntry, ArchiveEntryId, ArchiveRevision, EntryCompression, EntryKind};
 use super::native::{
-    NativeArchiveDestination, NativeArchiveError, NativeArchiveSource, OwnedStage,
+    NativeArchiveDestination, NativeArchiveError, NativeArchiveSource, NativeArchiveTarget, OwnedStage,
 };
 use super::native_io::ArchiveIoControl;
 use super::plan::{ExtractionPlan, PlannedOutput};
@@ -91,9 +91,11 @@ pub(crate) struct ArchiveWriteReport {
     pub cancelled_entry: Option<ArchiveEntryId>,
     pub unstarted_entries: Vec<ArchiveEntryId>,
     pub created_directories: usize,
+    pub created_destination_root: bool,
     pub actual_bytes_written: u64,
     pub failure: Option<(ArchiveWriteFailureKind, String)>,
     pub cleanup_failed: bool,
+    pub provenance_warning: Option<String>,
 }
 
 #[derive(Clone)]
@@ -318,14 +320,14 @@ impl ArchiveWriteJob {
         destination: NativeArchiveDestination,
         cancellation: ScanCancellation,
     ) -> io::Result<Self> {
-        Self::start_shared(source, Arc::new(catalog), plan, destination, cancellation)
+        Self::start_shared(source, Arc::new(catalog), plan, destination.into(), cancellation)
     }
 
     pub(crate) fn start_shared(
         source: NativeArchiveSource,
         catalog: Arc<ArchiveCatalog>,
         plan: ExtractionPlan,
-        destination: NativeArchiveDestination,
+        destination: NativeArchiveTarget,
         cancellation: ScanCancellation,
     ) -> io::Result<Self> {
         Self::start_with_shared_control_and_hooks(
@@ -335,7 +337,16 @@ impl ArchiveWriteJob {
             destination,
             ArchiveIoControl::new(cancellation),
             WriterTestHooks::default(),
+            None,
         )
+    }
+    pub(crate) fn start_shared_with_provenance(
+        source: NativeArchiveSource, catalog: Arc<ArchiveCatalog>, plan: ExtractionPlan,
+        destination: NativeArchiveTarget, cancellation: ScanCancellation,
+        profile: Option<crate::platform::app_data::AppDataRoot>,
+    ) -> io::Result<Self> {
+        Self::start_with_shared_control_and_hooks(source, catalog, plan, destination,
+            ArchiveIoControl::new(cancellation), WriterTestHooks::default(), profile)
     }
 
     #[cfg(test)]
@@ -343,9 +354,10 @@ impl ArchiveWriteJob {
         source: NativeArchiveSource,
         catalog: Arc<ArchiveCatalog>,
         plan: ExtractionPlan,
-        destination: NativeArchiveDestination,
+        destination: NativeArchiveTarget,
         cancellation: ScanCancellation,
         gate: Arc<WriterTestGate>,
+        profile: Option<crate::platform::app_data::AppDataRoot>,
     ) -> io::Result<Self> {
         Self::start_with_shared_control_and_hooks(
             source,
@@ -357,6 +369,7 @@ impl ArchiveWriteJob {
                 before_flush: Some(gate),
                 ..WriterTestHooks::default()
             },
+            profile,
         )
     }
 
@@ -389,9 +402,10 @@ impl ArchiveWriteJob {
             source,
             Arc::new(catalog),
             plan,
-            destination,
+            destination.into(),
             io,
             test_hooks,
+            None,
         )
     }
 
@@ -399,9 +413,10 @@ impl ArchiveWriteJob {
         source: NativeArchiveSource,
         catalog: Arc<ArchiveCatalog>,
         plan: ExtractionPlan,
-        destination: NativeArchiveDestination,
+        destination: NativeArchiveTarget,
         io: ArchiveIoControl,
         test_hooks: WriterTestHooks,
+        provenance_root: Option<crate::platform::app_data::AppDataRoot>,
     ) -> io::Result<Self> {
         let run_id = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
         let revision = plan.source().revision;
@@ -420,9 +435,13 @@ impl ArchiveWriteJob {
             .name(format!("archive-write-{run_id}"))
             .spawn(move || {
                 let mut report = ArchiveWriteReport::empty(run_id, revision);
+                let mut source = source;
+                let selected: std::collections::HashSet<_> = plan.outputs().iter().filter_map(|output| output.source_entry()).collect();
+                let expected_files: std::collections::HashSet<_> = plan.files().filter_map(|output| output.source_entry()).collect();
+                let full = !catalog.entries().is_empty() && catalog.entries().iter().all(|entry| selected.contains(&entry.id()));
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     execute_pipeline(
-                        source,
+                        &mut source,
                         &catalog,
                         plan,
                         destination,
@@ -441,11 +460,25 @@ impl ArchiveWriteJob {
                         ArchiveWriteFailureKind::WorkerPanicked,
                         "archive writer worker panicked".to_owned(),
                     ));
-                    report.status = if report.published_entries.is_empty() {
+                    report.status = if report.published_entries.is_empty()
+                        && !report.created_destination_root
+                    {
                         ArchiveWriteStatus::Failed
                     } else {
                         ArchiveWriteStatus::Partial
                     };
+                }
+                if let Some(profile) = provenance_root {
+                    let actual: std::collections::HashSet<_> = report.published_entries.iter().copied().collect();
+                    if report.status == ArchiveWriteStatus::Completed && report.failure.is_none()
+                        && !report.cleanup_failed && report.unstarted_entries.is_empty() && actual == expected_files {
+                        let coverage = if full { super::provenance::ArchiveCoverage::Full } else { super::provenance::ArchiveCoverage::Selection };
+                        let saved = source.recheck_source_stamp().map_err(|e| e.to_string()).and_then(|stamp|
+                            super::provenance::ArchiveProvenance::record(&profile, stamp, coverage, run_id).map_err(|e| e.to_string()));
+                        if let Err(error) = saved {
+                            report.provenance_warning = Some(format!("Extraction completed, but its history could not be recorded: {error}"));
+                        }
+                    }
                 }
                 let progress = worker_control.progress();
                 report.phase = progress.phase;
@@ -537,12 +570,14 @@ impl ArchiveWriteJob {
                     cancelled_entry: None,
                     unstarted_entries: Vec::new(),
                     created_directories: 0,
+                    created_destination_root: false,
                     actual_bytes_written: progress.actual_bytes_written,
                     failure: Some((
                         ArchiveWriteFailureKind::WorkerPanicked,
                         "archive writer worker panicked".to_owned(),
                     )),
                     cleanup_failed: false,
+                    provenance_warning: None,
                 }
             }
         };
@@ -577,9 +612,11 @@ impl ArchiveWriteReport {
             cancelled_entry: None,
             unstarted_entries: Vec::new(),
             created_directories: 0,
+            created_destination_root: false,
             actual_bytes_written: 0,
             failure: None,
             cleanup_failed: false,
+            provenance_warning: None,
         }
     }
 }
@@ -615,10 +652,10 @@ impl PipelineFailure {
 }
 
 fn execute_pipeline(
-    mut source: NativeArchiveSource,
+    source: &mut NativeArchiveSource,
     catalog: &ArchiveCatalog,
     plan: ExtractionPlan,
-    destination: NativeArchiveDestination,
+    destination: NativeArchiveTarget,
     control: &ArchiveWriteJobControl,
     report: &mut ArchiveWriteReport,
 ) {
@@ -704,14 +741,27 @@ fn execute_pipeline(
         report.status = ArchiveWriteStatus::Cancelled;
         return;
     }
-    if let Err(error) = destination.verify_identity() {
-        set_pipeline_failure(report, PipelineFailure::native(error, None));
+    if !control.admit_publication() {
+        report.status = ArchiveWriteStatus::Cancelled;
         return;
     }
-
+    let materialized = destination.materialize(&mut report.created_destination_root);
+    control.finish_publication();
+    report.created_directories += usize::from(report.created_destination_root);
+    let destination = match materialized {
+        Ok(result) => result,
+        Err(error) => {
+            set_pipeline_failure(report, PipelineFailure::native(error, None));
+            return;
+        }
+    };
     for output in plan.directories() {
         if control.is_cancelled() {
-            report.status = ArchiveWriteStatus::Cancelled;
+            report.status = if report.created_destination_root {
+                ArchiveWriteStatus::Partial
+            } else {
+                ArchiveWriteStatus::Cancelled
+            };
             return;
         }
         let (_, created) = match destination.ensure_directory_path(output.path()) {
@@ -1640,12 +1690,12 @@ fn set_pipeline_failure(report: &mut ArchiveWriteReport, failure: PipelineFailur
     report.cleanup_failed = failure.cleanup_failed;
     let cancelled = failure.kind == ArchiveWriteFailureKind::Cancelled;
     report.status = if cancelled {
-        if report.published_entries.is_empty() {
+        if report.published_entries.is_empty() && !report.created_destination_root {
             ArchiveWriteStatus::Cancelled
         } else {
             ArchiveWriteStatus::Partial
         }
-    } else if report.published_entries.is_empty() {
+    } else if report.published_entries.is_empty() && !report.created_destination_root {
         ArchiveWriteStatus::Failed
     } else {
         ArchiveWriteStatus::Partial

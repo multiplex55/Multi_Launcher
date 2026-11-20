@@ -85,6 +85,9 @@ pub(super) trait HostedUtilityDialog: Sized {
     fn target_generation(&self) -> TargetGeneration {
         TargetGeneration(self.session())
     }
+    fn target_generation_for_runtime(&self, _: &Self::Runtime) -> TargetGeneration {
+        self.target_generation()
+    }
     fn parent_targets_allowed(&self, runtime: &Self::Runtime) -> bool;
     fn parent_input_allowed(&self) -> bool;
     fn native_parent_current(
@@ -131,6 +134,9 @@ pub(super) trait HostedUtilityDialog: Sized {
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation>;
     fn closed_command() -> Self::Command;
     fn command_closes(command: &Self::Command) -> bool;
+    fn accept_close(&mut self, _keyboard: bool) -> bool {
+        true
+    }
     fn complete_actions(
         &mut self,
         actions: Self::Actions,
@@ -291,6 +297,10 @@ pub(super) trait UtilityWindowCompanion {
 }
 
 impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
+    #[cfg(test)]
+    pub(super) fn test_native_jump(&self) -> &JumpModeUi {
+        &self.native_jump
+    }
     #[cfg(test)]
     pub(super) fn test_target_rect(&self, label: &str) -> egui::Rect {
         self.native_jump
@@ -810,7 +820,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                 .then(|| {
                     self.native_jump.scope_for_viewport_binding(
                         surface.clone(),
-                        dialog.target_generation(),
+                        dialog.target_generation_for_runtime(runtime),
                         dialog.dialog_namespace(),
                         binding,
                     )
@@ -951,6 +961,11 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             return None;
         }
         if frame.close || frame.os_close {
+            if !dialog.accept_close(!frame.os_close) {
+                self.cancel_jump();
+                ctx.request_repaint_of(frame.owner.viewport_id);
+                return None;
+            }
             self.remember_presentation(ctx, frame.host.host);
             self.retire(ctx);
             return Some(HostCompletion {
@@ -2086,6 +2101,7 @@ pub(super) enum ProgrammerInspectorHostCommand {
     ),
 }
 impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspectorDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::ProgrammerInspector);
     const KEY: &'static str = "programmer-inspector";
     const REGISTER_TARGETS_ON_REPLAY: bool = true;
     const TITLE: &'static str = "Programmer Inspector";
@@ -2102,9 +2118,7 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
             egui::Id::new("programmer-inspector-window"),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
+    fn target_generation(&self) -> TargetGeneration { TargetGeneration(self.jump_generation()) }
     fn is_open(&self) -> bool {
         self.open
     }
@@ -2112,7 +2126,7 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
         self.epoch()
     }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2147,7 +2161,7 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -2157,7 +2171,7 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, parent, first, child, presentation)
+        self.render_host(ctx, runtime, parent, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -2191,6 +2205,7 @@ pub(super) enum ImageHostCommand {
     Apply(super::image_panel::ImageHostActions),
 }
 impl HostedUtilityDialog for super::image_panel::ImagePanel {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::ImageViewer);
     const KEY: &'static str = "image-viewer";
     const TITLE: &'static str = "Image Viewer";
     const SIZE: egui::Vec2 = egui::vec2(620.0, 480.0);
@@ -2207,9 +2222,6 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
     fn dialog_layer(&self) -> egui::LayerId {
         self.query_focus_layer_id()
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
@@ -2217,7 +2229,7 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
         self.session()
     }
     fn parent_targets_allowed(&self, _: &()) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2254,7 +2266,7 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2264,7 +2276,7 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, allowed, first, child, presentation)
+        self.render_host(ctx, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -2299,6 +2311,7 @@ pub(super) enum NoteTemplatesHostCommand {
     Apply(super::notes_dialog::TemplateHostActions),
 }
 impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::NoteTemplates);
     const KEY: &'static str = "note-templates";
     const TITLE: &'static str = "Note Templates";
     const SIZE: egui::Vec2 = egui::vec2(520.0, 360.0);
@@ -2312,9 +2325,6 @@ impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Note Templates")))
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.is_open()
     }
@@ -2322,7 +2332,7 @@ impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
         self.epoch()
     }
     fn parent_targets_allowed(&self, _: &()) -> bool {
-        false
+        self.delete_instance().is_none()
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2348,22 +2358,23 @@ impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
     fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
         None
     }
-    fn confirmation_binding(
-        &self,
-        _: egui::ViewportId,
-        _: u64,
-    ) -> Option<NavigationViewportBinding> {
-        None
+    fn confirmation_binding(&self, viewport: egui::ViewportId, _: u64) -> Option<NavigationViewportBinding> {
+        let instance = self.delete_instance()?;
+        Some(NavigationViewportBinding { viewport, base_layer: NavigationDialogKind::TemplateDelete.layer_id()?, owner: NavigationOwner::Dialog { kind: NavigationDialogKind::TemplateDelete, instance } })
+    }
+    fn confirmation_scope(&self, jump: &JumpModeUi, owner: NavigationOwner, binding: NavigationViewportBinding, _parent: SurfaceId) -> Option<JumpModeScope> {
+        let NavigationOwner::Dialog { kind: NavigationDialogKind::TemplateDelete, instance } = owner else { return None; };
+        jump.scope_for_viewport_binding(SurfaceId::dialog("note-template-delete", instance), TargetGeneration(instance), "note-templates/delete", binding)
     }
     fn capture(&self) {}
     fn restore(&mut self, _: ()) {}
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
-        _: NavigationOwner,
+        child_owner: NavigationOwner,
         first: bool,
         _: u64,
         _: &(),
@@ -2374,6 +2385,8 @@ impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
             self,
             ctx,
             allowed,
+            child_owner != NavigationOwner::Blocked,
+            scopes,
             first,
             child,
             presentation,
@@ -2408,6 +2421,7 @@ pub(super) enum UnusedAssetsHostCommand {
     Apply(super::unused_assets_dialog::UnusedAssetsHostActions),
 }
 impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::UnusedNoteAssets);
     const KEY: &'static str = "unused-note-assets";
     const TITLE: &'static str = "Unused Note Assets";
     const SIZE: egui::Vec2 = egui::vec2(300.0, 200.0);
@@ -2424,18 +2438,14 @@ impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
             egui::Id::new(Some("Unused Note Assets")),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
-    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
-    }
+    fn target_generation(&self) -> TargetGeneration { TargetGeneration(self.jump_generation()) }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool { true }
     fn parent_input_allowed(&self) -> bool {
         true
     }
@@ -2471,7 +2481,7 @@ impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2481,7 +2491,7 @@ impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        let mut actions = self.render_host(ctx, allowed, first, child, presentation);
+        let mut actions = self.render_host(ctx, allowed, first, child, presentation, scopes.0);
         if *pinned {
             actions.close = false;
         }
@@ -2520,7 +2530,9 @@ pub(super) enum PluginHostCommand {
     Navigation(crate::settings_editor::render::SettingsNavigationFrameObserver),
 }
 impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::PluginSettings);
     const KEY: &'static str = "plugin-settings";
+    const SURFACE_KIND: &'static str = "plugin-settings";
     const TITLE: &'static str = "Plugin Settings";
     const SIZE: egui::Vec2 = egui::vec2(540.0, 440.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
@@ -2533,17 +2545,17 @@ impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new("Plugin Settings"))
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.host_open
     }
     fn session(&self) -> u64 {
         self.host_session()
     }
+    fn target_generation_for_runtime(&self, runtime: &Self::Runtime) -> TargetGeneration {
+        self.jump_generation(runtime)
+    }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2582,7 +2594,7 @@ impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2592,7 +2604,7 @@ impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, allowed, first, child, presentation)
+        self.render_host(ctx, runtime, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.presentation_request
@@ -2642,11 +2654,13 @@ pub(super) enum FilePreviewHostCommand {
     Apply(super::file_search_preview_dialog::FileSearchPreviewHostActions),
 }
 impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPreviewDialogState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::FilePreview);
     const KEY: &'static str = "file-preview";
     const TITLE: &'static str = "File preview";
     const SIZE: egui::Vec2 = egui::vec2(860.0, 620.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
     const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     type Runtime = crate::file_search::settings::FileSearchSettings;
     type Actions = super::file_search_preview_dialog::FileSearchPreviewHostActions;
     type Checkpoint = ();
@@ -2657,17 +2671,17 @@ impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPrevie
             egui::Id::new(super::file_search_preview_dialog::preview_window_id_source()),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
+    fn target_generation(&self) -> TargetGeneration {
+        TargetGeneration(self.jump_generation())
+    }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2704,7 +2718,7 @@ impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPrevie
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2714,7 +2728,7 @@ impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPrevie
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, allowed, first, child, presentation)
+        self.render_host(ctx, runtime, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -2745,6 +2759,7 @@ pub(super) enum HashGeneratorHostCommand {
     Apply(super::hash_generator_dialog::HashHostActions, Option<usize>),
 }
 impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::HashGenerator);
     const KEY: &'static str = "hash-generator";
     const TITLE: &'static str = "Hash Generator";
     const SIZE: egui::Vec2 = egui::vec2(620.0, 440.0);
@@ -2758,17 +2773,17 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new("hash_generator_dialog"))
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
+    fn target_generation(&self) -> TargetGeneration {
+        TargetGeneration(self.jump_generation())
+    }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -2805,7 +2820,7 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         allowed: bool,
         _: NavigationOwner,
@@ -2815,7 +2830,7 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, allowed, first, child, presentation)
+        self.render_host(ctx, runtime, allowed, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -2955,6 +2970,8 @@ pub(super) enum CalculationDependencyHostCommand {
     Apply(super::calculation_dependency_dialog::DependencyActions),
 }
 impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDependencyDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::CalculationDependencies);
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     const KEY: &'static str = "calculation-pad-dependencies";
     const TITLE: &'static str = "Dependency Explorer";
     const SIZE: egui::Vec2 = egui::vec2(560.0, 500.0);
@@ -2970,18 +2987,14 @@ impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDe
             egui::Id::new("calculation-dependencies-window"),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
-    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
-    }
+    fn target_generation(&self) -> TargetGeneration { TargetGeneration(self.jump_generation()) }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool { true }
     fn parent_input_allowed(&self) -> bool {
         true
     }
@@ -3015,7 +3028,7 @@ impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDe
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -3025,7 +3038,7 @@ impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDe
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, parent, first, child, presentation)
+        self.render_host(ctx, runtime, parent, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -3056,11 +3069,14 @@ pub(super) enum CalculationChartHostCommand {
     Apply(super::calculation_chart_dialog::ChartActions),
 }
 impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::CalculationChart);
     const KEY: &'static str = "calculation-pad-charts";
+    const SURFACE_KIND: &'static str = "calculation-chart";
     const TITLE: &'static str = "Charts";
     const SIZE: egui::Vec2 = egui::vec2(560.0, 500.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
     const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     type Runtime = super::calculation_chart_dialog::ChartRuntime;
     type Actions = super::calculation_chart_dialog::ChartActions;
     type Checkpoint = ();
@@ -3071,17 +3087,17 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
             egui::Id::new("calculation-chart-window"),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
+    fn target_generation_for_runtime(&self, runtime: &Self::Runtime) -> TargetGeneration {
+        self.jump_generation(runtime)
+    }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -3116,7 +3132,7 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -3126,7 +3142,7 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, parent, first, child, presentation)
+        self.render_host_with_jump(ctx, runtime, parent, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -3157,6 +3173,8 @@ pub(super) enum CalculationSensitivityHostCommand {
     Apply(Box<super::calculation_sensitivity_dialog::SensitivityActions>),
 }
 impl HostedUtilityDialog for super::calculation_sensitivity_dialog::CalculationSensitivityDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::CalculationSensitivity);
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     const KEY: &'static str = "calculation-pad-sensitivity";
     const TITLE: &'static str = "Sensitivity Tables";
     const SIZE: egui::Vec2 = egui::vec2(560.0, 500.0);
@@ -3172,18 +3190,14 @@ impl HostedUtilityDialog for super::calculation_sensitivity_dialog::CalculationS
             egui::Id::new("calculation-sensitivity-window"),
         )
     }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch()
     }
-    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
-    }
+    fn target_generation(&self) -> TargetGeneration { TargetGeneration(self.jump_generation()) }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool { true }
     fn parent_input_allowed(&self) -> bool {
         true
     }
@@ -3217,7 +3231,7 @@ impl HostedUtilityDialog for super::calculation_sensitivity_dialog::CalculationS
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -3227,7 +3241,7 @@ impl HostedUtilityDialog for super::calculation_sensitivity_dialog::CalculationS
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, parent, first, child, presentation)
+        self.render_host(ctx, runtime, parent, first, child, presentation, scopes.0)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -3258,20 +3272,19 @@ pub(super) enum QrHostCommand {
     Apply(Box<super::qr_dialog::QrActions>),
 }
 impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::QrGenerator);
     const KEY: &'static str = "qr-generator";
     const TITLE: &'static str = "QR Generator";
     const SIZE: egui::Vec2 = egui::vec2(620.0, 700.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 420.0);
     const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     type Runtime = bool;
     type Actions = super::qr_dialog::QrActions;
     type Checkpoint = ();
     type Command = QrHostCommand;
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new("qr_generator_embedded"))
-    }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
     }
     fn is_open(&self) -> bool {
         self.open
@@ -3280,7 +3293,7 @@ impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
         self.epoch()
     }
     fn parent_targets_allowed(&self, _: &bool) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -3315,7 +3328,7 @@ impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -3327,6 +3340,7 @@ impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
     ) -> Self::Actions {
         self.render_host(
             ctx,
+            scopes.0,
             if presentation == UtilityPresentation::Docked {
                 *root_input
             } else {

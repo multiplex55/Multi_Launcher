@@ -4,8 +4,8 @@ use crate::common::persistence::{
     LoadState, PersistenceError, load_json, save_json_atomic_replaceable,
 };
 use crate::gui::theme::widgets::labeled_form_row;
+use crate::platform::protected_clipboard::{ClipboardError, ClipboardRead, read_clipboard_briefly};
 use crate::plugin::Plugin;
-use arboard::Clipboard;
 use eframe::egui;
 use once_cell::sync::Lazy;
 use serde_json;
@@ -144,7 +144,6 @@ pub struct ClipboardPlugin {
     max_entries: usize,
     path: String,
     history: Arc<Mutex<VecDeque<String>>>,
-    clipboard: Mutex<Option<Clipboard>>,
     #[allow(dead_code)]
     watcher: Option<JsonWatcher>,
 }
@@ -182,70 +181,56 @@ impl ClipboardPlugin {
             }
         })
         .ok();
-        let clipboard = Mutex::new(Clipboard::new().ok());
         Self {
             max_entries,
             path,
             history,
-            clipboard,
             watcher,
         }
     }
 
     fn update_history(&self) -> VecDeque<String> {
-        let mut history = match self.history.lock().ok() {
-            Some(h) => h,
-            None => return VecDeque::new(),
-        };
-        if std::env::var("ML_SKIP_CLIPBOARD_SYNC").is_ok() {
-            return history.clone();
-        }
-        let mut cb_lock = match self.clipboard.lock().ok() {
-            Some(c) => c,
-            None => return history.clone(),
-        };
+        self.update_history_with(|| {
+            if std::env::var("ML_SKIP_CLIPBOARD_SYNC").is_ok() {
+                Ok(ClipboardRead::NonText)
+            } else {
+                read_clipboard_briefly()
+            }
+        })
+    }
 
-        if cb_lock.is_none() {
-            match Clipboard::new() {
-                Ok(cb) => {
-                    *cb_lock = Some(cb);
+    fn update_history_with(
+        &self,
+        read: impl FnOnce() -> Result<ClipboardRead, ClipboardError>,
+    ) -> VecDeque<String> {
+        let snapshot = read();
+        let Ok(mut history) = self.history.lock() else {
+            return VecDeque::new();
+        };
+        let text = match snapshot {
+            Ok(ClipboardRead::Ordinary(text)) => text,
+            Ok(ClipboardRead::Private | ClipboardRead::NonText) => return history.clone(),
+            Err(error) => {
+                tracing::debug!(%error, "clipboard history read skipped");
+                return history.clone();
+            }
+        };
+        if history.front() != Some(&text) {
+            let result = update_history_file(&self.path, |next| {
+                if let Some(position) = next.iter().position(|item| item == &text) {
+                    next.remove(position);
                 }
-                Err(e) => {
-                    tracing::error!("clipboard init error: {:?}", e);
-                    return history.clone();
+                next.push_front(text);
+                while next.len() > self.max_entries {
+                    next.pop_back();
                 }
+                Ok(true)
+            });
+            match result {
+                Ok(committed) => *history = committed,
+                Err(error) => tracing::error!(%error, "clipboard history update skipped"),
             }
         }
-
-        if let Some(ref mut clipboard) = *cb_lock {
-            match clipboard.get_text() {
-                Ok(txt) => {
-                    if history.front().map(|v| v != &txt).unwrap_or(true) {
-                        let result = update_history_file(&self.path, |next| {
-                            if let Some(pos) = next.iter().position(|v| v == &txt) {
-                                next.remove(pos);
-                            }
-                            next.push_front(txt);
-                            while next.len() > self.max_entries {
-                                next.pop_back();
-                            }
-                            Ok(true)
-                        });
-                        match result {
-                            Ok(committed) => *history = committed,
-                            Err(error) => {
-                                tracing::error!(%error, "clipboard history update skipped")
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("clipboard read error: {:?}", e);
-                    *cb_lock = None;
-                }
-            }
-        }
-
         history.clone()
     }
 }
@@ -388,6 +373,43 @@ impl Plugin for ClipboardPlugin {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn protected_clipboard_history_skips_only_the_marked_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clipboard.json");
+        let path_str = path.to_str().unwrap();
+        let baseline = VecDeque::from(["previous ordinary item".to_owned()]);
+        save_history(path_str, &baseline).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let new_plugin = || ClipboardPlugin {
+            max_entries: 4,
+            path: path_str.to_owned(),
+            history: Arc::new(Mutex::new(load_history(path_str).unwrap())),
+            watcher: None,
+        };
+
+        let plugin = new_plugin();
+        assert_eq!(
+            plugin.update_history_with(|| Ok(ClipboardRead::Private)),
+            baseline
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        drop(plugin);
+        let restarted = new_plugin();
+        assert_eq!(
+            restarted.update_history_with(|| Ok(ClipboardRead::Private)),
+            baseline
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+
+        let ordinary = "identical text in an unmarked synthetic clipboard item";
+        let admitted =
+            restarted.update_history_with(|| Ok(ClipboardRead::Ordinary(ordinary.into())));
+        assert_eq!(admitted.front().map(String::as_str), Some(ordinary));
+        assert_eq!(load_history(path_str).unwrap(), admitted);
+        assert_eq!(admitted.back(), baseline.back());
+    }
 
     #[test]
     fn jump_mode_clipboard_checked_persistence_rejects_stale_snapshots() {

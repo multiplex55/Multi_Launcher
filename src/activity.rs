@@ -29,6 +29,7 @@ pub enum ActivityOwner {
     Macro,
     FolderSize,
     Recording,
+    FileTransfer,
 }
 
 impl ActivityOwner {
@@ -50,6 +51,7 @@ impl ActivityOwner {
             Self::Macro => "Macro playback",
             Self::FolderSize => "Folder Size",
             Self::Recording => "Screen recording",
+            Self::FileTransfer => "File Operations Center",
         }
     }
 }
@@ -146,6 +148,7 @@ pub enum ActivityOperation {
     PlayMacro,
     MeasureFolderSize,
     RecordScreenClip,
+    TransferFiles,
 }
 
 impl ActivityOperation {
@@ -183,6 +186,7 @@ impl ActivityOperation {
             Self::PlayMacro => "Play macro",
             Self::MeasureFolderSize => "Measure folder size",
             Self::RecordScreenClip => "Record screen clip",
+            Self::TransferFiles => "Transfer files",
         }
     }
 }
@@ -212,7 +216,10 @@ impl ActivityOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityLifecycle {
     Queued,
+    Preparing,
     Running,
+    PauseRequested,
+    Paused,
     Cancelling,
     Terminal(ActivityOutcome),
 }
@@ -222,7 +229,10 @@ impl ActivityLifecycle {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Queued => "Queued",
+            Self::Preparing => "Preparing",
             Self::Running => "Running",
+            Self::PauseRequested => "Pause requested",
+            Self::Paused => "Paused",
             Self::Cancelling => "Cancelling",
             Self::Terminal(outcome) => outcome.label(),
         }
@@ -303,6 +313,7 @@ pub enum ActivityDiagnostic {
     InvalidInput,
     WorkerUnavailable,
     WorkerFailed,
+    TransferReceiptUnavailable,
     NativeOperationUnavailable,
     Retiring,
     ResultUnavailable,
@@ -318,6 +329,7 @@ impl ActivityDiagnostic {
             Self::InvalidInput => "Input was rejected",
             Self::WorkerUnavailable => "Worker unavailable",
             Self::WorkerFailed => "Worker failed",
+            Self::TransferReceiptUnavailable => "Transfer receipt unavailable",
             Self::NativeOperationUnavailable => "Native operation unavailable",
             Self::Retiring => "Worker is retiring",
             Self::ResultUnavailable => "Result unavailable",
@@ -355,6 +367,7 @@ struct ActivityRecord {
     lifecycle: ActivityLifecycle,
     retirement: ActivityRetirement,
     started: Option<Instant>,
+    live_run_status: Option<Arc<dyn Fn() -> ActivityLifecycle + Send + Sync>>,
     updated: Instant,
     progress: Option<ActivityProgress>,
     diagnostic: Option<ActivityDiagnostic>,
@@ -413,15 +426,29 @@ struct Registry {
     omissions_by_owner: BTreeMap<ActivityOwner, ActivityOmissionCounts>,
 }
 
+type TerminalObserver = Arc<dyn Fn(ActivityKey, ActivityOutcome) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct ActivityCenter {
     registry: Arc<Mutex<Registry>>,
+    terminal_observer: Arc<Mutex<Option<TerminalObserver>>>,
 }
 
 impl ActivityCenter {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn set_terminal_observer(&self, observe: TerminalObserver) {
+        *self.terminal_observer.lock().unwrap_or_else(|error| error.into_inner()) = Some(observe);
+    }
+
+    fn report_terminal(&self, key: ActivityKey, outcome: ActivityOutcome) {
+        let observe = self.terminal_observer.lock().unwrap_or_else(|error| error.into_inner()).clone();
+        if let Some(observe) = observe {
+            let _ = catch_unwind(AssertUnwindSafe(|| observe(key, outcome)));
+        }
     }
 
     /// Start a new immutable operation identity in one owner slot. The owner
@@ -515,6 +542,7 @@ impl ActivityCenter {
                 lifecycle,
                 retirement: ActivityRetirement::Pending,
                 started,
+                live_run_status: None,
                 updated: now,
                 progress: None,
                 diagnostic: None,
@@ -693,6 +721,8 @@ impl ActivityCenter {
                 let counts = registry.omissions_by_owner.entry(key.owner).or_default();
                 counts.active = counts.active.saturating_sub(1);
                 counts.terminal = counts.terminal.saturating_add(1);
+                drop(registry);
+                self.report_terminal(key, outcome);
             }
             return;
         };
@@ -705,6 +735,7 @@ impl ActivityCenter {
         record.retirement = retirement;
         record.diagnostic = diagnostic.or(record.diagnostic);
         record.cancel = None;
+        record.live_run_status = None;
         record.updated = now;
         record.finished_elapsed = record
             .started
@@ -728,6 +759,8 @@ impl ActivityCenter {
                 counts.terminal = counts.terminal.saturating_add(1);
             }
         }
+        drop(registry);
+        self.report_terminal(key, outcome);
     }
 }
 
@@ -759,6 +792,22 @@ impl ActivityTask {
             if record.lifecycle == ActivityLifecycle::Queued {
                 record.lifecycle = ActivityLifecycle::Running;
             }
+        });
+    }
+
+    /// Attach an authoritative start and live status for a running owner.
+    /// The reader runs under the registry lock and must never call Activity.
+    pub(crate) fn mark_running_with_status(
+        &self,
+        started: Instant,
+        status: impl Fn() -> ActivityLifecycle + Send + Sync + 'static,
+    ) {
+        self.center.update_current(self.key, |record| {
+            if record.lifecycle == ActivityLifecycle::Queued {
+                record.lifecycle = ActivityLifecycle::Running;
+            }
+            record.started = Some(started);
+            record.live_run_status = Some(Arc::new(status));
         });
     }
 
@@ -830,10 +879,19 @@ impl ActivityTask {
 }
 
 fn row_from_record(record: &ActivityRecord, now: Instant) -> ActivityRow {
+    let lifecycle = match (&record.lifecycle, &record.live_run_status) {
+        (ActivityLifecycle::Running, Some(get_status)) => match get_status() {
+            status @ (ActivityLifecycle::Preparing
+            | ActivityLifecycle::PauseRequested
+            | ActivityLifecycle::Paused) => status,
+            _ => record.lifecycle,
+        },
+        _ => record.lifecycle,
+    };
     ActivityRow {
         key: record.key,
         operation: record.operation,
-        lifecycle: record.lifecycle,
+        lifecycle,
         retirement: record.retirement,
         elapsed: if record.lifecycle.is_terminal() {
             record.finished_elapsed

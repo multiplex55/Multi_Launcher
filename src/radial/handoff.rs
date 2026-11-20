@@ -143,7 +143,10 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         | Command::ClipboardModify(crate::commands::ClipboardModifyCommand::Open { .. }) => {
             InteractionRequirement::LauncherUi
         }
-        Command::Clipboard(crate::commands::ClipboardCommand::SetText { .. })
+        Command::Clipboard(
+            crate::commands::ClipboardCommand::SetText { .. }
+            | crate::commands::ClipboardCommand::CopyGeneratedPassword { .. },
+        )
         | Command::External(_) => InteractionRequirement::ExternalInput,
         _ => InteractionRequirement::None,
     }
@@ -452,6 +455,14 @@ mod tests {
             action_id_requirement(&crate::universal_actions::action_ids::MKMACRO_RUN),
             Some(InteractionRequirement::ExclusiveCapture)
         );
+    }
+
+    #[test]
+    fn legacy_password_copy_keeps_the_external_input_handoff() {
+        let command = Command::Clipboard(crate::commands::ClipboardCommand::CopyGeneratedPassword {
+            length: 12,
+        });
+        assert_eq!(command_requirement(&command), InteractionRequirement::ExternalInput);
     }
 
     #[test]

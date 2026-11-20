@@ -72,6 +72,7 @@ struct CalendarEditorLayout {
     body_content_size: egui::Vec2,
     body_max_height: f32,
     recurrence_end_rect: egui::Rect,
+    recurrence_toggle: Option<(egui::Id, egui::Rect, egui::Rect)>,
     footer_button_rects: [egui::Rect; 2],
     footer_reserved_height: f32,
     window_rect: egui::Rect,
@@ -90,6 +91,7 @@ impl Default for CalendarEditorLayout {
             body_content_size: egui::Vec2::ZERO,
             body_max_height: 0.0,
             recurrence_end_rect: egui::Rect::NOTHING,
+            recurrence_toggle: None,
             footer_button_rects: [egui::Rect::NOTHING; 2],
             footer_reserved_height: 0.0,
             window_rect: egui::Rect::NOTHING,
@@ -277,7 +279,8 @@ impl CalendarEventEditor {
 
     #[cfg(test)]
     fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        let actions = self.render_inner(ctx, app.calendar_editor_open, true, true, None, None);
+        let actions =
+            self.render_inner(ctx, app.calendar_editor_open, true, true, None, None, None);
         self.apply_host_actions(actions, app, CALENDAR_EVENTS_FILE);
     }
     pub(super) fn popup_anchors(&self) -> &[super::calendar_window_host::CalendarPopupAnchor] {
@@ -305,6 +308,10 @@ impl CalendarEventEditor {
     pub(crate) fn test_title(&self) -> &str {
         &self.title
     }
+    #[cfg(test)]
+    pub(crate) fn test_has_error(&self, key: &str) -> bool {
+        self.errors.contains_key(key)
+    }
 
     #[cfg(test)]
     pub(crate) fn test_start_date(&self) -> &str {
@@ -322,8 +329,17 @@ impl CalendarEventEditor {
         first: bool,
         child_ui: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> CalendarEditorHostActions {
-        self.render_inner(ctx, visible, owner, first, child_ui, Some(presentation))
+        self.render_inner(
+            ctx,
+            visible,
+            owner,
+            first,
+            child_ui,
+            Some(presentation),
+            scope,
+        )
     }
     fn render_inner(
         &mut self,
@@ -333,6 +349,7 @@ impl CalendarEventEditor {
         first: bool,
         child_ui: Option<&mut egui::Ui>,
         presentation: Option<super::utility_host::UtilityPresentation>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> CalendarEditorHostActions {
         let mut actions = CalendarEditorHostActions {
             epoch: self.host_session_epoch,
@@ -343,6 +360,7 @@ impl CalendarEventEditor {
         }
         let mut open = visible;
         let mut close_requested = false;
+        let mut targets = super::calendar_window_host::CalendarTargets::new(scope);
         #[cfg(test)]
         let mut test_layout = CalendarEditorLayout::default();
         self.host_popups.clear();
@@ -354,6 +372,13 @@ impl CalendarEventEditor {
                     ui,
                     current,
                     owner && ui.is_visible() && !ui.is_sizing_pass(),
+                );
+                targets.focus(
+                    ui,
+                    &response,
+                    "presentation",
+                    "Dock or pop out",
+                    super::jump_mode::TargetKind::Button,
                 );
                 #[cfg(test)]
                 {
@@ -393,6 +418,7 @@ impl CalendarEventEditor {
                             &mut self.title,
                             title_width,
                             title_error.as_deref(),
+                            &mut targets,
                         );
                         #[cfg(test)]
                         {
@@ -414,6 +440,7 @@ impl CalendarEventEditor {
                                 &mut self.start_date,
                                 column_width,
                                 start_date_error.as_deref(),
+                                &mut targets,
                             );
                             editor_text_field(
                                 ui,
@@ -421,10 +448,18 @@ impl CalendarEventEditor {
                                 &mut self.start_time,
                                 column_width,
                                 start_time_error.as_deref(),
+                                &mut targets,
                             );
                         });
                         ui.horizontal_wrapped(|ui| {
-                            ui.checkbox(&mut self.all_day, "All day");
+                            let all_day = ui.checkbox(&mut self.all_day, "All day");
+                            targets.focus(
+                                ui,
+                                &all_day,
+                                "all-day",
+                                "All day",
+                                super::jump_mode::TargetKind::Checkbox,
+                            );
                         });
 
                         let end_date_error = self.errors.get("end_date").cloned();
@@ -436,6 +471,7 @@ impl CalendarEventEditor {
                                 &mut self.end_date,
                                 column_width,
                                 end_date_error.as_deref(),
+                                &mut targets,
                             );
                             editor_text_field(
                                 ui,
@@ -443,6 +479,7 @@ impl CalendarEventEditor {
                                 &mut self.end_time,
                                 column_width,
                                 end_time_error.as_deref(),
+                                &mut targets,
                             );
                         });
                         let duration_error = self.errors.get("duration").cloned();
@@ -453,6 +490,7 @@ impl CalendarEventEditor {
                             &mut self.duration_minutes,
                             duration_width,
                             duration_error.as_deref(),
+                            &mut targets,
                         );
 
                         compact_section_heading(
@@ -461,12 +499,22 @@ impl CalendarEventEditor {
                             Some("Notes are optional. Separate multiple tags with commas."),
                         );
                         let notes_label = ui.label("Notes");
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.notes)
-                                .desired_width(ui.available_width().max(1.0))
-                                .desired_rows(4),
-                        )
-                        .labelled_by(notes_label.id);
+                        let notes_id = ui.make_persistent_id("calendar-editor-notes");
+                        let notes = ui
+                            .add(
+                                egui::TextEdit::multiline(&mut self.notes)
+                                    .id(notes_id)
+                                    .desired_width(ui.available_width().max(1.0))
+                                    .desired_rows(4),
+                            )
+                            .labelled_by(notes_label.id);
+                        targets.focus(
+                            ui,
+                            &notes,
+                            "notes",
+                            "Notes",
+                            super::jump_mode::TargetKind::TextEntry,
+                        );
 
                         compact_section_heading(
                             ui,
@@ -474,42 +522,57 @@ impl CalendarEventEditor {
                             Some("Repeat this event on the selected schedule."),
                         );
                         ui.horizontal_wrapped(|ui| {
-                            ui.checkbox(&mut self.repeat_enabled, "Enable recurrence");
+                            let repeat = ui.checkbox(&mut self.repeat_enabled, "Enable recurrence");
+                            #[cfg(test)]
+                            {
+                                test_layout.recurrence_toggle =
+                                    Some((repeat.id, repeat.rect, ui.clip_rect()));
+                            }
+                            targets.focus(
+                                ui,
+                                &repeat,
+                                "repeat-enabled",
+                                "Enable recurrence",
+                                super::jump_mode::TargetKind::Checkbox,
+                            );
                         });
                         if self.repeat_enabled {
                             ui.horizontal_wrapped(|ui| {
+                                let popup = targets.popup("repeat-frequency");
                                 let combo =
                                     egui::ComboBox::from_id_salt("calendar_repeat_frequency")
                                         .selected_text(format!("{:?}", self.repeat_frequency))
                                         .show_ui(ui, |ui| {
-                                            ui.add_enabled_ui(allowed, |ui| {
-                                                ui.selectable_value(
-                                                    &mut self.repeat_frequency,
-                                                    RecurrenceFrequency::Daily,
-                                                    "Daily",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut self.repeat_frequency,
-                                                    RecurrenceFrequency::Weekly,
-                                                    "Weekly",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut self.repeat_frequency,
-                                                    RecurrenceFrequency::Monthly,
-                                                    "Monthly",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut self.repeat_frequency,
-                                                    RecurrenceFrequency::Yearly,
-                                                    "Yearly",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut self.repeat_frequency,
-                                                    RecurrenceFrequency::Custom,
-                                                    "Custom",
-                                                );
+                                            ui.add_enabled_ui(owner, |ui| {
+                                                for (value, label) in [
+                                                    (RecurrenceFrequency::Daily, "Daily"),
+                                                    (RecurrenceFrequency::Weekly, "Weekly"),
+                                                    (RecurrenceFrequency::Monthly, "Monthly"),
+                                                    (RecurrenceFrequency::Yearly, "Yearly"),
+                                                    (RecurrenceFrequency::Custom, "Custom"),
+                                                ] {
+                                                    let response = ui.selectable_value(
+                                                        &mut self.repeat_frequency,
+                                                        value,
+                                                        label,
+                                                    );
+                                                    targets.option(
+                                                        popup.as_ref(),
+                                                        ui,
+                                                        &response,
+                                                        label,
+                                                        label,
+                                                    );
+                                                }
                                             });
                                         });
+                                targets.focus(
+                                    ui,
+                                    &combo.response,
+                                    "repeat-frequency",
+                                    "Repeat frequency",
+                                    super::jump_mode::TargetKind::ComboBox,
+                                );
                                 self.host_popups.push(
                                     super::calendar_window_host::CalendarPopupAnchor::new(
                                         ui,
@@ -518,40 +581,54 @@ impl CalendarEventEditor {
                                     ),
                                 );
                                 ui.label("Every");
-                                ui.add(
+                                let interval = ui.add(
                                     egui::DragValue::new(&mut self.repeat_interval).range(1..=365),
+                                );
+                                targets.focus(
+                                    ui,
+                                    &interval,
+                                    "repeat-interval",
+                                    "Repeat interval",
+                                    super::jump_mode::TargetKind::Slider,
                                 );
                             });
                             if self.repeat_frequency == RecurrenceFrequency::Custom {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Repeat unit");
+                                    let popup = targets.popup("repeat-unit");
                                     let combo =
                                         egui::ComboBox::from_id_salt("calendar_repeat_custom")
                                             .selected_text(format!("{:?}", self.repeat_custom_unit))
                                             .show_ui(ui, |ui| {
-                                                ui.add_enabled_ui(allowed, |ui| {
-                                                    ui.selectable_value(
-                                                        &mut self.repeat_custom_unit,
-                                                        CustomRecurrenceUnit::Days,
-                                                        "Days",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut self.repeat_custom_unit,
-                                                        CustomRecurrenceUnit::Weeks,
-                                                        "Weeks",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut self.repeat_custom_unit,
-                                                        CustomRecurrenceUnit::Months,
-                                                        "Months",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut self.repeat_custom_unit,
-                                                        CustomRecurrenceUnit::Years,
-                                                        "Years",
-                                                    );
+                                                ui.add_enabled_ui(owner, |ui| {
+                                                    for (value, label) in [
+                                                        (CustomRecurrenceUnit::Days, "Days"),
+                                                        (CustomRecurrenceUnit::Weeks, "Weeks"),
+                                                        (CustomRecurrenceUnit::Months, "Months"),
+                                                        (CustomRecurrenceUnit::Years, "Years"),
+                                                    ] {
+                                                        let response = ui.selectable_value(
+                                                            &mut self.repeat_custom_unit,
+                                                            value,
+                                                            label,
+                                                        );
+                                                        targets.option(
+                                                            popup.as_ref(),
+                                                            ui,
+                                                            &response,
+                                                            label,
+                                                            label,
+                                                        );
+                                                    }
                                                 });
                                             });
+                                    targets.focus(
+                                        ui,
+                                        &combo.response,
+                                        "repeat-unit",
+                                        "Repeat unit",
+                                        super::jump_mode::TargetKind::ComboBox,
+                                    );
                                     self.host_popups.push(
                                         super::calendar_window_host::CalendarPopupAnchor::new(
                                             ui,
@@ -573,10 +650,16 @@ impl CalendarEventEditor {
                                         Weekday::Sun,
                                     ] {
                                         let selected = self.weekly_days.contains(&weekday);
-                                        if ui
-                                            .selectable_label(selected, weekday.to_string())
-                                            .clicked()
-                                        {
+                                        let response =
+                                            ui.selectable_label(selected, weekday.to_string());
+                                        targets.focus(
+                                            ui,
+                                            &response,
+                                            format!("weekday/{weekday}"),
+                                            format!("Repeat {weekday}"),
+                                            super::jump_mode::TargetKind::Button,
+                                        );
+                                        if response.clicked() {
                                             if selected {
                                                 self.weekly_days.retain(|d| *d != weekday);
                                             } else {
@@ -588,6 +671,7 @@ impl CalendarEventEditor {
                             }
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("Ends");
+                                let popup = targets.popup("repeat-end");
                                 let combo = egui::ComboBox::from_id_salt("calendar_repeat_end")
                                     .selected_text(match self.repeat_end_mode {
                                         RecurrenceEndMode::Never => "Never",
@@ -595,24 +679,34 @@ impl CalendarEventEditor {
                                         RecurrenceEndMode::AfterCount => "After count",
                                     })
                                     .show_ui(ui, |ui| {
-                                        ui.add_enabled_ui(allowed, |ui| {
-                                            ui.selectable_value(
-                                                &mut self.repeat_end_mode,
-                                                RecurrenceEndMode::Never,
-                                                "Never",
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.repeat_end_mode,
-                                                RecurrenceEndMode::OnDate,
-                                                "On date",
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.repeat_end_mode,
-                                                RecurrenceEndMode::AfterCount,
-                                                "After count",
-                                            );
+                                        ui.add_enabled_ui(owner, |ui| {
+                                            for (value, label) in [
+                                                (RecurrenceEndMode::Never, "Never"),
+                                                (RecurrenceEndMode::OnDate, "On date"),
+                                                (RecurrenceEndMode::AfterCount, "After count"),
+                                            ] {
+                                                let response = ui.selectable_value(
+                                                    &mut self.repeat_end_mode,
+                                                    value,
+                                                    label,
+                                                );
+                                                targets.option(
+                                                    popup.as_ref(),
+                                                    ui,
+                                                    &response,
+                                                    label,
+                                                    label,
+                                                );
+                                            }
                                         });
                                     });
+                                targets.focus(
+                                    ui,
+                                    &combo.response,
+                                    "repeat-end",
+                                    "Recurrence end",
+                                    super::jump_mode::TargetKind::ComboBox,
+                                );
                                 self.host_popups.push(
                                     super::calendar_window_host::CalendarPopupAnchor::new(
                                         ui,
@@ -631,6 +725,7 @@ impl CalendarEventEditor {
                                         &mut self.repeat_end_date,
                                         width,
                                         error.as_deref(),
+                                        &mut targets,
                                     );
                                     #[cfg(test)]
                                     {
@@ -642,9 +737,16 @@ impl CalendarEventEditor {
                                 RecurrenceEndMode::AfterCount => {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label("After");
-                                        ui.add(
+                                        let count = ui.add(
                                             egui::DragValue::new(&mut self.repeat_end_count)
                                                 .range(1..=999),
+                                        );
+                                        targets.focus(
+                                            ui,
+                                            &count,
+                                            "repeat-count",
+                                            "Recurrence count",
+                                            super::jump_mode::TargetKind::Slider,
                                         );
                                         ui.label("occurrences");
                                     });
@@ -663,6 +765,7 @@ impl CalendarEventEditor {
                             &mut self.reminders,
                             reminders_width,
                             reminders_error.as_deref(),
+                            &mut targets,
                         );
                         let tags_width = ui.available_width().max(1.0);
                         editor_text_field(
@@ -671,6 +774,7 @@ impl CalendarEventEditor {
                             &mut self.tags,
                             tags_width,
                             None,
+                            &mut targets,
                         );
 
                         #[cfg(test)]
@@ -687,6 +791,13 @@ impl CalendarEventEditor {
                 ui.horizontal_wrapped(|ui| {
                     let save = ui.button("Save");
                     let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+                    targets.focus(
+                        ui,
+                        &save,
+                        "save",
+                        "Save event",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(test)]
                     {
                         save_rect = save.rect;
@@ -696,6 +807,13 @@ impl CalendarEventEditor {
                         actions.save = true;
                     }
                     let cancel = ui.button("Cancel");
+                    targets.focus(
+                        ui,
+                        &cancel,
+                        "cancel",
+                        "Cancel editor",
+                        super::jump_mode::TargetKind::Button,
+                    );
                     #[cfg(test)]
                     {
                         cancel_rect = cancel.rect;
@@ -927,22 +1045,38 @@ fn editor_text_field(
     value: &mut String,
     width: f32,
     error: Option<&str>,
+    targets: &mut super::calendar_window_host::CalendarTargets<'_>,
 ) -> egui::Rect {
-    ui.vertical(|ui| {
-        ui.set_max_width(width.max(1.0));
-        let label_response = ui.add(egui::Label::new(label).wrap());
-        let input = ui
-            .add(egui::TextEdit::singleline(value).desired_width(width.max(1.0)))
-            .labelled_by(label_response.id);
-        if let Some(error) = error {
-            semantic_status(
+    ui.push_id(("calendar-editor-field", label), |ui| {
+        ui.vertical(|ui| {
+            ui.set_max_width(width.max(1.0));
+            let label_response = ui.add(egui::Label::new(label).wrap());
+            let field_id = ui.make_persistent_id(("calendar-editor-field", label));
+            let input = ui
+                .add(
+                    egui::TextEdit::singleline(value)
+                        .id(field_id)
+                        .desired_width(width.max(1.0)),
+                )
+                .labelled_by(label_response.id);
+            targets.focus(
                 ui,
-                StatusTone::Error,
-                &format!("Invalid {label}"),
-                Some(error),
+                &input,
+                format!("field/{label}"),
+                label,
+                super::jump_mode::TargetKind::TextEntry,
             );
-        }
-        input.rect
+            if let Some(error) = error {
+                semantic_status(
+                    ui,
+                    StatusTone::Error,
+                    &format!("Invalid {label}"),
+                    Some(error),
+                );
+            }
+            input.rect
+        })
+        .inner
     })
     .inner
 }
@@ -1445,6 +1579,87 @@ mod persistence_tests {
         .unwrap_err();
         assert!(error.to_string().contains("changed"));
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn calendar_editor_tab_reveals_clipped_recurrence_control() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _test = calendar_test_guard();
+                let directory = tempfile::tempdir().unwrap();
+                let ctx = egui::Context::default();
+                ctx.all_styles_mut(|style| {
+                    style.animation_time = 0.0;
+                    style.scroll_animation = egui::style::ScrollAnimation::none();
+                });
+                let mut app = test_app(&ctx, directory.path());
+                let mut editor = CalendarEventEditor::default();
+                editor.open_new(NaiveDate::from_ymd_opt(2026, 9, 6).unwrap());
+                app.calendar_editor_open = true;
+                let mut time = 1.0;
+                let mut frame =
+                    |editor: &mut CalendarEventEditor, app: &mut LauncherApp, events| {
+                        time += 0.1;
+                        ctx.run_ui(
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    egui::vec2(360.0, 320.0),
+                                )),
+                                focused: true,
+                                time: Some(time),
+                                events,
+                                ..Default::default()
+                            },
+                            |ui| editor.ui(ui.ctx(), app),
+                        )
+                        .drop_without_applying_deltas();
+                        editor.test_layout.clone().unwrap()
+                    };
+                for _ in 0..4 {
+                    frame(&mut editor, &mut app, Vec::new());
+                }
+                let initial = editor.test_layout.as_ref().unwrap();
+                let (target, rect, clip) = initial.recurrence_toggle.unwrap();
+                assert!(
+                    !clip.contains_rect(rect),
+                    "recurrence starts clipped in this fixture"
+                );
+                let key = |pressed| egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                let mut reached = false;
+                for _ in 0..32 {
+                    frame(&mut editor, &mut app, vec![key(true)]);
+                    frame(&mut editor, &mut app, vec![key(false)]);
+                    if ctx.memory(|memory| memory.focused()) == Some(target) {
+                        reached = true;
+                        break;
+                    }
+                }
+                assert!(reached, "Tab reaches the actual recurrence checkbox");
+                for _ in 0..3 {
+                    frame(&mut editor, &mut app, Vec::new());
+                }
+                let (current, rect, clip) = editor
+                    .test_layout
+                    .as_ref()
+                    .unwrap()
+                    .recurrence_toggle
+                    .unwrap();
+                assert_eq!(current, target);
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(target));
+                assert!(clip.contains_rect(rect), "the focused checkbox is revealed");
+                assert!(!editor.repeat_enabled, "focus does not toggle recurrence");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

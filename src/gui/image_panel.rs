@@ -96,6 +96,7 @@ impl ImagePanel {
         first: bool,
         child: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> ImageHostActions {
         self.load_texture(ctx);
         let native = child.is_some();
@@ -104,12 +105,22 @@ impl ImagePanel {
         let mut external_open = false;
         let mut host_request = None;
         let mut close = false;
+        let mut order = 0;
         #[cfg(test)]
         let mut test_controls = Vec::new();
         let mut body = |ui: &mut egui::Ui| {
             let interactive = allowed && ui.is_visible() && !ui.is_sizing_pass();
             let (host, next) =
                 super::utility_host::presentation_button(ui, presentation, interactive);
+            super::jump_mode::ui::register_and_apply_target(
+                scope,
+                ui,
+                &host,
+                "presentation",
+                "Dock or pop out",
+                super::jump_mode::TargetKind::Button,
+                &mut order,
+            );
             #[cfg(test)]
             test_controls.push(("host".into(), host.rect, ui.clip_rect(), host.enabled()));
             if first && !ctx.will_discard() && host.clicked() {
@@ -129,6 +140,33 @@ impl ImagePanel {
                     let slider = ui.add(egui::Slider::new(&mut zoom, 0.1..=5.0).text("Zoom"));
                     let external = ui.button("Open in Default Viewer");
                     let close_button = ui.button("Close");
+                    super::jump_mode::ui::register_and_apply_target(
+                        scope,
+                        ui,
+                        &slider,
+                        "zoom",
+                        "Image zoom",
+                        super::jump_mode::TargetKind::Slider,
+                        &mut order,
+                    );
+                    super::jump_mode::ui::register_and_apply_target(
+                        scope,
+                        ui,
+                        &external,
+                        "external",
+                        "Open in Default Viewer",
+                        super::jump_mode::TargetKind::Button,
+                        &mut order,
+                    );
+                    super::jump_mode::ui::register_and_apply_target(
+                        scope,
+                        ui,
+                        &close_button,
+                        "close",
+                        "Close image",
+                        super::jump_mode::TargetKind::Button,
+                        &mut order,
+                    );
                     #[cfg(test)]
                     for (name, response) in [
                         ("zoom", &slider),

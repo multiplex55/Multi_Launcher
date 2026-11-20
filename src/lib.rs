@@ -43,6 +43,10 @@ pub mod explorer_tabs;
 pub mod file_lock;
 pub mod file_operations;
 pub mod file_search;
+#[cfg(windows)]
+pub mod file_transfer;
+#[cfg(windows)]
+pub(crate) mod downloads_triage;
 pub mod folder_size;
 pub mod help_window;
 pub mod history;
@@ -55,6 +59,7 @@ pub mod launcher;
 pub(crate) mod launcher_parking;
 pub mod linking;
 pub mod logging;
+pub(crate) mod notifications;
 pub mod markdown_studio;
 pub mod mkmacro;
 pub mod mouse_gestures;
@@ -64,6 +69,7 @@ pub mod note_ui_state;
 pub mod notes_markdown;
 pub mod ocr;
 pub mod paste_sequence;
+pub mod password_generator;
 #[cfg(feature = "perf-harness")]
 pub mod perf_harness;
 pub mod performance;

@@ -3,7 +3,7 @@ use crate::common::persistence::{LoadState, load_json, save_json_atomic_replacea
 use crate::plugin::Plugin;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -15,6 +15,147 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub static ALARMS_LOADED: AtomicBool = AtomicBool::new(false);
 pub const ALARMS_FILE: &str = "alarms.json";
 pub static FINISHED_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+const INBOX_COMPLETED_LIMIT: usize = 128;
+struct CompletedInboxTimer {
+    id: u64,
+    generation: u64,
+    label: String,
+    sound: String,
+    persist: bool,
+}
+struct TimerInboxOwner {
+    publisher: crate::notifications::InboxPublisher,
+    session: [u8; 16],
+    completed: VecDeque<CompletedInboxTimer>,
+}
+static TIMER_INBOX: Lazy<Mutex<Option<TimerInboxOwner>>> = Lazy::new(|| Mutex::new(None));
+
+/// Attach the current app-session publisher. Reattachment invalidates old snooze authority.
+pub(crate) fn attach_inbox_timer(
+    publisher: crate::notifications::InboxPublisher,
+    session: [u8; 16],
+) {
+    if session == [0; 16] {
+        return;
+    }
+    if let Ok(mut owner) = TIMER_INBOX.lock() {
+        *owner = Some(TimerInboxOwner {
+            publisher,
+            session,
+            completed: VecDeque::new(),
+        });
+    }
+}
+
+fn record_inbox_completion(entry: &TimerEntry) {
+    use crate::notifications::{
+        Category, FactId, InternalEvent, InternalFact, RelatedItem, Status,
+    };
+    if let Ok(mut guard) = TIMER_INBOX.lock() {
+        if let Some(owner) = guard.as_mut() {
+            if owner.completed.len() == INBOX_COMPLETED_LIMIT {
+                owner.completed.pop_front();
+            }
+            owner.completed.push_back(CompletedInboxTimer {
+                id: entry.id,
+                generation: entry.generation,
+                label: entry.label.clone(),
+                sound: entry.sound.clone(),
+                persist: entry.persist,
+            });
+            let event = InternalEvent {
+                id: FactId::Timer {
+                    session: owner.session,
+                    id: entry.id,
+                    occurrence: entry.generation,
+                },
+                occurred_at: chrono::Utc::now().timestamp(),
+                category: Category::Reminder,
+                status: Status::Completed,
+                fact: InternalFact::TimerFinished,
+                related: Some(RelatedItem::Timer {
+                    session: owner.session,
+                    id: entry.id,
+                }),
+            };
+            let _ = owner.publisher.try_publish(event);
+        }
+    }
+}
+
+fn snooze_owned_timer(
+    owner: &mut TimerInboxOwner,
+    ticket: &crate::notifications::ActionTicket,
+    duration: Duration,
+    publish: impl FnOnce(&CompletedInboxTimer, Duration) -> anyhow::Result<u64>,
+) -> anyhow::Result<u64> {
+    use crate::notifications::{ActionKind, FactId, RelatedItem};
+    if !matches!(duration.as_secs(), 300 | 600 | 900) || duration.subsec_nanos() != 0 {
+        anyhow::bail!("Choose a 5, 10, or 15 minute snooze.");
+    }
+    let FactId::Timer {
+        session,
+        id,
+        occurrence,
+    } = &ticket.id
+    else {
+        anyhow::bail!("Timer is no longer available.")
+    };
+    if ticket.kind != ActionKind::Snooze
+        || *session != owner.session
+        || ticket.related
+            != Some(RelatedItem::Timer {
+                session: *session,
+                id: *id,
+            })
+    {
+        anyhow::bail!("Timer is no longer available.");
+    }
+    let index = owner
+        .completed
+        .iter()
+        .position(|timer| timer.id == *id && timer.generation == *occurrence)
+        .ok_or_else(|| anyhow::anyhow!("Timer is no longer available."))?;
+    let result = publish(&owner.completed[index], duration)?;
+    owner.completed.remove(index);
+    Ok(result)
+}
+
+/// Snooze only an exact, still-owned completed occurrence; failures preserve the retry.
+pub(crate) fn related_inbox_timer(id: &crate::notifications::FactId) -> Option<bool> {
+    use crate::notifications::FactId;
+    let FactId::Timer { session, id, occurrence } = id else { return None };
+    let guard = TIMER_INBOX.lock().ok()?;
+    let owner = guard.as_ref()?;
+    if &owner.session != session { return None; }
+    owner.completed.iter().find(|timer| timer.id == *id && timer.generation == *occurrence).map(|timer| timer.persist)
+}
+
+pub(crate) fn snooze_inbox_timer(
+    ticket: &crate::notifications::ActionTicket,
+    duration: Duration,
+) -> anyhow::Result<u64> {
+    let mut guard = TIMER_INBOX
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Timer state is unavailable."))?;
+    let owner = guard
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("Timer is no longer available."))?;
+    snooze_owned_timer(owner, ticket, duration, |previous, duration| {
+        let id = allocate_timer_id()?;
+        let mut entry = timer_entry_at(
+            id,
+            duration,
+            Some(previous.label.clone()),
+            previous.sound.clone(),
+            chrono::Local::now(),
+            Instant::now(),
+        )?;
+        entry.persist = previous.persist;
+        publish_entry(entry, previous.persist)
+    })
+}
 
 pub struct TimerEntry {
     pub id: u64,
@@ -223,6 +364,21 @@ struct Inner {
     condvar: Condvar,
 }
 
+fn take_finished_timer(
+    timers: &mut HashMap<u64, TimerEntry>,
+    id: u64,
+    generation: u64,
+) -> Option<TimerEntry> {
+    if timers
+        .get(&id)
+        .is_some_and(|entry| entry.generation == generation && !entry.paused)
+    {
+        timers.remove(&id)
+    } else {
+        None
+    }
+}
+
 impl TimerManager {
     fn new() -> Self {
         let inner = Arc::new(Inner {
@@ -275,15 +431,12 @@ impl TimerManager {
             Some(l) => l,
             None => return,
         };
-        if let Some(entry) = list.get(&id)
-            && entry.generation == generation
-            && !entry.paused
-            && let Some(entry) = list.remove(&id)
-        {
+        if let Some(entry) = take_finished_timer(&mut list, id, generation) {
             if entry.persist {
                 save_persistent_alarms_locked(&list);
             }
             drop(list);
+            record_inbox_completion(&entry);
             let msg = if entry.persist {
                 format!("Alarm triggered: {}", entry.label)
             } else {
@@ -1319,6 +1472,117 @@ mod tests {
 
     fn utc_map(local: chrono::NaiveDateTime) -> LocalResult<chrono::DateTime<Utc>> {
         Utc.from_local_datetime(&local)
+    }
+
+    #[test]
+    fn notification_inbox_timer_completion_claims_only_current_occurrence_once() {
+        let mut entry = test_entry(42, false);
+        entry.generation = 3;
+        let mut entries = HashMap::from([(42, entry)]);
+        assert!(take_finished_timer(&mut entries, 42, 2).is_none());
+        assert!(take_finished_timer(&mut entries, 42, 3).is_some());
+        assert!(take_finished_timer(&mut entries, 42, 3).is_none());
+    }
+
+    #[test]
+    fn notification_inbox_timer_completion_emits_sanitized_typed_fact() {
+        use crate::notifications::{FactId, InboxService, RelatedItem};
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let mut service = InboxService::start(root, Arc::new(|| {})).unwrap();
+        let session = [9; 16];
+        attach_inbox_timer(service.publisher(), session);
+        let mut entry = test_entry(51, false);
+        entry.generation = 4;
+        entry.label = "private timer label".into();
+        entry.sound = "private sound".into();
+        record_inbox_completion(&entry);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = service.snapshot();
+            let records = snapshot.inbox.records();
+            if let Some(record) = records.first() {
+                assert_eq!(
+                    record.id,
+                    FactId::Timer {
+                        session,
+                        id: 51,
+                        occurrence: 4
+                    }
+                );
+                assert_eq!(record.related, Some(RelatedItem::Timer { session, id: 51 }));
+                assert!(!format!("{record:?}").contains("private"));
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        *TIMER_INBOX.lock().unwrap() = None;
+        service.shutdown();
+    }
+
+    #[test]
+    fn notification_inbox_timer_snooze_is_session_scoped_and_consumed_only_on_success() {
+        use crate::notifications::{
+            ActionKind, Category, FactId, Inbox, InboxService, InternalFact, RelatedItem, Status,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let mut service = InboxService::start(root, Arc::new(|| {})).unwrap();
+        let session = [7; 16];
+        let id = FactId::Timer {
+            session,
+            id: 42,
+            occurrence: 3,
+        };
+        let mut inbox = Inbox::default();
+        inbox.ingest_internal(
+            id.clone(),
+            1,
+            Category::Reminder,
+            Status::Completed,
+            InternalFact::TimerFinished,
+            Some(RelatedItem::Timer { session, id: 42 }),
+            1,
+        );
+        let ticket = inbox.begin_action(&id, ActionKind::Snooze).unwrap();
+        let mut owner = TimerInboxOwner {
+            publisher: service.publisher(),
+            session,
+            completed: VecDeque::from([CompletedInboxTimer {
+                id: 42,
+                generation: 3,
+                label: "private label".into(),
+                sound: "private sound".into(),
+                persist: true,
+            }]),
+        };
+        assert!(
+            snooze_owned_timer(&mut owner, &ticket, Duration::from_secs(301), |_, _| Ok(1))
+                .is_err()
+        );
+        assert!(
+            snooze_owned_timer(
+                &mut owner,
+                &ticket,
+                Duration::from_secs(300),
+                |_, _| anyhow::bail!("failed")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            snooze_owned_timer(&mut owner, &ticket, Duration::from_secs(300), |timer, _| {
+                assert!(timer.persist);
+                Ok(77)
+            })
+            .unwrap(),
+            77
+        );
+        assert!(
+            snooze_owned_timer(&mut owner, &ticket, Duration::from_secs(300), |_, _| Ok(1))
+                .is_err()
+        );
+        service.shutdown();
     }
 
     fn test_entry(id: u64, persist: bool) -> TimerEntry {

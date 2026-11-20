@@ -162,6 +162,7 @@ pub(crate) struct NativeArchiveError {
     cleanup_attempted: bool,
     cleanup_failure: Option<Box<NativeFailure>>,
     cleanup_failed: bool,
+    unconfirmed_name_effect: bool,
 }
 
 impl NativeArchiveError {
@@ -171,6 +172,9 @@ impl NativeArchiveError {
 
     pub(crate) fn cleanup_failed(&self) -> bool {
         self.cleanup_failed
+    }
+    pub(crate) fn unconfirmed_name_effect(&self) -> bool {
+        self.unconfirmed_name_effect
     }
 
     fn validation(
@@ -183,6 +187,7 @@ impl NativeArchiveError {
             cleanup_attempted: false,
             cleanup_failure: None,
             cleanup_failed: false,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -196,6 +201,7 @@ impl NativeArchiveError {
             cleanup_attempted: false,
             cleanup_failure: None,
             cleanup_failed: false,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -209,6 +215,7 @@ impl NativeArchiveError {
             cleanup_attempted: false,
             cleanup_failure: None,
             cleanup_failed: false,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -222,7 +229,13 @@ impl NativeArchiveError {
             cleanup_attempted: false,
             cleanup_failure: None,
             cleanup_failed: false,
+            unconfirmed_name_effect: false,
         }
+    }
+
+    fn with_unconfirmed_name_effect(mut self) -> Self {
+        self.unconfirmed_name_effect = true;
+        self
     }
 
     fn with_cleanup(mut self, cleanup: Result<(), NativeFailure>) -> Self {
@@ -239,6 +252,7 @@ impl NativeArchiveError {
             cleanup_attempted: true,
             cleanup_failed: cleanup_failure.is_some(),
             cleanup_failure,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -248,6 +262,7 @@ impl NativeArchiveError {
             cleanup_attempted: true,
             cleanup_failure: None,
             cleanup_failed: true,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -321,29 +336,47 @@ impl HeldDirectory {
         Ok(current)
     }
 
-    fn open_child(
-        self: &Arc<Self>,
-        component: &OsStr,
-        require_add_file: bool,
+    fn open_child(self: &Arc<Self>, component: &OsStr, require_add_file: bool) -> Result<Arc<Self>, NativeArchiveError> {
+        self.open_child_with_access(component, require_add_file, require_add_file)
+    }
+
+    fn open_child_with_access(
+        self: &Arc<Self>, component: &OsStr, require_add_file: bool, require_add_subdirectory: bool,
+    ) -> Result<Arc<Self>, NativeArchiveError> {
+        self.open_child_with_options(component, require_add_file, require_add_subdirectory, false, false, false)
+    }
+
+    fn open_child_with_options(
+        self: &Arc<Self>, component: &OsStr, require_add_file: bool,
+        require_add_subdirectory: bool, no_recall: bool, list: bool, write_attributes: bool,
     ) -> Result<Arc<Self>, NativeArchiveError> {
         validate_single_component(component, "relative directory component")?;
         let access = windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
             | windows::Win32::Storage::FileSystem::FILE_TRAVERSE
             | windows::Win32::Storage::FileSystem::SYNCHRONIZE
+            | if write_attributes {
+                windows::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES
+            } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) }
+            | if list {
+                windows::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY
+            } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) }
             | if require_add_file {
                 windows::Win32::Storage::FileSystem::FILE_ADD_FILE
-                    | windows::Win32::Storage::FileSystem::FILE_ADD_SUBDIRECTORY
-            } else {
-                windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0)
-            };
+            } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) }
+            | if require_add_subdirectory { windows::Win32::Storage::FileSystem::FILE_ADD_SUBDIRECTORY } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) };
         let (file, _) = open_relative(
             self,
             component,
             access,
             shared_directory_access(),
             windows::Wdk::Storage::FileSystem::FILE_OPEN,
-            windows::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE
-                | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT
+            // FILE_DIRECTORY_FILE cannot be combined with FILE_OPEN_NO_RECALL.
+            // The transfer open validates the returned directory handle below.
+            (if no_recall {
+                windows::Wdk::Storage::FileSystem::FILE_OPEN_NO_RECALL
+            } else {
+                windows::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE
+            }) | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT
                 | windows::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
             windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
             "NtCreateFile(FILE_OPEN child directory)",
@@ -390,6 +423,14 @@ impl HeldDirectory {
     }
 
     fn create_child(self: &Arc<Self>, component: &OsStr) -> Result<Arc<Self>, NativeArchiveError> {
+        self.create_child_observed(component, || {})
+    }
+
+    fn create_child_observed(
+        self: &Arc<Self>,
+        component: &OsStr,
+        on_created: impl FnOnce(),
+    ) -> Result<Arc<Self>, NativeArchiveError> {
         validate_single_component(component, "relative directory component")?;
         self.verify_identity()?;
         let (file, information) = open_relative(
@@ -414,8 +455,9 @@ impl HeldDirectory {
                 "NtCreateFile did not report FILE_CREATED for output directory",
                 io::ErrorKind::InvalidData,
                 Some(self.identity),
-            ));
+            ).with_unconfirmed_name_effect());
         }
+        on_created();
         let metadata = file.metadata().map_err(|error| {
             NativeArchiveError::from_io(
                 "File::metadata(new output directory)",
@@ -492,6 +534,109 @@ fn is_name_collision(error: &NativeArchiveError) -> bool {
 /// reparse point. Its held directory chain is used for every later operation.
 pub(crate) struct NativeArchiveDestination {
     root: Arc<HeldDirectory>,
+}
+
+/// A reviewed output root. A missing final child is held by its verified parent
+/// and is created exclusively only after the extraction is confirmed.
+pub(crate) enum NativeArchiveTarget {
+    Existing(NativeArchiveDestination),
+    Vacant {
+        parent: NativeDirectoryHandle,
+        leaf: OsString,
+    },
+}
+
+impl From<NativeArchiveDestination> for NativeArchiveTarget {
+    fn from(destination: NativeArchiveDestination) -> Self {
+        Self::Existing(destination)
+    }
+}
+
+impl NativeArchiveTarget {
+    pub(crate) fn open(path: &Path) -> Result<Self, NativeArchiveError> {
+        match NativeArchiveDestination::open(path) {
+            Ok(destination) => return Ok(Self::Existing(destination)),
+            Err(error) if is_missing_relative_component(&error) => {}
+            Err(error) => return Err(error),
+        }
+        let parent_path = path.parent().ok_or_else(|| {
+            NativeArchiveError::validation("destination has no parent", io::ErrorKind::InvalidInput, None)
+        })?;
+        let leaf = path.file_name().ok_or_else(|| {
+            NativeArchiveError::validation("destination has no final component", io::ErrorKind::InvalidInput, None)
+        })?.to_os_string();
+        let leaf_text = leaf.to_str().ok_or_else(|| {
+            NativeArchiveError::validation("destination name is not valid Unicode", io::ErrorKind::InvalidInput, None)
+        })?;
+        let safe = super::SafeRelativePath::validate(
+            leaf_text,
+            super::EntryKind::File,
+            &ArchiveLimits::default(),
+        ).map_err(|_| {
+            NativeArchiveError::validation("invalid destination name", io::ErrorKind::InvalidInput, None)
+        })?;
+        if safe.component_count() != 1 {
+            return Err(NativeArchiveError::validation(
+                "destination must be a single child",
+                io::ErrorKind::InvalidInput,
+                None,
+            ));
+        }
+        let parent = NativeDirectoryHandle {
+            directory: open_directory_path(parent_path, true)?,
+        };
+        if parent.probe_leaf_occupancy(&leaf)?.is_some() {
+            return Err(NativeArchiveError::validation(
+                "destination appeared during admission",
+                io::ErrorKind::AlreadyExists,
+                Some(parent.identity()),
+            ));
+        }
+        Ok(Self::Vacant { parent, leaf })
+    }
+
+    pub(crate) fn verify_identity(&self) -> Result<NativeFileIdentity, NativeArchiveError> {
+        match self {
+            Self::Existing(destination) => destination.verify_identity(),
+            Self::Vacant { parent, leaf } => {
+                let identity = parent.verify_identity()?;
+                if parent.probe_leaf_occupancy(leaf)?.is_some() {
+                    return Err(NativeArchiveError::validation(
+                        "proposed destination is no longer vacant",
+                        io::ErrorKind::AlreadyExists,
+                        Some(identity),
+                    ));
+                }
+                Ok(identity)
+            }
+        }
+    }
+
+    pub(crate) fn probe_occupancy(
+        &self,
+        path: &ValidatedRelativePath,
+    ) -> Result<DestinationOccupancy, io::ErrorKind> {
+        match self {
+            Self::Existing(destination) => destination.probe_occupancy(path),
+            Self::Vacant { .. } => Ok(DestinationOccupancy::Vacant),
+        }
+    }
+
+    pub(crate) fn materialize(
+        self,
+        created_root: &mut bool,
+    ) -> Result<NativeArchiveDestination, NativeArchiveError> {
+        match self {
+            Self::Existing(destination) => {
+                destination.verify_identity()?;
+                Ok(destination)
+            }
+            Self::Vacant { parent, leaf } => {
+                let root = parent.directory.create_child_observed(&leaf, || *created_root = true)?;
+                Ok(NativeArchiveDestination { root })
+            }
+        }
+    }
 }
 
 impl NativeArchiveDestination {
@@ -1003,6 +1148,188 @@ fn open_ordinary_file(path: &Path) -> Result<OrdinaryFileAdmission, NativeArchiv
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ArchiveSourceStamp {
+    pub identity: NativeFileIdentity,
+    pub length: u64,
+    pub created: i64,
+    pub modified: i64,
+    pub changed: i64,
+    pub attributes: u32,
+}
+fn archive_source_stamp(file: &File) -> Result<ArchiveSourceStamp, NativeArchiveError> {
+    let identity = native_file_identity(file)
+        .map_err(|e| NativeArchiveError::from_io("FILE_ID_INFO(archive source stamp)", e, None))?;
+    let basic = crate::file_operations::query_replace_basic_info(file).map_err(|e| {
+        NativeArchiveError::from_io("FILE_BASIC_INFO(archive source stamp)", e, Some(identity))
+    })?;
+    let meta = file.metadata().map_err(|e| {
+        NativeArchiveError::from_io("metadata(archive source stamp)", e, Some(identity))
+    })?;
+    if !meta.is_file() || meta.file_attributes() != basic.FileAttributes {
+        return Err(NativeArchiveError::validation(
+            "archive source is not an ordinary file",
+            io::ErrorKind::InvalidData,
+            Some(identity),
+        ));
+    }
+    Ok(ArchiveSourceStamp {
+        identity,
+        length: meta.len(),
+        created: basic.CreationTime,
+        modified: basic.LastWriteTime,
+        changed: basic.ChangeTime,
+        attributes: basic.FileAttributes,
+    })
+}
+fn exact_stamp_matches(
+    stamp: ArchiveSourceStamp,
+    expected: &crate::file_transfer::EntrySnapshot,
+) -> bool {
+    let meta = expected.metadata();
+    meta.kind == crate::file_transfer::EntryKind::File
+        && meta.byte_len == Some(stamp.length)
+        && expected.identity() == stamp.identity
+        && meta.created == stamp.created
+        && meta.modified == stamp.modified
+        && meta.changed == stamp.changed
+        && meta.attributes == stamp.attributes
+        && stamp.attributes & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+            == 0
+        && !crate::file_operations::has_cloud_placeholder_attributes(stamp.attributes)
+}
+fn open_exact_archive(
+    expected: &crate::file_transfer::EntrySnapshot,
+) -> Result<OrdinaryFileAdmission, NativeArchiveError> {
+    use windows::Wdk::Storage::FileSystem::{
+        FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, SYNCHRONIZE,
+    };
+    let parent_path = expected.parent().path();
+    let (root, parts) = split_local_absolute_path(parent_path)?;
+    let mut parent = open_volume_root_with_options(&root, false, false, true, false)?;
+    let mut ids = vec![parent.identity];
+    for part in &parts {
+        parent = parent.open_child_with_options(part, false, false, true, false, false)?;
+        ids.push(parent.identity);
+    }
+    if !ids.into_iter().eq(expected.parent().ancestor_identities()) {
+        return Err(NativeArchiveError::validation(
+            "archive source parent identity changed",
+            io::ErrorKind::InvalidData,
+            Some(parent.identity),
+        ));
+    }
+    let check_parent = || -> Result<(), NativeArchiveError> {
+        let current = crate::file_transfer::inspect_parent(parent_path, &ScanCancellation::new())
+            .map_err(|error| {
+            NativeArchiveError::from_io(
+                "archive source parent proof",
+                io::Error::other(error),
+                Some(parent.identity),
+            )
+        })?;
+        if &current != expected.parent() {
+            return Err(NativeArchiveError::validation(
+                "archive source parent changed",
+                io::ErrorKind::InvalidData,
+                Some(parent.identity),
+            ));
+        }
+        Ok(())
+    };
+    check_parent()?;
+    let leaf = expected.leaf().as_os_str();
+    validate_single_component(leaf, "exact archive source leaf")?;
+    let (metadata_file, _) = open_relative(
+        &parent,
+        leaf,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        shared_directory_access(),
+        FILE_OPEN,
+        FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        FILE_ATTRIBUTE_NORMAL,
+        "NtCreateFile(exact archive metadata)",
+        || Ok(()),
+    )?;
+    let metadata_stamp = archive_source_stamp(&metadata_file)?;
+    if !exact_stamp_matches(metadata_stamp, expected) {
+        return Err(NativeArchiveError::validation(
+            "exact archive source changed",
+            io::ErrorKind::InvalidData,
+            Some(metadata_stamp.identity),
+        ));
+    }
+    let actual_path =
+        crate::file_operations::final_path_for_handle(&metadata_file).map_err(|e| {
+            NativeArchiveError::from_io(
+                "exact archive source path",
+                e,
+                Some(metadata_stamp.identity),
+            )
+        })?;
+    if actual_path.file_name() != Some(leaf)
+        || !crate::batch_rename::compare_paths_windows_ordinal(&actual_path, &expected.path())
+            .is_eq()
+    {
+        return Err(NativeArchiveError::validation(
+            "exact archive source name changed",
+            io::ErrorKind::InvalidData,
+            Some(metadata_stamp.identity),
+        ));
+    }
+    let (file, _) = open_relative(
+        &parent,
+        leaf,
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ,
+        FILE_OPEN,
+        FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT,
+        FILE_ATTRIBUTE_NORMAL,
+        "NtCreateFile(exact archive source)",
+        || Ok(()),
+    )?;
+    let stamp = archive_source_stamp(&file)?;
+    if stamp != metadata_stamp || !exact_stamp_matches(stamp, expected) {
+        return Err(NativeArchiveError::validation(
+            "exact archive source changed while opening",
+            io::ErrorKind::InvalidData,
+            Some(stamp.identity),
+        ));
+    }
+    let actual_path = crate::file_operations::final_path_for_handle(&file).map_err(|e| {
+        NativeArchiveError::from_io("exact archive held path", e, Some(stamp.identity))
+    })?;
+    if actual_path.file_name() != Some(leaf)
+        || !crate::batch_rename::compare_paths_windows_ordinal(&actual_path, &expected.path())
+            .is_eq()
+    {
+        return Err(NativeArchiveError::validation(
+            "exact archive held name changed",
+            io::ErrorKind::InvalidData,
+            Some(stamp.identity),
+        ));
+    }
+    check_parent()?;
+    let file = VerifiedOverlappedFile::verify(file).map_err(|_| {
+        NativeArchiveError::validation(
+            "exact archive source is not overlapped",
+            io::ErrorKind::InvalidData,
+            Some(stamp.identity),
+        )
+    })?;
+    Ok(OrdinaryFileAdmission {
+        file,
+        ancestors: parent,
+        identity: stamp.identity,
+        len: stamp.length,
+        modified: stamp.modified as u64,
+        created: stamp.created as u64,
+    })
+}
+
 /// One opened archive source. Catalog verification reads through an
 /// explicit-offset adapter over this held handle; it never reopens the path.
 pub(crate) struct NativeArchiveSource {
@@ -1010,6 +1337,7 @@ pub(crate) struct NativeArchiveSource {
     _ancestors: Arc<HeldDirectory>,
     identity: NativeFileIdentity,
     archive_len: u64,
+    source_stamp: ArchiveSourceStamp,
     revision: ArchiveRevision,
     limits: ArchiveLimits,
     catalog_source: Option<ArchiveSource>,
@@ -1022,6 +1350,18 @@ impl NativeArchiveSource {
         limits: ArchiveLimits,
     ) -> Result<Self, NativeArchiveError> {
         let admitted = open_ordinary_file(path)?;
+        Self::from_admission(admitted, revision, limits)
+    }
+    pub(crate) fn open_exact(expected: &crate::file_transfer::EntrySnapshot, revision: ArchiveRevision, limits: ArchiveLimits) -> Result<Self, NativeArchiveError> {
+        let admitted = open_exact_archive(expected)?;
+        let source = Self::from_admission(admitted, revision, limits)?;
+        if !exact_stamp_matches(source.source_stamp, expected) {
+            return Err(NativeArchiveError::validation("exact archive source revision changed", io::ErrorKind::InvalidData, Some(source.identity)));
+        }
+        Ok(source)
+    }
+    fn from_admission(admitted: OrdinaryFileAdmission, revision: ArchiveRevision, limits: ArchiveLimits) -> Result<Self, NativeArchiveError> {
+        let source_stamp = archive_source_stamp(admitted.file.as_file())?;
         let OrdinaryFileAdmission {
             file,
             ancestors,
@@ -1034,6 +1374,7 @@ impl NativeArchiveSource {
             _ancestors: ancestors,
             identity,
             archive_len,
+            source_stamp,
             revision,
             limits,
             catalog_source: None,
@@ -1042,6 +1383,13 @@ impl NativeArchiveSource {
 
     pub(crate) fn identity(&self) -> NativeFileIdentity {
         self.identity
+    }
+
+    pub(crate) fn source_stamp(&self) -> ArchiveSourceStamp { self.source_stamp }
+    pub(crate) fn recheck_source_stamp(&self) -> Result<ArchiveSourceStamp, NativeArchiveError> {
+        let stamp = archive_source_stamp(self.file.as_file())?;
+        if stamp != self.source_stamp { return Err(NativeArchiveError::validation("held archive source revision changed", io::ErrorKind::InvalidData, Some(stamp.identity))); }
+        Ok(stamp)
     }
 
     pub(crate) fn archive_source(&self) -> Option<ArchiveSource> {
@@ -1072,6 +1420,7 @@ impl NativeArchiveSource {
         cancellation: &ScanCancellation,
         io_control: &ArchiveIoControl,
     ) -> Result<ArchiveCatalog, NativeArchiveError> {
+        self.recheck_source_stamp()?;
         let file = self.file.as_file();
         let before = native_file_identity(file).map_err(|error| {
             NativeArchiveError::from_io(
@@ -1129,6 +1478,7 @@ impl NativeArchiveSource {
                 Some(after),
             ));
         }
+        self.recheck_source_stamp()?;
         self.catalog_source = Some(catalog.source());
         Ok(catalog)
     }
@@ -1190,7 +1540,7 @@ fn shared_directory_access() -> windows::Win32::Storage::FileSystem::FILE_SHARE_
         | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE
 }
 
-fn split_local_absolute_path(path: &Path) -> Result<(PathBuf, Vec<OsString>), NativeArchiveError> {
+pub(crate) fn split_local_absolute_path(path: &Path) -> Result<(PathBuf, Vec<OsString>), NativeArchiveError> {
     let mut components = path.components();
     let drive = match components.next() {
         Some(Component::Prefix(prefix)) => match prefix.kind() {
@@ -1270,9 +1620,18 @@ fn open_directory_parts(
     Ok(current)
 }
 
-fn open_volume_root(
-    path: &Path,
-    require_add_file: bool,
+fn open_volume_root(path: &Path, require_add_file: bool) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
+    open_volume_root_with_access(path, require_add_file, require_add_file)
+}
+
+fn open_volume_root_with_access(
+    path: &Path, require_add_file: bool, require_add_subdirectory: bool,
+) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
+    open_volume_root_with_options(path, require_add_file, require_add_subdirectory, false, false)
+}
+
+fn open_volume_root_with_options(
+    path: &Path, require_add_file: bool, require_add_subdirectory: bool, no_recall: bool, list: bool,
 ) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
@@ -1297,9 +1656,11 @@ fn open_volume_root(
         ));
     }
     let mut access = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
+    if list { access |= windows::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY; }
     if require_add_file {
-        access |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+        access |= FILE_ADD_FILE;
     }
+    if require_add_subdirectory { access |= FILE_ADD_SUBDIRECTORY; }
     // SAFETY: `wide` is an absolute, local, NUL-terminated root path. The
     // handle is opened as the reparse point itself and immediately owned by a
     // `File`. Directory handles intentionally do not share delete access.
@@ -1310,7 +1671,8 @@ fn open_volume_root(
             shared_directory_access(),
             None,
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+                | if no_recall { windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_NO_RECALL } else { windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0) },
             HANDLE::default(),
         )
     }
@@ -1445,6 +1807,7 @@ fn open_relative(
         cleanup_attempted: false,
         cleanup_failure: None,
         cleanup_failed: false,
+        unconfirmed_name_effect: false,
     })?;
     if parent_attributes.FileAttributes
         & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
@@ -1502,17 +1865,23 @@ fn open_relative(
     // Unlike a data ReadFile/WriteFile request, it has no pending completion
     // object; do not accept another nonnegative NTSTATUS as completed work.
     if status.0 != 0 || io_status_value.0 != 0 {
+        let error = NativeArchiveError::from_ntstatus(
+            operation, evidence_status, Some(parent.identity),
+        );
         if !handle.is_invalid() {
-            // The documented NtCreateFile contract is synchronous. Close any
-            // unexpected non-success handle rather than leaking it.
+            // A returned handle on failure leaves the name effect uncertain.
             let unexpected = unsafe { File::from_raw_handle(handle.0 as RawHandle) };
             drop(unexpected);
+            return Err(error.with_unconfirmed_name_effect());
         }
-        return Err(NativeArchiveError::from_ntstatus(
-            operation,
-            evidence_status,
+        return Err(if status.0 >= 0 { error.with_unconfirmed_name_effect() } else { error });
+    }
+    if handle.is_invalid() {
+        return Err(NativeArchiveError::validation(
+            "NtCreateFile returned success without a valid handle",
+            io::ErrorKind::InvalidData,
             Some(parent.identity),
-        ));
+        ).with_unconfirmed_name_effect());
     }
     // SAFETY: NT success returned a new owned file handle; it is transferred
     // once to File and closed by RAII.
@@ -1713,6 +2082,22 @@ fn extended_path_wide_with_nul(path: &Path) -> Result<Vec<u16>, NativeArchiveErr
     Ok(wide)
 }
 
+fn default_stage_leaf() -> OsString {
+    let serial = NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed);
+    OsString::from(format!(".multi-launcher-c06-{}-{serial}.stage", std::process::id()))
+}
+
+struct StageCreateObservation {
+    leaf: OsString,
+    identity: Option<NativeFileIdentity>,
+    creation_confirmed: bool,
+}
+
+struct TransferStageAdmission<'a> {
+    final_leaf: &'a OsStr,
+    observation: &'a mut Option<StageCreateObservation>,
+}
+
 /// A create-new stage tied to its held parent and file identity.
 pub(crate) struct OwnedStage {
     file: VerifiedOverlappedFile,
@@ -1752,18 +2137,39 @@ impl OwnedStage {
         })
     }
 
-    fn create_after_parent_validation(
+    fn create_after_parent_validation(parent: Arc<HeldDirectory>, before_native_create: impl FnOnce() -> Result<(), NativeArchiveError>) -> Result<Self, NativeArchiveError> {
+        Self::create_after_parent_validation_with_access(parent, before_native_create, windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0), windows::Win32::Storage::FileSystem::FILE_SHARE_READ)
+    }
+    fn create_after_parent_validation_with_access(
+        parent: Arc<HeldDirectory>, before_native_create: impl FnOnce() -> Result<(), NativeArchiveError>, extra: windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS, sharing: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE,
+    ) -> Result<Self, NativeArchiveError> {
+        Self::create_with_options(
+            parent, before_native_create, extra, sharing,
+            windows::Wdk::Storage::FileSystem::NTCREATEFILE_CREATE_OPTIONS(0),
+            None, default_stage_leaf, STAGE_ATTEMPTS,
+        )
+    }
+    fn create_with_options(
         parent: Arc<HeldDirectory>,
         before_native_create: impl FnOnce() -> Result<(), NativeArchiveError>,
+        extra: windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS,
+        sharing: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE,
+        options: windows::Wdk::Storage::FileSystem::NTCREATEFILE_CREATE_OPTIONS,
+        mut transfer: Option<TransferStageAdmission<'_>>,
+        mut next_leaf: impl FnMut() -> OsString,
+        attempts: usize,
     ) -> Result<Self, NativeArchiveError> {
         let mut before_native_create = Some(before_native_create);
         let mut last_collision = None;
-        for _ in 0..STAGE_ATTEMPTS {
-            let serial = NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed);
-            let leaf = OsString::from(format!(
-                ".multi-launcher-c06-{}-{serial}.stage",
-                std::process::id()
-            ));
+        for _ in 0..attempts {
+            let leaf = next_leaf();
+            if let Some(transfer) = &transfer
+                && crate::batch_rename::compare_paths_windows_ordinal(
+                    Path::new(&leaf), Path::new(transfer.final_leaf),
+                ).is_eq()
+            {
+                continue;
+            }
             let opened = open_relative(
                 &parent,
                 &leaf,
@@ -1772,11 +2178,11 @@ impl OwnedStage {
                     | windows::Win32::Storage::FileSystem::FILE_WRITE_DATA
                     | windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
                     | windows::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES
-                    | windows::Win32::Storage::FileSystem::SYNCHRONIZE,
-                windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
+                    | windows::Win32::Storage::FileSystem::SYNCHRONIZE | extra,
+                sharing,
                 windows::Wdk::Storage::FileSystem::FILE_CREATE,
                 windows::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
-                    | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT,
+                    | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT | options,
                 windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
                 "NtCreateFile(FILE_CREATE owned stage)",
                 || match before_native_create.take() {
@@ -1787,23 +2193,44 @@ impl OwnedStage {
             let (file, information) = match opened {
                 Ok(opened) => opened,
                 Err(error)
-                    if matches!(error.primary.win32_code, Some(80 | 183))
-                        || error.primary.nt_status == Some(0xc000_0035_u32 as i32) =>
+                    if !error.unconfirmed_name_effect
+                        && (matches!(error.primary.win32_code, Some(80 | 183))
+                            || error.primary.nt_status == Some(0xc000_0035_u32 as i32)) =>
                 {
                     last_collision = Some(error);
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    if error.unconfirmed_name_effect
+                        && let Some(transfer) = &mut transfer
+                    {
+                        *transfer.observation = Some(StageCreateObservation {
+                            leaf,
+                            identity: None,
+                            creation_confirmed: false,
+                        });
+                    }
+                    return Err(error);
+                }
             };
 
-            // FILE_CREATE must report FILE_CREATED (2). If a filesystem returns
-            // an unexpected success disposition, the exact returned handle is
-            // nevertheless a new owned object, so delete only that handle.
+            if let Some(transfer) = &mut transfer {
+                *transfer.observation = Some(StageCreateObservation {
+                    leaf: leaf.clone(),
+                    identity: None,
+                    creation_confirmed: information == 2,
+                });
+            }
             if information != 2 {
+                let operation = "NtCreateFile did not report FILE_CREATED for stage";
+                if transfer.is_some() {
+                    // A contradictory disposition cannot establish transfer ownership.
+                    return Err(NativeArchiveError::validation(
+                        operation, io::ErrorKind::InvalidData, Some(parent.identity),
+                    ));
+                }
                 let primary = NativeFailure::validation(
-                    "NtCreateFile did not report FILE_CREATED for stage",
-                    io::ErrorKind::InvalidData,
-                    Some(parent.identity),
+                    operation, io::ErrorKind::InvalidData, Some(parent.identity),
                 );
                 let cleanup = delete_open_file_without_identity(&file);
                 return Err(NativeArchiveError::after_cleanup(primary, cleanup));
@@ -1854,6 +2281,21 @@ impl OwnedStage {
                 );
                 let cleanup = delete_open_file_without_identity(&file);
                 return Err(NativeArchiveError::after_cleanup(primary, cleanup));
+            }
+            if transfer.is_some() && identity.file_id() == [0; 16] {
+                let primary = NativeFailure::validation(
+                    "new stage has no supported file identity",
+                    io::ErrorKind::InvalidData,
+                    Some(parent.identity),
+                );
+                return Err(NativeArchiveError::after_cleanup(
+                    primary, delete_open_file_without_identity(&file),
+                ));
+            }
+            if let Some(transfer) = &mut transfer
+                && let Some(observation) = transfer.observation.as_mut()
+            {
+                observation.identity = Some(identity);
             }
             if let Err(error) = VerifiedOverlappedFile::verify_before_ownership(&file) {
                 let primary = match error {
@@ -2008,10 +2450,16 @@ impl OwnedStage {
         self.flush_final()
     }
 
-    pub(crate) fn publish(
+    pub(crate) fn publish(self, target_leaf: &OsStr) -> Result<NativeFileIdentity, NativeArchiveError> {
+        self.publish_admitted(target_leaf, || true, false).map(|(identity, _)| identity)
+    }
+
+    fn publish_admitted(
         mut self,
         target_leaf: &OsStr,
-    ) -> Result<NativeFileIdentity, NativeArchiveError> {
+        admit: impl FnOnce() -> bool,
+        transfer_cleanup_guard: bool,
+    ) -> Result<(NativeFileIdentity, VerifiedOverlappedFile), NativeArchiveError> {
         if let Err(error) = validate_single_component(target_leaf, "relative rename target") {
             return Err(self.fail_and_cleanup(error.primary));
         }
@@ -2080,14 +2528,55 @@ impl OwnedStage {
             );
             return Err(self.fail_and_cleanup(primary));
         }
+        if !admit() {
+            return Err(self.fail_and_cleanup(NativeFailure::validation(
+                "publication admission retired",
+                io::ErrorKind::Interrupted,
+                Some(actual_identity),
+            )));
+        }
         match rename_open_file_relative_no_replace(file, &self.parent, target_leaf, actual_identity)
         {
             Ok(()) => {
                 self.finished = true;
-                Ok(actual_identity)
+                Ok((actual_identity, self.file.clone()))
             }
-            Err(primary) => Err(self.fail_and_cleanup(primary)),
+            Err(primary) => Err(self.finish_rename_failure(primary, transfer_cleanup_guard)),
         }
+    }
+
+    fn finish_rename_failure(
+        &mut self,
+        primary: NativeFailure,
+        transfer_cleanup_guard: bool,
+    ) -> NativeArchiveError {
+        if !transfer_cleanup_guard || self.proves_private_stage_name() {
+            return self.fail_and_cleanup(primary);
+        }
+        self.finished = true;
+        NativeArchiveError {
+            primary,
+            cleanup_attempted: false,
+            cleanup_failure: None,
+            cleanup_failed: false,
+            unconfirmed_name_effect: true,
+        }
+    }
+
+    fn proves_private_stage_name(&self) -> bool {
+        let Ok(parent_identity) = self.parent.verify_identity() else { return false; };
+        if parent_identity != self.parent_identity
+            || native_file_identity(self.file.as_file()).ok() != Some(self.identity)
+        {
+            return false;
+        }
+        let (Ok(parent_path), Ok(file_path)) = (
+            crate::file_operations::final_path_for_handle(&self.parent.file),
+            crate::file_operations::final_path_for_handle(self.file.as_file()),
+        ) else { return false; };
+        crate::batch_rename::compare_paths_windows_ordinal(&parent_path.join(&self.leaf), &file_path).is_eq()
+            && self.parent.verify_identity().ok() == Some(self.parent_identity)
+            && native_file_identity(self.file.as_file()).ok() == Some(self.identity)
     }
 
     fn fail_and_cleanup(&mut self, primary: NativeFailure) -> NativeArchiveError {
@@ -2863,6 +3352,153 @@ mod tests {
     }
 
     #[test]
+    fn transfer_admission_refuses_a_retagged_parent_and_never_descends() {
+        use crate::file_operations::ScanCancellation;
+        use crate::file_transfer::{
+            AdmissionError, TargetOccupancy, TransferLeaf, inspect_parent, inspect_source,
+            inspect_target, recheck_target_metadata,
+        };
+
+        let (_temp, selected, _held, outside) = fixture_tree();
+        let sentinel = outside.join("sentinel.txt");
+        fs::write(&sentinel, b"outside sentinel").unwrap();
+        let cancellation = ScanCancellation::new();
+        let parent = inspect_parent(&selected, &cancellation).unwrap();
+        let leaf = TransferLeaf::new(OsStr::new("sentinel.txt")).unwrap();
+        let approved = inspect_target(&parent, &leaf, &cancellation).unwrap();
+        assert_eq!(approved.occupancy(), &TargetOccupancy::Vacant);
+
+        let mut junction =
+            set_junction_on_existing_directory(&selected, parent.identity(), &outside).unwrap();
+        assert!(matches!(
+            inspect_source(&selected.join(leaf.as_os_str()), &cancellation),
+            Err(AdmissionError::ReparsePoint)
+        ));
+        assert!(matches!(
+            recheck_target_metadata(&approved, &cancellation),
+            Err(AdmissionError::ReparsePoint)
+        ));
+        junction.clear().unwrap();
+        assert_eq!(fs::read(sentinel).unwrap(), b"outside sentinel");
+        recheck_target_metadata(&approved, &cancellation).unwrap();
+    }
+
+    #[test]
+    fn transfer_tree_records_junction_as_unavailable_without_listing_its_target() {
+        use crate::file_operations::ScanCancellation;
+        use crate::file_transfer::{AdmissionError, SourceObservation, inspect_parent, inspect_source_tree};
+
+        let (_temp, selected, _held, outside) = fixture_tree();
+        let outside_file = outside.join("external.txt");
+        fs::write(&outside_file, b"external payload").unwrap();
+        let local_file = selected.join("local.txt");
+        fs::write(&local_file, b"local payload").unwrap();
+        let link = selected.join("link");
+        fs::create_dir(&link).unwrap();
+        let cancellation = ScanCancellation::new();
+        let identity = inspect_parent(&link, &cancellation).unwrap().identity();
+        let mut junction = set_junction_on_existing_directory(&link, identity, &outside).unwrap();
+
+        let tree = inspect_source_tree(&[selected], &cancellation).unwrap();
+        assert_eq!(tree.entries().len(), 3);
+        assert_eq!(tree.entries()[1].path().file_name(), Some(OsStr::new("link")));
+        assert!(matches!(
+            tree.entries()[1].observation(),
+            SourceObservation::Unavailable(AdmissionError::ReparsePoint)
+        ));
+        assert_eq!(tree.entries()[2].path().file_name(), Some(OsStr::new("local.txt")));
+        junction.clear().unwrap();
+        assert_eq!(fs::read(outside_file).unwrap(), b"external payload");
+    }
+
+    #[test]
+    fn transfer_execute_native_directory_preflight_has_definite_no_effect() {
+        let (_temp, selected, _held, _outside) = fixture_tree();
+        let (root, parts) = split_local_absolute_path(&selected).unwrap();
+        let mut parent = transfer_native::TransferDirectory::open_root(&root).unwrap();
+        for (index, part) in parts.iter().enumerate() {
+            parent = if index + 1 == parts.len() {
+                parent.open_create_directory_child(part).unwrap()
+            } else {
+                parent.open_child(part).unwrap()
+            };
+        }
+
+        let Err(refused) = parent.create_directory(OsStr::new("invalid\\nested")) else {
+            panic!("the native boundary accepted a nonliteral directory name");
+        };
+        assert_eq!(refused.outcome, transfer_native::TransferDirectoryCreateOutcome::NotCreated);
+        assert_eq!(fs::read_dir(selected).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn transfer_copy_native_stage_name_excludes_the_exact_final_name() {
+        let (_temp, selected, _held, _outside) = fixture_tree();
+        let (root, parts) = split_local_absolute_path(&selected).unwrap();
+        let mut parent = transfer_native::TransferDirectory::open_root(&root).unwrap();
+        for (index, name) in parts.iter().enumerate() {
+            parent = if index + 1 == parts.len() {
+                parent.open_create_file_child(name).unwrap()
+            } else {
+                parent.open_child(name).unwrap()
+            };
+        }
+        let mut names = [OsString::from("FINAL.STAGE"), OsString::from("distinct.stage")].into_iter();
+        let stage = parent.create_stage_with_names(
+            OsStr::new("Final.Stage"),
+            || names.next().expect("reserved and distinct stage names"),
+        ).unwrap();
+        assert_eq!(stage.leaf(), OsStr::new("distinct.stage"));
+        assert!(!selected.join("Final.Stage").exists());
+        assert!(selected.join("distinct.stage").exists());
+        stage.abort().unwrap();
+        assert_eq!(fs::read_dir(selected).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn transfer_copy_native_uncertain_rename_keeps_the_actual_published_file() {
+        let (_temp, selected, _held, _outside) = fixture_tree();
+        let directory = NativeArchiveDestination::open(&selected).unwrap().open_descendant(&[]).unwrap();
+        let mut stage = directory.create_stage().unwrap();
+        let saved_identity = stage.identity();
+        stage.write_all_and_sync(b"completed transfer").unwrap();
+        let old_private = selected.join(stage.leaf());
+        let final_leaf = OsStr::new("published.txt");
+        rename_open_file_relative_no_replace(
+            stage.file.as_file(), &directory.directory, final_leaf, saved_identity,
+        ).unwrap();
+        // Inject a failed status at the native result boundary after the
+        // real rename. Recovery must leave the held object at its new name.
+        let injected = NativeFailure::validation(
+            "fixture interrupted rename observation", io::ErrorKind::Other, Some(saved_identity),
+        );
+        let result = stage.finish_rename_failure(injected, true);
+        assert!(result.unconfirmed_name_effect());
+        assert!(!result.cleanup_attempted);
+        drop(stage);
+        assert!(!old_private.exists());
+        let published = selected.join(final_leaf);
+        assert_eq!(fs::read(&published).unwrap(), b"completed transfer");
+        assert_eq!(native_file_identity(&File::open(published).unwrap()).unwrap(), saved_identity);
+    }
+
+    #[test]
+    fn transfer_admission_distinguishes_definitive_leaf_absence_from_other_failures() {
+        use windows::Win32::Foundation::{
+            STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+            STATUS_SHARING_VIOLATION,
+        };
+
+        let refusal = |status| NativeArchiveError::from_ntstatus("transfer test", status, None);
+        assert!(transfer_native::is_missing_relative_leaf(&refusal(
+            STATUS_OBJECT_NAME_NOT_FOUND
+        )));
+        for status in [STATUS_OBJECT_PATH_NOT_FOUND, STATUS_ACCESS_DENIED, STATUS_SHARING_VIOLATION] {
+            assert!(!transfer_native::is_missing_relative_leaf(&refusal(status)));
+        }
+    }
+
+    #[test]
     fn c06_reparse_destination_and_source_ancestors_are_rejected_without_escape() {
         let (root_temp, selected, _held, root_outside) = fixture_tree();
         let archive_path = root_outside.join("source.zip");
@@ -2954,5 +3590,1629 @@ mod tests {
                 && child_cleanup_ok,
             "reparse admission or owned cleanup failed: destination={destination_failure:?}, source={source_failure:?}, descendant={descendant_failure:?}, root_names={root_names:?}, child_names={child_names:?}, sentinels={root_sentinel:?}/{child_sentinel:?}, cleanup={root_cleanup_ok}/{child_cleanup_ok}"
         );
+    }
+}
+
+/// Narrow read-only handle-relative primitives for transfer metadata proofs.
+pub(crate) mod transfer_native {
+    use super::*;
+
+    pub(crate) use super::{NativeArchiveError, split_local_absolute_path};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum TransferDirectoryCreateOutcome {
+        NotCreated,
+        Observed,
+        Ambiguous,
+    }
+    #[derive(Debug)]
+    pub(crate) struct TransferDirectoryCreateFailure {
+        pub(crate) error: NativeArchiveError,
+        pub(crate) outcome: TransferDirectoryCreateOutcome,
+    }
+
+    pub(crate) struct TransferDirectory(Arc<HeldDirectory>);
+
+    impl TransferDirectory {
+        pub(crate) fn open_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            Self::open_root_with_list(root, false)
+        }
+        pub(crate) fn open_listable_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            Self::open_root_with_list(root, true)
+        }
+        fn open_root_with_list(root: &Path, list: bool) -> Result<Self, NativeArchiveError> {
+            let (validated_root, components) = split_local_absolute_path(root)?;
+            if !components.is_empty() {
+                return Err(NativeArchiveError::validation(
+                    "transfer root must be a drive root",
+                    io::ErrorKind::InvalidInput,
+                    None,
+                ));
+            }
+            open_volume_root_with_options(&validated_root, false, false, true, list).map(Self)
+        }
+
+        pub(crate) fn file(&self) -> &File {
+            &self.0.file
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.0.identity
+        }
+        pub(crate) fn verify_identity(&self) -> Result<NativeFileIdentity, NativeArchiveError> {
+            self.0.verify_identity()
+        }
+        pub(crate) fn open_child(&self, name: &OsStr) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, false, false, true, false, false)
+                .map(Self)
+        }
+        pub(crate) fn open_listable_child(&self, name: &OsStr) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, false, false, true, true, false)
+                .map(Self)
+        }
+        pub(crate) fn create_receipt(
+            &self,
+            leaf: &OsStr,
+        ) -> Result<ReceiptFile, NativeArchiveError> {
+            self.open_receipt_inner(leaf, ReceiptMode::Create)
+        }
+        pub(crate) fn open_receipt_read(
+            &self,
+            leaf: &OsStr,
+        ) -> Result<ReceiptFile, NativeArchiveError> {
+            self.open_receipt_inner(leaf, ReceiptMode::Read)
+        }
+        pub(crate) fn open_receipt_prune(
+            &self,
+            leaf: &OsStr,
+        ) -> Result<ReceiptFile, NativeArchiveError> {
+            self.open_receipt_inner(leaf, ReceiptMode::Prune)
+        }
+        fn open_receipt_inner(
+            &self,
+            leaf: &OsStr,
+            mode: ReceiptMode,
+        ) -> Result<ReceiptFile, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_CREATE, FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+                FILE_SYNCHRONOUS_IO_NONALERT, FILE_WRITE_THROUGH, NTCREATEFILE_CREATE_OPTIONS,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE,
+                FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, SYNCHRONIZE,
+            };
+            validate_single_component(leaf, "receipt name")?;
+            verify_receipt_chain(&self.0)?;
+            let creating = matches!(mode, ReceiptMode::Create);
+            let access = FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE
+                | match mode {
+                    ReceiptMode::Create => FILE_GENERIC_WRITE,
+                    ReceiptMode::Read => FILE_READ_DATA,
+                    ReceiptMode::Prune => FILE_READ_DATA | DELETE,
+                }
+                | FILE_ACCESS_RIGHTS(0);
+            let options = FILE_OPEN_NO_RECALL
+                | FILE_OPEN_REPARSE_POINT
+                | FILE_SYNCHRONOUS_IO_NONALERT
+                | if creating {
+                    FILE_WRITE_THROUGH
+                } else {
+                    NTCREATEFILE_CREATE_OPTIONS(0)
+                };
+            let (file, information) = open_relative(
+                &self.0,
+                leaf,
+                access,
+                FILE_SHARE_READ,
+                if creating { FILE_CREATE } else { FILE_OPEN },
+                options,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(receipt)",
+                || Ok(()),
+            )?;
+            if creating && information != 2 {
+                return Err(NativeArchiveError::validation(
+                    "receipt creation was not confirmed",
+                    io::ErrorKind::InvalidData,
+                    Some(self.0.identity),
+                )
+                .with_unconfirmed_name_effect());
+            }
+            let identity = native_file_identity(&file).map_err(|e| {
+                let error =
+                    NativeArchiveError::from_io("FILE_ID_INFO(receipt)", e, Some(self.0.identity));
+                if creating {
+                    error.with_unconfirmed_name_effect()
+                } else {
+                    error
+                }
+            })?;
+            let receipt = ReceiptFile {
+                file,
+                identity,
+                parent: self.0.clone(),
+                leaf: leaf.to_os_string(),
+                mode,
+            };
+            receipt.validate().map_err(|error| {
+                if creating {
+                    error.with_unconfirmed_name_effect()
+                } else {
+                    error
+                }
+            })?;
+            Ok(receipt)
+        }
+        pub(crate) fn open_removable_directory_child(
+            &self,
+            name: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferRemovableDirectory, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+                FILE_SYNCHRONOUS_IO_NONALERT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                DELETE, FILE_ATTRIBUTE_NORMAL, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+                FILE_READ_EA, SYNCHRONIZE,
+            };
+            validate_single_component(name, "transfer removable directory name")?;
+            let (file, _) = open_relative(
+                &self.0,
+                name,
+                DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE,
+                shared_directory_access(),
+                FILE_OPEN,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer removable directory)",
+                || Ok(()),
+            )?;
+            let guard = TransferRemovableDirectory {
+                file,
+                identity: expected,
+                parent: self.0.clone(),
+            };
+            guard.validate()?;
+            Ok(guard)
+        }
+        /// Opens the final destination directory with create-file access only.
+        pub(crate) fn open_create_file_child(
+            &self,
+            name: &OsStr,
+        ) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, true, false, true, false, false)
+                .map(Self)
+        }
+        /// Grants directory creation only on this final child.
+        pub(crate) fn open_create_directory_child(
+            &self,
+            name: &OsStr,
+        ) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, false, true, true, false, false)
+                .map(Self)
+        }
+        /// Grants metadata updates only on this final child.
+        pub(crate) fn open_metadata_write_child(
+            &self,
+            name: &OsStr,
+        ) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, false, false, true, false, true)
+                .map(Self)
+        }
+        pub(crate) fn open_create_directory_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            let (root, parts) = split_local_absolute_path(root)?;
+            if !parts.is_empty() {
+                return Err(NativeArchiveError::validation(
+                    "transfer root must be a drive root",
+                    io::ErrorKind::InvalidInput,
+                    None,
+                ));
+            }
+            open_volume_root_with_options(&root, false, true, true, false).map(Self)
+        }
+        /// Exclusively creates a child; failures never remove or merge entries.
+        pub(crate) fn create_directory(
+            &self,
+            name: &OsStr,
+        ) -> Result<Self, TransferDirectoryCreateFailure> {
+            let mut observed = false;
+            self.0
+                .create_child_observed(name, || observed = true)
+                .map(Self)
+                .map_err(|error| {
+                    let outcome = if observed {
+                        TransferDirectoryCreateOutcome::Observed
+                    } else if error.unconfirmed_name_effect {
+                        TransferDirectoryCreateOutcome::Ambiguous
+                    } else {
+                        TransferDirectoryCreateOutcome::NotCreated
+                    };
+                    TransferDirectoryCreateFailure { error, outcome }
+                })
+        }
+        pub(crate) fn open_create_file_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            let (root, parts) = split_local_absolute_path(root)?;
+            if !parts.is_empty() {
+                return Err(NativeArchiveError::validation(
+                    "transfer root must be a drive root",
+                    io::ErrorKind::InvalidInput,
+                    None,
+                ));
+            }
+            open_volume_root_with_options(&root, true, false, true, false).map(Self)
+        }
+        pub(crate) fn open_relocation(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferRelocation, NativeArchiveError> {
+            self.open_relocation_inner(leaf, expected, false, false, false)
+        }
+        pub(crate) fn open_move_relocation(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+            verify_content: bool,
+        ) -> Result<TransferRelocation, NativeArchiveError> {
+            self.open_relocation_inner(leaf, expected, true, verify_content, false)
+        }
+        pub(crate) fn open_staged_move_source(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferRelocation, NativeArchiveError> {
+            self.open_relocation_inner(leaf, expected, false, true, true)
+        }
+        fn open_relocation_inner(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+            moving: bool,
+            verify_content: bool,
+            read_ea: bool,
+        ) -> Result<TransferRelocation, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+                FILE_SYNCHRONOUS_IO_NONALERT, NTCREATEFILE_CREATE_OPTIONS,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES,
+                FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, SYNCHRONIZE,
+            };
+            validate_single_component(leaf, "transfer relocation source")?;
+            let access = DELETE
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE
+                | if moving {
+                    FILE_WRITE_ATTRIBUTES
+                } else {
+                    FILE_ACCESS_RIGHTS(0)
+                }
+                | if verify_content {
+                    FILE_READ_DATA
+                } else {
+                    FILE_ACCESS_RIGHTS(0)
+                }
+                | if read_ea {
+                    FILE_READ_EA
+                } else {
+                    FILE_ACCESS_RIGHTS(0)
+                };
+            let options = FILE_OPEN_NO_RECALL
+                | FILE_OPEN_REPARSE_POINT
+                | if verify_content {
+                    NTCREATEFILE_CREATE_OPTIONS(0)
+                } else {
+                    FILE_SYNCHRONOUS_IO_NONALERT
+                };
+            let (file, _) = open_relative(
+                &self.0,
+                leaf,
+                access,
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                options,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer relocation)",
+                || Ok(()),
+            )?;
+            let file = if verify_content {
+                let file = VerifiedOverlappedFile::verify(file).map_err(|_| {
+                    NativeArchiveError::validation(
+                        "transfer relocation is not verified overlapped",
+                        io::ErrorKind::InvalidData,
+                        Some(expected),
+                    )
+                })?;
+                RelocationFile::Data(TransferFile {
+                    file,
+                    identity: expected,
+                })
+            } else {
+                RelocationFile::Metadata(file)
+            };
+            let relocation = TransferRelocation {
+                file,
+                identity: expected,
+                parent: self.0.clone(),
+            };
+            relocation.validate()?;
+            Ok(relocation)
+        }
+        pub(crate) fn open_read(&self, name: &OsStr) -> Result<TransferFile, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
+                SYNCHRONIZE,
+            };
+            validate_single_component(name, "transfer source name")?;
+            let (file, _) = open_relative(
+                &self.0,
+                name,
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer source)",
+                || Ok(()),
+            )?;
+            let metadata = file.metadata().map_err(|e| {
+                NativeArchiveError::from_io(
+                    "File::metadata(transfer source)",
+                    e,
+                    Some(self.0.identity),
+                )
+            })?;
+            let identity = native_file_identity(&file).map_err(|e| {
+                NativeArchiveError::from_io(
+                    "FILE_ID_INFO(transfer source)",
+                    e,
+                    Some(self.0.identity),
+                )
+            })?;
+            if !metadata.is_file()
+                || metadata.file_attributes()
+                    & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                    != 0
+                || identity.volume_serial_number() != self.0.identity.volume_serial_number()
+            {
+                return Err(NativeArchiveError::validation(
+                    "transfer source is not an ordinary local file",
+                    io::ErrorKind::InvalidData,
+                    Some(identity),
+                ));
+            }
+            let file = VerifiedOverlappedFile::verify(file).map_err(|_| {
+                NativeArchiveError::validation(
+                    "transfer source is not verified overlapped",
+                    io::ErrorKind::InvalidData,
+                    Some(identity),
+                )
+            })?;
+            Ok(TransferFile { file, identity })
+        }
+        pub(crate) fn create_stage(
+            &self,
+            final_leaf: &OsStr,
+        ) -> Result<TransferStage, TransferStageCreateFailure> {
+            self.create_stage_with_names(final_leaf, default_stage_leaf)
+        }
+
+        pub(crate) fn create_stage_exact(
+            &self,
+            final_leaf: &OsStr,
+            candidate: &OsStr,
+        ) -> Result<TransferStage, TransferStageCreateFailure> {
+            validate_single_component(candidate, "transfer stage candidate").map_err(|error| {
+                TransferStageCreateFailure {
+                    error,
+                    unresolved: None,
+                }
+            })?;
+            self.create_stage_with_limit(final_leaf, || candidate.to_os_string(), 1)
+        }
+        pub(super) fn create_stage_with_names(
+            &self,
+            final_leaf: &OsStr,
+            next_leaf: impl FnMut() -> OsString,
+        ) -> Result<TransferStage, TransferStageCreateFailure> {
+            self.create_stage_with_limit(final_leaf, next_leaf, STAGE_ATTEMPTS)
+        }
+        fn create_stage_with_limit(
+            &self,
+            final_leaf: &OsStr,
+            next_leaf: impl FnMut() -> OsString,
+            attempts: usize,
+        ) -> Result<TransferStage, TransferStageCreateFailure> {
+            use windows::Win32::Storage::FileSystem::{FILE_ACCESS_RIGHTS, FILE_SHARE_MODE};
+            let mut observation = None;
+            let result = (|| {
+                validate_single_component(final_leaf, "transfer destination name")?;
+                self.0.verify_identity()?;
+                OwnedStage::create_with_options(
+                    self.0.clone(),
+                    || Ok(()),
+                    FILE_ACCESS_RIGHTS(0),
+                    FILE_SHARE_MODE(0),
+                    windows::Wdk::Storage::FileSystem::FILE_WRITE_THROUGH,
+                    Some(TransferStageAdmission {
+                        final_leaf,
+                        observation: &mut observation,
+                    }),
+                    next_leaf,
+                    attempts,
+                )
+            })();
+            result.map(TransferStage).map_err(|error| {
+                let unresolved = observation
+                    .filter(|observation| error.cleanup_failed() || !observation.creation_confirmed)
+                    .map(|observation| Box::new(TransferStageAttempt {
+                        leaf: observation.leaf,
+                        identity: observation.identity,
+                    }));
+                TransferStageCreateFailure { error, unresolved }
+            })
+        }
+        pub(crate) fn open_source_zone(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferFile, NativeArchiveError> {
+            self.open_source_zone_inner(leaf, expected, false)
+        }
+        pub(crate) fn open_move_source_zone(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferFile, NativeArchiveError> {
+            self.open_source_zone_inner(leaf, expected, true)
+        }
+        fn open_source_zone_inner(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+            moving: bool,
+        ) -> Result<TransferFile, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+                FILE_SHARE_MODE, FILE_SHARE_READ, SYNCHRONIZE,
+            };
+            let name = zone_name(leaf)?;
+            verify_base(&self.0, leaf, expected)?;
+            let (file, _) = open_relative(
+                &self.0,
+                &name,
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ
+                    | if moving {
+                        FILE_SHARE_DELETE
+                    } else {
+                        FILE_SHARE_MODE(0)
+                    },
+                FILE_OPEN,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer Zone.Identifier read)",
+                || Ok(()),
+            )?;
+            let file = verify_zone_file(file, expected)?;
+            verify_base(&self.0, leaf, expected)?;
+            Ok(file)
+        }
+        pub(crate) fn open_relative_metadata(
+            &self,
+            name: &OsStr,
+        ) -> Result<File, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+                FILE_SYNCHRONOUS_IO_NONALERT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, SYNCHRONIZE,
+            };
+            validate_single_component(name, "transfer relative metadata name")?;
+            open_relative(
+                &self.0,
+                name,
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                shared_directory_access(),
+                FILE_OPEN,
+                FILE_OPEN_REPARSE_POINT | FILE_OPEN_NO_RECALL | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer metadata)",
+                || Ok(()),
+            )
+            .map(|(file, _)| file)
+        }
+    }
+
+    fn zone_name(leaf: &OsStr) -> Result<OsString, NativeArchiveError> {
+        validate_single_component(leaf, "transfer Zone.Identifier base name")?;
+        let mut name = leaf.to_os_string();
+        name.push(":Zone.Identifier:$DATA");
+        Ok(name)
+    }
+    fn verify_base(
+        parent: &Arc<HeldDirectory>,
+        leaf: &OsStr,
+        expected: NativeFileIdentity,
+    ) -> Result<(), NativeArchiveError> {
+        use windows::Wdk::Storage::FileSystem::{
+            FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, SYNCHRONIZE,
+        };
+        validate_single_component(leaf, "transfer Zone.Identifier base name")?;
+        let (file, _) = open_relative(
+            parent,
+            leaf,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            shared_directory_access(),
+            FILE_OPEN,
+            FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            FILE_ATTRIBUTE_NORMAL,
+            "NtCreateFile(transfer Zone.Identifier base)",
+            || Ok(()),
+        )?;
+        let metadata = file.metadata().map_err(|e| {
+            NativeArchiveError::from_io(
+                "File::metadata(transfer Zone.Identifier base)",
+                e,
+                Some(expected),
+            )
+        })?;
+        let actual = native_file_identity(&file).map_err(|e| {
+            NativeArchiveError::from_io(
+                "FILE_ID_INFO(transfer Zone.Identifier base)",
+                e,
+                Some(expected),
+            )
+        })?;
+        if actual != expected
+            || !metadata.is_file()
+            || metadata.file_attributes()
+                & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+        {
+            return Err(NativeArchiveError::validation(
+                "transfer Zone.Identifier base changed or is not ordinary",
+                io::ErrorKind::InvalidData,
+                Some(actual),
+            ));
+        }
+        Ok(())
+    }
+    fn verify_zone_file(
+        file: File,
+        expected: NativeFileIdentity,
+    ) -> Result<TransferFile, NativeArchiveError> {
+        let metadata = file.metadata().map_err(|e| {
+            NativeArchiveError::from_io(
+                "File::metadata(transfer Zone.Identifier)",
+                e,
+                Some(expected),
+            )
+        })?;
+        let actual = native_file_identity(&file).map_err(|e| {
+            NativeArchiveError::from_io("FILE_ID_INFO(transfer Zone.Identifier)", e, Some(expected))
+        })?;
+        if actual != expected
+            || !metadata.is_file()
+            || metadata.file_attributes()
+                & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+        {
+            return Err(NativeArchiveError::validation(
+                "transfer Zone.Identifier does not match the ordinary base",
+                io::ErrorKind::InvalidData,
+                Some(actual),
+            ));
+        }
+        let file = VerifiedOverlappedFile::verify(file).map_err(|_| {
+            NativeArchiveError::validation(
+                "transfer Zone.Identifier is not verified overlapped",
+                io::ErrorKind::InvalidData,
+                Some(actual),
+            )
+        })?;
+        Ok(TransferFile {
+            file,
+            identity: actual,
+        })
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReceiptMode {
+        Create,
+        Read,
+        Prune,
+    }
+
+    fn verify_receipt_chain(parent: &Arc<HeldDirectory>) -> Result<(), NativeArchiveError> {
+        let mut current = Some(parent.as_ref());
+        while let Some(directory) = current {
+            let identity = directory.verify_identity()?;
+            let attributes = query_attribute_tag(
+                &directory.file,
+                "FileAttributeTagInformation(receipt ancestor)",
+                identity,
+            )
+            .map_err(|primary| NativeArchiveError {
+                primary,
+                cleanup_attempted: false,
+                cleanup_failure: None,
+                cleanup_failed: false,
+                unconfirmed_name_effect: false,
+            })?;
+            if attributes.FileAttributes
+                & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+                || crate::file_operations::has_cloud_placeholder_attributes(
+                    attributes.FileAttributes,
+                )
+            {
+                return Err(NativeArchiveError::validation(
+                    "receipt ancestor is a reparse point or unavailable",
+                    io::ErrorKind::InvalidData,
+                    Some(identity),
+                ));
+            }
+            current = directory.parent.as_deref();
+        }
+        Ok(())
+    }
+
+    /// Owns the exact synchronous receipt handle; drop only closes it.
+    pub(crate) struct ReceiptFile {
+        file: File,
+        identity: NativeFileIdentity,
+        parent: Arc<HeldDirectory>,
+        leaf: OsString,
+        mode: ReceiptMode,
+    }
+    impl ReceiptFile {
+        pub(crate) fn file(&self) -> &File {
+            &self.file
+        }
+        pub(crate) fn file_mut(&mut self) -> &mut File {
+            &mut self.file
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.identity
+        }
+        pub(crate) fn try_clone_file(&self) -> io::Result<File> {
+            if !matches!(self.mode, ReceiptMode::Create) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "only a newly created receipt can be cloned for writing",
+                ));
+            }
+            self.file.try_clone()
+        }
+        pub(crate) fn validate(&self) -> Result<(), NativeArchiveError> {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+            };
+            verify_receipt_chain(&self.parent)?;
+            let actual = native_file_identity(&self.file).map_err(|e| {
+                NativeArchiveError::from_io("FILE_ID_INFO(receipt)", e, Some(self.identity))
+            })?;
+            let meta = self.file.metadata().map_err(|e| {
+                NativeArchiveError::from_io("File::metadata(receipt)", e, Some(actual))
+            })?;
+            let mut standard = FILE_STANDARD_INFO::default();
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(self.file.as_raw_handle() as _),
+                    FileStandardInfo,
+                    std::ptr::from_mut(&mut standard).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            }
+            .map_err(|e| {
+                NativeArchiveError::from_win32("FileStandardInfo(receipt)", e, Some(actual))
+            })?;
+            if actual != self.identity
+                || actual.file_id() == [0; 16]
+                || actual.volume_serial_number() != self.parent.identity.volume_serial_number()
+                || !meta.is_file()
+                || standard.Directory.0 != 0
+                || standard.NumberOfLinks != 1
+                || standard.DeletePending.0 != 0
+                || meta.file_attributes()
+                    & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                    != 0
+                || crate::file_operations::has_cloud_placeholder_attributes(meta.file_attributes())
+            {
+                return Err(NativeArchiveError::validation(
+                    "receipt is not an ordinary single-link local file",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            let parent_path = crate::file_operations::final_path_for_handle(&self.parent.file)
+                .map_err(|e| {
+                    NativeArchiveError::from_io(
+                        "final path(receipt parent)",
+                        e,
+                        Some(self.parent.identity),
+                    )
+                })?;
+            let file_path = crate::file_operations::final_path_for_handle(&self.file)
+                .map_err(|e| NativeArchiveError::from_io("final path(receipt)", e, Some(actual)))?;
+            if !crate::batch_rename::compare_paths_windows_ordinal(
+                &parent_path.join(&self.leaf),
+                &file_path,
+            )
+            .is_eq()
+            {
+                return Err(NativeArchiveError::validation(
+                    "receipt name changed or is an alternate name",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            verify_receipt_chain(&self.parent)
+        }
+        pub(crate) fn mark_delete_pending(&self) -> Result<(), NativeArchiveError> {
+            if !matches!(self.mode, ReceiptMode::Prune) {
+                return Err(NativeArchiveError::validation(
+                    "receipt was not opened for pruning",
+                    io::ErrorKind::PermissionDenied,
+                    Some(self.identity),
+                ));
+            }
+            self.validate()?;
+            delete_open_file(&self.file, self.identity).map_err(|primary| NativeArchiveError {
+                primary,
+                cleanup_attempted: false,
+                cleanup_failure: None,
+                cleanup_failed: false,
+                unconfirmed_name_effect: true,
+            })?;
+            verify_receipt_chain(&self.parent)
+                .map_err(NativeArchiveError::with_unconfirmed_name_effect)
+        }
+    }
+
+    /// Holds the exact directory and parent; Drop never marks it for deletion.
+    pub(crate) struct TransferRemovableDirectory {
+        file: File,
+        identity: NativeFileIdentity,
+        parent: Arc<HeldDirectory>,
+    }
+    impl TransferRemovableDirectory {
+        pub(crate) fn file(&self) -> &File {
+            &self.file
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.identity
+        }
+        fn validate(&self) -> Result<(), NativeArchiveError> {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+            };
+            self.parent.verify_identity()?;
+            let actual = native_file_identity(&self.file).map_err(|e| {
+                NativeArchiveError::from_io(
+                    "FILE_ID_INFO(transfer removable directory)",
+                    e,
+                    Some(self.identity),
+                )
+            })?;
+            let metadata = self.file.metadata().map_err(|e| {
+                NativeArchiveError::from_io(
+                    "File::metadata(transfer removable directory)",
+                    e,
+                    Some(actual),
+                )
+            })?;
+            let mut standard = FILE_STANDARD_INFO::default();
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(self.file.as_raw_handle() as _),
+                    FileStandardInfo,
+                    std::ptr::from_mut(&mut standard).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            }
+            .map_err(|e| {
+                NativeArchiveError::from_win32(
+                    "FileStandardInfo(transfer removable directory)",
+                    e,
+                    Some(actual),
+                )
+            })?;
+            if actual != self.identity
+                || actual.file_id() == [0; 16]
+                || actual.volume_serial_number() != self.parent.identity.volume_serial_number()
+                || !metadata.is_dir()
+                || standard.Directory.0 == 0
+                || standard.DeletePending.0 != 0
+                || metadata.file_attributes()
+                    & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                    != 0
+                || crate::file_operations::has_cloud_placeholder_attributes(
+                    metadata.file_attributes(),
+                )
+            {
+                return Err(NativeArchiveError::validation(
+                    "transfer removable source is not an ordinary local directory",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            Ok(())
+        }
+        pub(crate) fn require_no_extended_attributes(&self) -> Result<(), NativeArchiveError> {
+            self.validate()?;
+            require_no_extended_attributes(&self.file, self.identity)
+        }
+        /// Rename this exact held directory within a verified parent, without replacing a name.
+        pub(crate) fn rename_no_replace(&self, target: &TransferDirectory, leaf: &OsStr) -> Result<(), NativeArchiveError> {
+            validate_single_component(leaf, "transfer directory rename target")?;
+            self.validate()?;
+            target.0.verify_identity()?;
+            if self.identity.volume_serial_number() != target.0.identity.volume_serial_number() {
+                return Err(NativeArchiveError::validation("transfer directory rename crosses volumes", io::ErrorKind::InvalidInput, Some(self.identity)));
+            }
+            rename_open_file_relative_no_replace(&self.file, &target.0, leaf, self.identity).map_err(|primary| {
+                let collision = primary.nt_status == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION.0);
+                NativeArchiveError { primary, cleanup_attempted: false, cleanup_failure: None, cleanup_failed: false, unconfirmed_name_effect: !collision }
+            })
+        }
+        /// Nonrecursive disposition; caller verifies emptiness and eventual absence.
+        pub(crate) fn mark_delete_pending(&self) -> Result<(), NativeArchiveError> {
+            self.validate()?;
+            delete_open_file(&self.file, self.identity).map_err(|primary| NativeArchiveError {
+                primary,
+                cleanup_attempted: false,
+                cleanup_failure: None,
+                cleanup_failed: false,
+                unconfirmed_name_effect: true,
+            })
+        }
+    }
+
+    fn require_no_extended_attributes(
+        file: &File,
+        identity: NativeFileIdentity,
+    ) -> Result<(), NativeArchiveError> {
+        use windows::Wdk::Storage::FileSystem::{
+            FILE_EA_INFORMATION, FileEaInformation, NtQueryInformationFile,
+        };
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::IO::IO_STATUS_BLOCK;
+        let mut info = FILE_EA_INFORMATION::default();
+        let mut io_status = IO_STATUS_BLOCK::default();
+        // SAFETY: the retained handle and both output buffers remain valid
+        // for this synchronous metadata query.
+        let status = unsafe {
+            NtQueryInformationFile(
+                HANDLE(file.as_raw_handle() as _),
+                &mut io_status,
+                std::ptr::from_mut(&mut info).cast(),
+                std::mem::size_of::<FILE_EA_INFORMATION>() as u32,
+                FileEaInformation,
+            )
+        };
+        let completed = unsafe { io_status.Anonymous.Status };
+        if status.0 != 0 || completed.0 != 0 {
+            let status = if status.0 != 0 { status } else { completed };
+            return Err(NativeArchiveError::from_ntstatus(
+                "NtQueryInformationFile(FileEaInformation)",
+                status,
+                Some(identity),
+            ));
+        }
+        if io_status.Information < std::mem::size_of::<FILE_EA_INFORMATION>() || info.EaSize != 0 {
+            return Err(NativeArchiveError::validation(
+                "transfer source has extended attributes or an incomplete EA query",
+                io::ErrorKind::Unsupported,
+                Some(identity),
+            ));
+        }
+        Ok(())
+    }
+
+    enum RelocationFile {
+        Metadata(File),
+        Data(TransferFile),
+    }
+    /// Owns the exact source handle and its parent; dropping never deletes it.
+    pub(crate) struct TransferRelocation {
+        file: RelocationFile,
+        identity: NativeFileIdentity,
+        parent: Arc<HeldDirectory>,
+    }
+    impl TransferRelocation {
+        pub(crate) fn file(&self) -> &File {
+            match &self.file {
+                RelocationFile::Metadata(file) => file,
+                RelocationFile::Data(file) => file.file(),
+            }
+        }
+        pub(crate) fn data_file(&self) -> Option<&TransferFile> {
+            match &self.file {
+                RelocationFile::Data(file) => Some(file),
+                RelocationFile::Metadata(_) => None,
+            }
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.identity
+        }
+        fn validate(&self) -> Result<(), NativeArchiveError> {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+            };
+            self.parent.verify_identity()?;
+            let actual = native_file_identity(self.file()).map_err(|e| {
+                NativeArchiveError::from_io(
+                    "FILE_ID_INFO(transfer relocation)",
+                    e,
+                    Some(self.identity),
+                )
+            })?;
+            let metadata = self.file().metadata().map_err(|e| {
+                NativeArchiveError::from_io("File::metadata(transfer relocation)", e, Some(actual))
+            })?;
+            let mut standard = FILE_STANDARD_INFO::default();
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(self.file().as_raw_handle() as _),
+                    FileStandardInfo,
+                    std::ptr::from_mut(&mut standard).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            }
+            .map_err(|e| {
+                NativeArchiveError::from_win32(
+                    "FileStandardInfo(transfer relocation)",
+                    e,
+                    Some(actual),
+                )
+            })?;
+            if actual != self.identity
+                || actual.volume_serial_number() != self.parent.identity.volume_serial_number()
+                || actual.file_id() == [0; 16]
+                || !metadata.is_file()
+                || metadata.file_attributes()
+                    & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                    != 0
+                || crate::file_operations::has_cloud_placeholder_attributes(
+                    metadata.file_attributes(),
+                )
+                || standard.NumberOfLinks != 1
+                || standard.DeletePending.0 != 0
+            {
+                return Err(NativeArchiveError::validation(
+                    "transfer relocation is not a single-link ordinary local file",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            Ok(())
+        }
+        /// Requires a successful, complete query proving there are no EAs.
+        pub(crate) fn require_no_extended_attributes(&self) -> Result<(), NativeArchiveError> {
+            self.validate()?;
+            require_no_extended_attributes(self.file(), self.identity)
+        }
+        /// Marks this exact held object for non-POSIX deletion; absence must
+        /// be checked independently after all source handles are closed.
+        pub(crate) fn mark_delete_pending(&self) -> Result<(), NativeArchiveError> {
+            self.validate()?;
+            delete_open_file(self.file(), self.identity).map_err(|primary| NativeArchiveError {
+                primary,
+                cleanup_attempted: false,
+                cleanup_failure: None,
+                cleanup_failed: false,
+                unconfirmed_name_effect: true,
+            })
+        }
+        pub(crate) fn rename_no_replace(
+            &self,
+            target: &TransferDirectory,
+            leaf: &OsStr,
+        ) -> Result<(), NativeArchiveError> {
+            validate_single_component(leaf, "transfer relocation target")?;
+            self.validate()?;
+            target.0.verify_identity()?;
+            if self.identity.volume_serial_number() != target.0.identity.volume_serial_number() {
+                return Err(NativeArchiveError::validation(
+                    "transfer relocation destination is on another volume",
+                    io::ErrorKind::InvalidInput,
+                    Some(self.identity),
+                ));
+            }
+            rename_open_file_relative_no_replace(self.file(), &target.0, leaf, self.identity)
+                .map_err(|primary| {
+                    let confirmed_collision = primary.nt_status
+                        == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION.0);
+                    NativeArchiveError {
+                        primary,
+                        cleanup_attempted: false,
+                        cleanup_failure: None,
+                        cleanup_failed: false,
+                        unconfirmed_name_effect: !confirmed_collision,
+                    }
+                })
+        }
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct TransferFile {
+        file: VerifiedOverlappedFile,
+        identity: NativeFileIdentity,
+    }
+    impl TransferFile {
+        pub(crate) fn file(&self) -> &File {
+            self.file.as_file()
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.identity
+        }
+    }
+    impl TransferFile {
+        pub(crate) fn flush(&self) -> Result<(), NativeArchiveError> {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::FlushFileBuffers;
+            let actual = native_file_identity(self.file.as_file()).map_err(|e| {
+                NativeArchiveError::from_io("FILE_ID_INFO(transfer flush)", e, Some(self.identity))
+            })?;
+            if actual != self.identity {
+                return Err(NativeArchiveError::validation(
+                    "transfer file identity changed before flush",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            unsafe { FlushFileBuffers(HANDLE(self.file.as_file().as_raw_handle() as _)) }.map_err(
+                |e| {
+                    NativeArchiveError::from_win32(
+                        "FlushFileBuffers(transfer file)",
+                        e,
+                        Some(actual),
+                    )
+                },
+            )
+        }
+    }
+    #[derive(Clone)]
+    pub(crate) struct TransferIo(ArchiveIoControl);
+    impl TransferIo {
+        pub(crate) fn new(cancellation: ScanCancellation) -> Self {
+            Self(ArchiveIoControl::new(cancellation))
+        }
+        pub(crate) fn cancel(&self) {
+            self.0.cancel();
+        }
+        pub(crate) fn is_cancelled(&self) -> bool {
+            self.0.is_cancelled()
+        }
+        pub(crate) fn write_at(
+            &self,
+            file: &TransferFile,
+            offset: u64,
+            bytes: Box<[u8]>,
+        ) -> io::Result<usize> {
+            self.0.write_at(&file.file, offset, bytes)
+        }
+        pub(crate) fn read_at(
+            &self,
+            file: &TransferFile,
+            offset: u64,
+            length: usize,
+        ) -> io::Result<(Box<[u8]>, usize)> {
+            self.0.read_at(&file.file, offset, length)
+        }
+    }
+    #[derive(Debug)]
+    pub(crate) struct TransferStageAttempt {
+        pub(crate) leaf: OsString,
+        pub(crate) identity: Option<NativeFileIdentity>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct TransferStageCreateFailure {
+        pub(crate) error: NativeArchiveError,
+        pub(crate) unresolved: Option<Box<TransferStageAttempt>>,
+    }
+
+    pub(crate) struct TransferStage(OwnedStage);
+    impl TransferStage {
+        pub(crate) fn leaf(&self) -> &OsStr {
+            &self.0.leaf
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.0.identity()
+        }
+        pub(crate) fn file(&self) -> &File {
+            self.0.file.as_file()
+        }
+        pub(crate) fn write(
+            &self,
+            io: &TransferIo,
+            offset: u64,
+            bytes: &[u8],
+        ) -> Result<usize, NativeArchiveError> {
+            self.0.write_chunk(&io.0, offset, bytes)
+        }
+        pub(crate) fn flush(&self) -> Result<(), NativeArchiveError> {
+            self.0.flush_final()
+        }
+        pub(crate) fn create_zone(&self) -> Result<TransferFile, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_CREATE, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT, FILE_WRITE_THROUGH,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+                FILE_WRITE_DATA, SYNCHRONIZE,
+            };
+            let expected = self.0.identity;
+            let name = zone_name(&self.0.leaf)?;
+            verify_base(&self.0.parent, &self.0.leaf, expected)?;
+            let (file, information) = open_relative(
+                &self.0.parent,
+                &name,
+                FILE_WRITE_DATA | FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_DELETE,
+                FILE_CREATE,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_WRITE_THROUGH,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer Zone.Identifier create)",
+                || Ok(()),
+            )?;
+            if information != 2 {
+                return Err(NativeArchiveError::validation(
+                    "transfer Zone.Identifier was not created",
+                    io::ErrorKind::InvalidData,
+                    Some(expected),
+                ));
+            }
+            let file = verify_zone_file(file, expected)?;
+            verify_base(&self.0.parent, &self.0.leaf, expected)?;
+            Ok(file)
+        }
+        pub(crate) fn abort(self) -> Result<(), NativeArchiveError> {
+            self.0.abort()
+        }
+        pub(crate) fn publish(
+            self,
+            name: &OsStr,
+            admit: impl FnOnce() -> bool,
+        ) -> Result<TransferFile, NativeArchiveError> {
+            self.0
+                .publish_admitted(name, admit, true)
+                .map(|(identity, file)| TransferFile { file, identity })
+        }
+    }
+
+    pub(crate) fn is_missing_relative_leaf(error: &NativeArchiveError) -> bool {
+        !error.unconfirmed_name_effect
+            && error.primary.nt_status
+                == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.0)
+    }
+}
+
+/// Narrow handle-relative primitives for guarded PDF publication.
+pub(crate) mod print_publication {
+    use super::*;
+    use windows::Wdk::Storage::FileSystem::{
+        FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+
+    fn error(error: NativeArchiveError) -> io::Error {
+        io::Error::new(error.kind(), error.to_string())
+    }
+    fn failure(error: NativeFailure) -> io::Error {
+        io::Error::new(error.kind, format!("{error:?}"))
+    }
+    pub(crate) struct Directory(Arc<HeldDirectory>);
+    pub(crate) struct ReadFile {
+        file: File,
+        _parent: Arc<HeldDirectory>,
+    }
+    impl io::Read for ReadFile {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.file.read(buffer)
+        }
+    }
+    pub(crate) struct Leaf {
+        file: File,
+        identity: NativeFileIdentity,
+    }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct Revision {
+        pub identity: NativeFileIdentity,
+        pub size: u64,
+        pub creation: i64,
+        pub modified: i64,
+        pub changed: i64,
+        pub attributes: u32,
+    }
+    pub(crate) fn validate_pdf_attributes(attributes: u32) -> io::Result<()> {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_SYSTEM,
+        };
+        crate::file_operations::validate_replace_basic_attributes(attributes)?;
+        if attributes
+            & (FILE_ATTRIBUTE_HIDDEN.0
+                | FILE_ATTRIBUTE_SYSTEM.0
+                | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED.0)
+            != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PDF replacement refuses special file attributes",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) struct Stage(OwnedStage);
+    impl Directory {
+        pub(crate) fn open(path: &Path, writable: bool) -> io::Result<Self> {
+            {
+                let (root, parts) = split_local_absolute_path(path).map_err(error)?;
+                let mut current =
+                    open_volume_root_with_access(&root, writable && parts.is_empty(), false)
+                        .map_err(error)?;
+                for (index, part) in parts.iter().enumerate() {
+                    current = current
+                        .open_child_with_access(part, writable && index + 1 == parts.len(), false)
+                        .map_err(error)?;
+                }
+                Ok(Self(current))
+            }
+        }
+        /// Open a plain asset relative to the held root, retaining every parent
+        /// handle until the caller finishes reading.
+        pub(crate) fn read_relative_file(&self, path: &Path) -> io::Result<ReadFile> {
+            let mut components = path.components().peekable();
+            let mut parent = Arc::clone(&self.0);
+            while let Some(component) = components.next() {
+                let std::path::Component::Normal(name) = component else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid asset path",
+                    ));
+                };
+                if components.peek().is_some() {
+                    parent = parent.open_child(name, false).map_err(error)?;
+                    continue;
+                }
+                validate_single_component(name, "print asset leaf").map_err(error)?;
+                let (file, _) = open_relative(
+                    &parent,
+                    name,
+                    FILE_READ_ATTRIBUTES
+                        | windows::Win32::Storage::FileSystem::FILE_READ_DATA
+                        | SYNCHRONIZE,
+                    FILE_SHARE_READ,
+                    FILE_OPEN,
+                    FILE_NON_DIRECTORY_FILE
+                        | FILE_OPEN_REPARSE_POINT
+                        | FILE_SYNCHRONOUS_IO_NONALERT,
+                    FILE_ATTRIBUTE_NORMAL,
+                    "open print asset",
+                    || Ok(()),
+                )
+                .map_err(error)?;
+                let metadata = file.metadata()?;
+                let attributes = metadata.file_attributes();
+                if !metadata.is_file()
+                    || attributes
+                        & (FILE_ATTRIBUTE_REPARSE_POINT.0
+                            | FILE_ATTRIBUTE_DIRECTORY.0
+                            | windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_OFFLINE.0)
+                        != 0
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "print asset is not an available ordinary file",
+                    ));
+                }
+                if native_file_identity(&file)?.volume_serial_number()
+                    != parent.identity.volume_serial_number()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "print asset changed volume",
+                    ));
+                }
+                return Ok(ReadFile {
+                    file,
+                    _parent: parent,
+                });
+            }
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "empty asset path",
+            ))
+        }
+        pub(crate) fn identity(&self) -> io::Result<NativeFileIdentity> {
+            self.0.verify_identity().map_err(error)
+        }
+        pub(crate) fn leaf(&self, name: &OsStr, guard: bool) -> io::Result<Option<Leaf>> {
+            let access = FILE_READ_ATTRIBUTES
+                | windows::Win32::Storage::FileSystem::FILE_READ_DATA
+                | SYNCHRONIZE
+                | if guard {
+                    DELETE | windows::Win32::Storage::FileSystem::READ_CONTROL
+                } else {
+                    windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0)
+                };
+            let sharing = if guard {
+                FILE_SHARE_READ
+            } else {
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+            };
+            let file = match open_relative(
+                &self.0,
+                name,
+                access,
+                sharing,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "open PDF destination",
+                || Ok(()),
+            ) {
+                Ok((file, _)) => file,
+                Err(e) if e.primary.nt_status == Some(0xc000_0034u32 as i32) => return Ok(None),
+                Err(e) => return Err(error(e)),
+            };
+            let metadata = file.metadata()?;
+            let attrs = metadata.file_attributes();
+            if !metadata.is_file()
+                || attrs & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0) != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PDF destination is not an ordinary file",
+                ));
+            }
+            let actual = crate::file_operations::final_path_for_handle(&file)?;
+            let actual_leaf = actual.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "destination has no final name")
+            })?;
+            if !crate::batch_rename::compare_paths_windows_ordinal(
+                Path::new(actual_leaf),
+                Path::new(name),
+            )
+            .is_eq()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "destination leaf is an alternate name",
+                ));
+            }
+            let identity = native_file_identity(&file)?;
+            Ok(Some(Leaf { file, identity }))
+        }
+        pub(crate) fn source_leaf(&self, name: &OsStr, guard: bool) -> io::Result<Option<Leaf>> {
+            let file = match open_relative(
+                &self.0,
+                name,
+                FILE_READ_ATTRIBUTES
+                    | SYNCHRONIZE
+                    | if guard {
+                        windows::Win32::Storage::FileSystem::FILE_READ_DATA
+                    } else {
+                        windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0)
+                    },
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "open PDF active source",
+                || Ok(()),
+            ) {
+                Ok((file, _)) => file,
+                Err(e) if e.primary.nt_status == Some(0xc000_0034u32 as i32) => return Ok(None),
+                Err(e) => return Err(error(e)),
+            };
+            let meta = file.metadata()?;
+            if !meta.is_file()
+                || meta.file_attributes()
+                    & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0)
+                    != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "active source is not an ordinary file",
+                ));
+            }
+            let identity = native_file_identity(&file)?;
+            Ok(Some(Leaf { file, identity }))
+        }
+        pub(crate) fn stage(&self, security: bool) -> io::Result<Stage> {
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ACCESS_RIGHTS, FILE_SHARE_MODE, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+            };
+            let extra = if security {
+                READ_CONTROL | WRITE_DAC | WRITE_OWNER
+            } else {
+                FILE_ACCESS_RIGHTS(0)
+            };
+            self.0.verify_identity().map_err(error)?;
+            OwnedStage::create_after_parent_validation_with_access(
+                self.0.clone(),
+                || Ok(()),
+                extra,
+                FILE_SHARE_MODE(0),
+            )
+            .map(Stage)
+            .map_err(error)
+        }
+        pub(crate) fn rename(&self, leaf: &Leaf, name: &OsStr) -> io::Result<()> {
+            self.identity()?;
+            rename_open_file_relative_no_replace(&leaf.file, &self.0, name, leaf.identity)
+                .map_err(failure)
+        }
+    }
+    impl Leaf {
+        pub(crate) fn revision(&self) -> io::Result<Revision> {
+            if native_file_identity(&self.file)? != self.identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "held PDF destination identity changed",
+                ));
+            }
+            let info = crate::file_operations::query_replace_basic_info(&self.file)?;
+            let metadata = self.file.metadata()?;
+            if !metadata.is_file()
+                || info.FileAttributes
+                    & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0)
+                    != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PDF destination is not an ordinary file",
+                ));
+            }
+            Ok(Revision {
+                identity: self.identity,
+                size: metadata.len(),
+                creation: info.CreationTime,
+                modified: info.LastWriteTime,
+                changed: info.ChangeTime,
+                attributes: info.FileAttributes,
+            })
+        }
+        pub(crate) fn fingerprint(
+            &self,
+            cancel: &mut impl FnMut() -> bool,
+        ) -> io::Result<(Revision, [u8; 32])> {
+            use sha2::{Digest, Sha256};
+            use std::io::{Read, Seek, SeekFrom};
+            let before = self.revision()?;
+            if before.size > crate::notes_markdown::print_layout::MAX_OUTPUT_BYTES as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "existing PDF exceeds the review size limit",
+                ));
+            }
+            let mut input = self.file.try_clone()?;
+            input.seek(SeekFrom::Start(0))?;
+            let mut hash = Sha256::new();
+            let mut total = 0u64;
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                if cancel() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "PDF review cancelled",
+                    ));
+                }
+                let n = input.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                total += n as u64;
+                if total > crate::notes_markdown::print_layout::MAX_OUTPUT_BYTES as u64 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "existing PDF exceeds the review size limit",
+                    ));
+                }
+                hash.update(&buffer[..n]);
+            }
+            if self.revision()? != before || total != before.size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "existing PDF changed while reviewed",
+                ));
+            }
+            Ok((before, hash.finalize().into()))
+        }
+        pub(crate) fn validate_security(&self) -> io::Result<()> {
+            let attributes =
+                crate::file_operations::query_replace_basic_info(&self.file)?.FileAttributes;
+            validate_pdf_attributes(attributes)?;
+            crate::file_operations::ensure_unnamed_stream_only(&self.file)
+        }
+        pub(crate) fn dispose(self) -> io::Result<()> {
+            delete_open_file(&self.file, self.identity).map_err(failure)
+        }
+    }
+    impl Stage {
+        pub(crate) fn copy_security(&self, original: &Leaf) -> io::Result<()> {
+            crate::file_operations::copy_replace_security(&original.file, self.0.file.as_file())
+        }
+        pub(crate) fn write(
+            &self,
+            bytes: &[u8],
+            cancel: &mut impl FnMut() -> bool,
+        ) -> io::Result<()> {
+            let io = ArchiveIoControl::new(ScanCancellation::new());
+            let mut offset = 0u64;
+            for chunk in bytes.chunks(64 * 1024) {
+                let mut done = 0;
+                while done < chunk.len() {
+                    if cancel() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "PDF publication cancelled",
+                        ));
+                    }
+                    let n = self
+                        .0
+                        .write_chunk(&io, offset + done as u64, &chunk[done..])
+                        .map_err(error)?;
+                    if n == 0 || n > chunk.len() - done {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "invalid PDF stage write",
+                        ));
+                    }
+                    done += n;
+                }
+                offset += chunk.len() as u64;
+            }
+            self.0.flush_final().map_err(error)
+        }
+        pub(crate) fn name(&self) -> OsString {
+            self.0.leaf.clone()
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.0.identity()
+        }
+        pub(crate) fn publish(
+            self,
+            name: &OsStr,
+            admit: impl FnOnce() -> bool,
+        ) -> Result<NativeFileIdentity, (io::Error, Option<(OsString, NativeFileIdentity)>)>
+        {
+            let leaf = self.0.leaf.clone();
+            let identity = self.0.identity();
+            self.0.publish_admitted(name, admit, false).map(|(identity, _)| identity).map_err(|e| {
+                let retained = e.cleanup_failed().then_some((leaf, identity));
+                (error(e), retained)
+            })
+        }
+        pub(crate) fn abort(self) -> io::Result<()> {
+            self.0.abort().map_err(error)
+        }
     }
 }

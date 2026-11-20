@@ -8,14 +8,25 @@ recomputes after an edit, undo, or redo changes that revision. Ordinary small
 calculations use the cached synchronous path; repeated script work runs in a
 bounded background evaluation, with pending results identified in the UI.
 
-The Pad's **Config Menu → Tools → Examples & reference** window has a pinned search and executable
-examples with expected results. Use **Pop Out** to keep it in a separate native
-window, or **Dock** to return it to the launcher; its search and scroll position
-are retained when moving between presentations. Search matches group names,
-titles, source, and keywords without regard to case; matching examples are
-shown even if their group was collapsed. Select **Copy example**, then paste the
-source into the Pad to run it. The arrow beneath each example shows its expected
-result or diagnostic. Clearing search restores the ordinary groups.
+Open **Config Menu → Tools → Examples & Reference** and choose **API Reference**
+to search the offline catalog by name, type, alias or concept. Searching
+`remove last element` finds `pop(vector)`. Press Enter to open the top result,
+or use Tab and Enter to choose a result. Each entry includes an executable
+example, its expected result and related entries. **Back to results** returns to
+the previous search. **Grouped Examples** keeps the existing examples and
+their own search.
+
+Use **Copy Example** to copy the exact source. To insert it, place the source
+caret at the start of a top-level line or the end of the Pad, or select complete
+top-level lines, then choose **Insert Example into Pad**. Review any reported
+name collisions or affected physical row references before confirming. Undo
+restores the previous source in one edit. In Manual mode, use Calculate when
+you want results. Browsing entries leaves the draft and clipboard alone.
+
+Use **Pop Out** to keep the reference in its own native window or **Dock** to
+return it to the launcher. Search, selected entries and scroll positions are
+retained. Physical unit entries show accepted symbols and aliases from the
+shared unit catalog.
 
 ## Lines and names
 
@@ -261,6 +272,12 @@ intermediate values produce line-local errors. Matching empty element-wise
 operations and valid scalar scaling return `[]`; `dot([], [])` is zero and
 `[] / 0` fails. `+` remains element-wise addition.
 
+The executable reference catalog tracks vector calls against the Pad's evaluator
+signatures, with argument ranges, failure cases and expected results. For
+example, searching for the operation “remove last element” describes
+`pop([10, 20, 30])`, which returns `[10, 20]`. Use `last([10, 20, 30])`
+to read the scalar `30` separately.
+
 Collection calls are case-insensitive and produce new values without changing
 their inputs or previous results. `range()` remains a sequence and can be used
 as a loop iterable, while these operations require vectors.
@@ -273,6 +290,58 @@ as a loop iterable, while these operations require vectors.
   requested element is unavailable. `len(v)` returns the component count.
 * `slice(v, start, end)` uses a zero-based inclusive start and exclusive end.
   Equal endpoints return `[]`. `reverse(v)` returns a reversed vector.
+* `sort(v)` and `sort_desc(v)` return stable numeric ordering in ascending and
+  descending order. Equal values preserve their input order, including signed
+  zeros. `unique(v)` keeps the first occurrence of each numeric value, treating
+  positive and negative zero as equal and preserving the first representation.
+  All three accept empty vectors and leave the original unchanged.
+* `map(v, function, extra_args...)`, `filter(v, function, extra_args...)`,
+  `count_if(v, function, extra_args...)` and
+  `find_indices(v, function, extra_args...)` use a previously declared
+  formula name as the second argument. Each call receives the current element
+  followed by the explicit extra arguments. Map returns finite dimensionless
+  scalars. The other callbacks must return Boolean values. Filter retains
+  matching elements, count_if returns their count, and find_indices returns
+  their zero-based positions. Empty input returns an empty vector or zero, but
+  the callback name and arity are still checked.
+* `cumsum(v)` and `cumprod(v)` return cumulative sums and products with the
+  same length as their input. `diff(v)` returns consecutive differences.
+  `percent_changes(v)` returns `(current - previous) / previous` as ratios,
+  so `0.2` means 20%. A zero previous value is an error.
+* `rolling_sum(v, window)`, `rolling_average(v, window)`,
+  `rolling_min(v, window)` and `rolling_max(v, window)` use complete trailing
+  windows. The window is a positive integral ordinary scalar. The output has
+  `max(len(v) - window + 1, 0)` values. For charts, align an existing X vector
+  with `slice(x, window - 1, len(x))` when a complete window exists.
+  Nonfinite intermediate arithmetic produces an error.
+* `quantile(v, q)` uses `q` from 0 to 1. `percentile(v, p)` uses
+  `p` from 0 to 100. Both sort a copy and linearly interpolate at index
+  `(len(v) - 1) * q`. They require a nonempty vector.
+* `variance_population(v)` divides the sum of squared deviations by the
+  number of values. `variance_sample(v)` and `stdev_sample(v)` use one
+  fewer than the number of values and require at least two. The existing
+  `stdev(v)` remains the population standard deviation. Results that cannot
+  be represented as finite scalars report an error.
+* `covariance_population(x, y)` and `covariance_sample(x, y)` use paired
+  equal-length vectors and divide by `n` and `n - 1`, respectively.
+  Population covariance needs one pair and sample covariance needs two.
+  `correlation(x, y)` returns Pearson's correlation and requires two
+  nonconstant vectors.
+* `regression_slope(x, y)`, `regression_intercept(x, y)`, and
+  `regression_r2(x, y)` describe a least-squares straight line with an
+  intercept. `predict_linear(x, y, x_new)` evaluates that line. Extrapolation
+  outside the observed X range is an estimate. A fit needs at least two pairs
+  and nonconstant X. Constant Y yields a zero slope and its constant value as
+  intercept and prediction, while correlation and R-squared are undefined.
+
+Previously declared local formula functions named `sort`, `sort_desc`,
+`unique`, `map`, `filter`, `count_if`, `find_indices`, `cumsum`,
+`cumprod`, `diff`, `percent_changes`, `rolling_sum`, `rolling_average`,
+`rolling_min`, `rolling_max`, `quantile`, `percentile`,
+`variance_population`, `variance_sample`, `stdev_sample`,
+`covariance_population`, `covariance_sample`, `correlation`,
+`regression_slope`, `regression_intercept`, `regression_r2` or
+`predict_linear` retain precedence for calls using the same spelling.
 
 Indexes must be finite, nonnegative integral ordinary scalars within the stated
 bounds. They are checked before conversion and are never clamped. Append,
@@ -480,17 +549,28 @@ limited to 1,000 samples.
 
 ## Charts
 
-Open **Config Menu → Tools → Charts…** to plot current numeric vectors or a
-completed current Sensitivity Table. Choose line, bar, or scatter, select the
-series and optional X vector, and adjust labels, visibility, and the view.
-Choose a named X or Y vector to follow its current final binding, including
-values produced by a loop. Physical `rN` choices continue to refer to that
-specific result row. Automatic X positions are indexes 0 through N−1. Empty
-datasets show **No data**, and a one-point line shows a marker. The presentation
-and Close controls sit together at the top of the companion.
-Hover a point for its original value. **Copy Chart as Image** copies the chart
-itself when its data is current. Opening Charts never starts a calculation;
-calculate or generate again when the source data is outdated.
+Open **Config Menu → Tools → Charts…** to plot current numeric vectors, range
+sequences or a completed current Sensitivity Table. Choose Line, Scatter or Bar,
+then select Y series and optionally X. Automatic X positions are indexes 0 through
+N−1. A named series follows its current binding, while a physical `rN` choice
+refers to the specific source row.
+
+Select **Histogram** to bin one vector using Auto, a count from 1 through 1,024
+or a positive fixed width. Auto uses `ceil(sqrt(n))` for nonconstant data. A
+constant vector has one exact-value bin. The intervals include their left edge
+and exclude the right edge, with the final right edge included. Choose Count or
+Percentage for the Y axis. **Cumulative** plots the fraction at or below each
+threshold, and its summary includes the counts and percentages.
+
+**Chart Options** stages fixed or automatic axes, linear or base-10 log scales,
+ticks, labels, grid, references, legend and series appearance. Log scales require
+positive values and bounds. Use an explicit positive X vector for log X. Bar,
+Histogram and Cumulative use a zero-based Y axis. **Reset Axes** restores
+automatic definition bounds, and **Reset View** resets pan and zoom.
+
+Hover a point or use the data summaries to inspect values. **Copy Chart as
+Image** uses the current chart scene. Opening Charts leaves the evaluation
+state alone. Calculate or regenerate when its source is outdated.
 
 ## Resource limits
 

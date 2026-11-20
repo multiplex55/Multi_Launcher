@@ -42,6 +42,17 @@ mod file_search_window_host;
 mod folder_size_dialog;
 mod font_revision;
 mod hash_generator_dialog;
+mod password_generator_dialog;
+#[cfg(windows)]
+mod file_operations_center_dialog;
+#[cfg(windows)]
+mod downloads_triage_dialog;
+#[cfg(windows)]
+mod downloads_triage_runtime;
+mod notification_inbox_dialog;
+mod notification_inbox_runtime;
+#[cfg(windows)]
+mod file_operations_center_runtime;
 pub(crate) mod hotfolder_dialog;
 pub(crate) mod hotfolder_dispatch;
 pub(crate) mod hotfolder_runtime;
@@ -65,7 +76,9 @@ mod m7_startup_measurement;
 pub use jump_mode::ui::JumpModeScope;
 mod macro_dialog;
 mod markdown_export;
+mod markdown_print;
 mod markdown_preview;
+mod markdown_outline;
 mod markdown_studio;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;
@@ -80,7 +93,6 @@ mod note_graph_dialog;
 pub(crate) mod note_mutation;
 mod note_panel;
 mod notes_dialog;
-mod numpad_navigation;
 mod ocr;
 mod ocr_view;
 mod paste_sequence_dialog;
@@ -93,6 +105,7 @@ mod mouse_form_host;
 mod qa_framebuffer;
 mod qr_dialog;
 mod query_history;
+mod query_navigation;
 mod query_observation;
 mod radial_actions;
 mod radial_editor;
@@ -300,9 +313,6 @@ use fst::Map;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use numpad_navigation::{
-    LauncherNumpadNavigation, NativeNumpadKeyStateProbe, consume_physical_numpad_navigation,
-};
 use once_cell::sync::Lazy;
 use query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 #[cfg(test)]
@@ -750,6 +760,10 @@ pub enum Panel {
     SnippetDialog,
     PasteSequenceDialog,
     HashGeneratorDialog,
+    PasswordGeneratorDialog,
+    FileOperationsCenterDialog,
+    DownloadsTriageDialog,
+    NotificationInboxDialog,
     SnippetPromptDialog,
     MacroDialog,
     MkMacroDialog,
@@ -828,6 +842,10 @@ impl Panel {
             Self::SnippetDialog => "Snippets",
             Self::PasteSequenceDialog => "Paste Sequences",
             Self::HashGeneratorDialog => "Hash Generator",
+            Self::PasswordGeneratorDialog => "Password Generator",
+            Self::FileOperationsCenterDialog => "File Operations Center",
+            Self::DownloadsTriageDialog => "Downloads Triage",
+            Self::NotificationInboxDialog => "Notification Inbox",
             Self::SnippetPromptDialog => "Snippet Prompt",
             Self::MacroDialog => "Macros",
             Self::MkMacroDialog => "MKMacro",
@@ -907,6 +925,10 @@ struct PanelStates {
     snippet_dialog: bool,
     paste_sequence_dialog: bool,
     hash_generator_dialog: bool,
+    password_generator_dialog: bool,
+    file_operations_center_dialog: bool,
+    downloads_triage_dialog: bool,
+    notification_inbox_dialog: bool,
     snippet_prompt_dialog: bool,
     macro_dialog: bool,
     mkmacro_dialog: bool,
@@ -1279,6 +1301,29 @@ pub struct LauncherApp {
     paste_sequence_host: utility_window_host::PasteSequenceWindowHost,
     pub hash_generator_dialog: HashGeneratorDialogState,
     hash_generator_host: utility_window_host::HashGeneratorWindowHost,
+    password_generator_dialog: password_generator_dialog::PasswordGeneratorDialog,
+    password_generator_host: utility_window_host::UtilityWindowHost<password_generator_dialog::PasswordGeneratorDialog>,
+    #[cfg(windows)]
+    file_operations_center_dialog: file_operations_center_dialog::FileOperationsCenterDialog,
+    #[cfg(windows)]
+    file_operations_center_host: utility_window_host::UtilityWindowHost<file_operations_center_dialog::FileOperationsCenterDialog>,
+    #[cfg(windows)]
+    file_operations_center_runtime: file_operations_center_runtime::FileOperationsCenterRuntime,
+    #[cfg(windows)]
+    downloads_triage_dialog: downloads_triage_dialog::DownloadsTriageDialog,
+    #[cfg(windows)]
+    downloads_triage_host: utility_window_host::UtilityWindowHost<downloads_triage_dialog::DownloadsTriageDialog>,
+    #[cfg(windows)]
+    downloads_triage_runtime: downloads_triage_runtime::DownloadsTriageRuntime,
+    notification_inbox_dialog: notification_inbox_dialog::NotificationInboxDialog,
+    notification_inbox_host: utility_window_host::UtilityWindowHost<notification_inbox_dialog::NotificationInboxDialog>,
+    notification_inbox: Option<crate::notifications::InboxService>,
+    notification_windows_consent: crate::notifications::WindowsConsent,
+    notification_session: [u8; 16],
+    notification_alert_sequence: u64,
+    notification_calendar_version: u64,
+    notification_request: Option<u64>,
+    notification_notice: Option<String>,
     file_preview_host: utility_window_host::FilePreviewWindowHost,
     note_templates_host: utility_window_host::NoteTemplatesWindowHost,
     unused_assets_host: utility_window_host::UnusedAssetsWindowHost,
@@ -1354,6 +1399,7 @@ pub struct LauncherApp {
     pending_todo_entry: Option<String>,
     clipboard_dialog: ClipboardDialog,
     clipboard_history_host: utility_window_host::ClipboardHistoryWindowHost,
+    legacy_password_copy: command_host::LegacyPasswordCopy,
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     clipboard_modify_host: utility_window_host::ClipboardModifyWindowHost,
@@ -1367,6 +1413,8 @@ pub struct LauncherApp {
     pub(crate) zip_extractor_dialog: ZipExtractorDialog,
     #[cfg(windows)]
     pub(crate) archive_session: crate::archive::ArchiveSession,
+    #[cfg(windows)]
+    pub(crate) transfer_jobs: crate::file_transfer::TransferJobs,
     #[cfg(windows)]
     pub(crate) zip_creation_session: crate::archive::CreationSession,
     pub regex_tester_dialog: RegexTesterDialogState,
@@ -1384,6 +1432,8 @@ pub struct LauncherApp {
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
     pub(crate) diagram_studio_dialog: DiagramStudioDialog,
     pub(crate) markdown_studio_dialog: MarkdownStudioDialog,
+    markdown_print_dialog: markdown_print::PrintDialog,
+    markdown_print_host: utility_window_host::UtilityWindowHost<markdown_print::PrintDialog>,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
@@ -1523,6 +1573,8 @@ pub struct LauncherApp {
         crate::radial::model::ConfigRevision,
     )>,
     pending_data_recovery: Option<PendingRecoveryIntent>,
+    pending_data_recovery_owner: Option<(u64, u64)>,
+    pending_data_confirmation_pass: Option<render::PendingDataConfirmationPass>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
     pub file_search_selected_kind: crate::file_search::model::SearchKind,
@@ -1879,14 +1931,20 @@ impl LauncherApp {
             .map(|set| set.iter().cloned().collect())
     }
     pub fn add_toast(&mut self, toast: Toast) {
+        self.record_launcher_notification(toast.kind);
+        self.present_toast(toast);
+    }
+
+    fn present_toast(&mut self, toast: Toast) {
         #[cfg(test)]
         self.test_toast_messages.push(toast.text.text().to_string());
         push_toast(&mut self.toasts, toast);
     }
 
     pub fn add_error_toast(&mut self, msg: impl Into<String>) {
+        self.record_launcher_notification(ToastKind::Error);
         if self.enable_toasts && self.show_error_toasts {
-            self.add_toast(Toast {
+            self.present_toast(Toast {
                 text: msg.into().into(),
                 kind: ToastKind::Error,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -2112,6 +2170,7 @@ impl LauncherApp {
     }
 
     pub fn report_error_message(&mut self, context: &'static str, msg: impl Into<String>) {
+        self.record_launcher_notification(ToastKind::Error);
         let msg = msg.into();
         tracing::error!(context, error = %msg);
         append_toast_log(&format!("[error:{context}] {msg}"));
@@ -2119,7 +2178,7 @@ impl LauncherApp {
             self.set_inline_error(msg.clone());
         }
         if self.enable_toasts && self.show_error_toasts {
-            self.add_toast(Toast {
+            self.present_toast(Toast {
                 text: msg.into(),
                 kind: ToastKind::Error,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -2896,7 +2955,7 @@ impl LauncherApp {
     ) {
         match command {
             FileSearchUiCommand::OpenHash(path) => self.open_hash_generator_for_file(path),
-            FileSearchUiCommand::OpenPreview { .. } => {}
+            FileSearchUiCommand::OpenFileOperations(_) | FileSearchUiCommand::OpenPreview { .. } => {}
             FileSearchUiCommand::OpenFolderSize(path) => {
                 if ctx.viewport_id() == egui::ViewportId::ROOT {
                     self.folder_size_dialog.stage_prefill(ctx, path);
@@ -2988,6 +3047,57 @@ impl LauncherApp {
                 }
             }
         }
+    }
+
+    #[cfg(windows)]
+    fn close_downloads_triage(&mut self) {
+        self.downloads_triage_runtime.close_view();
+        self.downloads_triage_dialog.close();
+        self.downloads_triage_host.close_from_app(&self.egui_ctx);
+        self.panel_stack.retain(|panel| *panel != Panel::DownloadsTriageDialog);
+    }
+
+    #[cfg(windows)]
+    fn close_file_operations_center(&mut self) {
+        self.file_operations_center_runtime.close_view();
+        self.file_operations_center_dialog.close();
+        self.file_operations_center_host.close_from_app(&self.egui_ctx);
+        self.panel_stack.retain(|panel| *panel != Panel::FileOperationsCenterDialog);
+    }
+
+    #[cfg(windows)]
+    fn open_file_operations_from_origin<S>(
+        &mut self,
+        sources: Option<Vec<std::path::PathBuf>>,
+        origin: &utility_host::ChildOpenOrigin<S>,
+    ) -> bool {
+        let was_open = self.file_operations_center_dialog.open;
+        if let Some(sources) = sources {
+            self.file_operations_center_dialog.open_with_sources(sources);
+        } else {
+            self.file_operations_center_dialog.ensure_open();
+        }
+        let desired = self.file_operations_center_host.open_from_origin(
+            &self.egui_ctx,
+            &self.file_operations_center_dialog,
+            was_open,
+            origin,
+        );
+        self.panel_stack.retain(|panel| *panel != Panel::FileOperationsCenterDialog);
+        self.panel_stack.push(Panel::FileOperationsCenterDialog);
+        self.panel_states.file_operations_center_dialog = true;
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn close_password_generator_dialog(&mut self) {
+        self.password_generator_dialog.close();
+        self.password_generator_host.close_from_app(&self.egui_ctx);
+        self.panel_stack.retain(|panel| *panel != Panel::PasswordGeneratorDialog);
     }
 
     pub(crate) fn open_hash_generator_for_file(&mut self, path: PathBuf) {
@@ -3908,6 +4018,32 @@ impl LauncherApp {
                 Arc::clone(&plugins.internal_services().mkmacro_store),
             );
         let activity_center = crate::activity::ActivityCenter::new();
+        let inbox_ctx = ctx.clone();
+        let notification_inbox = crate::notifications::InboxService::start(
+            data_root.clone(),
+            Arc::new(move || inbox_ctx.request_repaint_of(egui::ViewportId::ROOT)),
+        ).ok();
+        #[cfg(test)]
+        let production_notifications = matches!(init_policy, LauncherInitPolicy::Production);
+        #[cfg(not(test))]
+        let production_notifications = true;
+        let notification_session = if production_notifications {
+            rand::random::<u128>().max(1).to_le_bytes()
+        } else {
+            [0; 16]
+        };
+        let inbox_publisher = notification_inbox.as_ref()
+            .filter(|_| production_notifications)
+            .map(crate::notifications::InboxService::publisher);
+        if let Some(publisher) = &inbox_publisher {
+            crate::notifications::attach_activity_inbox(&activity_center, publisher.clone(), notification_session);
+            crate::plugins::timer::attach_inbox_timer(publisher.clone(), notification_session);
+            crate::mkmacro::runtime::attach_inbox_macro(publisher.clone(), notification_session);
+        }
+        if let Some(inbox) = &notification_inbox && production_notifications {
+            inbox.enable_calendar();
+        }
+
         let recording_repaint_ctx = ctx.clone();
         let recording_controller = crate::recording::RecordingController::new(
             Arc::new(crate::recording::WindowsRecordingBackend),
@@ -3921,6 +4057,7 @@ impl LauncherApp {
                     data_root.clone(),
                     hotfolder_action_adapter.clone(),
                     activity_center.clone(),
+                    inbox_publisher.clone(),
                 )
             }
             LauncherInitPolicy::IsolatedTest | LauncherInitPolicy::IsolatedWatcherTest => {
@@ -3932,6 +4069,7 @@ impl LauncherApp {
             data_root.clone(),
             hotfolder_action_adapter.clone(),
             activity_center.clone(),
+            inbox_publisher,
         );
         let settings_save_workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
         let utility_dialog_size_manager = utility_dialog_size::UtilityDialogSizeManager::new(
@@ -3948,7 +4086,7 @@ impl LauncherApp {
         utility_presentation_manager.install_in_context(ctx);
         #[cfg(windows)]
         let archive_session =
-            crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+            crate::archive::ArchiveSession::with_data_root(crate::archive::ArchiveLimits::default(), data_root.clone());
         #[cfg(windows)]
         let zip_creation_session =
             crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
@@ -4172,6 +4310,29 @@ impl LauncherApp {
             paste_sequence_host: utility_window_host::PasteSequenceWindowHost::default(),
             hash_generator_dialog: HashGeneratorDialogState::default(),
             hash_generator_host: Default::default(),
+            password_generator_dialog: password_generator_dialog::PasswordGeneratorDialog::new(settings.password_generator.clone()),
+            password_generator_host: Default::default(),
+            #[cfg(windows)]
+            file_operations_center_dialog: Default::default(),
+            #[cfg(windows)]
+            file_operations_center_host: Default::default(),
+            #[cfg(windows)]
+            file_operations_center_runtime: Default::default(),
+            #[cfg(windows)]
+            downloads_triage_dialog: Default::default(),
+            #[cfg(windows)]
+            downloads_triage_host: Default::default(),
+            #[cfg(windows)]
+            downloads_triage_runtime: Default::default(),
+            notification_inbox_dialog: Default::default(),
+            notification_inbox_host: Default::default(),
+            notification_inbox,
+            notification_windows_consent: Default::default(),
+            notification_session,
+            notification_alert_sequence: 0,
+            notification_calendar_version: crate::plugins::calendar::calendar_version(),
+            notification_request: None,
+            notification_notice: None,
             file_preview_host: Default::default(),
             note_templates_host: Default::default(),
             unused_assets_host: Default::default(),
@@ -4242,6 +4403,7 @@ impl LauncherApp {
             pending_todo_entry: None,
             clipboard_dialog: ClipboardDialog::default(),
             clipboard_history_host: Default::default(),
+            legacy_password_copy: command_host::LegacyPasswordCopy::default(),
             clipboard_modify_runtime,
             clipboard_modify_dialog: ClipboardModifyDialogState::default(),
             clipboard_modify_host: utility_window_host::ClipboardModifyWindowHost::default(),
@@ -4254,6 +4416,8 @@ impl LauncherApp {
             zip_extractor_dialog: ZipExtractorDialog::default(),
             #[cfg(windows)]
             archive_session,
+            #[cfg(windows)]
+            transfer_jobs: crate::file_transfer::TransferJobs::with_data_root(activity_center.clone(), data_root.clone()),
             #[cfg(windows)]
             zip_creation_session,
             regex_tester_dialog,
@@ -4271,6 +4435,8 @@ impl LauncherApp {
             date_time_studio_dialog: DateTimeStudioDialog::default(),
             diagram_studio_dialog,
             markdown_studio_dialog,
+            markdown_print_dialog: Default::default(),
+            markdown_print_host: Default::default(),
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
                 settings.table_utility_resources.to_policy(),
@@ -4400,6 +4566,8 @@ impl LauncherApp {
             radial_consumed_dispatches: VecDeque::new(),
             radial_current_preparation: None,
             pending_data_recovery: None,
+            pending_data_recovery_owner: None,
+            pending_data_confirmation_pass: None,
             action_cache: Vec::new(),
             action_filter_metadata: Vec::new(),
             actions_by_id,
@@ -4685,12 +4853,12 @@ impl LauncherApp {
                 if !self.results.is_empty() {
                     let max = self.results.len() - 1;
                     self.selected = match self.selected {
+                        Some(0) | None => None,
                         Some(i) if self.resolved_grid_layout => {
                             Some(move_to(i, -(cols as isize), max))
                         }
                         Some(i) if i > 0 => Some(i - 1),
                         Some(i) => Some(i.min(max)),
-                        None => Some(0),
                     };
                 }
                 None
@@ -4728,8 +4896,9 @@ impl LauncherApp {
             }
             egui::Key::PageUp => {
                 if !self.results.is_empty() {
+                    let max = self.results.len() - 1;
                     self.selected = match self.selected {
-                        Some(i) => Some(i.saturating_sub(self.page_jump)),
+                        Some(i) => Some(i.saturating_sub(self.page_jump).min(max)),
                         None => Some(0),
                     };
                 }
@@ -5007,7 +5176,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 73] = [
+    const TRACKED_PANELS: [Panel; 77] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -5021,6 +5190,10 @@ impl LauncherApp {
         Panel::SnippetDialog,
         Panel::PasteSequenceDialog,
         Panel::HashGeneratorDialog,
+        Panel::PasswordGeneratorDialog,
+        Panel::FileOperationsCenterDialog,
+        Panel::DownloadsTriageDialog,
+        Panel::NotificationInboxDialog,
         Panel::SnippetPromptDialog,
         Panel::MacroDialog,
         Panel::MkMacroDialog,
@@ -5098,6 +5271,10 @@ impl LauncherApp {
             Panel::SnippetDialog => self.snippet_dialog.open,
             Panel::PasteSequenceDialog => self.paste_sequence_dialog.open,
             Panel::HashGeneratorDialog => self.hash_generator_dialog.open,
+            Panel::PasswordGeneratorDialog => self.password_generator_dialog.open,
+            Panel::FileOperationsCenterDialog => self.file_operations_center_is_open(),
+            Panel::DownloadsTriageDialog => self.downloads_triage_is_open(),
+            Panel::NotificationInboxDialog => self.notification_inbox_dialog.open,
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.is_open(),
             Panel::MacroDialog => self.macro_dialog.open,
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
@@ -5184,6 +5361,10 @@ impl LauncherApp {
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer().is_some(),
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer().is_some(),
+            Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer().is_some(),
+            Panel::FileOperationsCenterDialog => self.file_operations_center_root_layer().is_some(),
+            Panel::DownloadsTriageDialog => self.downloads_triage_root_layer().is_some(),
+            Panel::NotificationInboxDialog => self.notification_inbox_host.root_layer().is_some(),
             Panel::TodoViewDialog => self.todo_view_host.root_layer().is_some(),
             Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer().is_some(),
             Panel::ImagePanel => self
@@ -5583,6 +5764,16 @@ impl LauncherApp {
             Panel::HashGeneratorDialog => {
                 self.hash_generator_dialog.request_close();
             }
+            Panel::PasswordGeneratorDialog => self.close_password_generator_dialog(),
+            Panel::FileOperationsCenterDialog => {
+                #[cfg(windows)]
+                self.close_file_operations_center();
+            }
+            Panel::NotificationInboxDialog => self.close_notification_inbox(),
+            Panel::DownloadsTriageDialog => {
+                #[cfg(windows)]
+                self.close_downloads_triage();
+            }
             Panel::FileSearchPreviewDialog => {
                 self.file_search_dialog.preview_dialog.request_close();
             }
@@ -5940,6 +6131,16 @@ impl LauncherApp {
             Panel::HashGeneratorDialog => {
                 self.hash_generator_dialog.request_close();
             }
+            Panel::PasswordGeneratorDialog => self.close_password_generator_dialog(),
+            Panel::FileOperationsCenterDialog => {
+                #[cfg(windows)]
+                self.close_file_operations_center();
+            }
+            Panel::NotificationInboxDialog => self.close_notification_inbox(),
+            Panel::DownloadsTriageDialog => {
+                #[cfg(windows)]
+                self.close_downloads_triage();
+            }
             Panel::FileSearchPreviewDialog => {
                 self.file_search_dialog.preview_dialog.request_close();
             }
@@ -6278,6 +6479,13 @@ impl LauncherApp {
                 }
             }
             Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
+            Panel::PasswordGeneratorDialog => self.password_generator_dialog.ensure_open(),
+            Panel::FileOperationsCenterDialog => {
+                #[cfg(windows)]
+                self.file_operations_center_dialog.ensure_open();
+            }
+            Panel::DownloadsTriageDialog => {}
+            Panel::NotificationInboxDialog => {}
             Panel::FileSearchPreviewDialog => {}
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
@@ -6735,6 +6943,40 @@ impl LauncherApp {
             self.open_unused_assets_from_origin(&utility_host::ChildOpenOrigin::<()>::Root);
         } else if panel == Panel::TodoViewDialog {
             self.open_todo_view_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
+        } else if panel == Panel::NotificationInboxDialog {
+            self.open_notification_inbox();
+        } else if panel == Panel::DownloadsTriageDialog {
+            #[cfg(windows)]
+            {
+                let was_open = self.downloads_triage_dialog.open;
+                self.downloads_triage_dialog.ensure_open();
+                if !was_open && self.downloads_triage_dialog.open {
+                    let session = self.downloads_triage_dialog.session();
+                    match crate::platform::app_data::AppDataRoot::from_settings_path(&self.settings_path) {
+                        Ok(root) => self.downloads_triage_runtime.open_view(&self.egui_ctx, session, root),
+                        Err(error) => {
+                            self.downloads_triage_dialog.set_notice(session, format!("Could not resolve Downloads profile ({error})."));
+                        }
+                    }
+                }
+                let presentation = self.downloads_triage_host.open_from_origin(&self.egui_ctx, &self.downloads_triage_dialog, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
+                if presentation == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+            }
+        } else if panel == Panel::FileOperationsCenterDialog {
+            #[cfg(windows)]
+            self.open_file_operations_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
+        } else if panel == Panel::PasswordGeneratorDialog {
+            let was_open = self.password_generator_dialog.open;
+            self.password_generator_dialog.ensure_open();
+            let presentation = self.password_generator_host.open_from_origin(
+                &self.egui_ctx,
+                &self.password_generator_dialog,
+                was_open,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if presentation == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::HashGeneratorDialog {
             let was_open = self.hash_generator_dialog.open;
             self.hash_generator_dialog.ensure_open();
@@ -6943,6 +7185,12 @@ impl LauncherApp {
         check!(snippet_dialog, Panel::SnippetDialog);
         check!(paste_sequence_dialog, Panel::PasteSequenceDialog);
         check!(hash_generator_dialog, Panel::HashGeneratorDialog);
+        check!(password_generator_dialog, Panel::PasswordGeneratorDialog);
+        #[cfg(windows)]
+        check!(file_operations_center_dialog, Panel::FileOperationsCenterDialog);
+        #[cfg(windows)]
+        check!(downloads_triage_dialog, Panel::DownloadsTriageDialog);
+        check!(notification_inbox_dialog, Panel::NotificationInboxDialog);
         check!(snippet_prompt_dialog, Panel::SnippetPromptDialog);
         check!(macro_dialog, Panel::MacroDialog);
         check!(mkmacro_dialog, Panel::MkMacroDialog);

@@ -875,6 +875,8 @@ pub struct Settings {
     #[serde(default)]
     pub paste_sequence: PasteSequencePreferences,
     #[serde(default)]
+    pub password_generator: crate::password_generator::GeneratorPreferences,
+    #[serde(default)]
     pub table_utility_resources: TableUtilityResourcePreferences,
     pub index_paths: Option<Vec<String>>,
     pub max_indexed_items: Option<usize>,
@@ -1339,6 +1341,7 @@ impl Default for Settings {
             help_hotkey: Some("F1".into()),
             recording_stop_hotkey: None,
             paste_sequence: PasteSequencePreferences::default(),
+            password_generator: crate::password_generator::GeneratorPreferences::default(),
             table_utility_resources: TableUtilityResourcePreferences::default(),
             index_paths: None,
             max_indexed_items: None,

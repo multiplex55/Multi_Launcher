@@ -361,6 +361,31 @@ mod radial_parser_tests {
 
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
+    if s.get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("password:"))
+    {
+        let invalid = || {
+            CommandError::new("clipboard", "Invalid password generation command")
+                .with_gui_failure_policy()
+        };
+        if action.args.is_some() {
+            return Err(invalid());
+        }
+        if s == "password:generator" {
+            return Ok(Command::Dialog(DialogCommand::PasswordGenerator));
+        }
+        let raw = s.strip_prefix("password:copy:").ok_or_else(invalid)?;
+        if raw.is_empty() || raw.len() > 3 || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        let length = raw.parse::<usize>().map_err(|_| invalid())?;
+        if !crate::password_generator::PASSWORD_LENGTH_RANGE.contains(&length) {
+            return Err(invalid());
+        }
+        return Ok(Command::Clipboard(ClipboardCommand::CopyGeneratedPassword {
+            length,
+        }));
+    }
     if s.get(..4)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("zip:"))
     {
@@ -599,6 +624,35 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
             },
         )
         .with_gui_failure_policy());
+    }
+    if s.starts_with("notification_inbox:") {
+        if s == "notification_inbox:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::NotificationInbox));
+        }
+        let error = if action.args.is_some() {
+            "The Notification Inbox accepts no command payload"
+        } else {
+            "Unknown Notification Inbox command"
+        };
+        return Err(CommandError::new("notification_inbox", error).with_gui_failure_policy());
+    }
+    if s.starts_with("downloads_triage:") {
+        if s == "downloads_triage:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::DownloadsTriage));
+        }
+        return Err(CommandError::new("downloads_triage", if action.args.is_some() {
+            "Downloads Triage does not accept a path or content payload"
+        } else { "unknown Downloads Triage command" }).with_gui_failure_policy());
+    }
+    if s.starts_with("file_operations:") {
+        if s == "file_operations:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::FileOperationsCenter));
+        }
+        return Err(CommandError::new("file_operations", if action.args.is_some() {
+            "File Operations Center does not accept a path or content payload"
+        } else {
+            "unknown File Operations Center command"
+        }).with_gui_failure_policy());
     }
     if s.starts_with("activity:") {
         if s == "activity:open" && action.args.is_none() {
@@ -3505,5 +3559,27 @@ mod explorer_tabs_parser_tests {
             assert!(parse_action(&action(invalid, None)).is_err());
         }
         assert!(parse_action(&action("explorertabs:open", Some("extra"))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod password_command_tests {
+    use super::*;
+    fn action(wire: &str, args: Option<&str>) -> Action {
+        Action { label: String::new(), desc: String::new(), action: wire.into(), args: args.map(str::to_owned) }
+    }
+    #[test]
+    fn password_wire_is_strict_and_literal_clipboard_is_preserved() {
+        for (wire, length) in [("password:copy:8", 8), ("password:copy:256", 256)] {
+            let parsed = parse_action(&action(wire,None)).unwrap();
+            assert_eq!(parsed, Command::Clipboard(ClipboardCommand::CopyGeneratedPassword { length }));
+            assert_eq!(parsed.kind_name(), "copy_generated_password");
+        }
+        for wire in ["password:copy:", "password:copy:7", "password:copy:257", "password:copy:+8", "password:copy:８", "password:copy:999999999999999999999999", "password:other:8", "PASSWORD:copy:8"] {
+            let error = parse_action(&action(wire,None)).unwrap_err();
+            assert_eq!(error.message, "Invalid password generation command");
+        }
+        assert_eq!(parse_action(&action("password:copy:8",Some("secret"))).unwrap_err().message, "Invalid password generation command");
+        assert_eq!(parse_action(&action("clipboard:password:copy:8",None)).unwrap(), Command::Clipboard(ClipboardCommand::SetText { text:"password:copy:8".into() }));
     }
 }

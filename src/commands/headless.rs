@@ -7,6 +7,8 @@
 //! execute without inspecting their wire strings again.
 
 use crate::actions::Action;
+use crate::password_generator::{SecretResult, generate_legacy_password};
+use crate::platform::protected_clipboard::{ClipboardError, CopyStatus, RejectedSecretCopy, copy_secret};
 use crate::plugins::calc_history::{self, CALC_HISTORY_FILE, CalcHistoryEntry, MAX_ENTRIES};
 
 use super::*;
@@ -287,6 +289,39 @@ mod activity_headless_tests {
     use super::*;
 
     #[test]
+    fn downloads_triage_headless_requires_gui_without_external_fallback() {
+        let original = Action { label: "Downloads Triage".into(), desc: String::new(), action: "downloads_triage:open".into(), args: None };
+        let command = crate::commands::parse_action(&original).unwrap();
+        assert_eq!(command, Command::Dialog(DialogCommand::DownloadsTriage));
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            external_calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        }).unwrap_err();
+        assert!(error.to_string().contains("Downloads Triage requires the launcher interface"));
+        assert!(external_calls.is_empty());
+    }
+
+    #[test]
+    fn file_operations_headless_requires_gui_without_external_fallback() {
+        let original = Action {
+            label: "Open File Operations Center".into(),
+            desc: String::new(),
+            action: "file_operations:open".into(),
+            args: None,
+        };
+        let command = crate::commands::parse_action(&original).unwrap();
+        assert_eq!(command, Command::Dialog(DialogCommand::FileOperationsCenter));
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            external_calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        }).unwrap_err();
+        assert!(error.to_string().contains("File Operations Center requires the launcher interface"));
+        assert!(external_calls.is_empty());
+    }
+
+    #[test]
     fn activity_headless_route_requires_gui_without_external_fallback() {
         let original = Action {
             label: "Open Activity".into(),
@@ -422,6 +457,15 @@ fn execute_with_external(
         Command::Dialog(DialogCommand::FileLock { .. }) => {
             anyhow::bail!("File Lock Inspector requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::NotificationInbox) => {
+            anyhow::bail!("The Notification Inbox requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::DownloadsTriage) => {
+            anyhow::bail!("Downloads Triage requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::FileOperationsCenter) => {
+            anyhow::bail!("File Operations Center requires the launcher interface")
+        }
         Command::Dialog(DialogCommand::Activity) => {
             anyhow::bail!("Activity requires the launcher interface")
         }
@@ -439,6 +483,9 @@ fn execute_with_external(
         }
         Command::Dialog(DialogCommand::DiagramStudio) => {
             anyhow::bail!("Diagram Studio requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::PasswordGenerator) => {
+            anyhow::bail!("Password Generator requires the launcher interface")
         }
         Command::Dialog(DialogCommand::MarkdownStudio) => {
             anyhow::bail!("Markdown Studio requires the launcher interface")
@@ -770,12 +817,25 @@ fn execute_shell(command: ShellCommand) -> anyhow::Result<()> {
 }
 
 fn execute_clipboard(command: ClipboardCommand) -> anyhow::Result<()> {
+    execute_clipboard_with_password_copy(command, copy_secret)
+}
+
+fn execute_clipboard_with_password_copy(
+    command: ClipboardCommand,
+    publish: impl FnOnce(&SecretResult) -> Result<CopyStatus, ClipboardError>,
+) -> anyhow::Result<()> {
     use crate::actions::clipboard;
     match command {
         ClipboardCommand::Dialog => clipboard::set_text("dialog"),
         ClipboardCommand::Clear => clipboard::clear_history(),
         ClipboardCommand::Copy { index } => clipboard::copy_entry(index),
         ClipboardCommand::SetText { text } => clipboard::set_text(&text),
+        ClipboardCommand::CopyGeneratedPassword { length } => {
+            let result = generate_legacy_password(length)?;
+            publish(&result)
+                .map(|_| ())
+                .map_err(|error| RejectedSecretCopy::new(error, result).into())
+        }
     }
 }
 
@@ -1637,5 +1697,37 @@ mod markdown_studio_headless_tests {
             "Markdown Studio requires the launcher interface"
         );
         assert_eq!(calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod password_headless_tests {
+    use super::*;
+    #[test]
+    fn password_headless_uses_the_protected_writer_for_saved_queries() {
+        use crate::plugin::Plugin;
+        use crate::plugins::random::RandomPlugin;
+
+        let action = RandomPlugin::from_seed(7).search("rand pw 12").pop().unwrap();
+        let Command::Clipboard(command) = crate::commands::parse_action(&action).unwrap() else {
+            panic!("expected a typed clipboard command");
+        };
+        execute_clipboard_with_password_copy(command.clone(), |result| {
+            assert_eq!(result.expose().len(), 12);
+            assert!(result.expose().bytes().all(|byte| byte.is_ascii_alphanumeric()));
+            Ok(CopyStatus::AcceptedAndPersisted)
+        })
+        .unwrap();
+
+        let mut attempted = None;
+        let error = execute_clipboard_with_password_copy(command, |result| {
+            attempted = Some(result.id());
+            Err(ClipboardError::Busy)
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "The clipboard is busy.");
+        let rejected = error.downcast::<RejectedSecretCopy>().unwrap();
+        assert_eq!(Some(rejected.result_id()), attempted);
+        assert_eq!(format!("{rejected:?}"), "RejectedSecretCopy { error: Busy, .. }");
     }
 }

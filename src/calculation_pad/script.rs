@@ -246,6 +246,84 @@ pub(super) enum ScriptExpression {
     CalendarCall(String, Vec<Self>, Option<String>),
     ExactInteger(String),
     UserCall(Arc<UserFunction>, Vec<Self>),
+    VectorCallback(VectorCallback, Arc<UserFunction>, Vec<Self>),
+    InvalidCallback(DiagnosticKind),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum VectorCallback { Map, Filter, CountIf, FindIndices }
+
+pub(crate) fn is_vector_callback(name: &str) -> bool {
+    VectorCallback::from_name(name).is_some()
+}
+
+impl VectorCallback {
+    fn from_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("map") { Some(Self::Map) }
+        else if name.eq_ignore_ascii_case("filter") { Some(Self::Filter) }
+        else if name.eq_ignore_ascii_case("count_if") { Some(Self::CountIf) }
+        else if name.eq_ignore_ascii_case("find_indices") { Some(Self::FindIndices) }
+        else { None }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Map => "map", Self::Filter => "filter",
+            Self::CountIf => "count_if", Self::FindIndices => "find_indices",
+        }
+    }
+}
+
+/// Locate callback identifiers in logical source, respecting local functions
+/// that shadow the built-in collection calls.
+pub(super) fn callback_ranges(source: &str, functions: &[Arc<UserFunction>]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    while cursor < source.len() {
+        let ch = source[cursor..].chars().next().unwrap();
+        if ch == '"' || ch == '{' {
+            let close = if ch == '"' { '"' } else { '}' };
+            cursor += ch.len_utf8();
+            let mut escaped = false;
+            while cursor < source.len() {
+                let next = source[cursor..].chars().next().unwrap();
+                cursor += next.len_utf8();
+                if escaped { escaped = false; }
+                else if ch == '"' && next == '\\' { escaped = true; }
+                else if next == close { break; }
+            }
+        } else if is_identifier_start(ch) {
+            let start = cursor;
+            cursor += ch.len_utf8();
+            while cursor < source.len() {
+                let next = source[cursor..].chars().next().unwrap();
+                if !is_identifier_continue(next) { break; }
+                cursor += next.len_utf8();
+            }
+            let name = &source[start..cursor];
+            let open = cursor + source[cursor..].len() - source[cursor..].trim_start().len();
+            if VectorCallback::from_name(name).is_none()
+                || functions.iter().any(|function| function.name == name)
+                || !source[open..].starts_with('(')
+            { continue; }
+            if let Ok(close) = matching(source, open)
+                && let Ok(arguments) = split_arguments(&source[open + 1..close])
+                && let Some(argument) = arguments.get(1)
+            {
+                let name = argument.trim();
+                let mut chars = name.chars();
+                if chars.next().is_some_and(is_identifier_start)
+                    && chars.all(is_identifier_continue)
+                {
+                    let start = name.as_ptr() as usize - source.as_ptr() as usize;
+                    ranges.push(start..start + name.len());
+                }
+            }
+        } else {
+            cursor += ch.len_utf8();
+        }
+    }
+    ranges
 }
 
 #[derive(Debug)]
@@ -259,6 +337,10 @@ pub(super) struct UserFunction {
 pub(super) type UserFunctions = Vec<Arc<UserFunction>>;
 
 pub(super) fn contains_user_call(source: &str, functions: &[Arc<UserFunction>]) -> bool {
+    contains_named_call(source, |name| functions.iter().any(|function| function.name == name))
+}
+
+fn contains_named_call(source: &str, matches_name: impl Fn(&str) -> bool) -> bool {
     let mut index = 0;
     while index < source.len() {
         let ch = source[index..].chars().next().unwrap();
@@ -287,7 +369,7 @@ pub(super) fn contains_user_call(source: &str, functions: &[Arc<UserFunction>]) 
                 index += next.len_utf8();
             }
             if source[index..].trim_start().starts_with('(')
-                && functions.iter().any(|function| function.name == source[start..index])
+                && matches_name(&source[start..index])
             { return true; }
         } else {
             index += ch.len_utf8();
@@ -379,8 +461,20 @@ pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctio
                 return Err(error("function declarations must be top-level"));
             }
             if functions.len() >= 64 { return Err(error("document exceeds the 64-function limit")); }
-            if signature(&name).is_some() || functions.iter().any(|function: &Arc<UserFunction>| function.name == name) {
+            let new_collection_name = ["sort", "sort_desc", "unique", "map", "filter", "count_if", "find_indices",
+                "cumsum", "cumprod", "diff", "percent_changes", "rolling_sum", "rolling_average", "rolling_min", "rolling_max",
+                "quantile", "percentile", "variance_population", "variance_sample", "stdev_sample",
+                "covariance_population", "covariance_sample", "correlation", "regression_slope",
+                "regression_intercept", "regression_r2", "predict_linear"]
+                .iter()
+                .any(|builtin| builtin.eq_ignore_ascii_case(&name));
+            if (signature(&name).is_some() && !new_collection_name)
+                || functions.iter().any(|function: &Arc<UserFunction>| function.name == name)
+            {
                 return Err(error("function name collides with an existing function"));
+            }
+            if new_collection_name && contains_named_call(body, |called| called == name) {
+                return Err(error("recursive function calls are not supported"));
             }
             let count = validate_source(body)?;
             if identifiers.saturating_add(count) > MAX_DEPENDENCIES {
@@ -411,6 +505,7 @@ pub(super) enum Compare {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Function {
     Collection(super::super::vector::CollectionOperation),
+    Statistic(super::super::statistics::VectorStatistic),
     Range,
     Sum,
     Average,
@@ -441,6 +536,26 @@ pub(crate) struct FunctionSignature {
     arities: &'static [usize],
     insensitive: bool,
 }
+#[cfg(test)]
+impl FunctionSignature {
+    pub(crate) fn arities(&self) -> &'static [usize] {
+        self.arities
+    }
+
+    pub(crate) fn documented_example_arities(&self, source: &str) -> Vec<usize> {
+        let token = format!("{}(", self.name);
+        syntax::SourceAnalysis::new(source).rows.iter().flat_map(|row| {
+            row.text.match_indices(&token).filter_map(|(start, _)| {
+                if row.text[..start].chars().next_back().is_some_and(is_identifier_continue) {
+                    return None;
+                }
+                let open = start + token.len() - 1;
+                let close = matching(&row.text, open).ok()?;
+                split_arguments(&row.text[open + 1..close]).ok().map(|args| args.len())
+            }).collect::<Vec<_>>()
+        }).collect()
+    }
+}
 pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
     FunctionSignature { name: "append", help: "append(vector, value)", arities: &[2], insensitive: true },
     FunctionSignature { name: "concat", help: "concat(left, right)", arities: &[2], insensitive: true },
@@ -454,6 +569,33 @@ pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
     FunctionSignature { name: "len", help: "len(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "slice", help: "slice(vector, start, end)", arities: &[3], insensitive: true },
     FunctionSignature { name: "reverse", help: "reverse(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "sort", help: "sort(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "sort_desc", help: "sort_desc(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "unique", help: "unique(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "cumsum", help: "cumsum(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "cumprod", help: "cumprod(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "diff", help: "diff(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "percent_changes", help: "percent_changes(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "rolling_sum", help: "rolling_sum(vector, window)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "rolling_average", help: "rolling_average(vector, window)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "rolling_min", help: "rolling_min(vector, window)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "rolling_max", help: "rolling_max(vector, window)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "quantile", help: "quantile(vector, q)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "percentile", help: "percentile(vector, p)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "variance_population", help: "variance_population(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "variance_sample", help: "variance_sample(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "stdev_sample", help: "stdev_sample(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "covariance_population", help: "covariance_population(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "covariance_sample", help: "covariance_sample(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "correlation", help: "correlation(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "regression_slope", help: "regression_slope(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "regression_intercept", help: "regression_intercept(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "regression_r2", help: "regression_r2(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "predict_linear", help: "predict_linear(x, y, x_new)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "map", help: "map(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
+    FunctionSignature { name: "filter", help: "filter(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
+    FunctionSignature { name: "count_if", help: "count_if(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
+    FunctionSignature { name: "find_indices", help: "find_indices(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
     FunctionSignature { name: "date", help: "date(\"YYYY-MM-DD\")", arities: &[1], insensitive: true },
     FunctionSignature { name: "time", help: "time(\"HH:MM[:SS]\")", arities: &[1], insensitive: true },
     FunctionSignature { name: "datetime", help: "datetime(\"RFC3339 timestamp\")", arities: &[1], insensitive: true },
@@ -562,6 +704,9 @@ fn special(name: &str, arity: usize) -> Option<Function> {
     if let Some(operation) = super::super::vector::CollectionOperation::from_name(name) {
         return Some(Function::Collection(operation));
     }
+    if let Some(statistic) = super::super::statistics::VectorStatistic::from_name(name) {
+        return Some(Function::Statistic(statistic));
+    }
     match name.to_ascii_lowercase().as_str() {
         "round_to" => Some(Function::RoundTo),
         "floor_to" => Some(Function::FloorTo),
@@ -648,7 +793,7 @@ pub(super) fn uses_script_syntax(source: &str) -> bool {
             return true;
         }
         if source[end..].trim_start().starts_with('(')
-            && (super::super::vector::CollectionOperation::from_name(name).is_some() || matches!(
+            && (super::super::vector::CollectionOperation::from_name(name).is_some() || super::super::statistics::VectorStatistic::from_name(name).is_some() || VectorCallback::from_name(name).is_some() || matches!(
                 name.to_ascii_lowercase().as_str(),
                 "if" | "range" | "sum" | "average" | "median" | "stdev" | "decimal" | "fraction" | "decimal_div" | "to_float" |
                 "round_to" | "floor_to" | "ceil_to" | "clamp" | "percent_change" | "percent_of" | "choose" | "permutations" | "lerp" | "map_range"
@@ -958,6 +1103,41 @@ fn parse(
                     index = close + 1;
                     continue;
                 }
+                if let Some(operation) = VectorCallback::from_name(name) {
+                    let callback = (|| {
+                        if !(2..=17).contains(&args.len()) {
+                            return Err(error("callback operation requires a vector and formula name"));
+                        }
+                        let callback = args[1].trim();
+                        let mut characters = callback.chars();
+                        if !characters.next().is_some_and(is_identifier_start)
+                            || !characters.all(is_identifier_continue)
+                        {
+                            return Err(error("callback must be a bare formula function name"));
+                        }
+                        let function = functions.iter().find(|function| function.name == callback)
+                            .ok_or_else(|| error("callback must name a previously declared formula function"))?;
+                        if function.parameters.len() != args.len() - 1 {
+                            return Err(error("incorrect number of callback arguments"));
+                        }
+                        Ok(function)
+                    })();
+                    let node = match callback {
+                        Ok(function) => {
+                            let mut children = Vec::with_capacity(args.len() - 1);
+                            children.push(parse(args[0], declared, functions, depth + 1)?);
+                            for argument in &args[2..] {
+                                children.push(parse(argument, declared, functions, depth + 1)?);
+                            }
+                            ScriptExpression::VectorCallback(operation, Arc::clone(function), children)
+                        }
+                        Err(kind) => ScriptExpression::InvalidCallback(kind),
+                    };
+                    if index == 0 && close + 1 == source.len() { return Ok(node); }
+                    add_slot(&mut template, &mut slots, node, source, declared);
+                    index = close + 1;
+                    continue;
+                }
                 let allowed = signature(name).ok_or(DiagnosticKind::InvalidExpression)?;
                 if !allowed.contains(&args.len()) {
                     return Err(DiagnosticKind::InvalidExpression);
@@ -1174,6 +1354,7 @@ fn validate_calls(source: &str) -> Result<(), DiagnosticKind> {
 impl ScriptExpression {
     fn validate_parameters(&self, parameters: &HashSet<String>) -> Result<(), DiagnosticKind> {
         match self {
+            Self::InvalidCallback(kind) => Err(kind.clone()),
             Self::Decimal(_) | Self::ExactInteger(_) | Self::Boolean { .. } | Self::CalendarLiteral(_, _) => Ok(()),
             Self::Legacy { line, slots, .. } => {
                 for reference in &line.references {
@@ -1195,7 +1376,7 @@ impl ScriptExpression {
                 b.validate_parameters(parameters)
             }
             Self::Not(child) => child.validate_parameters(parameters),
-            Self::Call(_, args) | Self::UserCall(_, args) | Self::CalendarCall(_, args, _) => {
+            Self::Call(_, args) | Self::UserCall(_, args) | Self::CalendarCall(_, args, _) | Self::VectorCallback(_, _, args) => {
                 for child in args { child.validate_parameters(parameters)?; }
                 Ok(())
             }
@@ -1218,7 +1399,7 @@ impl ScriptExpression {
         named_binding: &mut impl FnMut(&str) -> Option<usize>,
     ) {
         match self {
-            Self::Decimal(_) | Self::ExactInteger(_) | Self::CalendarLiteral(_, _) => {}
+            Self::Decimal(_) | Self::ExactInteger(_) | Self::CalendarLiteral(_, _) | Self::InvalidCallback(_) => {}
             Self::Boolean { name, target } => {
                 *target = named_binding(name)
                     .filter(|target| *target < line_index || *target >= SLOT_BASE);
@@ -1250,7 +1431,7 @@ impl ScriptExpression {
                 b.resolve_inner(line_index, row_count, named_binding);
             }
             Self::Not(child) => child.resolve_inner(line_index, row_count, named_binding),
-            Self::Call(_, args) | Self::UserCall(_, args) | Self::CalendarCall(_, args, _) => {
+            Self::Call(_, args) | Self::UserCall(_, args) | Self::CalendarCall(_, args, _) | Self::VectorCallback(_, _, args) => {
                 for arg in args {
                     arg.resolve_inner(line_index, row_count, named_binding);
                 }
@@ -1268,6 +1449,10 @@ impl ScriptExpression {
     ) -> Result<CalculationValue, DiagnosticKind> {
         work.charge(1)?;
         match self {
+            Self::InvalidCallback(kind) => {
+                work.collection_failure = true;
+                Err(kind.clone())
+            }
             Self::CalendarLiteral(name, args) => super::super::calendar::construct(name, args),
             Self::CalendarCall(name, args, fold) => {
                 let values = args.iter().map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work)).collect::<Result<Vec<_>, _>>()?;
@@ -1422,7 +1607,7 @@ impl ScriptExpression {
                         .collect::<Result<Vec<_>, _>>()?;
                     call(*function, &values, work)
                 })();
-                if matches!(function, Function::Collection(_))
+                if matches!(function, Function::Collection(_) | Function::Statistic(_))
                     && result.as_ref().is_err_and(|kind| !matches!(kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled))
                 {
                     work.collection_failure = true;
@@ -1431,22 +1616,79 @@ impl ScriptExpression {
             }
             Self::UserCall(function, args) => {
                 let arguments = args.iter().map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work)).collect::<Result<Vec<_>, _>>()?;
-                if work.call_depth >= 16 { return Err(error("function call depth exceeds 16")); }
-                work.charge(1)?;
-                work.call_depth += 1;
-                work.called_definitions.push(function.line);
-                let local_outcomes = arguments.iter().cloned().map(LineOutcome::Value).collect::<Vec<_>>();
-                let local_values = arguments.into_iter().map(Some).collect::<Vec<_>>();
-                let runtime_line = work.runtime_line.take();
-                let runtime_definitions = work.runtime_definitions.take();
-                let result = function.body.evaluate(SLOT_BASE, &local_outcomes, &local_values, &mut Vec::new(), work);
-                work.runtime_line = runtime_line;
-                work.runtime_definitions = runtime_definitions;
-                work.call_depth -= 1;
+                invoke_user(function, arguments, work)
+            }
+            Self::VectorCallback(operation, function, args) => {
+                let result = (|| {
+                    let arguments = args.iter().map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work)).collect::<Result<Vec<_>, _>>()?;
+                    let Some(CalculationValue::Vector(vector)) = arguments.first() else {
+                        return Err(error("callback operation requires a vector"));
+                    };
+                    work.charge_vector(vector.components().len().saturating_mul(2))?;
+                    record_definition(function.line, work);
+                    let mut output = Vec::with_capacity(vector.components().len());
+                    let mut count = 0usize;
+                    for (index, &value) in vector.components().iter().enumerate() {
+                        let mut callback_args = Vec::with_capacity(arguments.len());
+                        callback_args.push(CalculationValue::Scalar(value));
+                        callback_args.extend_from_slice(&arguments[1..]);
+                        let mapped = invoke_user(function, callback_args, work).map_err(|cause| {
+                            if matches!(cause, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled) {
+                                cause
+                            } else {
+                                error(&format!("{} callback at index {index}: {}", operation.name(), Diagnostic { kind: cause }))
+                            }
+                        })?;
+                        match (operation, mapped) {
+                            (VectorCallback::Map, CalculationValue::Scalar(value)) if value.is_finite() => output.push(value),
+                            (VectorCallback::Map, _) => return Err(error(&format!("map callback at index {index} must return a finite dimensionless scalar"))),
+                            (_, CalculationValue::Boolean(true)) => {
+                                count += 1;
+                                match operation {
+                                    VectorCallback::Filter => output.push(value),
+                                    VectorCallback::FindIndices => output.push(index as f64),
+                                    _ => {}
+                                }
+                            }
+                            (_, CalculationValue::Boolean(false)) => {}
+                            _ => return Err(error(&format!("{} callback at index {index} must return a Boolean", operation.name()))),
+                        }
+                    }
+                    if matches!(operation, VectorCallback::CountIf) {
+                        Ok(CalculationValue::Scalar(count as f64))
+                    } else {
+                        Ok(CalculationValue::Vector(super::super::vector::CalculationVector::new(output)?))
+                    }
+                })();
+                if result.as_ref().is_err_and(|kind| !matches!(kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled)) {
+                    work.collection_failure = true;
+                }
                 result
             }
         }
     }
+}
+
+fn record_definition(line: usize, work: &mut WorkBudget) {
+    if !work.called_definitions.contains(&line) {
+        work.called_definitions.push(line);
+    }
+}
+
+fn invoke_user(function: &UserFunction, arguments: Vec<CalculationValue>, work: &mut WorkBudget) -> Result<CalculationValue, DiagnosticKind> {
+    if work.call_depth >= 16 { return Err(error("function call depth exceeds 16")); }
+    work.charge(1)?;
+    work.call_depth += 1;
+    record_definition(function.line, work);
+    let local_outcomes = arguments.iter().cloned().map(LineOutcome::Value).collect::<Vec<_>>();
+    let local_values = arguments.into_iter().map(Some).collect::<Vec<_>>();
+    let runtime_line = work.runtime_line.take();
+    let runtime_definitions = work.runtime_definitions.take();
+    let result = function.body.evaluate(SLOT_BASE, &local_outcomes, &local_values, &mut Vec::new(), work);
+    work.runtime_line = runtime_line;
+    work.runtime_definitions = runtime_definitions;
+    work.call_depth -= 1;
+    result
 }
 
 fn value_at(
@@ -1559,6 +1801,9 @@ fn call(
     use super::super::exact::{EverydayFunction, ExactNumber};
     if let Function::Collection(operation) = function {
         return operation.call(arguments, work);
+    }
+    if let Function::Statistic(statistic) = function {
+        return statistic.call(arguments, work);
     }
     let everyday = match function {
         Function::RoundTo => Some(EverydayFunction::RoundTo),
@@ -1756,7 +2001,7 @@ fn call(
             }
             finite((variance_sum / values.len() as f64).max(0.0).sqrt())?
         }
-        Function::Collection(_) | Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat
+        Function::Collection(_) | Function::Statistic(_) | Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat
         | Function::RoundTo | Function::FloorTo | Function::CeilTo | Function::Clamp
         | Function::PercentChange | Function::PercentOf | Function::Choose | Function::Permutations
         | Function::Lerp | Function::MapRange => unreachable!(),
@@ -1774,6 +2019,21 @@ fn finite(value: f64) -> Result<f64, DiagnosticKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vector_callback_preserves_terminal_cancellation_and_budget() {
+        let analysis = syntax::SourceAnalysis::new("fn double(v) = v * 2");
+        let (functions, _, _) = build_functions(&analysis);
+        let expression = prepare_with_functions("map([1, 2], double)", &HashSet::new(), &functions).unwrap();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut work = WorkBudget::with_cancellation(cancelled);
+        assert!(matches!(expression.evaluate(0, &[], &[], &mut Vec::new(), &mut work), Err(DiagnosticKind::Canceled)));
+        assert!(!work.take_collection_failure());
+        let mut work = WorkBudget::default();
+        work.charge_vector(MAX_VECTOR_COMPONENT_WORK).unwrap();
+        assert!(matches!(expression.evaluate(0, &[], &[], &mut Vec::new(), &mut work), Err(DiagnosticKind::WorkLimit)));
+        assert!(!work.take_collection_failure());
+    }
 
     fn evaluated(source: &str) -> Vec<LineOutcome> {
         CalculationDocument::new(source)

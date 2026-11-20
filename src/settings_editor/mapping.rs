@@ -353,6 +353,7 @@ impl SettingsEditor {
             calculation_pad_remember_source: self.calculation_pad_remember_source,
             programmer_inspector: self.programmer_inspector,
             calculation_pad_display: current.calculation_pad_display,
+            password_generator: current.password_generator.clone(),
             note_images_as_links: self.note_images_as_links,
             note_show_details: self.note_show_details,
             note_more_limit: self.note_more_limit,

@@ -110,7 +110,10 @@ fn comparison_input_text(
                     && context.document_id == selected.document_id
             })
             .and_then(|context| {
-                context.rows.iter().position(|row| row.id == selected.line_id)
+                context
+                    .rows
+                    .iter()
+                    .position(|row| row.id == selected.line_id)
             })
             .map_or_else(
                 || "Unavailable selected result".to_owned(),
@@ -178,6 +181,7 @@ fn annotation_label(annotation: &crate::calculation_pad::InspectorAnnotation) ->
 pub(crate) struct ProgrammerInspectorDialog {
     pub(super) open: bool,
     epoch: u64,
+    jump_generation: u64,
     close_requested: bool,
     draft: InspectorDraft,
     published: Option<Arc<InspectorPadContext>>,
@@ -185,6 +189,8 @@ pub(crate) struct ProgrammerInspectorDialog {
     file_feedback: Option<String>,
     #[cfg(test)]
     test_controls: Vec<(String, egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_annotation_buttons: Vec<(std::ops::Range<u32>, egui::Id)>,
     #[cfg(test)]
     test_clicked_bit: Option<u32>,
     #[cfg(test)]
@@ -226,6 +232,27 @@ pub(super) struct InspectorActions {
     #[cfg(test)]
     pub(super) host_button: Option<(egui::Rect, egui::Rect, bool)>,
 }
+fn inspector_target(
+    scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    id: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: super::jump_mode::TargetKind,
+    order: &mut u64,
+) {
+    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order);
+    if response.gained_focus()
+        && response.enabled()
+        && ui.is_visible()
+        && !ui.is_sizing_pass()
+        && !ui.ctx().will_discard()
+        && !ui.clip_rect().contains_rect(response.rect)
+    {
+        response.scroll_to_me(None);
+    }
+}
+
 impl ProgrammerInspectorDialog {
     pub(crate) fn initialize_preferences(
         &mut self,
@@ -286,6 +313,36 @@ impl ProgrammerInspectorDialog {
     pub(super) fn epoch(&self) -> u64 {
         self.epoch
     }
+    pub(super) fn sync_jump_generation(&mut self, runtime: &InspectorRuntime) {
+        let source = runtime.context.candidate.as_ref().map(|source| {
+            (
+                source.incarnation,
+                source.document_id,
+                source.revision,
+                source.line_id,
+                source.basis.generation,
+            )
+        });
+        let comparison = runtime.context.comparison.as_ref().map(|context| {
+            (
+                context.incarnation,
+                context.document_id,
+                context.revision,
+                context.basis.generation,
+            )
+        });
+        self.jump_generation = egui::Id::new((
+            "programmer-inspector",
+            self.epoch,
+            source,
+            comparison,
+            runtime.context.selection_generation,
+        ))
+        .value();
+    }
+    pub(super) fn jump_generation(&self) -> u64 {
+        self.jump_generation
+    }
     #[cfg(test)]
     pub(super) fn test_control(&self, name: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
         self.test_controls
@@ -322,7 +379,9 @@ impl ProgrammerInspectorDialog {
         };
         comparison_input_text(
             input,
-            self.published.as_ref().and_then(|context| context.comparison.as_deref()),
+            self.published
+                .as_ref()
+                .and_then(|context| context.comparison.as_deref()),
         )
     }
     #[cfg(test)]
@@ -634,7 +693,9 @@ impl ProgrammerInspectorDialog {
         first: bool,
         child_ui: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> InspectorActions {
+        let mut order = 0;
         let mut draft = self.draft.clone();
         let mut changed = false;
         let mut copy = None;
@@ -650,6 +711,8 @@ impl ProgrammerInspectorDialog {
         #[cfg(test)]
         let mut test_controls = Vec::new();
         #[cfg(test)]
+        let mut test_annotation_buttons = Vec::new();
+        #[cfg(test)]
         let mut test_clicked_bit = None;
         let start = ctx.output(|o| o.commands.len());
         let mut body = |ui: &mut egui::Ui| {
@@ -660,6 +723,15 @@ impl ProgrammerInspectorDialog {
             let active = interactive && first && !ctx.will_discard();
             visible |= active;
             let (host, target) = super::utility_host::presentation_button(ui, presentation, owner);
+            inspector_target(
+                scope,
+                ui,
+                &host,
+                "presentation",
+                "Dock or pop out",
+                super::jump_mode::TargetKind::Button,
+                &mut order,
+            );
             #[cfg(test)]
             {
                 host_button = Some((host.rect, ui.clip_rect(), host.enabled()));
@@ -696,6 +768,7 @@ impl ProgrammerInspectorDialog {
                         );
                     }
                     let refresh = ui.button("Refresh from selected result");
+                    inspector_target(scope, ui, &refresh, "refresh", "Refresh from selected result", super::jump_mode::TargetKind::Button, &mut order);
                     #[cfg(test)]
                     test_controls.push((
                         "refresh".into(),
@@ -729,6 +802,7 @@ impl ProgrammerInspectorDialog {
                     && runtime.context.editable;
                 let insert_button =
                     ui.add_enabled(ready, egui::Button::new("Insert at Pad selection"));
+                    inspector_target(scope, ui, &insert_button, "insert", "Insert at Pad selection", super::jump_mode::TargetKind::Button, &mut order);
                 #[cfg(test)]
                 test_controls.push((
                     "insert".into(),
@@ -754,6 +828,7 @@ impl ProgrammerInspectorDialog {
                             width.bits().to_string()
                         };
                         let response = ui.selectable_label(active_mode.width() == width, label);
+                    inspector_target(scope, ui, &response, format!("width/{}", width.bits()), format!("Width {}", width.bits()), super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         test_controls.push((
                             format!("width-{}", width.bits()),
@@ -778,6 +853,7 @@ impl ProgrammerInspectorDialog {
                         };
                         let response =
                             ui.selectable_label(active_mode.is_signed() == signedness, label);
+                    inspector_target(scope, ui, &response, format!("signed/{signedness}"), if signedness { "Signed" } else { "Unsigned" }, super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         test_controls.push((
                             if signedness { "signed" } else { "unsigned" }.into(),
@@ -816,6 +892,7 @@ impl ProgrammerInspectorDialog {
                     }
                     let reinterpret =
                         ui.add_enabled(pending, egui::Button::new("Reinterpret bits"));
+                    inspector_target(scope, ui, &reinterpret, "reinterpret", "Reinterpret bits", super::jump_mode::TargetKind::Button, &mut order);
                     #[cfg(test)]
                     test_controls.push((
                         "reinterpret".into(),
@@ -837,6 +914,7 @@ impl ProgrammerInspectorDialog {
                     {
                         let response =
                             ui.selectable_label(draft.bit_grouping == group, group.to_string());
+                    inspector_target(scope, ui, &response, format!("group/{group}"), format!("Bit grouping {group}"), super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         test_controls.push((
                             format!("bit-group-{group}"),
@@ -851,9 +929,10 @@ impl ProgrammerInspectorDialog {
                     }
                 });
                 let model = &mut draft.model;
-                egui::ScrollArea::vertical()
+                let mut focused_bit = false;
+                let bit_view = egui::ScrollArea::vertical()
                     .id_salt("inspector-bits")
-                    .max_height(220.0)
+                    .max_height(220.0_f32.min(ui.clip_rect().height().max(1.0)))
                     .show(ui, |ui| {
                         const GROUP_GAP: f32 = 8.0;
                         const CELL_GAP: f32 = 1.0;
@@ -907,7 +986,7 @@ impl ProgrammerInspectorDialog {
                                             for &index in group {
                                                 let bit = model.bit(index).unwrap_or(false);
                                                 let response = ui
-                                                    .push_id(("inspector-bit", index), |ui| {
+                                                    .scope_builder(egui::UiBuilder::new().id(egui::Id::new(("programmer-inspector-bit", self.epoch, index))), |ui| {
                                                         ui.add_sized(
                                                             [
                                                                 cell_width,
@@ -922,6 +1001,14 @@ impl ProgrammerInspectorDialog {
                                                     })
                                                     .inner
                                                     .on_hover_text(format!("Bit {index}"));
+                    inspector_target(scope, ui, &response, format!("bit/{index}"), format!("Bit {index}"), super::jump_mode::TargetKind::Button, &mut order);
+                                                if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard() {
+                                                    focused_bit = true;
+                                                }
+                                                #[cfg(test)]
+                                                if index == 0 {
+                                                    ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test_inspector_bit_zero"), response.id));
+                                                }
                                                 #[cfg(test)]
                                                 test_controls.push((
                                                     format!("bit-{index}"),
@@ -995,22 +1082,37 @@ impl ProgrammerInspectorDialog {
                             }
                         }
                     });
+                if focused_bit
+                    && !ui.clip_rect().contains_rect(bit_view.inner_rect)
+                {
+                    ui.scroll_to_rect(bit_view.inner_rect, None);
+                }
 
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("NOT").clicked() {
+                    let button = ui.button("NOT");
+                    inspector_target(scope, ui, &button, "not", "NOT", super::jump_mode::TargetKind::Button, &mut order);
+                    if button.clicked() {
                         model.bit_not();
                         changed = true;
                     }
-                    if ui.button("Shift left").clicked() && model.shift_left(1).is_ok() {
+                    let button = ui.button("Shift left");
+                    inspector_target(scope, ui, &button, "shift-left", "Shift left", super::jump_mode::TargetKind::Button, &mut order);
+                    if button.clicked() && model.shift_left(1).is_ok() {
                         changed = true;
                     }
-                    if ui.button("Shift right").clicked() && model.shift_right(1).is_ok() {
+                    let button = ui.button("Shift right");
+                    inspector_target(scope, ui, &button, "shift-right", "Shift right", super::jump_mode::TargetKind::Button, &mut order);
+                    if button.clicked() && model.shift_right(1).is_ok() {
                         changed = true;
                     }
-                    if ui.button("Rotate left").clicked() && model.rotate_left(1).is_ok() {
+                    let button = ui.button("Rotate left");
+                    inspector_target(scope, ui, &button, "rotate-left", "Rotate left", super::jump_mode::TargetKind::Button, &mut order);
+                    if button.clicked() && model.rotate_left(1).is_ok() {
                         changed = true;
                     }
-                    if ui.button("Rotate right").clicked() && model.rotate_right(1).is_ok() {
+                    let button = ui.button("Rotate right");
+                    inspector_target(scope, ui, &button, "rotate-right", "Rotate right", super::jump_mode::TargetKind::Button, &mut order);
+                    if button.clicked() && model.rotate_right(1).is_ok() {
                         changed = true;
                     }
                     ui.label(format!("Set bits: {}", model.popcount()));
@@ -1023,6 +1125,7 @@ impl ProgrammerInspectorDialog {
                     ui.clip_rect(),
                     formatting.enabled(),
                 ));
+                inspector_target(scope, ui, &formatting, "section/formatting", "Formatting", super::jump_mode::TargetKind::Button, &mut order);
                 if formatting.clicked() {
                     changed = true;
                 }
@@ -1030,6 +1133,7 @@ impl ProgrammerInspectorDialog {
                     let mut options = model.format_options();
                     ui.horizontal_wrapped(|ui| {
                         let prefix = ui.checkbox(&mut options.prefix, "Prefix");
+                    inspector_target(scope, ui, &prefix, "format/prefix", "Prefix", super::jump_mode::TargetKind::Checkbox, &mut order);
                         #[cfg(test)]
                         test_controls.push((
                             "prefix".into(),
@@ -1041,30 +1145,32 @@ impl ProgrammerInspectorDialog {
                             changed = true;
                             preferences_changed = true;
                         }
-                        if ui
-                            .checkbox(&mut options.pad_to_width, "Pad to width")
-                            .changed()
-                        {
+                        let pad = ui.checkbox(&mut options.pad_to_width, "Pad to width");
+                        inspector_target(scope, ui, &pad, "format/pad", "Pad to width", super::jump_mode::TargetKind::Checkbox, &mut order);
+                        if pad.changed() {
                             changed = true;
                             preferences_changed = true;
                         }
                         ui.label("Group digits:");
-                        if ui
-                            .add(egui::DragValue::new(&mut options.grouping).range(0..=128))
-                            .changed()
-                        {
+                        let grouping = ui.add(egui::DragValue::new(&mut options.grouping).range(0..=128));
+                        inspector_target(scope, ui, &grouping, "format/grouping", "Group digits", super::jump_mode::TargetKind::Slider, &mut order);
+                        if grouping.changed() {
                             changed = true;
                             preferences_changed = true;
                         }
-                        if ui.button("Plain digits").clicked() {
+                        let button = ui.button("Plain digits");
+                    inspector_target(scope, ui, &button, "plain", "Plain digits", super::jump_mode::TargetKind::Button, &mut order);
+                    if button.clicked() {
                             options = Default::default();
                             changed = true;
                             preferences_changed = true;
                         }
                     });
                     let _ = model.set_format_options(options);
-                    if self.preference_error.is_some() && ui.button("Retry preferences").clicked() {
-                        preferences_changed = true;
+                    if self.preference_error.is_some() {
+                        let button = ui.button("Retry preferences");
+                        inspector_target(scope, ui, &button, "retry-preferences", "Retry preferences", super::jump_mode::TargetKind::Button, &mut order);
+                        if button.clicked() { preferences_changed = true; }
                     }
                     for (title, base) in [
                         ("Binary", NumericBase::Binary),
@@ -1084,6 +1190,7 @@ impl ProgrammerInspectorDialog {
                                 _value.enabled(),
                             ));
                             let response = ui.small_button("Copy");
+                    inspector_target(scope, ui, &response, format!("copy/{title}"), format!("Copy {title}"), super::jump_mode::TargetKind::Button, &mut order);
                             #[cfg(test)]
                             test_controls.push((
                                 format!("copy-{title}"),
@@ -1105,13 +1212,16 @@ impl ProgrammerInspectorDialog {
                     ui.clip_rect(),
                     labels.enabled(),
                 ));
+                inspector_target(scope, ui, &labels, "section/labels", "Bit labels", super::jump_mode::TargetKind::Button, &mut order);
                 if labels.clicked() {
                     changed = true;
                 }
                 if draft.labels_open {
                     ui.horizontal_wrapped(|ui| {
                         let import = ui.button("Import labels…");
+                    inspector_target(scope, ui, &import, "labels/import", "Import labels", super::jump_mode::TargetKind::Button, &mut order);
                         let export = ui.button("Export labels…");
+                    inspector_target(scope, ui, &export, "labels/export", "Export labels", super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         {
                             test_controls.push(("import-labels".into(), import.rect, ui.clip_rect(), import.enabled()));
@@ -1131,6 +1241,7 @@ impl ProgrammerInspectorDialog {
                             ui.clip_rect(),
                             label_start.enabled(),
                         ));
+                        inspector_target(scope, ui, &label_start, "label_start", "Label start", super::jump_mode::TargetKind::TextEntry, &mut order);
                         if label_start.changed() {
                             changed = true;
                             draft.control_dirty = true;
@@ -1144,6 +1255,7 @@ impl ProgrammerInspectorDialog {
                             ui.clip_rect(),
                             label_end.enabled(),
                         ));
+                        inspector_target(scope, ui, &label_end, "label_end", "Label end", super::jump_mode::TargetKind::TextEntry, &mut order);
                         if label_end.changed() {
                             changed = true;
                             draft.control_dirty = true;
@@ -1157,11 +1269,13 @@ impl ProgrammerInspectorDialog {
                             ui.clip_rect(),
                             label_text.enabled(),
                         ));
+                        inspector_target(scope, ui, &label_text, "label_text", "Label text", super::jump_mode::TargetKind::TextEntry, &mut order);
                         if label_text.changed() {
                             changed = true;
                             draft.control_dirty = true;
                         }
                         let add_label = ui.button("Add label");
+                    inspector_target(scope, ui, &add_label, "labels/add", "Add label", super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         test_controls.push((
                             "add-label".into(),
@@ -1189,7 +1303,10 @@ impl ProgrammerInspectorDialog {
                         }
                     });
                     for annotation in model.annotations().to_vec() {
-                        ui.horizontal(|ui| {
+                        let row_id = egui::Id::new(("programmer-inspector-annotation", self.epoch, annotation.range.start, annotation.range.end));
+                        ui.scope_builder(
+                            egui::UiBuilder::new().id(row_id).layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            |ui| {
                             ui.label(format!(
                                 "{}{}",
                                 annotation_label(&annotation),
@@ -1199,7 +1316,11 @@ impl ProgrammerInspectorDialog {
                                     " (outside current width)"
                                 }
                             ));
-                            if ui.small_button("Remove").clicked() {
+                            let remove = ui.small_button("Remove");
+                            #[cfg(test)]
+                            test_annotation_buttons.push((annotation.range.clone(), remove.id));
+                            inspector_target(scope, ui, &remove, format!("labels/remove/{}/{}", annotation.range.start, annotation.range.end), format!("Remove label {}–{}", annotation.range.start, annotation.range.end), super::jump_mode::TargetKind::Button, &mut order);
+                            if remove.clicked() {
                                 model.remove_annotation(annotation.range);
                                 changed = true;
                             }
@@ -1215,6 +1336,7 @@ impl ProgrammerInspectorDialog {
                     ui.clip_rect(),
                     comparison.enabled(),
                 ));
+                inspector_target(scope, ui, &comparison, "section/comparison", "Compare two values", super::jump_mode::TargetKind::Button, &mut order);
                 if comparison.clicked() {
                     changed = true;
                 }
@@ -1228,6 +1350,7 @@ impl ProgrammerInspectorDialog {
                             let mut expression =
                                 comparison_input_text(input, runtime.context.comparison.as_deref());
                             let field = ui.text_edit_singleline(&mut expression);
+                    inspector_target(scope, ui, &field, format!("comparison/{title}/input"), format!("{title} comparison"), super::jump_mode::TargetKind::TextEntry, &mut order);
                             #[cfg(test)]
                             test_controls.push((
                                 format!("comparison-{title}"),
@@ -1251,6 +1374,7 @@ impl ProgrammerInspectorDialog {
                                 runtime.context.selected_line.is_some() && runtime.context.comparison.is_some(),
                                 egui::Button::new("Use selected result"),
                             );
+                    inspector_target(scope, ui, &select, format!("comparison/{title}/selected"), format!("Use selected result for {title}"), super::jump_mode::TargetKind::Button, &mut order);
                             #[cfg(test)]
                             test_controls.push((
                                 format!("select-{title}"),
@@ -1283,6 +1407,7 @@ impl ProgrammerInspectorDialog {
                         runtime.context.comparison.is_some(),
                         egui::Button::new("Compare / Refresh"),
                     );
+                    inspector_target(scope, ui, &comparison_button, "comparison/run", "Compare / Refresh", super::jump_mode::TargetKind::Button, &mut order);
                     #[cfg(test)]
                     test_controls.push((
                         "compare".into(),
@@ -1322,6 +1447,7 @@ impl ProgrammerInspectorDialog {
                                     ui.weak("approx.");
                                 }
                                 let response = ui.add_enabled(comparison_current, egui::Button::new("Copy result").small());
+                    inspector_target(scope, ui, &response, format!("comparison/{name}/copy"), format!("Copy {name} result"), super::jump_mode::TargetKind::Button, &mut order);
                                 #[cfg(test)]
                                 test_controls.push((
                                     format!("comparison-copy-{name}"),
@@ -1430,6 +1556,7 @@ impl ProgrammerInspectorDialog {
         #[cfg(test)]
         {
             self.test_controls = test_controls;
+            self.test_annotation_buttons = test_annotation_buttons;
             self.test_clicked_bit = test_clicked_bit;
         }
         let preferences = preferences_changed.then(|| {
@@ -1490,7 +1617,9 @@ fn native_label_confirmation(count: usize, hwnd: Option<usize>) -> anyhow::Resul
         use windows::{
             Win32::{
                 Foundation::HWND,
-                UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, MessageBoxW},
+                UI::WindowsAndMessaging::{
+                    IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
+                },
             },
             core::PCWSTR,
         };
@@ -1543,9 +1672,174 @@ mod tests {
     use crate::platform::app_data::AppDataRoot;
 
     #[test]
+    fn inspector_tab_reveals_the_deep_focused_bit() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let mut dialog = ProgrammerInspectorDialog::default();
+        dialog.open();
+        dialog
+            .draft
+            .select_mode(IntegerMode::unsigned(IntegerWidth::Bits128));
+        dialog.draft.formatting_open = true;
+        dialog.draft.labels_open = true;
+        dialog.draft.comparison_open = true;
+        let context = Arc::new(InspectorPadContext::default());
+        let frame = |dialog: &mut ProgrammerInspectorDialog, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(320.0, 300.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let runtime = InspectorRuntime {
+                        context: Arc::clone(&context),
+                        root: ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT),
+                        host: HostIdentity {
+                            host: UtilityPresentation::Popout,
+                            generation: 1,
+                        },
+                        pinned: false,
+                    };
+                    let actions = dialog.render_host(
+                        &ctx,
+                        &runtime,
+                        true,
+                        true,
+                        Some(ui),
+                        UtilityPresentation::Popout,
+                        None,
+                    );
+                    assert!(actions.draft.is_none());
+                },
+            )
+            .drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            frame(&mut dialog, Vec::new());
+        }
+        let target = ctx
+            .data(|data| data.get_temp::<egui::Id>(egui::Id::new("test_inspector_bit_zero")))
+            .unwrap();
+        let (rect, clip, enabled) = dialog.test_control("bit-0").unwrap();
+        assert!(enabled && !clip.contains_rect(rect));
+        let tab = |pressed| egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for _ in 0..160 {
+            frame(&mut dialog, vec![tab(true)]);
+            frame(&mut dialog, vec![tab(false)]);
+            if ctx.memory(|m| m.focused()) == Some(target) {
+                break;
+            }
+        }
+        frame(&mut dialog, Vec::new());
+        assert_eq!(ctx.memory(|m| m.focused()), Some(target));
+        let (rect, clip, _) = dialog.test_control("bit-0").unwrap();
+        assert!(
+            clip.contains_rect(rect),
+            "focused bit {rect:?} vs nested clip {clip:?}"
+        );
+        assert_eq!(dialog.draft.model.bit(0), Ok(false));
+    }
+
+    #[test]
+    fn inspector_annotation_remove_focus_survives_prior_row_removal() {
+        fn frame(
+            ctx: &egui::Context,
+            dialog: &mut ProgrammerInspectorDialog,
+            events: Vec<egui::Event>,
+        ) -> InspectorActions {
+            let context = Arc::new(InspectorPadContext::default());
+            let mut actions = None;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 1200.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let runtime = InspectorRuntime {
+                    context: Arc::clone(&context),
+                    root: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                    host: HostIdentity {
+                        host: UtilityPresentation::Docked,
+                        generation: 0,
+                    },
+                    pinned: false,
+                };
+                actions = Some(dialog.render_host(
+                    ctx,
+                    &runtime,
+                    true,
+                    true,
+                    Some(ui),
+                    UtilityPresentation::Docked,
+                    None,
+                ));
+            });
+            output.drop_without_applying_deltas();
+            actions.unwrap()
+        }
+        let ctx = egui::Context::default();
+        let mut dialog = ProgrammerInspectorDialog::default();
+        dialog.open();
+        dialog.draft.labels_open = true;
+        dialog
+            .draft
+            .model
+            .set_annotation(0..1, "first".into())
+            .unwrap();
+        dialog
+            .draft
+            .model
+            .set_annotation(1..2, "second".into())
+            .unwrap();
+        frame(&ctx, &mut dialog, vec![]);
+        frame(&ctx, &mut dialog, vec![]);
+        let second = dialog
+            .test_annotation_buttons
+            .iter()
+            .find(|(range, _)| *range == (1..2))
+            .unwrap()
+            .1;
+        ctx.memory_mut(|memory| memory.request_focus(second));
+        dialog.draft.model.remove_annotation(0..1);
+        frame(&ctx, &mut dialog, vec![]);
+        assert_eq!(dialog.test_annotation_buttons[0].1, second);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(second));
+        let actions = frame(
+            &ctx,
+            &mut dialog,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(actions.draft.unwrap().model.annotations().is_empty());
+    }
+
+    #[test]
     fn stale_comparison_results_cannot_be_copied_while_current_results_are_unavailable() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session = CalculationPadSession::new(&AppDataRoot::from_path(temp.path().join("pad")));
+        let mut session =
+            CalculationPadSession::new(&AppDataRoot::from_path(temp.path().join("pad")));
         session.replace_source("1\n2").unwrap();
         session.evaluation();
         let comparison = session.comparison_context().unwrap();
@@ -1554,25 +1848,50 @@ mod tests {
         dialog.draft.comparison_left = ComparisonSlot::Expression("1".into());
         dialog.draft.comparison_right = ComparisonSlot::Expression("2".into());
         dialog.draft.comparison_selection_generation = Some(0);
-        dialog.draft.comparison_result = Some(Arc::new(comparison.compare(dialog.draft.comparison_request())));
+        dialog.draft.comparison_result = Some(Arc::new(
+            comparison.compare(dialog.draft.comparison_request()),
+        ));
         let ctx = egui::Context::default();
         for current in [Some(Arc::new(comparison)), None] {
             let is_current = current.is_some();
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 1200.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 1200.0),
+                )),
                 ..Default::default()
             };
             let output = ctx.run_ui(input, |ui| {
                 let runtime = InspectorRuntime {
-                    context: Arc::new(InspectorPadContext { comparison: current.clone(), ..Default::default() }),
+                    context: Arc::new(InspectorPadContext {
+                        comparison: current.clone(),
+                        ..Default::default()
+                    }),
                     root: ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT),
-                    host: HostIdentity { host: UtilityPresentation::Docked, generation: 0 },
+                    host: HostIdentity {
+                        host: UtilityPresentation::Docked,
+                        generation: 0,
+                    },
                     pinned: false,
                 };
-                dialog.render_host(&ctx, &runtime, true, true, Some(ui), UtilityPresentation::Docked);
+                dialog.render_host(
+                    &ctx,
+                    &runtime,
+                    true,
+                    true,
+                    Some(ui),
+                    UtilityPresentation::Docked,
+                    None,
+                );
             });
-            assert_eq!(dialog.test_control("comparison-copy-Left").unwrap().2, is_current);
-            assert_eq!(dialog.test_control("comparison-copy-Right").unwrap().2, is_current);
+            assert_eq!(
+                dialog.test_control("comparison-copy-Left").unwrap().2,
+                is_current
+            );
+            assert_eq!(
+                dialog.test_control("comparison-copy-Right").unwrap().2,
+                is_current
+            );
             output.drop_without_applying_deltas();
         }
     }
@@ -1866,7 +2185,7 @@ mod tests {
                     pinned: false,
                 };
                 let actions =
-                    dialog.render_host(&ctx, &runtime, true, true, Some(ui), presentation);
+                    dialog.render_host(&ctx, &runtime, true, true, Some(ui), presentation, None);
                 assert!(actions.file_action.is_none());
             });
             for name in ["import-labels", "export-labels"] {
@@ -1901,12 +2220,20 @@ mod tests {
         session.replace_source("0\n345").unwrap();
         session.evaluation();
         let removed = session.comparison_context().unwrap();
-        assert_eq!(comparison_input_text(&input, Some(&removed)), "Unavailable selected result");
+        assert_eq!(
+            comparison_input_text(&input, Some(&removed)),
+            "Unavailable selected result"
+        );
         session.request_open(initial.document_id).unwrap();
-        session.resolve_pending(crate::calculation_pad::TransitionDecision::Discard).unwrap();
+        session
+            .resolve_pending(crate::calculation_pad::TransitionDecision::Discard)
+            .unwrap();
         session.evaluation();
         let reopened = session.comparison_context().unwrap();
-        assert_eq!(comparison_input_text(&input, Some(&reopened)), "Unavailable selected result");
+        assert_eq!(
+            comparison_input_text(&input, Some(&reopened)),
+            "Unavailable selected result"
+        );
     }
 
     #[test]
@@ -2045,6 +2372,7 @@ mod tests {
                     true,
                     Some(ui),
                     UtilityPresentation::Docked,
+                    None,
                 );
             });
             output.textures_delta.clear();
@@ -2114,6 +2442,7 @@ mod tests {
                     true,
                     Some(ui),
                     UtilityPresentation::Docked,
+                    None,
                 );
             });
             output.textures_delta.clear();

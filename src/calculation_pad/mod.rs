@@ -20,8 +20,10 @@ mod operators;
 mod persistence;
 mod programmer;
 mod quantity;
+pub(crate) mod reference;
 mod session;
 mod sensitivity;
+mod statistics;
 mod vector;
 mod worker;
 pub use worker::EvaluationBasis;
@@ -49,7 +51,7 @@ pub use document::{
     MAX_DEPENDENCIES_PER_LINE, MAX_DOCUMENT_BYTES, MAX_EXPRESSION_BYTES, MAX_EXPRESSION_NESTING,
     MAX_NAME_BYTES, MAX_SOURCE_LINES,
 };
-pub(crate) use examples::{CalculationExampleGroup, EXAMPLE_GROUPS};
+pub(crate) use examples::{CalculationExample, CalculationExampleGroup, EXAMPLE_GROUPS};
 pub use inspector::{
     DocumentIncarnation, InspectorAnnotation, InspectorError, InspectorFormatOptions,
     InspectorInsertRequest, InspectorSourceOrigin, InspectorSourceSnapshot, ProgrammerInspector,
@@ -59,13 +61,19 @@ pub use programmer::ProgrammerError;
 pub use quantity::{CalculatedQuantity, QuantityError};
 pub use vector::CalculationVector;
 pub use document::CalculationSequence;
-pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindings, editor_loop_header, editor_control_keyword, editor_function_scope, function_signature_help, FUNCTIONS};
+pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindings, editor_loop_header, editor_control_keyword, editor_function_scope, editor_callback_ranges, function_signature_help, is_vector_callback, FUNCTIONS};
 pub(crate) use document::rename::{RenamePlan, RenameScope};
 
 pub(crate) use persistence::{PadViewMetadata, PadInputReference, SensitivitySettings};
 pub(crate) use input::{InputConfig, InputControl, InputKind, SampleNumber};
 pub(crate) use sensitivity::{Sampling, SensitivityBasis, SensitivityDefinition, SensitivityRow, SensitivityStatus, SensitivityTable};
-pub(crate) use chart::{ChartDataset, ChartHit, ChartKind, ChartPoint, ChartScene, ChartSeries, ChartVectorReference, ChartView, ScenePrimitive};
+pub(crate) use chart::{ChartDataset, ChartHit, ChartKind, ChartPoint, ChartScene, ChartSeries, ChartVectorReference, ChartView, ResolvedReferenceLine, ScenePrimitive};
+pub(crate) use chart::scalar_reference_coordinate;
+pub(crate) use chart::default_series_color;
+pub(crate) use chart::distribution::{DistributionBins, DistributionData, DistributionDefinition, DistributionScale};
+pub(crate) use chart::options::ReferenceValue as ChartReferenceValue;
+pub(crate) use chart::options::{AxisBounds as ChartAxisBounds, AxisOptions as ChartAxisOptions, AxisScale as ChartAxisScale, AxisTicks as ChartAxisTicks, ChartOptions, LegendPlacement as ChartLegendPlacement, ReferenceAxis as ChartReferenceAxis, ReferenceLine as ChartReferenceLine, SeriesKey as ChartSeriesKey, SeriesStyle as ChartSeriesStyle, LineStyle as ChartLineStyle, MarkerStyle as ChartMarkerStyle};
+pub(crate) use chart::options::FiniteValue as ChartFiniteValue;
 pub(crate) use sensitivity::{TableExport, export_table, table_header, table_row};
 pub(crate) use input::{step_value, slider_values, exact_grid, exact_grid_value, project as project_input};
 pub use persistence::{

@@ -56,10 +56,50 @@ pub(crate) enum NavigationDialogKind {
     Activity,
     ZipExtractor,
     ClipboardModify,
+    CalculationChart,
+    MarkdownPrint,
+    PasswordGenerator,
+    FileOperations,
+    DownloadsTriage,
+    NotificationInbox,
+    FilePreview,
+    HashGenerator,
+    QrGenerator,
+    ExplorerTabs,
+    Convert,
+    FileLock,
+    FolderSize,
+    DateTimeStudio,
+    Calendar,
+    CalendarDetails,
+    CalendarEditor,
+    HotFolder,
+    DataRecovery,
+    DataRecoveryConfirmation,
+    NoteTemplates,
+    TemplateDelete,
+    UnusedNoteAssets,
+    ImageViewer,
+    CalculationDependencies,
+    CalculationSensitivity,
+    ProgrammerInspector,
+    NotePanel,
+    NoteFormTable,
+    NoteFormLink,
+    NoteFormNewNote,
+    NoteClosePrompt,
+    NoteConflictPrompt,
+    NotePlainLinkPrompt,
+    MarkdownStudio,
+    CalculationPad,
+    CalculationReference,
+    DiagramStudio,
+    DiagramViewer,
+    PluginSettings,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 20] = [
+    pub(crate) const ALL: [Self; 60] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -80,6 +120,46 @@ impl NavigationDialogKind {
         Self::Activity,
         Self::ZipExtractor,
         Self::ClipboardModify,
+        Self::CalculationChart,
+        Self::MarkdownPrint,
+        Self::PasswordGenerator,
+        Self::FileOperations,
+        Self::DownloadsTriage,
+        Self::NotificationInbox,
+        Self::FilePreview,
+        Self::HashGenerator,
+        Self::QrGenerator,
+        Self::ExplorerTabs,
+        Self::FileLock,
+        Self::FolderSize,
+        Self::Convert,
+        Self::DateTimeStudio,
+        Self::Calendar,
+        Self::CalendarDetails,
+        Self::CalendarEditor,
+        Self::HotFolder,
+        Self::DataRecovery,
+        Self::DataRecoveryConfirmation,
+        Self::NoteTemplates,
+        Self::TemplateDelete,
+        Self::UnusedNoteAssets,
+        Self::ImageViewer,
+        Self::CalculationDependencies,
+        Self::CalculationSensitivity,
+        Self::ProgrammerInspector,
+        Self::NotePanel,
+        Self::NoteFormTable,
+        Self::NoteFormLink,
+        Self::NoteFormNewNote,
+        Self::NoteClosePrompt,
+        Self::NoteConflictPrompt,
+        Self::NotePlainLinkPrompt,
+        Self::MarkdownStudio,
+        Self::CalculationPad,
+        Self::CalculationReference,
+        Self::DiagramStudio,
+        Self::DiagramViewer,
+        Self::PluginSettings,
     ];
 
     const fn index(self) -> usize {
@@ -104,6 +184,46 @@ impl NavigationDialogKind {
             Self::Activity => 17,
             Self::ZipExtractor => 18,
             Self::ClipboardModify => 19,
+            Self::CalculationChart => 20,
+            Self::MarkdownPrint => 21,
+            Self::PasswordGenerator => 22,
+            Self::FileOperations => 23,
+            Self::DownloadsTriage => 24,
+            Self::NotificationInbox => 25,
+            Self::FilePreview => 26,
+            Self::HashGenerator => 27,
+            Self::QrGenerator => 28,
+            Self::ExplorerTabs => 29,
+            Self::Convert => 32,
+            Self::FileLock => 30,
+            Self::FolderSize => 31,
+            Self::DateTimeStudio => 33,
+            Self::Calendar => 34,
+            Self::CalendarDetails => 35,
+            Self::CalendarEditor => 36,
+            Self::HotFolder => 37,
+            Self::DataRecovery => 38,
+            Self::DataRecoveryConfirmation => 39,
+            Self::NoteTemplates => 40,
+            Self::TemplateDelete => 41,
+            Self::UnusedNoteAssets => 42,
+            Self::ImageViewer => 43,
+            Self::CalculationDependencies => 44,
+            Self::CalculationSensitivity => 45,
+            Self::ProgrammerInspector => 46,
+            Self::NotePanel => 47,
+            Self::NoteFormTable => 48,
+            Self::NoteFormLink => 49,
+            Self::NoteFormNewNote => 50,
+            Self::NoteClosePrompt => 51,
+            Self::NoteConflictPrompt => 52,
+            Self::NotePlainLinkPrompt => 53,
+            Self::MarkdownStudio => 54,
+            Self::CalculationPad => 55,
+            Self::CalculationReference => 56,
+            Self::DiagramStudio => 57,
+            Self::DiagramViewer => 58,
+            Self::PluginSettings => 59,
         }
     }
 
@@ -129,6 +249,46 @@ impl NavigationDialogKind {
             Self::Activity => "activity",
             Self::ZipExtractor => "zip-extractor",
             Self::ClipboardModify => "clipboard-modify",
+            Self::CalculationChart => "calculation-chart",
+            Self::MarkdownPrint => "markdown-print",
+            Self::PasswordGenerator => "password-generator",
+            Self::FileOperations => "file-operations-center",
+            Self::DownloadsTriage => "downloads-triage",
+            Self::NotificationInbox => "notification-inbox",
+            Self::FilePreview => "file-preview",
+            Self::HashGenerator => "hash-generator",
+            Self::QrGenerator => "qr-generator",
+            Self::ExplorerTabs => "explorer-tabs",
+            Self::Convert => "convert-panel",
+            Self::FileLock => "file-lock",
+            Self::FolderSize => "folder-size",
+            Self::DateTimeStudio => "date-time-studio",
+            Self::Calendar => "calendar",
+            Self::CalendarDetails => "calendar-event-details",
+            Self::CalendarEditor => "calendar-event-editor",
+            Self::HotFolder => "hotfolder-manager",
+            Self::DataRecovery => "data-recovery",
+            Self::DataRecoveryConfirmation => "data-recovery-confirmation",
+            Self::NoteTemplates => "note-templates",
+            Self::TemplateDelete => "note-template-delete",
+            Self::UnusedNoteAssets => "unused-note-assets",
+            Self::ImageViewer => "image-viewer",
+            Self::CalculationDependencies => "calculation-dependencies",
+            Self::CalculationSensitivity => "calculation-sensitivity",
+            Self::ProgrammerInspector => "programmer-inspector",
+            Self::NotePanel => "note-panel",
+            Self::NoteFormTable => "note-custom-table-builder",
+            Self::NoteFormLink => "note-insert-link",
+            Self::NoteFormNewNote => "note-link-new",
+            Self::NoteClosePrompt => "note-close-prompt",
+            Self::NoteConflictPrompt => "note-conflict-prompt",
+            Self::NotePlainLinkPrompt => "note-plain-link-prompt",
+            Self::MarkdownStudio => "markdown-studio",
+            Self::CalculationPad => "calculation-pad",
+            Self::CalculationReference => "calculation-reference",
+            Self::DiagramStudio => "diagram-studio",
+            Self::DiagramViewer => "diagram-viewer",
+            Self::PluginSettings => "plugin-settings",
         }
     }
 
@@ -157,6 +317,39 @@ impl NavigationDialogKind {
             Self::DuplicateFinder => egui::Id::new(Some("Duplicate Finder")),
             Self::Activity => egui::Id::new("activity_dialog"),
             Self::ZipExtractor => egui::Id::new("zip_extractor_dialog"),
+            Self::CalculationChart => egui::Id::new("calculation-chart-window"),
+            Self::MarkdownPrint => egui::Id::new("markdown-print-window"),
+            Self::PasswordGenerator => egui::Id::new("password-generator-window"),
+            Self::FileOperations => egui::Id::new("file-operations-center-window"),
+            Self::DownloadsTriage => egui::Id::new("downloads-triage-window"),
+            Self::NotificationInbox => egui::Id::new("notification-inbox-window"),
+            Self::FilePreview => egui::Id::new(super::super::file_search_preview_dialog::preview_window_id_source()),
+            Self::HashGenerator => egui::Id::new("hash_generator_dialog"),
+            Self::QrGenerator => egui::Id::new("qr_generator_embedded"),
+            Self::ExplorerTabs => egui::Id::new("explorer-tabs-window"),
+            Self::Convert => egui::Id::new("convert-panel-window"),
+            Self::FileLock => egui::Id::new(Some("File Lock Inspector")),
+            Self::FolderSize => egui::Id::new(Some("Folder Size")),
+            Self::DateTimeStudio => egui::Id::new("date-time-studio-window"),
+            Self::Calendar => egui::Id::new(Some("Calendar")),
+            Self::CalendarDetails => egui::Id::new(Some("Event Details")),
+            Self::CalendarEditor => egui::Id::new(Some("Calendar Event")),
+            Self::HotFolder => egui::Id::new("hotfolder_manager_window"),
+            Self::DataRecovery => egui::Id::new(Some("Data & Recovery")),
+            Self::DataRecoveryConfirmation => egui::Id::new("data-recovery-confirmation"),
+            Self::NoteTemplates => egui::Id::new(Some("Note Templates")),
+            Self::TemplateDelete => egui::Id::new(Some("Delete Template?")),
+            Self::UnusedNoteAssets => egui::Id::new(Some("Unused Note Assets")),
+            Self::ImageViewer | Self::NotePanel | Self::NoteFormTable | Self::NoteFormLink | Self::NoteFormNewNote | Self::NoteClosePrompt | Self::NoteConflictPrompt | Self::NotePlainLinkPrompt => return None,
+            Self::CalculationDependencies => egui::Id::new("calculation-dependencies-window"),
+            Self::CalculationSensitivity => egui::Id::new("calculation-sensitivity-window"),
+            Self::MarkdownStudio => egui::Id::new("markdown-studio-window"),
+            Self::CalculationPad => egui::Id::new("calculation-pad-window"),
+            Self::CalculationReference => egui::Id::new("calculation-pad-examples-window"),
+            Self::DiagramStudio => egui::Id::new("diagram-studio"),
+            Self::DiagramViewer => egui::Id::new("diagram-viewer"),
+            Self::PluginSettings => egui::Id::new("Plugin Settings"),
+            Self::ProgrammerInspector => egui::Id::new("programmer-inspector-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -440,6 +633,23 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::ClipboardModify
+                    | NavigationDialogKind::CalculationChart
+                    | NavigationDialogKind::FilePreview
+                    | NavigationDialogKind::UnusedNoteAssets
+                    | NavigationDialogKind::NoteTemplates
+                    | NavigationDialogKind::TemplateDelete
+                    | NavigationDialogKind::ProgrammerInspector
+                    | NavigationDialogKind::CalculationSensitivity
+                    | NavigationDialogKind::CalculationDependencies
+                    | NavigationDialogKind::HashGenerator
+                    | NavigationDialogKind::QrGenerator
+                    | NavigationDialogKind::ExplorerTabs
+                    | NavigationDialogKind::Convert
+                    | NavigationDialogKind::MarkdownPrint
+                    | NavigationDialogKind::PasswordGenerator
+                    | NavigationDialogKind::DownloadsTriage
+                    | NavigationDialogKind::NotificationInbox
+                    | NavigationDialogKind::FileOperations
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets
                     | NavigationDialogKind::XmlToolkit
@@ -447,6 +657,26 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ImageCompare
                     | NavigationDialogKind::DuplicateFinder
                     | NavigationDialogKind::ZipExtractor
+                    | NavigationDialogKind::FileLock
+                    | NavigationDialogKind::FolderSize
+                    | NavigationDialogKind::DateTimeStudio
+                    | NavigationDialogKind::Calendar
+                    | NavigationDialogKind::CalendarDetails
+                    | NavigationDialogKind::CalendarEditor
+                    | NavigationDialogKind::NoteFormTable
+                    | NavigationDialogKind::NoteFormLink
+                    | NavigationDialogKind::NoteFormNewNote
+                    | NavigationDialogKind::NoteClosePrompt
+                    | NavigationDialogKind::NoteConflictPrompt
+                    | NavigationDialogKind::NotePlainLinkPrompt
+                    | NavigationDialogKind::CalculationReference
+                    | NavigationDialogKind::CalculationPad
+                    | NavigationDialogKind::MarkdownStudio
+                    | NavigationDialogKind::DiagramStudio
+                    | NavigationDialogKind::DiagramViewer
+                    | NavigationDialogKind::PluginSettings
+                    | NavigationDialogKind::NotePanel
+                    | NavigationDialogKind::ImageViewer
                     | NavigationDialogKind::DashboardEditor
                     | NavigationDialogKind::MouseGestures
                     | NavigationDialogKind::MouseSettings
@@ -475,12 +705,92 @@ impl NavigationViewportBinding {
         let visible_layer = visible_top_middle_layer(ctx);
         let layer_is_current = match self.owner {
             NavigationOwner::Dialog {
+                kind: kind @ (NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote),
+                instance,
+            } => {
+                let key = kind.surface_kind();
+                self.viewport == egui::ViewportId::from_hash_of((key, instance))
+                    && self.base_layer == egui::LayerId::new(egui::Order::Middle, egui::Id::new((key, instance)))
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::Dialog {
+                kind: kind @ (NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt),
+                instance,
+            } => {
+                let name = match kind {
+                    NavigationDialogKind::NoteClosePrompt => "close",
+                    NavigationDialogKind::NoteConflictPrompt => "save-conflict",
+                    NavigationDialogKind::NotePlainLinkPrompt => "plain-link-conversion",
+                    _ => unreachable!(),
+                };
+                self.viewport == egui::ViewportId::from_hash_of(("note-panel-editor", instance))
+                    && self.base_layer == egui::LayerId::new(egui::Order::Middle, egui::Id::new(("note-panel-prompt", name, instance)))
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationReference, .. } => {
+                self.viewport == egui::ViewportId::from_hash_of("calculation_pad_reference_native_viewport")
+                    && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
+            }
+            NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationPad, .. } => {
+                self.viewport == egui::ViewportId::from_hash_of("calculation_pad_native_viewport")
+                    && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
+            }
+            NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownStudio, .. } => {
+                self.viewport == egui::ViewportId::from_hash_of("markdown_studio_viewport")
+                    && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
+            }
+            NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramStudio, .. } => {
+                self.viewport == egui::ViewportId::from_hash_of("diagram_studio_viewport")
+                    && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
+            }
+            NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramViewer, .. } => {
+                self.viewport == egui::ViewportId::from_hash_of("diagram_studio_preview_viewer")
+                    && self.base_layer == egui::LayerId::background() && visible_layer.is_none()
+            }
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::NotePanel,
+                instance,
+            } => {
+                self.viewport == egui::ViewportId::from_hash_of(("note-panel-editor", instance))
+                    && self.base_layer == egui::LayerId::background()
+                    && visible_layer.is_none()
+            }
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::ImageViewer,
+                instance,
+            } => {
+                self.viewport == egui::ViewportId::from_hash_of(("image-viewer", instance))
+                    && self.base_layer == egui::LayerId::new(
+                        egui::Order::Middle,
+                        egui::Id::new(("image-viewer", instance)),
+                    )
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::Dialog {
                 kind: kind @ (NavigationDialogKind::FileSearch
                     | NavigationDialogKind::BatchRename
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::ClipboardModify
+                    | NavigationDialogKind::CalculationChart
+                    | NavigationDialogKind::FilePreview
+                    | NavigationDialogKind::UnusedNoteAssets
+                    | NavigationDialogKind::NoteTemplates
+                    | NavigationDialogKind::TemplateDelete
+                    | NavigationDialogKind::ProgrammerInspector
+                    | NavigationDialogKind::CalculationSensitivity
+                    | NavigationDialogKind::CalculationDependencies
+                    | NavigationDialogKind::HashGenerator
+                    | NavigationDialogKind::QrGenerator
+                    | NavigationDialogKind::ExplorerTabs
+                    | NavigationDialogKind::Convert
+                    | NavigationDialogKind::MarkdownPrint
+                    | NavigationDialogKind::PasswordGenerator
+                    | NavigationDialogKind::DownloadsTriage
+                    | NavigationDialogKind::NotificationInbox
+                    | NavigationDialogKind::FileOperations
                     | NavigationDialogKind::JsonUtility
+                    | NavigationDialogKind::PluginSettings
                     | NavigationDialogKind::Snippets),
                 ..
             } => {
@@ -586,6 +896,10 @@ impl NavigationViewportBinding {
         focused_response_layer(ctx).is_none_or(|layer| {
             layer == self.base_layer
                 || Some(layer) == popup_layer
+                || (matches!(self.owner, NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::TemplateDelete | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt,
+                    ..
+                }) && layer == egui::LayerId::background())
                 || (matches!(self.owner, NavigationOwner::SnippetPrompt { .. })
                     && (Some(layer) == NavigationDialogKind::Snippets.layer_id()
                         || layer.order != egui::Order::Middle))
@@ -641,7 +955,7 @@ pub(crate) fn resolve_bound_viewport_navigation_owner(
         }) else {
             return NavigationOwner::Blocked;
         };
-        if !binding.focus_is_owned(ctx, Some(popup.popup_layer)) {
+        if popup.menu_chain.is_empty() && !binding.focus_is_owned(ctx, Some(popup.popup_layer)) {
             return NavigationOwner::Blocked;
         }
         binding.owner
@@ -1107,6 +1421,35 @@ pub(crate) fn resolve_snippet_prompt_navigation_owner(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NavigationDialogSlots<T>([T; NavigationDialogKind::ALL.len()]);
+
+impl<T> NavigationDialogSlots<T> {
+    pub(crate) fn for_kinds(make: impl FnMut(NavigationDialogKind) -> T) -> Self {
+        Self(NavigationDialogKind::ALL.map(make))
+    }
+}
+
+impl<T: Default> Default for NavigationDialogSlots<T> {
+    fn default() -> Self {
+        Self::for_kinds(|_| T::default())
+    }
+}
+
+impl<T> std::ops::Deref for NavigationDialogSlots<T> {
+    type Target = [T; NavigationDialogKind::ALL.len()];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for NavigationDialogSlots<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NavigationWindows {
     pub(crate) settings: Option<u64>,
@@ -1119,8 +1462,8 @@ pub(crate) struct NavigationWindows {
     pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
     pub(crate) mouse_form_layers: [Option<egui::LayerId>; 3],
     pub(crate) file_search_layer: Option<egui::LayerId>,
-    pub(crate) hosted_utility_layers: [Option<egui::LayerId>; NavigationDialogKind::ALL.len()],
-    pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
+    pub(crate) hosted_utility_layers: NavigationDialogSlots<Option<egui::LayerId>>,
+    pub(crate) dialogs: NavigationDialogSlots<Option<u64>>,
 }
 
 impl NavigationWindows {
@@ -1263,7 +1606,10 @@ pub(crate) fn resolve_layer_navigation_owner_with_combo_popup(
         return NavigationOwner::Blocked;
     }
     if egui::Popup::is_any_open(ctx) {
-        if combo_popup.is_some_and(|popup| popup.is_current(ctx, parent_owner)) {
+        if combo_popup.is_some_and(|popup| {
+            popup.is_current(ctx, parent_owner)
+                || (!popup.menu_chain.is_empty() && popup.is_sizing_pass(ctx, parent_owner))
+        }) {
             parent_owner
         } else {
             NavigationOwner::Blocked
@@ -1285,6 +1631,7 @@ pub(crate) struct ComboPopupOwner {
     anchor_layer: egui::LayerId,
     popup_layer: egui::LayerId,
     popup_surface: SurfaceId,
+    menu_chain: Vec<(egui::Id, egui::LayerId)>,
 }
 
 impl ComboPopupOwner {
@@ -1315,8 +1662,14 @@ impl ComboPopupOwner {
             && egui::ComboBox::is_open(ctx, self.response_id)
             && egui::Popup::is_any_open(ctx)
             && anchor_is_current
-            && focused_response_layer(ctx)
-                .is_none_or(|layer| layer == self.anchor_layer || layer == self.popup_layer)
+            && focused_response_layer(ctx).is_none_or(|layer| {
+                layer == self.anchor_layer
+                    || layer == self.popup_layer
+                    || self
+                        .menu_chain
+                        .iter()
+                        .any(|(_, ancestor)| *ancestor == layer)
+            })
     }
 
     /// The first visible ComboBox popup pass is deliberately non-interactive
@@ -1328,7 +1681,10 @@ impl ComboPopupOwner {
             return false;
         }
 
-        let popup_id = self.response_id.with("popup");
+        let popup_id = self
+            .menu_chain
+            .last()
+            .map_or(self.response_id.with("popup"), |(id, _)| *id);
         let Some(rect) = ctx.memory(|memory| memory.area_rect(popup_id)) else {
             return false;
         };
@@ -1343,7 +1699,10 @@ impl ComboPopupOwner {
             return false;
         }
 
-        let popup_id = self.response_id.with("popup");
+        let popup_id = self
+            .menu_chain
+            .last()
+            .map_or(self.response_id.with("popup"), |(id, _)| *id);
         let Some(rect) = ctx.memory(|memory| memory.area_rect(popup_id)) else {
             return false;
         };
@@ -1450,6 +1809,14 @@ pub(crate) struct RegisteredTarget {
     eligible: bool,
     epoch: NavigationEpoch,
     provenance: Option<TargetProvenance>,
+    menu_anchor: Option<MenuAnchorKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MenuAnchorKind {
+    Root,
+    Submenu,
+    Context(TargetKind),
 }
 
 impl RegisteredTarget {
@@ -1516,6 +1883,16 @@ pub(crate) struct TargetRegistry {
     // Combo anchors are retained separately when the popup becomes the active
     // surface, so the next frame can prove which native popup owns navigation.
     combo_anchors: Vec<RegisteredTarget>,
+    context_anchors: Vec<ContextAnchorReceipt>,
+}
+
+/// A rendered, already-open context anchor. It is evidence only and never a hint target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ContextAnchorReceipt {
+    id: TargetId,
+    response_id: egui::Id,
+    viewport: egui::ViewportId,
+    layer: egui::LayerId,
 }
 
 impl TargetRegistry {
@@ -1543,7 +1920,9 @@ impl TargetRegistry {
         self.combo_anchors = self
             .targets
             .iter()
-            .filter(|target| target.metadata.kind() == TargetKind::ComboBox)
+            .filter(|target| {
+                target.metadata.kind() == TargetKind::ComboBox || target.menu_anchor.is_some()
+            })
             .cloned()
             .collect();
         let Some(priority) = self
@@ -1623,7 +2002,8 @@ impl TargetRegistry {
             };
             let popup_surface_owned = active_combo_popup
                 .as_ref()
-                .is_some_and(|popup| popup.popup_surface == *target.id().surface());
+                .is_some_and(|popup| popup.popup_surface == *target.id().surface()
+                    && (popup.menu_chain.is_empty() || popup.popup_layer == target.layer_id));
             viewport_is_current
                 && target.viewport == expected_viewport
                 && target.eligible
@@ -1654,6 +2034,17 @@ impl TargetRegistry {
                 && navigation_owner.owns_surface(target.id().surface())
                 && ctx.memory(|memory| memory.allows_interaction(target.layer_id))
         });
+        self.context_anchors.retain(|anchor| {
+            viewport_is_current
+                && anchor.viewport == expected_viewport
+                && navigation_owner != NavigationOwner::Blocked
+                && navigation_owner.owns_surface(anchor.id.surface())
+                && egui::Popup::is_id_open(ctx, anchor.response_id.with("popup"))
+                && match viewport_binding {
+                    Some(binding) => anchor.layer == binding.base_layer,
+                    None => combo_anchor_layer_is_current(ctx, navigation_owner, anchor.id.surface(), anchor.layer),
+                }
+        });
     }
 
     fn open_combo_popup(
@@ -1662,6 +2053,113 @@ impl TargetRegistry {
         parent_owner: NavigationOwner,
     ) -> Result<Option<ComboPopupOwner>, ()> {
         self.open_combo_popup_for_binding(ctx, parent_owner, None)
+    }
+
+    fn open_menu_popup_for_binding(
+        &self,
+        ctx: &egui::Context,
+        parent_owner: NavigationOwner,
+        binding: Option<NavigationViewportBinding>,
+    ) -> Result<Option<ComboPopupOwner>, ()> {
+        if !egui::Popup::is_any_open(ctx) {
+            return Ok(None);
+        }
+        if binding.is_some_and(|b| !b.base_is_current(ctx) || b.owner != parent_owner) {
+            return Err(());
+        }
+        let viewport = binding.map_or(egui::ViewportId::ROOT, |b| b.viewport);
+        let roots = self.combo_anchors.iter().filter(|anchor| {
+            matches!(
+                anchor.menu_anchor,
+                Some(MenuAnchorKind::Root | MenuAnchorKind::Context(_))
+            ) && anchor.viewport == viewport
+                && anchor.enabled
+                && anchor.eligible
+                && parent_owner.owns_surface(anchor.id().surface())
+                && egui::Popup::is_id_open(ctx, anchor.response_id.with("popup"))
+        });
+        let mut root: Option<ContextAnchorReceipt> = None;
+        for anchor in roots {
+            let receipt = ContextAnchorReceipt {
+                id: anchor.id().clone(),
+                response_id: anchor.response_id,
+                viewport: anchor.viewport,
+                layer: anchor.layer_id,
+            };
+            if root.as_ref().is_some_and(|old| old != &receipt) {
+                return Err(());
+            }
+            root = Some(receipt);
+        }
+        for receipt in self.context_anchors.iter().filter(|anchor| {
+            anchor.viewport == viewport
+                && parent_owner.owns_surface(anchor.id.surface())
+                && egui::Popup::is_id_open(ctx, anchor.response_id.with("popup"))
+        }) {
+            if root.as_ref().is_some_and(|old| old != receipt) {
+                return Err(());
+            }
+            root = Some(receipt.clone());
+        }
+        let Some(root) = root else {
+            return Ok(None);
+        };
+        let anchor_is_current = match binding {
+            Some(binding) => root.layer == binding.base_layer,
+            None => combo_anchor_layer_is_current(ctx, parent_owner, root.id.surface(), root.layer),
+        };
+        if !anchor_is_current {
+            return Err(());
+        }
+        let mut id = root.response_id.with("popup");
+        let mut surface = combo_popup_surface(&root.id);
+        let mut chain = vec![(id, egui::LayerId::new(egui::Order::Foreground, id))];
+        const MAX_MENU_DEPTH: usize = 8;
+        loop {
+            let open = egui::menu::MenuState::from_id(ctx, id, |state| state.open_item);
+            let Some(child_id) = open else {
+                break;
+            };
+            if chain.len() >= MAX_MENU_DEPTH {
+                return Err(());
+            }
+            let layer = egui::LayerId::new(egui::Order::Foreground, id);
+            let mut candidates = self.combo_anchors.iter().filter(|anchor| {
+                anchor.menu_anchor == Some(MenuAnchorKind::Submenu)
+                    && anchor.viewport == viewport
+                    && anchor.enabled
+                    && anchor.eligible
+                    && anchor.id().surface() == &surface
+                    && anchor.id().generation() == root.id.generation()
+                    && anchor.layer_id == layer
+                    && egui::menu::SubMenu::id_from_widget_id(anchor.response_id) == child_id
+            });
+            let Some(child) = candidates.next() else {
+                return Err(());
+            };
+            if candidates.next().is_some() {
+                return Err(());
+            }
+            id = child_id;
+            surface = combo_popup_surface(child.id());
+            chain.push((id, egui::LayerId::new(egui::Order::Foreground, id)));
+        }
+        let owner = ComboPopupOwner {
+            parent_owner,
+            anchor_id: root.id.clone(),
+            viewport,
+            binding,
+            response_id: root.response_id,
+            anchor_layer: root.layer,
+            popup_layer: chain.last().ok_or(())?.1,
+            popup_surface: surface,
+            menu_chain: chain,
+        };
+        if owner.is_current(ctx, parent_owner) || owner.is_sizing_pass(ctx, parent_owner) {
+            Ok(Some(owner))
+        } else {
+            Err(())
+        }
     }
 
     fn open_combo_popup_for_binding(
@@ -1685,6 +2183,7 @@ impl TargetRegistry {
             if anchor.viewport != binding.map_or(egui::ViewportId::ROOT, |binding| binding.viewport)
                 || !anchor.enabled
                 || !anchor.eligible
+                || anchor.menu_anchor.is_some()
                 || !parent_owner.owns_surface(anchor.id().surface())
                 || !egui::ComboBox::is_open(ctx, anchor.response_id)
             {
@@ -1709,6 +2208,7 @@ impl TargetRegistry {
             anchor_layer: anchor.layer_id,
             popup_layer: egui::LayerId::new(egui::Order::Foreground, popup_id),
             popup_surface: combo_popup_surface(anchor.id()),
+            menu_chain: Vec::new(),
         };
         let anchor_is_current = match binding {
             Some(binding) => binding.base_is_current(ctx) && anchor.layer_id == binding.base_layer,
@@ -1862,6 +2362,97 @@ impl JumpModeScope {
     pub(crate) fn combo_popup_scope(&self, anchor_identity: impl AsRef<str>) -> Self {
         let anchor_id = self.target_id(anchor_identity);
         self.with_surface(combo_popup_surface(&anchor_id), self.generation)
+    }
+
+    /// Record only the identity of an already-open context popup's rendered source.
+    /// The source may be disabled or clipped; it is never offered as a focus target.
+    pub(crate) fn record_open_context_anchor(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+    ) -> bool {
+        let ctx = ui.ctx();
+        let Some(owner) = self.navigation_owner else {
+            return false;
+        };
+        let popup_id = egui::Popup::default_response_id(response);
+        if popup_id != response.id.with("popup")
+            || !egui::Popup::is_id_open(ctx, popup_id)
+            || ctx.viewport_id() != self.viewport
+            || response.ctx.viewport_id() != self.viewport
+            || ui.layer_id() != response.layer_id
+            || !ctx.input(|input| input.focused)
+            || !owner.owns_surface(&self.surface)
+        {
+            return false;
+        }
+        let layer_current = match self.viewport_binding {
+            Some(binding) => {
+                binding.owner == owner
+                    && binding.viewport == self.viewport
+                    && binding.base_is_current(ctx)
+                    && binding.base_layer == response.layer_id
+            }
+            None => {
+                self.viewport == egui::ViewportId::ROOT
+                    && combo_anchor_layer_is_current(ctx, owner, &self.surface, response.layer_id)
+            }
+        };
+        if !layer_current {
+            return false;
+        }
+        let receipt = ContextAnchorReceipt {
+            id: self.target_id(identity),
+            response_id: response.id,
+            viewport: self.viewport,
+            layer: response.layer_id,
+        };
+        let Ok(mut collector) = self.collector.lock() else {
+            return false;
+        };
+        if collector.closed {
+            return false;
+        }
+        if !collector.registry.context_anchors.contains(&receipt) {
+            collector.registry.context_anchors.push(receipt);
+        }
+        true
+    }
+
+    /// Register the actual menu opener and return only a focus directive.
+    /// Use `combo_popup_scope` for the matching popup's content.
+    pub(crate) fn register_menu_anchor(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: impl Into<String>,
+        role: MenuAnchorKind,
+        visual_order: u64,
+    ) -> RegistrationResult {
+        let result = self.register(
+            ui,
+            response,
+            identity,
+            label,
+            match role {
+                MenuAnchorKind::Context(kind) => kind,
+                _ => TargetKind::ComboBox,
+            },
+            visual_order,
+        );
+        if let RegistrationResult::Registered { id, .. } = &result
+            && let Ok(mut collector) = self.collector.lock()
+            && let Some(target) = collector
+                .registry
+                .targets
+                .iter_mut()
+                .find(|target| target.id() == id)
+        {
+            target.menu_anchor = Some(role);
+        }
+        result
     }
 
     pub(crate) fn target_id(&self, local_identity: impl AsRef<str>) -> TargetId {
@@ -2123,6 +2714,7 @@ impl JumpModeScope {
             eligible: true,
             epoch: self.epoch,
             provenance,
+            menu_anchor: None,
         };
 
         let Ok(mut collector) = self.collector.lock() else {
@@ -2263,6 +2855,28 @@ pub(crate) fn register_and_apply_target(
     }
 }
 
+/// Register a root menu or submenu opener; a hint only focuses the opener.
+pub(crate) fn register_and_apply_menu_anchor(
+    scope: Option<&JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: impl AsRef<str>,
+    label: impl Into<String>,
+    role: MenuAnchorKind,
+    visual_order: &mut u64,
+) {
+    let order = *visual_order;
+    *visual_order = visual_order.saturating_add(1);
+    if let Some(scope) = scope
+        && let RegistrationResult::Registered {
+            directive: Some(directive @ FocusDirective::Focus(_)),
+            ..
+        } = scope.register_menu_anchor(ui, response, identity, label, role, order)
+    {
+        directive.apply_to_response(response);
+    }
+}
+
 /// App-instance-owned coordinator. It separates the in-progress pass, the
 /// completed pass, and the last fully completed frame snapshot.
 #[derive(Default)]
@@ -2287,7 +2901,7 @@ pub(crate) struct JumpModeUi {
     timer_instance: u64,
     paste_sequence_open: bool,
     paste_sequence_instance: u64,
-    observed_dialogs: [ObservedNavigationDialog; NavigationDialogKind::ALL.len()],
+    observed_dialogs: NavigationDialogSlots<ObservedNavigationDialog>,
     active_session: Option<HintSession>,
     hint_session_generation: u64,
     last_outcome: Option<MatchOutcome>,
@@ -2656,7 +3270,38 @@ impl JumpModeUi {
                     );
                 }
             }
+            // Target authority is retired during a popup transition. Keep only
+            // the observed menu openers so the next pass can revalidate the
+            // live chain and capture fresh targets in the new epoch.
+            let menu_anchors = combo_popup
+                .as_ref()
+                .filter(|popup| !popup.menu_chain.is_empty() && popup.parent_owner == candidate)
+                .map(|_| {
+                    self.pass_registry
+                        .as_ref()
+                        .unwrap_or(&self.retained_registry)
+                        .combo_anchors
+                        .iter()
+                        .filter(|anchor| {
+                            anchor.menu_anchor.is_some()
+                                && candidate.owns_surface(anchor.id().surface())
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let context_anchors = combo_popup
+                .as_ref()
+                .filter(|popup| !popup.menu_chain.is_empty() && popup.parent_owner == candidate)
+                .map(|popup| {
+                    self.pass_registry.as_ref().unwrap_or(&self.retained_registry).context_anchors
+                        .iter().filter(|anchor| anchor.id == popup.anchor_id
+                            && anchor.response_id == popup.response_id && anchor.layer == popup.anchor_layer
+                            && anchor.viewport == popup.viewport).cloned().collect()
+                }).unwrap_or_default();
             self.cancel_all();
+            self.retained_registry.combo_anchors = menu_anchors;
+            self.retained_registry.context_anchors = context_anchors;
             self.last_completed_focus_handoff = None;
             self.navigation_owner = candidate;
             self.active_combo_popup = combo_popup;
@@ -2684,7 +3329,17 @@ impl JumpModeUi {
         ctx: &egui::Context,
         parent_owner: NavigationOwner,
     ) -> Option<ComboPopupOwner> {
+        let registry = self
+            .pass_registry
+            .as_ref()
+            .unwrap_or(&self.retained_registry);
+        match registry.open_menu_popup_for_binding(ctx, parent_owner, None) {
+            Ok(Some(menu)) => return Some(menu),
+            Err(()) => return None,
+            Ok(None) => {}
+        }
         if let Some(active) = self.active_combo_popup.as_ref()
+            && active.menu_chain.is_empty()
             && (active.is_current(ctx, parent_owner) || active.is_sizing_pass(ctx, parent_owner))
         {
             return Some(active.clone());
@@ -2704,7 +3359,17 @@ impl JumpModeUi {
         if ctx.viewport_id() != binding.viewport {
             return None;
         }
+        let registry = self
+            .pass_registry
+            .as_ref()
+            .unwrap_or(&self.retained_registry);
+        match registry.open_menu_popup_for_binding(ctx, binding.owner, Some(binding)) {
+            Ok(Some(menu)) => return Some(menu),
+            Err(()) => return None,
+            Ok(None) => {}
+        }
         if let Some(active) = self.active_combo_popup.as_ref()
+            && active.menu_chain.is_empty()
             && active.binding == Some(binding)
             && (active.is_current(ctx, binding.owner) || active.is_sizing_pass(ctx, binding.owner))
         {
@@ -3339,6 +4004,13 @@ impl JumpModeUi {
             preserve_query_focus,
             notes_query_bridge_allowed,
         );
+        if navigation_owner == NavigationOwner::Blocked
+            && self.navigation_owner_transitioned
+            && self.active_combo_popup.as_ref().is_some_and(|popup| !popup.menu_chain.is_empty())
+        {
+            completed.combo_anchors = std::mem::take(&mut self.retained_registry.combo_anchors);
+            completed.context_anchors = std::mem::take(&mut self.retained_registry.context_anchors);
+        }
         let pending_intent = self.pending_focus_intent.take();
         let mut completed_focus_handoff = None;
         if let Some(consumed) = self.frame_consumed_focus_intent.as_ref() {
@@ -4284,10 +4956,83 @@ mod tests {
                             .id(egui::Id::new("json_utility_dialog"))
                             .show(ctx, |_| {});
                     }
+                    NavigationDialogKind::CalculationChart => {
+                        egui::Window::new("Charts").id(egui::Id::new("calculation-chart-window")).show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::FilePreview => {
+                        egui::Window::new("File preview")
+                            .id(egui::Id::new(crate::gui::file_search_preview_dialog::preview_window_id_source()))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::QrGenerator => { egui::Window::new("QR Generator").id(egui::Id::new("qr_generator_embedded")).show(ctx, |_| {}); }
+                    NavigationDialogKind::Convert => { egui::Window::new("Convert").id(egui::Id::new("convert-panel-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::ExplorerTabs => { egui::Window::new("Explorer Tabs").id(egui::Id::new("explorer-tabs-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::HashGenerator => {
+                        egui::Window::new("Hash Generator")
+                            .id(egui::Id::new("hash_generator_dialog"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::NotificationInbox => {
+                        egui::Window::new("Notification Inbox").id(egui::Id::new("notification-inbox-window")).show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::DownloadsTriage => {
+                        egui::Window::new("Downloads Triage").id(egui::Id::new("downloads-triage-window")).show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::FileOperations => {
+                        egui::Window::new("File Operations Center")
+                            .id(egui::Id::new("file-operations-center-window"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::PasswordGenerator => {
+                        egui::Window::new("Password Generator")
+                            .id(egui::Id::new("password-generator-window"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::MarkdownPrint => {
+                        egui::Window::new("Export / Print")
+                            .id(egui::Id::new("markdown-print-window"))
+                            .show(ctx, |_| {});
+                    }
                     NavigationDialogKind::ZipExtractor => {
                         egui::Window::new("ZIP Extractor")
                             .id(egui::Id::new("zip_extractor_dialog"))
                             .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::FileLock => {
+                        egui::Window::new("File Lock Inspector").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::FolderSize => {
+                        egui::Window::new("Folder Size").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::DateTimeStudio => {
+                        egui::Window::new("Date & Time Studio")
+                            .id(egui::Id::new("date-time-studio-window"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::Calendar => {
+                        egui::Window::new("Calendar").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::CalendarDetails => {
+                        egui::Window::new("Event Details").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::HotFolder => { egui::Window::new("Hot Folder Manager").id(egui::Id::new("hotfolder_manager_window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::DataRecovery => { egui::Window::new("Data & Recovery").show(ctx, |_| {}); }
+                    NavigationDialogKind::UnusedNoteAssets => { egui::Window::new("Unused Note Assets").show(ctx, |_| {}); }
+                    NavigationDialogKind::NoteTemplates => { egui::Window::new("Note Templates").show(ctx, |_| {}); }
+                    NavigationDialogKind::TemplateDelete => { egui::Window::new("Delete Template?").show(ctx, |_| {}); }
+                    NavigationDialogKind::DataRecoveryConfirmation => { egui::Window::new("Confirm destructive action").id(egui::Id::new("data-recovery-confirmation")).show(ctx, |_| {}); }
+                    NavigationDialogKind::CalculationSensitivity => { egui::Window::new("Sensitivity Tables").id(egui::Id::new("calculation-sensitivity-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::MarkdownStudio => { egui::Window::new("Markdown Studio").id(egui::Id::new("markdown-studio-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::CalculationPad => { egui::Window::new("Calculation Pad").id(egui::Id::new("calculation-pad-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::CalculationReference => { egui::Window::new("Calculation Pad Examples & Reference").id(egui::Id::new("calculation-pad-examples-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::DiagramStudio => { egui::Window::new("Diagram Studio").id(egui::Id::new("diagram-studio")).show(ctx, |_| {}); }
+                    NavigationDialogKind::DiagramViewer => { egui::Window::new("Diagram Viewer").id(egui::Id::new("diagram-viewer")).show(ctx, |_| {}); }
+                    NavigationDialogKind::PluginSettings => { egui::Window::new("Plugin Settings").id(egui::Id::new("Plugin Settings")).show(ctx, |_| {}); }
+                    NavigationDialogKind::ProgrammerInspector => { egui::Window::new("Programmer Inspector").id(egui::Id::new("programmer-inspector-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::CalculationDependencies => { egui::Window::new("Dependency Explorer").id(egui::Id::new("calculation-dependencies-window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt => {}
+                    NavigationDialogKind::CalendarEditor => {
+                        egui::Window::new("Calendar Event").show(ctx, |_| {});
                     }
                     NavigationDialogKind::RegexTester => {
                         egui::Window::new("Regex Tester")
@@ -4440,8 +5185,8 @@ mod tests {
             dashboard_editor_layer: None,
             mouse_form_layers: [None; 3],
             file_search_layer: None,
-            hosted_utility_layers: [None; NavigationDialogKind::ALL.len()],
-            dialogs: [None; NavigationDialogKind::ALL.len()],
+            hosted_utility_layers: Default::default(),
+            dialogs: Default::default(),
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);
         assert_eq!(visible_top_middle_layer(&ctx), Some(todo_dialog_layer_id()));
@@ -4485,7 +5230,10 @@ mod tests {
     fn expanded_dialog_layer_inventory_matches_actual_window_ids() {
         for kind in NavigationDialogKind::ALL {
             let Some(expected_layer) = kind.layer_id() else {
-                assert_eq!(kind, NavigationDialogKind::RadialDesigner);
+                assert!(matches!(
+                    kind,
+                    NavigationDialogKind::RadialDesigner | NavigationDialogKind::ImageViewer | NavigationDialogKind::NotePanel | NavigationDialogKind::NoteFormTable | NavigationDialogKind::NoteFormLink | NavigationDialogKind::NoteFormNewNote | NavigationDialogKind::NoteClosePrompt | NavigationDialogKind::NoteConflictPrompt | NavigationDialogKind::NotePlainLinkPrompt
+                ));
                 continue;
             };
             let ctx = egui::Context::default();

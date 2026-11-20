@@ -652,7 +652,7 @@ mod child_open_tests {
         let file = directory.path().join("file.txt");
         std::fs::write(&file, "data").unwrap();
         let mut folder = super::super::folder_size_dialog::FolderSizeDialogState::new(&ctx);
-        folder.open_from_file_search(&ctx, directory.path().to_owned(), receipt.clone());
+        folder.open_from_parent(&ctx, directory.path().to_owned(), receipt.clone());
         assert!(folder.is_popped_out());
         assert!(!folder.session_view_for_test().is_busy());
         let mut lock = super::super::file_lock_dialog::FileLockDialogState::new(&ctx);

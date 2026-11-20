@@ -1,3 +1,4 @@
+use crate::platform::protected_clipboard::{ClipboardRead, read_clipboard_briefly};
 use arboard::Clipboard;
 
 pub fn clear_history() -> anyhow::Result<()> {
@@ -25,8 +26,11 @@ pub fn set_text(text: &str) -> anyhow::Result<()> {
 }
 
 pub fn get_text() -> anyhow::Result<String> {
-    let mut cb = Clipboard::new()?;
-    Ok(cb.get_text()?)
+    match read_clipboard_briefly()? {
+        ClipboardRead::Ordinary(text) => Ok(text),
+        ClipboardRead::NonText => Err(arboard::Error::ContentNotAvailable.into()),
+        ClipboardRead::Private => anyhow::bail!("This clipboard item was copied privately."),
+    }
 }
 
 pub fn calc_to_clipboard(val: &str) -> anyhow::Result<()> {

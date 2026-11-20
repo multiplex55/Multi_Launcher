@@ -1234,6 +1234,8 @@ pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'sta
         { return Err("invalid sensitivity definition"); }
     }
     if let Some(chart) = &view.chart {
+        chart.options.validate(&chart.source, chart.distribution.as_ref().map(|distribution| &distribution.vector))?;
+        chart.validate_distribution()?;
         if chart.x_label.len() > 128 || chart.y_label.len() > 128 || chart.bar_labels.len() > super::vector::MAX_VECTOR_COMPONENTS || chart.bar_labels.iter().any(|label| label.len() > 128 || label.chars().any(char::is_control))
             || chart.x_label.chars().any(char::is_control) || chart.y_label.chars().any(char::is_control)
             || chart.hidden.len() > 8 || chart.hidden.iter().any(|index| *index >= 8)
@@ -1447,10 +1449,118 @@ mod tests {
             kind: super::super::ChartKind::Bar,
             x_label: String::new(), y_label: String::new(), hidden: Vec::new(),
             bar_labels: vec!["label".into(); 1024],
+            distribution: None,
+            options: Default::default(),
         });
         assert!(super::validate_view_metadata(&view).is_ok());
         view.chart.as_mut().unwrap().bar_labels.push("overflow".into());
         assert!(super::validate_view_metadata(&view).is_err());
+    }
+
+    #[test]
+    fn chart_options_roundtrip_with_legacy_defaults_and_reject_invalid_wires() {
+        use super::super::chart::options::{
+            AxisBounds, AxisScale, AxisTicks, ChartOptions, FiniteValue, LegendPlacement,
+            LineStyle, MarkerStyle, ReferenceAxis, ReferenceLine, ReferenceValue, SeriesKey,
+            SeriesStyle,
+        };
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference};
+        let source = ChartSource::Vectors {
+            x: None,
+            y: vec![ChartVectorReference::Named { name: "values".into() }],
+        };
+        let mut chart = ChartDefinition {
+            source, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(),
+            hidden: Vec::new(), bar_labels: Vec::new(), distribution: None, options: ChartOptions::default(),
+        };
+        let legacy = serde_json::to_value(&chart).unwrap();
+        assert!(legacy.get("options").is_none());
+        assert_eq!(serde_json::from_value::<ChartDefinition>(legacy).unwrap(), chart);
+        chart.options.x.scale = AxisScale::Log10;
+        chart.options.x.bounds = AxisBounds::Fixed {
+            min: FiniteValue::try_from(1.0).unwrap(),
+            max: FiniteValue::try_from(100.0).unwrap(),
+        };
+        chart.options.x.ticks = AxisTicks::LogSubdivisions { count: 5 };
+        chart.options.title = "Distribution".into();
+        chart.options.grid = true;
+        chart.options.legend = LegendPlacement::Bottom;
+        chart.options.references.push(ReferenceLine {
+            id: 8, axis: ReferenceAxis::Y, value: ReferenceValue::Named("limit".into()), label: "Limit".into(),
+        });
+        chart.options.next_reference_id = 9;
+        chart.options.styles.push(SeriesStyle {
+            key: SeriesKey::Vector(ChartVectorReference::Named { name: "values".into() }),
+            color: [1, 2, 3, 255], line: LineStyle::Dashed, marker: MarkerStyle::Cross,
+            thickness: FiniteValue::try_from(2.5).unwrap(),
+        });
+        let wire = serde_json::to_value(&chart).unwrap();
+        let decoded: ChartDefinition = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded, chart);
+        let view = super::PadViewMetadata { chart: Some(decoded), ..Default::default() };
+        assert!(super::validate_view_metadata(&view).is_ok());
+        for (path, invalid) in [
+            (vec!["x", "bounds", "min"], serde_json::json!(-1.0)),
+            (vec!["x", "bounds", "max"], serde_json::json!(0.5)),
+            (vec!["x", "ticks", "count"], serde_json::json!(10)),
+            (vec!["next_reference_id"], serde_json::json!(8)),
+            (vec!["styles", "0", "thickness"], serde_json::json!(0.0)),
+        ] {
+            let mut invalid_wire = wire.clone();
+            let mut value = &mut invalid_wire["options"];
+            for key in path {
+                value = if let Ok(index) = key.parse::<usize>() { &mut value[index] } else { &mut value[key] };
+            }
+            *value = invalid;
+            let decoded: ChartDefinition = serde_json::from_value(invalid_wire).unwrap();
+            let view = super::PadViewMetadata { chart: Some(decoded), ..Default::default() };
+            assert!(super::validate_view_metadata(&view).is_err());
+        }
+        assert!(FiniteValue::try_from(f64::NAN).is_err());
+        assert!(FiniteValue::try_from(f64::INFINITY).is_err());
+        assert!(serde_json::from_str::<ChartDefinition>(&wire.to_string().replace("2.5", "1e400")).is_err());
+        let mut options = chart.options.clone();
+        assert_eq!(options.allocate_reference_id().unwrap(), 9);
+        options.references.clear();
+        assert_eq!(options.allocate_reference_id().unwrap(), 10);
+        options.next_reference_id = u64::MAX;
+        assert!(options.allocate_reference_id().is_err());
+    }
+
+    #[test]
+    fn distribution_definition_roundtrip_preserves_ordinary_source() {
+        use super::super::chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        use super::super::chart::options::FiniteValue;
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference};
+        let source = ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "original".into() }] };
+        let mut chart = ChartDefinition { source: source.clone(), kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+        let view = |chart| super::PadViewMetadata { chart: Some(chart), ..Default::default() };
+        assert!(super::validate_view_metadata(&view(chart.clone())).is_err());
+        chart.distribution = Some(DistributionDefinition { vector: ChartVectorReference::Named { name: "samples".into() }, bins: DistributionBins::Width { width: FiniteValue::try_from(2.5).unwrap() }, scale: DistributionScale::Percentage });
+        let wire = serde_json::to_value(&chart).unwrap();
+        let mut decoded: ChartDefinition = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, chart);
+        assert!(super::validate_view_metadata(&view(decoded.clone())).is_ok());
+        decoded.kind = ChartKind::Line;
+        assert_eq!(decoded.source, source);
+        assert!(decoded.distribution.is_some());
+        decoded.distribution.as_mut().unwrap().bins = DistributionBins::Count { count: 0 };
+        assert!(super::validate_view_metadata(&view(decoded)).is_err());
+    }
+
+    #[test]
+    fn distribution_style_roundtrip_is_distinct_from_ordinary_series() {
+        use super::super::chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference};
+        let vector = ChartVectorReference::Named { name: "v".into() };
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![vector.clone()] }, kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: vector.clone(), bins: DistributionBins::Auto, scale: DistributionScale::Count }), options: Default::default() };
+        let style = |key, color| SeriesStyle { key, color, line: LineStyle::Solid, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() };
+        chart.options.styles.push(style(SeriesKey::Vector(vector.clone()), [0, 0, 255, 255]));
+        chart.options.styles.push(style(SeriesKey::Distribution(vector), [255, 0, 0, 255]));
+        let decoded: ChartDefinition = serde_json::from_value(serde_json::to_value(&chart).unwrap()).unwrap();
+        assert_eq!(decoded, chart);
+        assert!(super::validate_view_metadata(&super::PadViewMetadata { chart: Some(decoded), ..Default::default() }).is_ok());
     }
 
     #[test]
@@ -1463,7 +1573,7 @@ mod tests {
         stored.format_version = 3;
         stored.view.chart = Some(ChartDefinition { source: ChartSource::Vectors {
             x: Some(ChartVectorReference::Physical(LineId(1))), y: vec![ChartVectorReference::Physical(LineId(2))],
-        }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() });
+        }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new(), distribution: None, options: Default::default() });
         let old = serde_json::to_vec(&stored).unwrap();
         let decoded = super::decode_document(&path, &old, Some(stored.id)).unwrap();
         assert_eq!(decoded.view.chart, stored.view.chart);

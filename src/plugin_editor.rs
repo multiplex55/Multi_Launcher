@@ -197,6 +197,10 @@ impl PluginEditor {
 
     pub(crate) fn host_session(&self) -> u64 { self.host_epoch }
 
+    pub(crate) fn jump_generation(&self, runtime: &PluginHostRuntime) -> crate::gui::jump_mode::TargetGeneration {
+        crate::gui::jump_mode::TargetGeneration(egui::Id::new((self.host_epoch, self.selection_revision, runtime.catalog_revision, &self.filter)).value())
+    }
+
     pub(crate) fn selection_is_current(&self, revision: u64, selection: &PluginSelection) -> bool {
         self.selection_revision == revision && self.selection() == *selection
     }
@@ -215,7 +219,8 @@ impl PluginEditor {
     }
 
     pub(crate) fn render_host(&mut self, ctx: &egui::Context, runtime: &PluginHostRuntime,
-        allowed: bool, first: bool, child: Option<&mut egui::Ui>, presentation: crate::gui::utility_host::UtilityPresentation) -> PluginHostActions {
+        allowed: bool, first: bool, child: Option<&mut egui::Ui>, presentation: crate::gui::utility_host::UtilityPresentation,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>) -> PluginHostActions {
         let navigation = runtime.navigation.as_ref().filter(|_| allowed && first && !ctx.will_discard());
         let _navigation_scope = navigation.map(|observer| observer.install(ctx));
         let mut open = self.host_open;
@@ -295,9 +300,18 @@ impl PluginEditor {
             self.test_filter_response = None;
         }
         let mut presentation_request = None;
+        let mut order = 0;
+        let current_control = |name: &str, capability: Option<&str>, caps: &[String]| {
+            let catalog = runtime.catalog.as_ref().filter(|catalog| catalog.revision == runtime.catalog_revision)?;
+            let mut matches = catalog.plugins.iter().filter(|plugin| plugin.name == name);
+            let plugin = matches.next()?;
+            if matches.next().is_some() || plugin.capabilities != caps { return None; }
+            plugin_editor_control_id(plugin, capability)
+        };
         let mut body = |ui: &mut egui::Ui| {
             let interactive = allowed && ui.is_visible() && !ui.is_sizing_pass();
             let (host, next) = crate::gui::utility_host::presentation_button(ui, presentation, interactive);
+            plugin_jump_target(scope, ui, &host, "presentation", if presentation == crate::gui::utility_host::UtilityPresentation::Docked { "Pop Out" } else { "Dock" }, crate::gui::jump_mode::TargetKind::Button, &mut order);
             #[cfg(test)] { test_button = Some((host.rect, ui.clip_rect(), host.enabled())); }
             if first && !ctx.will_discard() && host.clicked() { presentation_request = Some(next); }
                 ui.add_enabled_ui(interactive && !pending, |ui| {
@@ -306,6 +320,7 @@ impl PluginEditor {
                     ui.horizontal(|ui| {
                         ui.label("Filter:");
                         let response = ui.text_edit_singleline(&mut filter_after);
+                        plugin_jump_target(scope, ui, &response, "filter", "Filter", crate::gui::jump_mode::TargetKind::TextEntry, &mut order);
                         crate::settings_editor::render::observe_scoped_settings_navigation_response(
                             ui,
                             &response,
@@ -329,7 +344,9 @@ impl PluginEditor {
                                 }
                                 let mut enabled = self.enabled_plugins.contains(name);
                                 ui.horizontal(|ui| {
-                                    let response = ui.checkbox(&mut enabled, name);
+                                    let jump_id = current_control(name, None, caps);
+                                    let response = ui.push_id(jump_id.as_deref().unwrap_or(name), |ui| ui.checkbox(&mut enabled, name)).inner;
+                                    if let Some(id) = &jump_id { plugin_jump_target(scope, ui, &response, id, name, crate::gui::jump_mode::TargetKind::Checkbox, &mut order); }
                                     #[cfg(test)]
                                     if name == "cross_owner_probe" {
                                         self.test_plugin_checkbox = Some((name.clone(), response.rect, ui.clip_rect(), response.enabled()));
@@ -370,7 +387,9 @@ impl PluginEditor {
                                             } else {
                                                 cap.to_string()
                                             };
-                                            let response = ui.checkbox(&mut cap_enabled, label).on_hover_text(cap);
+                                            let jump_id = current_control(name, Some(cap), caps);
+                                            let response = ui.push_id(jump_id.as_deref().unwrap_or(cap), |ui| ui.checkbox(&mut cap_enabled, &label)).inner.on_hover_text(cap);
+                                            if let Some(id) = &jump_id { plugin_jump_target(scope, ui, &response, id, &format!("{name}: {label}"), crate::gui::jump_mode::TargetKind::Checkbox, &mut order); }
                                             if let Some(control_id) = navigation_control(name, Some(cap), caps) {
                                                 crate::settings_editor::render::observe_scoped_settings_navigation_response(
                                                     ui,
@@ -409,6 +428,12 @@ impl PluginEditor {
         PluginHostActions { presentation_request, changed: first && !ctx.will_discard() && changed, close: runtime.can_close && first && allowed && !ctx.will_discard() && !open, catalog_revision: runtime.catalog_revision, before, candidate: self.selection(), selection_revision, filter_before, filter_after, navigation: navigation.cloned(), #[cfg(test)] test_button }
     }
 
+}
+
+fn plugin_jump_target(scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: crate::gui::jump_mode::TargetKind, order: &mut u64) {
+    crate::gui::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order);
+    if response.gained_focus() && response.enabled() && ui.is_visible() && !ui.is_sizing_pass()
+        && !ui.ctx().will_discard() && !ui.clip_rect().contains_rect(response.rect) { response.scroll_to_me(None); }
 }
 
 fn plugin_editor_control_id(

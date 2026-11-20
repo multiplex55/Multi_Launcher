@@ -5,6 +5,7 @@ use super::*;
 pub(crate) enum RenameScope {
     Document,
     Parameter { owner_line: usize },
+    Function { owner_line: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,7 +140,25 @@ fn unit_spans(text: &str, base: usize, output: &mut Vec<Range<usize>>, depth: us
     }
 }
 
+#[derive(Default)]
+pub(crate) struct InsertionFacts {
+    pub names: Vec<(String, RenameScope, bool, Range<usize>)>,
+    pub calls: Vec<(String, Range<usize>)>,
+    pub physical_rows: Vec<(usize, Range<usize>)>,
+}
+
+pub(crate) fn insertion_facts(source: &str) -> Result<InsertionFacts, String> {
+    let mut facts = InsertionFacts::default();
+    let tokens = scan_tokens(source, Some(&mut facts))?;
+    facts.names = tokens.into_iter().map(|token| (token.name, token.scope, token.declaration, token.range)).collect();
+    Ok(facts)
+}
+
 fn tokens(source: &str) -> Result<Vec<Token>, String> {
+    scan_tokens(source, None)
+}
+
+fn scan_tokens(source: &str, mut facts: Option<&mut InsertionFacts>) -> Result<Vec<Token>, String> {
     let analysis = syntax::SourceAnalysis::new(source);
     let (functions, function_rows, _) = script::build_functions(&analysis);
     let declared = declared_names_in(&analysis);
@@ -216,6 +235,11 @@ fn tokens(source: &str) -> Result<Vec<Token>, String> {
             text.trim_end().strip_suffix(':').map_or(text.len(), str::len)
         } else { text.len() };
         let expression = &text[expr_start..expr_end];
+        let visible = functions.partition_point(|function| function.line < line);
+        let callbacks = script::callback_ranges(expression, &functions[..visible])
+            .into_iter()
+            .map(|range| range.start + expr_start..range.end + expr_start)
+            .collect::<Vec<_>>();
         let mut units = Vec::new();
         unit_spans(expression, expr_start, &mut units, 0);
         let mut pos = 0;
@@ -264,7 +288,41 @@ fn tokens(source: &str) -> Result<Vec<Token>, String> {
             }
             let authored = &text[start..pos];
             let parsed = parse_assignment_name(authored).map_err(|_| "Invalid name in source")?;
+            if let Some(header) = &header
+                && header.name_range == (start..pos)
+            {
+                let range = original(row, start..pos).ok_or("Name crosses a logical separator")?;
+                tokens.push(Token { name: parsed.canonical, range, braced: false,
+                    scope: RenameScope::Function { owner_line: line }, declaration: true });
+                continue;
+            }
+            if !braced && start >= expr_start && pos <= expr_end
+                && (text[pos..].trim_start().starts_with('(') || callbacks.contains(&(start..pos)))
+                && let Some(facts) = facts.as_deref_mut()
+                && let Some(range) = original(row, start..pos)
+            {
+                facts.calls.push((parsed.canonical.clone(), range));
+            }
+            if !braced && start >= expr_start && pos <= expr_end
+                && (text[pos..].trim_start().starts_with('(') || callbacks.contains(&(start..pos)))
+                && let Some(function) = functions[..visible].iter().find(|function| function.name == authored)
+            {
+                let range = original(row, start..pos).ok_or("Name crosses a logical separator")?;
+                tokens.push(Token { name: parsed.canonical, range, braced: false,
+                    scope: RenameScope::Function { owner_line: function.line }, declaration: false });
+                continue;
+            }
+            if !braced && callbacks.contains(&(start..pos)) {
+                continue;
+            }
             if is_row_reference_name(&parsed.canonical) {
+                if (braced || !text[pos..].trim_start().starts_with('('))
+                    && let Some(facts) = facts.as_deref_mut()
+                    && let RowReference::Line(index) = parse_row_reference(&parsed.canonical)
+                    && let Some(range) = original(row, start..pos)
+                {
+                    facts.physical_rows.push((index + 1, range));
+                }
                 continue;
             }
             let mut scope = RenameScope::Document;
@@ -351,6 +409,11 @@ pub(crate) fn plan(source: &str, caret: usize, replacement: &str) -> Result<Rena
     }
     let tokens = tokens(source)?;
     let selected = select_token(&tokens, caret)?;
+    if matches!(selected.scope, RenameScope::Function { .. })
+        && (parsed.braced || script::signature(&parsed.canonical).is_some())
+    {
+        return Err("Enter an unused bare function name.".into());
+    }
     if selected.name == parsed.canonical {
         return Err("Choose a different name.".into());
     }
@@ -419,6 +482,46 @@ pub(crate) fn plan(source: &str, caret: usize, replacement: &str) -> Result<Rena
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn function_rename_tracks_calls_and_callbacks_without_capturing_values() {
+        let source = concat!(
+            "scale = 3\r\nfn scale(value, factor) = value * factor\r\n",
+            "values = [1, 2]\r\nmap(\r\n values, scale, scale\r\n)\r\n",
+            "scale(2, 3)\r\nscale # scale\r\n"
+        );
+        let caret = source.find("fn scale").unwrap() + 3;
+        let preview = plan(source, caret, "multiply").unwrap();
+        assert_eq!(preview.scope, RenameScope::Function { owner_line: 1 });
+        assert!(preview.source.contains("fn multiply(value, factor)"));
+        assert!(preview.source.contains("values, multiply, scale"));
+        assert!(preview.source.contains("multiply(2, 3)"));
+        assert!(preview.source.ends_with("scale # scale\r\n"));
+        assert!(plan(source, caret, "{other}").is_err());
+        assert!(plan(source, caret, "sum").is_err());
+        let variable = plan(source, 0, "amount").unwrap();
+        assert!(variable.source.contains("values, scale, amount"));
+        assert!(variable.source.contains("fn scale(value, factor)"));
+        let parameter = source.find("value, factor").unwrap();
+        let parameter_plan = plan(source, parameter, "item").unwrap();
+        assert!(parameter_plan.source.contains("fn scale(item, factor) = item * factor"));
+        assert!(parameter_plan.source.contains("values, scale, scale"));
+    }
+
+    #[test]
+    fn row_named_formula_is_distinct_from_physical_row_reference() {
+        let source = "1\n2\n3\nfn r3(x) = x * 2\nmap([1], r3)\nr3(4)\nr3\n";
+        let caret = source.find("fn r3").unwrap() + 3;
+        let preview = plan(source, caret, "double_value").unwrap();
+        assert_eq!(preview.source, "1\n2\n3\nfn double_value(x) = x * 2\nmap([1], double_value)\ndouble_value(4)\nr3\n");
+    }
+
+    #[test]
+    fn unresolved_callback_is_not_a_document_value_reference() {
+        let source = "x = 2\nmap([1], x)\nx";
+        let preview = plan(source, 0, "value").unwrap();
+        assert_eq!(preview.source, "value = 2\nmap([1], x)\nvalue");
+    }
 
     #[test]
     fn document_rename_preserves_units_keywords_comments_and_physical_rows() {

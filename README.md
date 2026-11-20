@@ -120,11 +120,12 @@ that control; use a later, separate Enter, Space, or normal typing to interact
 with it. **Escape** cancels the hint session. Existing Save, Apply, and explicit
 confirmation steps still require their normal action.
 
-Coverage includes File Search; Snippets; Clipboard History; Dashboard commands
-and simple widgets; JSON, Regex, and XML tools; Mouse Settings and Gestures;
-Rename and Replace; and Dashboard and Radial editors. Coverage is selective:
-pointer-only canvas drags, capture or recording, native picker internals,
-unknown popups, and hidden, clipped, or disabled controls are not hint targets.
+Jump Mode follows the focused launcher window and its owned menus. Visible,
+enabled controls appear in the hint list. It covers ordinary controls across
+file and data tools, Notes and Markdown Studio, Calculation Pad and its
+companions, and the productivity utilities. The canvas and graphical color
+pickers use their existing pointer controls. Windows file and print dialogs
+keep their normal keyboard controls.
 
 ---
 
@@ -195,6 +196,9 @@ unknown popups, and hidden, clipped, or disabled controls are not hint targets.
 | `fs` | File-search plugin | `fs` / `fs file main` / `fs content TODO` |
 | `rename` | Explicit-root batch filename rename with preview, protected extensions, guarded Apply, and safe Undo | `rename` |
 | `data` | Data health, backups, and recovery | `data` / `data health` / `data backup` / `data folder` |
+| `fileops` | Review and queue file transfers | `fileops` |
+| `downloads` | Review and act on selected downloads | `downloads` |
+| `inbox` | Launcher and optional Windows notifications | `inbox` / `notifications` |
 
 ---
 
@@ -257,6 +261,9 @@ conditions, bounded loops, input controls, and named output watches. The Pad
   Sensitivity Tables and Charts companions. The
 [Calculation Pad guide](src/calculation_pad/README.md) covers the language,
 editor, limits, formatting, Programmer Inspector, and persistence.
+Open **Config Menu → Tools → Examples & Reference → API Reference** to look up
+functions and their executable examples, or use **Charts** for histograms,
+empirical cumulative distributions and configurable axes.
 
 ### 3) Convert things quickly
 - Unit conversion:
@@ -303,6 +310,17 @@ Notes support an in-app markdown workspace with **Edit**, **Preview**, and
 checkboxes, headings can appear in the outline sidebar, and sections can be
 collapsed while reading or editing longer notes. Callouts use blockquote-style
 markers such as `> [!NOTE]` or `> [!WARNING]`.
+
+In Notes or Markdown Studio, use the **Outline** to move a heading and its
+subsections together. Drag to the insertion line beside another sibling, or
+select a heading and use **Move up** or **Move down**. Review any changes to
+heading links before confirming. The move stays in the current draft and one
+Undo restores the previous order.
+
+In Notes, open **Markdown** from the Edit or Split toolbar. In Markdown Studio,
+open **Export**. Choose **Export / Print…** to preview the current draft, set
+Letter, A4, or a custom paper size, then use **Save PDF…** or **Print…**.
+This leaves the source draft intact.
 
 Within an open note, use **Ctrl+F** or the toolbar's **Find** button for literal,
 case-insensitive search of its current Markdown, including unsaved edits.
@@ -1471,9 +1489,11 @@ Screenshot behavior is controlled by settings:
 Type `zip` or use `zip:open`. Extract mode opens an archive with all physical
 entries selected, including duplicate names. Filter the list to find entries;
 **Select all** applies to the whole archive, and **Clear selection** clears it.
-Review the preview and its issues before confirming extraction. Ordinary
-unencrypted Stored and Deflated entries are supported; unsafe paths, unsupported
-entries, conflicts, and limits are reported rather than silently bypassed.
+Selecting an archive suggests an editable folder alongside it. For example,
+`C:\Downloads\work.zip` suggests `C:\Downloads\work`. The folder is created only
+on confirmed extraction. Review the preview and its issues before confirming.
+ZIP supports ordinary unencrypted Stored and Deflated entries and reports
+unsafe paths, unsupported entries, conflicts, and limits.
 Extraction uses staged, no-clobber publication, so an existing destination is
 not overwritten.
 
@@ -1484,6 +1504,52 @@ file/directory, and ancestor conflicts. Validate the draft, choose a new `.zip`
 output path, then choose **Create ZIP**. Existing outputs and files that appear
 at the destination are not overwritten. Sources are read without modification;
 changed or unsupported sources are reported and the draft remains available.
+
+## Password Generator
+
+Search for `password` and open **Password Generator**. Choose a password or
+passphrase and select **Generate**. The result appears masked. Use **Reveal**
+or **Conceal** to control visibility and **Copy** to send it to the protected
+clipboard. Multi Launcher saves generator preferences and keeps generated
+secrets out of its clipboard history.
+
+## File Operations Center
+
+Search for `fileops`. Choose the exact files or folders, an operation and a
+destination, then select **Review**. Resolve any listed conflicts before
+selecting **Queue reviewed transfer**. The job stays queued until you select
+**Start**. File Search and Downloads Triage can pass a selection to the same
+review.
+
+History shows completed, cancelled, partial and interrupted work. Retry and
+Undo require a new review and are available only when the saved receipt
+supports the action. In Activity, use **Open owner tool** to return to the job.
+
+## Downloads Triage
+
+Search for `downloads`. The utility starts from the Windows Downloads location,
+including a redirected folder, and lets you choose a different root. Filter
+for unfinished downloads, installers, archives or suspected duplicates.
+Origin appears when Windows attachment metadata provides it. **Compare…**
+checks two selected files before reporting verified matching contents.
+
+Select an item to mark it reviewed, open or reveal it, inspect it, or send it
+to File Operations or ZIP Extractor. **Recycle…** asks you to confirm the
+selected items. Scans and reviewed marks leave the files in place.
+
+## Notification Inbox
+
+Search for `inbox` or `notifications`. The Inbox collects sanitized launcher
+alerts, reminders, macro notifications and completed work. You can search,
+filter, mark entries read, pin entries or clear local history. Actions such
+as **Open related**, snooze and **Create Todo** depend on the entry and its
+current source.
+
+Internal history defaults to seven days and 1,000 entries, including pins.
+**Mute unread indicator** suppresses the source’s unread indicator. **Exclude
+new** prevents future records from that source. Windows capture, notification
+text and across-restart retention have separate settings that each start off.
+[Windows notification capture](docs/notification-inbox-windows.md)
 
 ## Explorer Tabs
 

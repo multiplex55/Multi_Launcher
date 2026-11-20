@@ -1,4 +1,6 @@
 //! Calendar data models and utilities.
+mod inbox_reminders;
+pub(crate) use inbox_reminders::{CalendarInboxReminders, related_inbox_calendar_occurrence};
 use crate::actions::Action;
 use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::json_watch::{JsonWatcher, watch_json};

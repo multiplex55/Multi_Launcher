@@ -217,6 +217,7 @@ struct HistoryEntry {
     sensitivity_outputs: Vec<WatchReplay>,
     chart_outputs: Vec<WatchReplay>,
     chart_x_live: bool,
+    chart_distribution_live: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -230,7 +231,12 @@ pub(crate) struct RelatedReferenceEdits {
     pub sensitivity_outputs: Vec<RelatedWatchRename>,
     pub chart_outputs: Vec<RelatedWatchRename>,
     pub chart_x: Option<RelatedWatchRename>,
+    pub chart_distribution: Option<RelatedWatchRename>,
+    pub chart_references: Vec<RelatedChartReferenceRename>,
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct RelatedChartReferenceRename { pub id: u64, pub before: String, pub after: String }
 
 #[derive(Clone, Debug)]
 pub(crate) struct RelatedInputRename {
@@ -253,6 +259,8 @@ impl RelatedReferenceEdits {
             .chain(self.sensitivity_outputs.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.chart_outputs.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.chart_x.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.chart_distribution.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.chart_references.iter().map(|item| item.before.len() + item.after.len() + std::mem::size_of::<u64>()))
             .fold(0usize, usize::saturating_add)
     }
 
@@ -314,14 +322,40 @@ impl RelatedReferenceEdits {
                 if !y.contains(&new) && let Some(output) = y.iter_mut().find(|reference| **reference == old) { *output = new; }
             }
         }
+        if let Some(chart) = result.chart.as_mut() {
+            if let Some(item) = &self.chart_distribution {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if let Some(distribution) = chart.distribution.as_mut() && matches!(&distribution.vector, super::ChartVectorReference::Named { name } if name == from) {
+                    distribution.vector = super::ChartVectorReference::Named { name: to.clone() };
+                    rename_distribution_style(chart, from, to);
+                } else if strict { return Err("The distribution source changed before the edit was applied."); }
+            }
+            for item in &self.chart_outputs {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                let vector_source = matches!(chart.source, super::ChartSource::Vectors { .. });
+                for style in &mut chart.options.styles {
+                    match &mut style.key {
+                        super::chart::options::SeriesKey::Vector(super::ChartVectorReference::Named { name }) if vector_source && name == from => name.clone_from(to),
+                        super::chart::options::SeriesKey::Sensitivity(name) if !vector_source && name == from => name.clone_from(to),
+                        _ => {}
+                    }
+                }
+            }
+            for item in &self.chart_references {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if let Some(reference) = chart.options.references.iter_mut().find(|reference| reference.id == item.id && matches!(&reference.value, super::chart::options::ReferenceValue::Named(name) if name == from)) {
+                    reference.value = super::chart::options::ReferenceValue::Named(to.clone());
+                } else if strict { return Err("A chart reference changed before the edit was applied."); }
+            }
+        }
         super::persistence::validate_view_metadata(&result)?;
         Ok(result)
     }
 }
 
 impl HistoryEntry {
-    fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, sensitivity_ids: &[u64], sensitivity_hidden: &HashSet<u64>, chart_ids: &[u64], chart_hidden: &HashSet<u64>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>), &'static str> {
-        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new(), chart_outputs: Vec::new(), chart_x: self.related.chart_x.clone().filter(|_| self.chart_x_live) };
+    fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, sensitivity_ids: &[u64], sensitivity_hidden: &HashSet<u64>, chart_ids: &[u64], chart_hidden: &HashSet<u64>, hidden_styles: &HashMap<u64, super::chart::options::SeriesStyle>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>, HashMap<u64, super::chart::options::SeriesStyle>), &'static str> {
+        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new(), chart_outputs: Vec::new(), chart_x: self.related.chart_x.clone().filter(|_| self.chart_x_live), chart_distribution: self.related.chart_distribution.clone().filter(|_| self.chart_distribution_live), chart_references: self.related.chart_references.clone() };
         let mut result = inputs.apply(view, reverse, false)?;
         let mut sensitivity_ids = sensitivity_ids.to_vec();
         let mut sensitivity_hidden = sensitivity_hidden.clone();
@@ -332,7 +366,14 @@ impl HistoryEntry {
         let mut hidden = hidden.clone();
         let mut chart_ids = chart_ids.to_vec();
         let mut chart_hidden = chart_hidden.clone();
+        let mut hidden_styles = hidden_styles.clone();
         if let Some(chart) = result.chart.as_mut() {
+            let old_keys = chart_source_keys(&chart.source);
+            let mut detached = Vec::new();
+            let mut styles = std::mem::take(&mut chart.options.styles).into_iter().filter_map(|style| {
+                if let Some(id) = old_keys.iter().position(|key| *key == style.key).and_then(|index| chart_ids.get(index)).copied() { Some((id, style)) }
+                else { detached.push(style); None }
+            }).collect::<Vec<_>>();
             let mut visual_hidden = chart.hidden.iter().filter_map(|index| chart_ids.get(*index).copied()).collect::<HashSet<_>>();
             for state in &mut self.chart_outputs {
                 if let Some(id) = state.id && chart_ids.contains(&id) {
@@ -343,6 +384,22 @@ impl HistoryEntry {
                 super::ChartSource::Sensitivity { outputs } => replay_values(outputs, &mut chart_ids, &mut chart_hidden, &self.related.chart_outputs, &mut self.chart_outputs, 8, reverse, str::to_owned),
                 super::ChartSource::Vectors { y, .. } => replay_values(y, &mut chart_ids, &mut chart_hidden, &self.related.chart_outputs, &mut self.chart_outputs, 8, reverse, |name| super::ChartVectorReference::Named { name: name.to_owned() }),
             }
+            let new_keys = chart_source_keys(&chart.source);
+            for state in &mut self.chart_outputs {
+                if let Some(id) = state.id {
+                    if !chart_ids.contains(&id) {
+                        if let Some(index) = styles.iter().position(|(owner, _)| *owner == id) { hidden_styles.insert(id, styles.remove(index).1); }
+                    } else if let Some(style) = hidden_styles.remove(&id) { styles.push((id, style)); }
+                }
+            }
+            chart.options.styles = styles.into_iter().filter_map(|(id, mut style)| {
+                let index = chart_ids.iter().position(|owner| *owner == id)?;
+                style.key = new_keys.get(index)?.clone();
+                Some(style)
+            }).collect();
+            let distribution_key = chart.distribution.as_ref().map(|distribution| super::chart::options::SeriesKey::Distribution(distribution.vector.clone()));
+            detached.retain(|style| Some(&style.key) == distribution_key.as_ref());
+            chart.options.styles.extend(detached);
             for state in &self.chart_outputs {
                 if let Some(id) = state.id && state.chart_was_hidden { visual_hidden.insert(id); }
             }
@@ -352,7 +409,7 @@ impl HistoryEntry {
         }
         replay_values(&mut result.watches, &mut ids, &mut hidden, &self.related.watches, &mut self.watches, super::persistence::MAX_WATCHES, reverse, str::to_owned);
         super::persistence::validate_view_metadata(&result)?;
-        Ok((result, ids, hidden, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden))
+        Ok((result, ids, hidden, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden, hidden_styles))
     }
 
     fn byte_size(&self) -> usize {
@@ -397,7 +454,8 @@ impl EditHistory {
         let sensitivity_outputs = sensitivity_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
         let chart_outputs = chart_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
         let chart_x_live = related.chart_x.is_some();
-        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs, chart_outputs, chart_x_live });
+        let chart_distribution_live = related.chart_distribution.is_some();
+        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs, chart_outputs, chart_x_live, chart_distribution_live });
         self.trim();
     }
 
@@ -445,15 +503,23 @@ fn chart_output_names(view: &PadViewMetadata) -> Vec<String> {
     }
 }
 
-#[derive(PartialEq, Eq)]
-enum ChartOutputKey { Vector(super::ChartVectorReference), Sensitivity(String) }
+fn chart_output_keys(view: &PadViewMetadata) -> Vec<super::chart::options::SeriesKey> {
+    view.chart.as_ref().map_or_else(Vec::new, |chart| chart_source_keys(&chart.source))
+}
 
-fn chart_output_keys(view: &PadViewMetadata) -> Vec<ChartOutputKey> {
-    match view.chart.as_ref().map(|chart| &chart.source) {
-        Some(super::ChartSource::Sensitivity { outputs }) => outputs.iter().cloned().map(ChartOutputKey::Sensitivity).collect(),
-        Some(super::ChartSource::Vectors { y, .. }) => y.iter().cloned().map(ChartOutputKey::Vector).collect(),
-        None => Vec::new(),
+fn chart_source_keys(source: &super::ChartSource) -> Vec<super::chart::options::SeriesKey> {
+    match source {
+        super::ChartSource::Sensitivity { outputs } => outputs.iter().cloned().map(super::chart::options::SeriesKey::Sensitivity).collect(),
+        super::ChartSource::Vectors { y, .. } => y.iter().cloned().map(super::chart::options::SeriesKey::Vector).collect(),
     }
+}
+
+fn rename_distribution_style(chart: &mut super::ChartDefinition, from: &str, to: &str) {
+    use super::chart::options::SeriesKey;
+    let old = SeriesKey::Distribution(super::ChartVectorReference::Named { name: from.into() });
+    let new = SeriesKey::Distribution(super::ChartVectorReference::Named { name: to.into() });
+    let Some(index) = chart.options.styles.iter().position(|style| style.key == old) else { return; };
+    chart.options.styles[index].key = new;
 }
 
 fn chart_x(view: &PadViewMetadata) -> Option<&super::ChartVectorReference> {
@@ -461,6 +527,10 @@ fn chart_x(view: &PadViewMetadata) -> Option<&super::ChartVectorReference> {
         Some(super::ChartSource::Vectors { x, .. }) => x.as_ref(),
         _ => None,
     }
+}
+
+fn chart_distribution(view: &PadViewMetadata) -> Option<&super::ChartVectorReference> {
+    view.chart.as_ref()?.distribution.as_ref().map(|distribution| &distribution.vector)
 }
 
 struct ActiveDocument {
@@ -481,7 +551,9 @@ struct ActiveDocument {
     next_sensitivity_output_id: u64,
     chart_output_ids: Vec<u64>,
     hidden_chart_output_ids: HashSet<u64>,
+    hidden_chart_styles: HashMap<u64, super::chart::options::SeriesStyle>,
     next_chart_output_id: u64,
+    chart_reference_highwater: u64,
     options: DocumentOptions,
     baseline: DocumentBaseline,
     cached_evaluation: Option<Arc<SessionEvaluation>>,
@@ -513,7 +585,9 @@ impl ActiveDocument {
             next_sensitivity_output_id: 1,
             chart_output_ids: Vec::new(),
             hidden_chart_output_ids: HashSet::new(),
+            hidden_chart_styles: HashMap::new(),
             next_chart_output_id: 1,
+            chart_reference_highwater: 1,
             options: DocumentOptions::default(),
             baseline: DocumentBaseline {
                 state: EditableState {
@@ -561,7 +635,9 @@ impl ActiveDocument {
             next_sensitivity_output_id: stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64 + 1,
             chart_output_ids: (1..=chart_output_keys(&stored.view).len() as u64).collect(),
             hidden_chart_output_ids: HashSet::new(),
+            hidden_chart_styles: HashMap::new(),
             next_chart_output_id: chart_output_keys(&stored.view).len() as u64 + 1,
+            chart_reference_highwater: stored.view.chart.as_ref().map_or(1, |chart| chart.options.next_reference_id),
             view: stored.view.clone(),
             options: stored.options,
             baseline: DocumentBaseline {
@@ -735,6 +811,16 @@ impl CalculationPadSession {
             }
             if matches!(chart_x(&current.view), Some(super::ChartVectorReference::Named { name }) if name == &preview.plan.old_name) {
                 related.chart_x = Some(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+            if matches!(chart_distribution(&current.view), Some(super::ChartVectorReference::Named { name }) if name == &preview.plan.old_name) {
+                related.chart_distribution = Some(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+            if let Some(chart) = &current.view.chart {
+                for reference in &chart.options.references {
+                    if matches!(&reference.value, super::chart::options::ReferenceValue::Named(name) if name == &preview.plan.old_name) {
+                        related.chart_references.push(RelatedChartReferenceRename { id: reference.id, before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+                    }
+                }
             }
         }
         let line_ids = current.line_ids.clone();
@@ -954,10 +1040,24 @@ impl CalculationPadSession {
         self.current.as_ref().is_some_and(|document| document.view != document.baseline.view)
     }
 
-    pub(crate) fn set_view_metadata(&mut self, view: PadViewMetadata) -> Result<(), &'static str> {
+    pub(crate) fn set_view_metadata(&mut self, mut view: PadViewMetadata) -> Result<(), &'static str> {
         if self.pending.is_some() { return Err("Resolve the pending document transition first."); }
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        if let Some(chart) = view.chart.as_mut() {
+            if current.view.chart.as_ref().is_some_and(|old| old.source != chart.source || old.distribution.as_ref().map(|value| &value.vector) != chart.distribution.as_ref().map(|value| &value.vector)) {
+                chart.options.retain_selected_styles(&chart.source, chart.distribution.as_ref().map(|distribution| &distribution.vector));
+            }
+            let old_refs = current.view.chart.as_ref().map(|old| old.options.references.as_slice()).unwrap_or_default();
+            if chart.options.references.iter().any(|reference| reference.id < current.chart_reference_highwater && !old_refs.iter().any(|old| old.id == reference.id)) {
+                return Err("A retired chart reference identity cannot be reused.");
+            }
+            chart.options.next_reference_id = chart.options.next_reference_id.max(current.chart_reference_highwater);
+        }
         if self.current.as_ref().is_some_and(|document| document.view == view) { return Ok(()); }
         super::persistence::validate_view_metadata(&view)?;
+        let old_refs = current.view.chart.as_ref().map(|chart| chart.options.references.as_slice()).unwrap_or_default();
+        let new_refs = view.chart.as_ref().map(|chart| chart.options.references.as_slice()).unwrap_or_default();
+        let retired = old_refs.iter().filter(|old| !new_refs.iter().any(|new| new.id == old.id && new.value == old.value)).map(|reference| reference.id).collect::<HashSet<_>>();
         let (sensitivity_ids, sensitivity_next) = if let Some(current) = self.current.as_ref() {
             let old = current.view.sensitivity.as_ref();
             let new = view.sensitivity.as_ref();
@@ -996,14 +1096,21 @@ impl CalculationPadSession {
                     else { let id = next; next = next.checked_add(1).ok_or("Chart output identity space exhausted.")?; id };
                 ids.push(id);
             }
-            let removed: HashSet<_> = current.chart_output_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
+            let mut removed: HashSet<_> = current.chart_output_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
+            let kind = |view: &PadViewMetadata| view.chart.as_ref().map(|chart| matches!(chart.source, super::ChartSource::Vectors { .. }));
+            if kind(&current.view) != kind(&view) { removed.extend(current.hidden_chart_output_ids.iter().copied()); }
             for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
                 for state in &mut entry.chart_outputs { if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; } }
                 if chart_x(&current.view) != chart_x(&view) { entry.chart_x_live = false; }
+                if chart_distribution(&current.view) != chart_distribution(&view) { entry.chart_distribution_live = false; }
             }
             (ids, next)
         } else { return Err("No document is open."); };
+        for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
+            entry.related.chart_references.retain(|reference| !retired.contains(&reference.id));
+        }
         let document = self.current.as_mut().ok_or("No document is open.")?;
+        document.chart_reference_highwater = view.chart.as_ref().map_or(document.chart_reference_highwater, |chart| document.chart_reference_highwater.max(chart.options.next_reference_id));
         document.sensitivity_output_ids = sensitivity_ids;
         document.next_sensitivity_output_id = sensitivity_next;
         document.chart_output_ids = chart_ids;
@@ -1048,6 +1155,7 @@ impl CalculationPadSession {
             current.hidden_sensitivity_output_ids.retain(|id| retained.contains(id));
             let retained = self.history.undo.iter().chain(&self.history.redo).flat_map(|entry| entry.chart_outputs.iter().filter_map(|state| state.id)).collect::<HashSet<_>>();
             current.hidden_chart_output_ids.retain(|id| retained.contains(id));
+            current.hidden_chart_styles.retain(|id, _| current.hidden_chart_output_ids.contains(id));
         }
     }
 
@@ -1339,6 +1447,39 @@ impl CalculationPadSession {
         self.commit_source_edit(source, line_ids, next_line_id, related)
     }
 
+    /// Commits a prepared top-level splice while preserving every retained row.
+    pub(crate) fn apply_reference_example(
+        &mut self,
+        basis: super::EvaluationBasis,
+        prepared: super::reference::insertion::PreparedExampleInsertion,
+    ) -> Result<bool, SessionError> {
+        self.ensure_editable()?;
+        if self.evaluation_basis() != Some(basis) {
+            return Err(SessionError::StaleRelatedEdit);
+        }
+        let current = self.current.as_ref().ok_or(SessionError::NoActiveDocument)?;
+        if current.source == prepared.source {
+            return Ok(false);
+        }
+        validate_source_size(&prepared.source)?;
+        let (prefix, suffix) = prepared.retained_rows();
+        let retained = prefix + suffix;
+        let old_count = current.line_ids.len();
+        let new_count = prepared.source.split('\n').count();
+        if retained > old_count || retained > new_count {
+            return Err(SessionError::LineIdStateMismatch);
+        }
+        let mut ids = Vec::with_capacity(new_count);
+        ids.extend_from_slice(&current.line_ids[..prefix]);
+        let mut next_id = current.next_line_id;
+        for _ in retained..new_count {
+            ids.push(LineId(next_id));
+            next_id = next_id.checked_add(1).ok_or(SessionError::LineIdExhausted)?;
+        }
+        ids.extend_from_slice(&current.line_ids[old_count - suffix..]);
+        self.commit_source_edit(prepared.source, ids, next_id, RelatedReferenceEdits::default())
+    }
+
     /// Restores an unnamed recovery draft over the session's initial blank
     /// document. Recovery starts with fresh line identities, no undo history,
     /// and the blank source as its saved baseline so restored text stays dirty.
@@ -1419,9 +1560,10 @@ impl CalculationPadSession {
         let sensitivity_ids = related.sensitivity_outputs.iter().map(|edit| current.view.sensitivity.as_ref().and_then(|settings| settings.definition.outputs.iter().position(|name| name == &edit.before)).map(|index| current.sensitivity_output_ids[index])).collect();
         let keys = chart_output_keys(&current.view);
         let chart_ids = related.chart_outputs.iter().map(|edit| keys.iter().position(|key| match key {
-            ChartOutputKey::Sensitivity(name) => name == &edit.before,
-            ChartOutputKey::Vector(super::ChartVectorReference::Named { name }) => name == &edit.before,
-            ChartOutputKey::Vector(_) => false,
+            super::chart::options::SeriesKey::Sensitivity(name) => name == &edit.before,
+            super::chart::options::SeriesKey::Vector(super::ChartVectorReference::Named { name }) => name == &edit.before,
+            super::chart::options::SeriesKey::Vector(_) => false,
+            super::chart::options::SeriesKey::Distribution(_) => false,
         }).map(|index| current.chart_output_ids[index])).collect();
         let view = related.apply(&current.view, false, true).map_err(SessionError::InvalidRelatedMetadata)?;
         let mut after = before.clone();
@@ -1486,7 +1628,7 @@ impl CalculationPadSession {
             return false;
         };
         let Some(mut entry) = self.history.undo.back().cloned() else { return false; };
-        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, &current.chart_output_ids, &current.hidden_chart_output_ids, true) else {
+        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden, hidden_styles)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, &current.chart_output_ids, &current.hidden_chart_output_ids, &current.hidden_chart_styles, true) else {
             return false;
         };
         if self.history.undo.pop_back().is_none() {
@@ -1504,6 +1646,7 @@ impl CalculationPadSession {
             current.hidden_sensitivity_output_ids = sensitivity_hidden;
             current.chart_output_ids = chart_ids;
             current.hidden_chart_output_ids = chart_hidden;
+            current.hidden_chart_styles = hidden_styles;
         }
         self.history.redo.push_back(entry);
         self.prune_hidden_watch_ids();
@@ -1521,7 +1664,7 @@ impl CalculationPadSession {
             return false;
         };
         let Some(mut entry) = self.history.redo.back().cloned() else { return false; };
-        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, &current.chart_output_ids, &current.hidden_chart_output_ids, false) else {
+        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden, hidden_styles)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, &current.chart_output_ids, &current.hidden_chart_output_ids, &current.hidden_chart_styles, false) else {
             return false;
         };
         if self.history.redo.pop_back().is_none() {
@@ -1539,6 +1682,7 @@ impl CalculationPadSession {
             current.hidden_sensitivity_output_ids = sensitivity_hidden;
             current.chart_output_ids = chart_ids;
             current.hidden_chart_output_ids = chart_hidden;
+            current.hidden_chart_styles = hidden_styles;
         }
         self.history.undo.push_back(entry);
         self.prune_hidden_watch_ids();
@@ -2203,7 +2347,7 @@ mod tests {
         let (_dir, root, mut session) = fixture();
         session.replace_source("x = 2\nx + 1").unwrap();
         let mut view = session.view_metadata().unwrap().clone();
-        view.chart = Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs: vec!["x".into()] }, kind: super::super::ChartKind::Bar, x_label: "Input".into(), y_label: "Output".into(), hidden: Vec::new(), bar_labels: vec!["first".into()] });
+        view.chart = Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs: vec!["x".into()] }, kind: super::super::ChartKind::Bar, x_label: "Input".into(), y_label: "Output".into(), hidden: Vec::new(), bar_labels: vec!["first".into()], distribution: None, options: Default::default() });
         session.set_view_metadata(view).unwrap();
         session.save_as("chart").unwrap();
         let id = session.current_id().unwrap();
@@ -2228,7 +2372,7 @@ mod tests {
         let ids = session.line_ids().unwrap().to_vec();
         let named = |name: &str| Ref::Named { name: name.into() };
         let mut view = session.view_metadata().unwrap().clone();
-        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: Some(named("x")), y: vec![Ref::Physical(ids[0]), named("x"), named("y")] }, kind: ChartKind::Bar, x_label: "custom".into(), y_label: String::new(), hidden: vec![1], bar_labels: Vec::new() });
+        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: Some(named("x")), y: vec![Ref::Physical(ids[0]), named("x"), named("y")] }, kind: ChartKind::Bar, x_label: "custom".into(), y_label: String::new(), hidden: vec![1], bar_labels: Vec::new(), distribution: None, options: Default::default() });
         session.set_view_metadata(view).unwrap();
         let preview = session.preview_rename(0, "z").unwrap();
         session.apply_rename(&preview).unwrap();
@@ -2263,6 +2407,224 @@ mod tests {
         let mut reopened = CalculationPadSession::new(&root);
         reopened.request_open(session.current_id().unwrap()).unwrap();
         assert_eq!(reopened.view_metadata().unwrap().chart, session.view_metadata().unwrap().chart);
+    }
+
+    #[test]
+    fn chart_styles_and_reference_ids_follow_owned_rename_replay() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, ReferenceAxis, ReferenceLine, ReferenceValue, SeriesKey, SeriesStyle};
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\ny = 3").unwrap();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x"), named("y")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+        chart.options.styles.push(SeriesStyle { key: SeriesKey::Vector(named("x")), color: [1, 2, 3, 255], line: LineStyle::Dashed, marker: MarkerStyle::Square, thickness: FiniteValue::try_from(2.0).unwrap() });
+        chart.options.references.push(ReferenceLine { id: 1, axis: ReferenceAxis::Y, value: ReferenceValue::Named("x".into()), label: "original".into() });
+        chart.options.next_reference_id = 2;
+        view.chart = Some(chart);
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "z").unwrap();
+        session.apply_rename(&preview).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        let chart = view.chart.as_mut().unwrap();
+        assert_eq!(chart.options.styles[0].key, SeriesKey::Vector(named("z")));
+        assert_eq!(chart.options.references[0].value, ReferenceValue::Named("z".into()));
+        if let ChartSource::Vectors { y, .. } = &mut chart.source { y.reverse(); }
+        chart.options.styles[0].color = [9, 8, 7, 255];
+        chart.options.references[0].label = "independent".into();
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.options.styles[0].key, SeriesKey::Vector(named("x")));
+        assert_eq!(chart.options.styles[0].color, [9, 8, 7, 255]);
+        assert_eq!(chart.options.references[0].value, ReferenceValue::Named("x".into()));
+        assert_eq!(chart.options.references[0].label, "independent");
+        assert!(session.redo());
+        let mut view = session.view_metadata().unwrap().clone();
+        let chart = view.chart.as_mut().unwrap();
+        chart.options.references.clear();
+        session.set_view_metadata(view).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        let chart = view.chart.as_mut().unwrap();
+        chart.options.references.push(ReferenceLine { id: 1, axis: ReferenceAxis::Y, value: ReferenceValue::Named("z".into()), label: "new".into() });
+        assert!(session.set_view_metadata(view.clone()).is_err());
+        let chart = view.chart.as_mut().unwrap();
+        let id = chart.options.allocate_reference_id().unwrap();
+        chart.options.references[0].id = id;
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.options.references[0].value, ReferenceValue::Named("z".into()));
+        assert!(chart.options.next_reference_id >= 3);
+    }
+
+    #[test]
+    fn chart_distribution_source_follows_rename_and_preserves_independent_edits() {
+        use super::super::chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = [1, 2]\ny = [3]").unwrap();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("y")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: named("x"), bins: DistributionBins::Count { count: 2 }, scale: DistributionScale::Percentage }), options: Default::default() });
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
+        assert_eq!(super::chart_distribution(session.view_metadata().unwrap()), Some(&named("z")));
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart.as_mut().unwrap().distribution.as_mut().unwrap().bins = DistributionBins::Count { count: 3 };
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.distribution.as_ref().unwrap().vector, named("x"));
+        assert_eq!(chart.distribution.as_ref().unwrap().bins, DistributionBins::Count { count: 3 });
+        assert!(session.redo());
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart.as_mut().unwrap().distribution.as_mut().unwrap().vector = named("y");
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert_eq!(super::chart_distribution(session.view_metadata().unwrap()), Some(&named("y")));
+    }
+
+    #[test]
+    fn chart_distribution_style_retains_source_identity_through_rename_and_pruning() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        use super::super::chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = [1, 2]\ny = [3, 4]").unwrap();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("y")] }, kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: named("x"), bins: DistributionBins::Auto, scale: DistributionScale::Count }), options: Default::default() };
+        chart.options.styles.push(SeriesStyle { key: SeriesKey::Distribution(named("x")), color: [10, 20, 30, 40], line: LineStyle::Dashed, marker: MarkerStyle::Square, thickness: FiniteValue::try_from(3.0).unwrap() });
+        view.chart = Some(chart); session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
+        assert_eq!(session.view_metadata().unwrap().chart.as_ref().unwrap().options.styles[0].key, SeriesKey::Distribution(named("z")));
+        let mut view = session.view_metadata().unwrap().clone(); view.chart.as_mut().unwrap().options.styles[0].color[3] = 99; session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.options.styles[0].key, SeriesKey::Distribution(named("x"))); assert_eq!(chart.options.styles[0].color[3], 99);
+        assert!(session.redo());
+        let mut view = session.view_metadata().unwrap().clone(); view.chart.as_mut().unwrap().distribution.as_mut().unwrap().vector = named("y"); session.set_view_metadata(view).unwrap();
+        assert!(session.view_metadata().unwrap().chart.as_ref().unwrap().options.styles.is_empty());
+        assert!(session.undo());
+        assert!(session.view_metadata().unwrap().chart.as_ref().unwrap().options.styles.is_empty());
+    }
+
+    #[test]
+    fn chart_distribution_style_shared_with_series_survives_rename_replay() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        use super::super::chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
+        let (_dir, _root, mut session) = fixture(); session.replace_source("x = [1, 2]").unwrap();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x")] }, kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: named("x"), bins: DistributionBins::Auto, scale: DistributionScale::Count }), options: Default::default() };
+        chart.options.styles.push(SeriesStyle { key: SeriesKey::Distribution(named("x")), color: [1, 2, 3, 255], line: LineStyle::Solid, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() });
+        view.chart = Some(chart); session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.options.styles.len(), 1); assert_eq!(chart.options.styles[0].key, SeriesKey::Distribution(named("x")));
+        assert!(session.redo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.options.styles.len(), 1); assert_eq!(chart.options.styles[0].key, SeriesKey::Distribution(named("z")));
+    }
+
+    #[test]
+    fn chart_distribution_style_is_separate_from_ordinary_rename_collision() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        use super::super::chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
+        let named = |name: &str| Ref::Named { name: name.into() };
+        for styled in [true, false] {
+            let (_dir, _root, mut session) = fixture(); session.replace_source("x = [1, 2]").unwrap();
+            let mut view = session.view_metadata().unwrap().clone();
+            let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("z")] }, kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: named("x"), bins: DistributionBins::Auto, scale: DistributionScale::Count }), options: Default::default() };
+            let style = |key, color| SeriesStyle { key, color, line: LineStyle::Solid, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() };
+            chart.options.styles.push(style(SeriesKey::Vector(named("z")), [0, 0, 255, 255]));
+            if styled { chart.options.styles.push(style(SeriesKey::Distribution(named("x")), [255, 0, 0, 255])); }
+            view.chart = Some(chart); session.set_view_metadata(view).unwrap();
+            let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
+            assert!(session.undo());
+            let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+            assert!(chart.options.styles.iter().any(|style| style.key == SeriesKey::Vector(named("z")) && style.color == [0, 0, 255, 255]));
+            assert_eq!(chart.options.styles.iter().any(|style| style.key == SeriesKey::Distribution(named("x")) && style.color == [255, 0, 0, 255]), styled);
+            assert!(session.redo());
+        }
+    }
+
+    #[test]
+    fn chart_source_change_prunes_removed_styles() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
+        let (_dir, _root, mut session) = fixture();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x"), named("y")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+        chart.options.styles.push(SeriesStyle { key: SeriesKey::Vector(named("x")), color: [1, 2, 3, 255], line: LineStyle::Solid, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() });
+        view.chart = Some(chart); session.set_view_metadata(view).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        if let ChartSource::Vectors { y, .. } = &mut view.chart.as_mut().unwrap().source { y.remove(0); }
+        session.set_view_metadata(view).unwrap();
+        assert!(session.view_metadata().unwrap().chart.as_ref().unwrap().options.styles.is_empty());
+    }
+
+    #[test]
+    fn chart_style_survives_rename_collision_and_restores_with_owner() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2").unwrap();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+        chart.options.styles.push(SeriesStyle { key: SeriesKey::Vector(named("x")), color: [9, 8, 7, 255], line: LineStyle::Dashed, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() });
+        view.chart = Some(chart); session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        if let ChartSource::Vectors { y, .. } = &mut view.chart.as_mut().unwrap().source { y.push(named("x")); }
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert!(session.view_metadata().unwrap().chart.as_ref().unwrap().options.styles.is_empty());
+        assert!(session.redo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.options.styles[0].key, SeriesKey::Vector(named("z")));
+        assert_eq!(chart.options.styles[0].color, [9, 8, 7, 255]);
+    }
+
+    #[test]
+    fn chart_hidden_style_survives_chained_rename_and_retires_on_source_switch() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
+        let named = |name: &str| Ref::Named { name: name.into() };
+        for delete_chart in [false, true] {
+            let (_dir, _root, mut session) = fixture();
+            session.replace_source("x = 2").unwrap();
+            let mut view = session.view_metadata().unwrap().clone();
+            let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
+            chart.options.styles.push(SeriesStyle { key: SeriesKey::Vector(named("x")), color: [9, 8, 7, 255], line: LineStyle::Dashed, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() });
+            view.chart = Some(chart); session.set_view_metadata(view).unwrap();
+            let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
+            let preview = session.preview_rename(0, "w").unwrap(); session.apply_rename(&preview).unwrap();
+            let mut view = session.view_metadata().unwrap().clone();
+            if let ChartSource::Vectors { y, .. } = &mut view.chart.as_mut().unwrap().source { y.push(named("z")); }
+            session.set_view_metadata(view).unwrap();
+            assert!(session.undo()); // w -> z collides with independent z
+            assert!(session.undo()); // z -> x restores the same hidden owner
+            let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+            assert_eq!(chart.options.styles[0].key, SeriesKey::Vector(named("x")));
+            assert_eq!(chart.options.styles[0].color, [9, 8, 7, 255]);
+            assert!(session.redo()); // x -> z collides again
+            let mut view = session.view_metadata().unwrap().clone();
+            if delete_chart { view.chart = None; } else { view.chart.as_mut().unwrap().source = ChartSource::Sensitivity { outputs: vec!["z".into()] }; }
+            session.set_view_metadata(view).unwrap();
+            assert!(session.redo());
+            let chart = session.view_metadata().unwrap().chart.as_ref();
+            if let Some(chart) = chart {
+                assert!(matches!(&chart.source, ChartSource::Sensitivity { outputs } if outputs == &["z"]));
+                assert!(chart.options.styles.is_empty());
+            } else { assert!(delete_chart); }
+        }
     }
 
     #[test]
@@ -2859,6 +3221,18 @@ mod tests {
         assert!(session.undo());
         assert_eq!(session.source(), Some(source));
         assert_eq!(scalar(&mut session, 4), 13.0);
+    }
+
+    #[test]
+    fn callback_function_rename_is_one_undoable_edit() {
+        let (_dir, _root, mut session) = fixture();
+        let source = "fn scale(value) = value * 2\nmap([1, 2], scale)";
+        session.replace_source(source).unwrap();
+        let preview = session.preview_rename(source.find("scale").unwrap(), "double_value").unwrap();
+        assert!(session.apply_rename(&preview).unwrap());
+        assert_eq!(session.source(), Some("fn double_value(value) = value * 2\nmap([1, 2], double_value)"));
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
     }
 
     #[test]

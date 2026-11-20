@@ -17,6 +17,7 @@ where
         Command::Dialog(DialogCommand::DateTimeStudio) => host.open_date_time_studio_dialog(),
         Command::Dialog(DialogCommand::DiagramStudio) => host.open_diagram_studio_dialog(),
         Command::Dialog(DialogCommand::MarkdownStudio) => host.open_markdown_studio_dialog(),
+        Command::Dialog(DialogCommand::PasswordGenerator) => host.open_password_generator_dialog(),
         Command::Dialog(DialogCommand::Help) => host.open_help_dialog(),
         Command::Dialog(DialogCommand::Convert) => host.open_convert_dialog(),
         Command::Dialog(DialogCommand::Settings) => host.open_settings_dialog(),
@@ -31,7 +32,12 @@ where
         Command::Dialog(DialogCommand::FileLock { path }) => {
             host.open_file_lock_dialog(path.as_deref())
         }
+        Command::Dialog(DialogCommand::DownloadsTriage) => host.open_downloads_triage_dialog(),
+        Command::Dialog(DialogCommand::NotificationInbox) => host.open_notification_inbox_dialog(),
         Command::Dialog(DialogCommand::Activity) => host.open_activity_dialog(),
+        Command::Dialog(DialogCommand::FileOperationsCenter) => {
+            host.open_file_operations_center_dialog()
+        }
         Command::Timer(TimerCommand::TimerDialog) => host.open_timer_dialog(),
         Command::Timer(TimerCommand::AlarmDialog) => host.open_alarm_dialog(),
         Command::Shell(ShellCommand::Dialog) => host.open_shell_dialog(),

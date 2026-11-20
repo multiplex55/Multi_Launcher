@@ -271,7 +271,32 @@ impl EpiIntegration {
             self.can_drag_window = true;
         }
 
-        egui_winit.on_window_event(window, event)
+        // egui-winit maps Digit2 and Numpad2 (and the other keypad directions)
+        // to the same egui physical key. Preserve the native position on the
+        // corresponding event without changing its logical key or text.
+        let keypad_position = match event {
+            WindowEvent::KeyboardInput { event, .. } => {
+                use winit::keyboard::{KeyCode, PhysicalKey};
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::Numpad2) => Some(egui::Key::Numpad2),
+                    PhysicalKey::Code(KeyCode::Numpad4) => Some(egui::Key::Numpad4),
+                    PhysicalKey::Code(KeyCode::Numpad6) => Some(egui::Key::Numpad6),
+                    PhysicalKey::Code(KeyCode::Numpad8) => Some(egui::Key::Numpad8),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let first_new_event = egui_winit.egui_input().events.len();
+        let response = egui_winit.on_window_event(window, event);
+        if let Some(position) = keypad_position {
+            for event in &mut egui_winit.egui_input_mut().events[first_new_event..] {
+                if let egui::Event::Key { physical_key, .. } = event {
+                    *physical_key = Some(position);
+                }
+            }
+        }
+        response
     }
 
     pub fn pre_update(&mut self) {

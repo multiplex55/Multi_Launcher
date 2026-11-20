@@ -1,6 +1,7 @@
 #[cfg(feature = "qa-framebuffer-capture")]
 use super::qa_framebuffer::{RootListDiagnostic, VisibleRowDiagnostic};
 use super::*;
+use super::query_navigation::{QueryNavigation, take_query_navigation};
 
 use super::screenshot_countdown::NATIVE_POLL_INTERVAL;
 use crate::gui::jump_mode::ui::NavigationOwner;
@@ -23,6 +24,7 @@ enum DialogCopyOwner {
     ProgrammerInspector,
     Converter,
     DateTimeStudio,
+    DataRecovery,
     ImageCompare,
     DuplicateFinder,
     ZipExtractor,
@@ -47,6 +49,14 @@ enum RootDialogEffect {
         instant_utc: chrono::DateTime<chrono::Utc>,
         origin: super::utility_host::AcceptedParentOpen<u64>,
     },
+}
+
+pub(super) struct PendingDataConfirmationPass {
+    pass: super::utility_host::ViewportPassProvenance,
+    modal_generation: u64,
+    parent_epoch: u64,
+    intent: PendingRecoveryIntent,
+    result: ConfirmationResult,
 }
 
 #[cfg(test)]
@@ -371,10 +381,14 @@ pub(super) struct RootListGeometryCache {
     content_x_offset: f32,
     content_width: f32,
     result_generation: u64,
+    last_revealed_selection: Option<(usize, f32)>,
     last_grid_mode: Option<bool>,
     popup_owner: Option<(u64, usize)>,
     popup_response: Option<egui::Response>,
     pending_popup_cleanup: Option<egui::Response>,
+    // Actual button responses from the last rendered pass. Invalidation retires
+    // them with their result generation, so Tab focus cannot target stale rows.
+    rendered_result_ids: Vec<(usize, egui::Id)>,
     #[cfg(test)]
     rebuild_count: u64,
     #[cfg(test)]
@@ -418,10 +432,12 @@ impl Default for RootListGeometryCache {
             content_x_offset: 0.0,
             content_width: 0.0,
             result_generation: 0,
+            last_revealed_selection: None,
             last_grid_mode: None,
             popup_owner: None,
             popup_response: None,
             pending_popup_cleanup: None,
+            rendered_result_ids: Vec::new(),
             #[cfg(test)]
             rebuild_count: 0,
             #[cfg(test)]
@@ -436,7 +452,9 @@ impl Default for RootListGeometryCache {
 
 impl RootListGeometryCache {
     fn invalidate_geometry(&mut self) {
+        self.rendered_result_ids.clear();
         self.key = None;
+        self.last_revealed_selection = None;
         self.row_tops.clear();
         self.row_heights.clear();
         self.row_x_offsets.clear();
@@ -466,6 +484,14 @@ impl RootListGeometryCache {
 
     pub(super) fn result_generation(&self) -> u64 {
         self.result_generation
+    }
+
+    fn selection_to_reveal(&mut self, selected: Option<usize>, view_height: f32) -> Option<usize> {
+        // Reissuing a centered target for the last row restarts the animation
+        // after egui has already clamped it to the bottom of the scroll area.
+        let target = selected.map(|index| (index, view_height));
+        let previous = std::mem::replace(&mut self.last_revealed_selection, target);
+        selected.filter(|_| previous != target)
     }
 
     #[cfg(feature = "qa-framebuffer-capture")]
@@ -587,6 +613,7 @@ impl RootListGeometryCache {
         if self.key.as_ref() == Some(&key) {
             return false;
         }
+        self.last_revealed_selection = None;
 
         let mut track_c_timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::RootGeometryCold,
@@ -718,6 +745,7 @@ impl RootListGeometryCache {
         if self.key.as_ref() == Some(&key) {
             return false;
         }
+        self.last_revealed_selection = None;
 
         let mut track_c_timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::RootGeometryCold,
@@ -2071,7 +2099,7 @@ impl LauncherApp {
                 gesture_capture_active,
             )
             || (self.notes_dialog.host_layer_if_root().is_some()
-                && self.notes_dialog.jump_mode_unsupported_nested_owner_open())
+                && self.notes_dialog.has_open_context_menu())
             || (self.unused_assets_dialog.open
                 && self
                     .unused_assets_host
@@ -2155,6 +2183,7 @@ impl LauncherApp {
             .chain(self.dashboard_editor.host_layer_if_root())
             .chain(self.diff_dialog.host_layer_if_root())
             .chain(self.diff_dialog.child_root_layers())
+            .chain(self.markdown_print_dialog.current_stamp().and_then(|_| self.markdown_print_host.root_layer()))
             .chain(
                 self.mouse_gestures_dialog
                     .binding_is_open()
@@ -2221,6 +2250,10 @@ impl LauncherApp {
             Panel::SnippetDialog => self.snippet_window_host.root_layer(),
             Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer(),
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer(),
+            Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer(),
+            Panel::FileOperationsCenterDialog => self.file_operations_center_root_layer(),
+            Panel::DownloadsTriageDialog => self.downloads_triage_root_layer(),
+            Panel::NotificationInboxDialog => self.notification_inbox_host.root_layer(),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
             Panel::MkMacroDialog => self
                 .mkmacro_dialog
@@ -2530,7 +2563,7 @@ impl LauncherApp {
             && visible_top_middle_layer(ctx) == Some(notes_layer)
             && focused_response_layer(ctx)
                 .is_none_or(|layer| layer == notes_layer || layer.order != egui::Order::Middle)
-            && !self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+            && !self.notes_dialog.has_open_context_menu()
             && self
                 .unused_assets_host
                 .root_layer()
@@ -3741,6 +3774,26 @@ struct RootQueryEditorPresentation {
     search_icon_rect: egui::Rect,
 }
 
+const ROOT_QUERY_EVENT_FILTER: egui::EventFilter = egui::EventFilter {
+    horizontal_arrows: true,
+    vertical_arrows: true,
+    tab: false,
+    escape: false,
+};
+
+fn request_root_query_focus(response: &egui::Response) {
+    response.request_focus();
+    retain_root_query_arrow_focus(response);
+}
+
+fn retain_root_query_arrow_focus(response: &egui::Response) {
+    // TextEdit is already drawn. Install its filter now so the very next
+    // arrow doesn't become an egui directional focus transfer.
+    response.ctx.memory_mut(|memory| {
+        memory.set_focus_lock_filter(response.id, ROOT_QUERY_EVENT_FILTER);
+    });
+}
+
 fn show_root_query_editor(
     ui: &mut egui::Ui,
     query: &mut String,
@@ -3778,6 +3831,7 @@ fn show_root_query_editor(
                 .hint_text("Search…")
                 .margin(margin)
                 .interactive(interactive)
+                .event_filter(ROOT_QUERY_EVENT_FILTER)
                 .return_key(
                     (!retain_focus_on_enter).then_some(egui::KeyboardShortcut::new(
                         egui::Modifiers::NONE,
@@ -4940,6 +4994,10 @@ impl LauncherApp {
             .prepare_open(ctx, &self.search_replace_dialog);
         self.hash_generator_host
             .prepare_open(ctx, &self.hash_generator_dialog);
+        self.password_generator_host
+            .prepare_open(ctx, &self.password_generator_dialog);
+        #[cfg(windows)]
+        self.downloads_triage_host.prepare_open(ctx, &self.downloads_triage_dialog);
         self.todo_view_host
             .prepare_open(ctx, &self.todo_view_dialog);
         self.file_preview_host
@@ -5056,6 +5114,12 @@ impl LauncherApp {
                     .calculation_dependency_host
                     .needs_root_ui_when_hidden(self.calculation_dependency_dialog.open)
                 || self.calculation_chart_host.needs_root_ui_when_hidden(self.calculation_chart_dialog.open)
+                || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
+                || self.markdown_print_dialog.output.busy()
+                || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
+                || self.file_operations_center_needs_root_ui()
+                || self.downloads_triage_needs_root_ui()
+                || self.notification_inbox_host.needs_root_ui_when_hidden(self.notification_inbox_dialog.open)
                 || self.calculation_sensitivity_host.needs_root_ui_when_hidden(self.calculation_sensitivity_dialog.open)
                 || self
                     .file_preview_host
@@ -5206,6 +5270,24 @@ impl LauncherApp {
         root_visible: bool,
         jump_escape_preempted: bool,
     ) {
+        use super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let kind = NavigationDialogKind::DateTimeStudio;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.jump_mode_ui.dialog_instance(kind);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::DateTimeStudio,
+                instance,
+            } => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("date-time-studio", instance),
+                super::jump_mode::TargetGeneration(self.date_time_studio_dialog.jump_generation()),
+                "date-time-studio",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
         let owner = self.date_time_studio_root_owner_current(ctx, root_visible);
         let allowed = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
@@ -5223,6 +5305,10 @@ impl LauncherApp {
             self.pinned_panels
                 .contains(&super::Panel::DateTimeStudioDialog),
             shortcut,
+            scope.as_ref(),
+            Some(&self.jump_mode_ui),
+            self.jump_mode_enabled(),
+            instance,
         );
     }
 
@@ -5292,6 +5378,15 @@ impl LauncherApp {
             && !self.pin_list_open;
         let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
         let root_shortcut = !jump_escape_preempted && self.jump_mode_ui.active_session().is_none();
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let jump_enabled = self.jump_mode_enabled();
+        let calendar_kind = super::jump_mode::ui::NavigationDialogKind::Calendar;
+        let calendar_instance = self.jump_mode_ui.dialog_instance(calendar_kind);
+        let calendar_scope = match navigation_owner {
+            super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::Calendar, instance } => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("calendar", instance), super::jump_mode::TargetGeneration(self.calendar_popover.host_session_epoch()), "calendar", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
 
         if self.calendar_popover_open {
             let panel = Panel::CalendarPopover;
@@ -5310,9 +5405,13 @@ impl LauncherApp {
                 owner,
                 allowed,
                 root_shortcut,
+                Some(super::calendar_window_host::CalendarJumpConfig {
+                    kind: calendar_kind, instance: calendar_instance, root_scope: calendar_scope.as_ref(),
+                    launcher: &self.jump_mode_ui, enabled: jump_enabled, root_active: self.jump_mode_ui.active_session().is_some(),
+                }),
                 super::CalendarPopover::popup_anchors,
-                |dialog, ctx, owner, first, child, host| {
-                    dialog.render_host(ctx, true, owner, first, &runtime, child, host)
+                |dialog, ctx, owner, first, child, host, scope, active| {
+                    dialog.render_host(ctx, true, owner, first, &runtime, child, host, scope, active)
                 },
             );
         }
@@ -5320,6 +5419,13 @@ impl LauncherApp {
             let panel = Panel::CalendarEventDetails;
             let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
             let epoch = self.calendar_event_details.host_session_epoch();
+            let kind = super::jump_mode::ui::NavigationDialogKind::CalendarDetails;
+            let instance = self.jump_mode_ui.dialog_instance(kind);
+            let scope = match navigation_owner {
+                super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalendarDetails, instance } => self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("calendar-event-details", instance), super::jump_mode::TargetGeneration(epoch), "calendar-event-details", ctx.viewport_id(), navigation_owner, false),
+                _ => None,
+            };
             self.calendar_details_host.show(
                 ctx,
                 &mut self.calendar_event_details,
@@ -5332,9 +5438,10 @@ impl LauncherApp {
                 owner,
                 allowed,
                 root_shortcut,
+                Some(super::calendar_window_host::CalendarJumpConfig { kind, instance, root_scope: scope.as_ref(), launcher: &self.jump_mode_ui, enabled: jump_enabled, root_active: self.jump_mode_ui.active_session().is_some() }),
                 super::CalendarEventDetails::popup_anchors,
-                |dialog, ctx, owner, first, child, host| {
-                    dialog.render_host(ctx, true, owner, first, child, host)
+                |dialog, ctx, owner, first, child, host, scope, _| {
+                    dialog.render_host(ctx, true, owner, first, child, host, scope)
                 },
             );
         }
@@ -5342,6 +5449,13 @@ impl LauncherApp {
             let panel = Panel::CalendarEventEditor;
             let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
             let epoch = self.calendar_event_editor.host_session_epoch();
+            let kind = super::jump_mode::ui::NavigationDialogKind::CalendarEditor;
+            let instance = self.jump_mode_ui.dialog_instance(kind);
+            let scope = match navigation_owner {
+                super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalendarEditor, instance } => self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("calendar-event-editor", instance), super::jump_mode::TargetGeneration(epoch), "calendar-event-editor", ctx.viewport_id(), navigation_owner, false),
+                _ => None,
+            };
             self.calendar_editor_host.show(
                 ctx,
                 &mut self.calendar_event_editor,
@@ -5354,9 +5468,10 @@ impl LauncherApp {
                 owner,
                 allowed,
                 root_shortcut,
+                Some(super::calendar_window_host::CalendarJumpConfig { kind, instance, root_scope: scope.as_ref(), launcher: &self.jump_mode_ui, enabled: jump_enabled, root_active: self.jump_mode_ui.active_session().is_some() }),
                 super::CalendarEventEditor::popup_anchors,
-                |dialog, ctx, owner, first, child, host| {
-                    dialog.render_host(ctx, true, owner, first, child, host)
+                |dialog, ctx, owner, first, child, host, scope, _| {
+                    dialog.render_host(ctx, true, owner, first, child, host, scope)
                 },
             );
         }
@@ -5640,7 +5755,12 @@ impl LauncherApp {
             && !self.action_sheet.is_open()
             && !self.pin_list_open;
         let pinned = self.pinned_panels.contains(&super::Panel::QrDialog);
-        self.qr_host.configure_jump(&self.jump_mode_ui, false);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::QrGenerator, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("qr-generator", instance), super::jump_mode::TargetGeneration(self.qr_dialog.epoch()), "qr-generator/form", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
+        self.qr_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() && !self.qr_host.is_popped_out() {
             self.qr_host.prepare_capture_popout(ctx, &self.qr_dialog);
@@ -5654,14 +5774,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
         #[cfg(feature = "qa-framebuffer-capture")]
@@ -5678,6 +5798,17 @@ impl LauncherApp {
         root_visible: bool,
     ) {
         if root_visible || self.calculation_pad_dialog.needs_root_ui_when_hidden() {
+            let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+            let instance = self.calculation_pad_dialog.jump_instance();
+            let scope = if nav == (NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationPad, instance }) {
+                self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("calculation-pad", instance), self.calculation_pad_dialog.jump_generation(), "calculation-pad", ctx.viewport_id(), nav, false)
+            } else { None };
+            self.calculation_pad_dialog.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled(), scope, first_ui_pass && !ctx.will_discard());
+            let reference_instance = self.calculation_pad_dialog.reference_jump_instance();
+            let reference_scope = if nav == (NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationReference, instance: reference_instance }) {
+                self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("calculation-reference", reference_instance), self.calculation_pad_dialog.reference_jump_generation(), "calculation-reference", ctx.viewport_id(), nav, false)
+            } else { None };
+            self.calculation_pad_dialog.configure_reference_jump(&self.jump_mode_ui, self.jump_mode_enabled(), reference_scope, first_ui_pass && !ctx.will_discard());
             self.calculation_pad_dialog.show(
                 ctx,
                 first_ui_pass,
@@ -5718,8 +5849,12 @@ impl LauncherApp {
             host: self.explorer_tabs_host.identity(),
             pinned,
         };
-        self.explorer_tabs_host
-            .configure_jump(&self.jump_mode_ui, false);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::ExplorerTabs, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("explorer-tabs", instance), super::jump_mode::TargetGeneration(self.explorer_tabs_dialog.jump_generation()), "explorer-tabs/form", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
+        self.explorer_tabs_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.explorer_tabs_host.show(
             ctx,
             &mut self.explorer_tabs_dialog,
@@ -5729,14 +5864,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned && !decision_pending,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
@@ -5752,6 +5887,7 @@ impl LauncherApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let native_input = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()
@@ -5768,8 +5904,24 @@ impl LauncherApp {
         let preview_pinned = self
             .pinned_panels
             .contains(&super::Panel::FileSearchPreviewDialog);
+        let preview_scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::FilePreview,
+                instance,
+            } if preview_owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("file-preview", instance),
+                super::jump_mode::TargetGeneration(
+                    self.file_search_dialog.preview_dialog.jump_generation(),
+                ),
+                "file-preview/form",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
         self.file_preview_host
-            .configure_jump(&self.jump_mode_ui, false);
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.file_preview_host.show(
             ctx,
             &mut self.file_search_dialog.preview_dialog,
@@ -5779,14 +5931,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: preview_owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !preview_pinned,
                 allow_os_close: !preview_pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (preview_scope.as_ref(), None),
             },
         );
         let hash_layer = self.hash_generator_host.root_layer();
@@ -5804,8 +5956,22 @@ impl LauncherApp {
         let hash_pinned = self
             .pinned_panels
             .contains(&super::Panel::HashGeneratorDialog);
+        let hash_scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::HashGenerator,
+                instance,
+            } if hash_owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("hash-generator", instance),
+                super::jump_mode::TargetGeneration(self.hash_generator_dialog.jump_generation()),
+                "hash-generator/form",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
         self.hash_generator_host
-            .configure_jump(&self.jump_mode_ui, false);
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         let hash_runtime = super::hash_generator_dialog::HashRuntime {
             host: self.hash_generator_host.identity(),
         };
@@ -5818,14 +5984,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: hash_owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !hash_pinned,
                 allow_os_close: !hash_pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (hash_scope.as_ref(), None),
             },
         );
         let todo_layer = self.todo_view_host.root_layer();
@@ -5889,9 +6055,63 @@ impl LauncherApp {
                     Some(focus) == layer || focus.order == egui::Order::Background
                 })
         };
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let template_layer = self.note_templates_host.root_layer();
-        let template_owner = is_owner(template_layer)
-            || (root_input && self.notes_dialog.template_manager.owns_input(ctx));
+        let template_scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::NoteTemplates,
+                instance,
+            } => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("note-templates", instance),
+                super::jump_mode::TargetGeneration(self.notes_dialog.template_manager.epoch()),
+                "note-templates/form",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
+        let delete_scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::TemplateDelete,
+                instance,
+            } if self.notes_dialog.template_manager.delete_instance() == Some(instance) => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("note-template-delete", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "note-templates/delete",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        self.note_templates_host
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        let delete_open = self
+            .notes_dialog
+            .template_manager
+            .delete_instance()
+            .is_some();
+        let delete_owner = root_input
+            && delete_open
+            && !egui::Popup::is_any_open(ctx)
+            && self.notes_dialog.template_manager.owns_input(ctx);
+        let delete_input_owner = self
+            .notes_dialog
+            .template_manager
+            .delete_instance()
+            .filter(|_| delete_owner)
+            .map_or(NavigationOwner::Blocked, |instance| {
+                NavigationOwner::Dialog {
+                    kind: super::jump_mode::ui::NavigationDialogKind::TemplateDelete,
+                    instance,
+                }
+            });
+        let template_owner = !delete_open
+            && (is_owner(template_layer)
+                || (root_input && self.notes_dialog.template_manager.owns_input(ctx)));
         self.note_templates_host.show(
             ctx,
             &mut self.notes_dialog.template_manager,
@@ -5901,16 +6121,21 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: template_owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
-                close_shortcut: true,
+                close_shortcut: !delete_open,
                 allow_os_close: true,
-                confirmation_owner: NavigationOwner::Blocked,
+                confirmation_owner: delete_input_owner,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (template_scope.as_ref(), delete_scope.as_ref()),
             },
         );
+        let assets_scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::UnusedNoteAssets, instance } if is_owner(self.unused_assets_host.root_layer()) => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("unused-note-assets", instance), super::jump_mode::TargetGeneration(self.unused_assets_dialog.jump_generation()), "unused-note-assets/form", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
+        self.unused_assets_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         let assets_layer = self.unused_assets_host.root_layer();
         let pinned = self
             .pinned_panels
@@ -5924,19 +6149,37 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: is_owner(assets_layer),
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (assets_scope.as_ref(), None),
             },
         );
+        let image_jump_enabled = self.jump_mode_enabled();
         for panel in &mut self.image_panels {
             let mut host = std::mem::take(&mut panel.host);
             let layer = host.root_layer();
+            let session = panel.session();
+            let image_owner = is_owner(layer);
+            let scope = match navigation_owner {
+                NavigationOwner::Dialog {
+                    kind: super::jump_mode::ui::NavigationDialogKind::ImageViewer,
+                    instance,
+                } if image_owner && instance == session => self.jump_mode_ui.scope_for_navigation_owner(
+                        super::jump_mode::SurfaceId::dialog("image-viewer", session),
+                        super::jump_mode::TargetGeneration(session),
+                        "image-viewer/form",
+                        ctx.viewport_id(),
+                        navigation_owner,
+                        false,
+                    ),
+                _ => None,
+            };
+            host.configure_jump(&self.jump_mode_ui, image_jump_enabled);
             host.show(
                 ctx,
                 panel,
@@ -5946,14 +6189,14 @@ impl LauncherApp {
                     root_visible,
                     root_input,
                     native_input,
-                    root_owner: NavigationOwner::Blocked,
-                    parent_owner: is_owner(layer),
+                    root_owner: navigation_owner,
+                    parent_owner: image_owner,
                     root_jump_active: self.jump_mode_ui.active_session().is_some(),
                     close_shortcut: true,
                     allow_os_close: true,
                     confirmation_owner: NavigationOwner::Blocked,
                     parent_instance: 0,
-                    root_scopes: (None, None),
+                    root_scopes: (scope.as_ref(), None),
                 },
             );
             panel.host = host;
@@ -5997,8 +6240,13 @@ impl LauncherApp {
             pad_host: self.calculation_pad_dialog.dependency_host(),
             pinned,
         };
-        self.calculation_dependency_host
-            .configure_jump(&self.jump_mode_ui, false);
+        self.calculation_dependency_dialog.sync_jump_generation(&runtime);
+        let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match nav {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationDependencies, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("calculation-dependencies", instance), super::jump_mode::TargetGeneration(self.calculation_dependency_dialog.jump_generation()), "calculation-dependencies/form", ctx.viewport_id(), nav, false),
+            _ => None,
+        };
+        self.calculation_dependency_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.calculation_dependency_host.show(
             ctx,
             &mut self.calculation_dependency_dialog,
@@ -6008,14 +6256,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: nav,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
@@ -6051,8 +6299,17 @@ impl LauncherApp {
             .pinned_panels
             .contains(&super::Panel::CalculationChartDialog);
         let runtime = self.calculation_pad_dialog.chart_runtime(pinned);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationChart, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("calculation-chart", instance),
+                self.calculation_chart_dialog.jump_generation(&runtime),
+                "calculation-pad-charts/form", ctx.viewport_id(), navigation_owner, false,
+            ),
+            _ => None,
+        };
         self.calculation_chart_host
-            .configure_jump(&self.jump_mode_ui, false);
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.calculation_chart_host.show(
             ctx,
             &mut self.calculation_chart_dialog,
@@ -6062,14 +6319,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
@@ -6105,8 +6362,13 @@ impl LauncherApp {
             .pinned_panels
             .contains(&super::Panel::CalculationSensitivityDialog);
         let runtime = self.calculation_pad_dialog.sensitivity_runtime(pinned);
-        self.calculation_sensitivity_host
-            .configure_jump(&self.jump_mode_ui, false);
+        self.calculation_sensitivity_dialog.sync_jump_generation(&runtime);
+        let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match nav {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::CalculationSensitivity, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("calculation-sensitivity", instance), super::jump_mode::TargetGeneration(self.calculation_sensitivity_dialog.jump_generation()), "calculation-sensitivity/form", ctx.viewport_id(), nav, false),
+            _ => None,
+        };
+        self.calculation_sensitivity_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.calculation_sensitivity_host.show(
             ctx,
             &mut self.calculation_sensitivity_dialog,
@@ -6116,14 +6378,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: nav,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
@@ -6159,8 +6421,21 @@ impl LauncherApp {
             host: self.programmer_inspector_host.identity(),
             pinned,
         };
+        self.programmer_inspector_dialog.sync_jump_generation(&runtime);
+        let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match nav {
+            NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::ProgrammerInspector,
+                instance,
+            } if owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("programmer-inspector", instance),
+                super::jump_mode::TargetGeneration(self.programmer_inspector_dialog.jump_generation()),
+                "programmer-inspector/form", ctx.viewport_id(), nav, false,
+            ),
+            _ => None,
+        };
         self.programmer_inspector_host
-            .configure_jump(&self.jump_mode_ui, false);
+            .configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.programmer_inspector_host.show(
             ctx,
             &mut self.programmer_inspector_dialog,
@@ -6170,17 +6445,621 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: nav,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
+    pub(super) fn downloads_triage_is_open(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.downloads_triage_dialog.open
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn downloads_triage_root_layer(&self) -> Option<egui::LayerId> {
+        #[cfg(windows)]
+        {
+            self.downloads_triage_host.root_layer()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    fn downloads_triage_needs_root_ui(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.downloads_triage_runtime.needs_poll()
+                || self.downloads_triage_host.needs_root_ui_when_hidden(self.downloads_triage_dialog.open)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    #[cfg(windows)]
+    fn show_downloads_triage(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+
+        if first {
+            self.downloads_triage_runtime.poll(&mut self.downloads_triage_dialog);
+        }
+        if self.downloads_triage_runtime.needs_poll() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let open = self.downloads_triage_dialog.open;
+        if !open || (!root_visible && !self.downloads_triage_host.needs_root_ui_when_hidden(open)) {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.downloads_triage_host.root_layer();
+        let parent_owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx);
+        let keyboard_owner = parent_owner && focused_response_layer(ctx)
+            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::DownloadsTriage, instance } if keyboard_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("downloads-triage", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "downloads-triage/form",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let pinned = self.pinned_panels.contains(&super::Panel::DownloadsTriageDialog);
+        self.downloads_triage_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        let runtime = self.downloads_triage_runtime.snapshot();
+        self.downloads_triage_host.show(
+            ctx,
+            &mut self.downloads_triage_dialog,
+            runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: navigation_owner,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned && (layer.is_none() || keyboard_owner),
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+        );
+    }
+
+
+    #[cfg(windows)]
+    fn complete_downloads_triage(&mut self, ctx: &egui::Context) {
+        use super::downloads_triage_dialog::Command;
+
+        let Some(completion) = self.downloads_triage_host
+            .complete(ctx, &mut self.downloads_triage_dialog)
+        else {
+            return;
+        };
+        for command in completion.commands {
+            if matches!(command, Command::Closed) {
+                self.close_downloads_triage();
+            } else if completion.origin.as_ref().is_some_and(|origin| {
+                self.downloads_triage_host
+                    .accepts_origin(&self.downloads_triage_dialog, origin)
+            }) {
+                if let Some(origin) = completion.origin.as_ref() {
+                    self.dispatch_downloads_triage(ctx, command, origin);
+                }
+                ctx.request_repaint_of(completion.owner_viewport);
+            }
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+    }
+
+    pub(super) fn file_operations_center_is_open(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.file_operations_center_dialog.open
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn file_operations_center_root_layer(&self) -> Option<egui::LayerId> {
+        #[cfg(windows)]
+        {
+            self.file_operations_center_host.root_layer()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    fn file_operations_center_needs_root_ui(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.file_operations_center_runtime.needs_poll()
+                || self.file_operations_center_host.needs_root_ui_when_hidden(self.file_operations_center_dialog.open)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    #[cfg(windows)]
+    fn show_file_operations_center(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+
+        if first {
+            self.file_operations_center_runtime.poll(
+                ctx,
+                &mut self.file_operations_center_dialog,
+                &mut self.transfer_jobs,
+            );
+        }
+        let open = self.file_operations_center_dialog.open;
+        if !open || (!root_visible && !self.file_operations_center_host.needs_root_ui_when_hidden(open)) {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.file_operations_center_host.root_layer();
+        let parent_owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx);
+        let keyboard_owner = parent_owner && focused_response_layer(ctx)
+            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::FileOperations, instance } if keyboard_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("file-operations-center", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "file-operations-center/form",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let pinned = self.pinned_panels.contains(&super::Panel::FileOperationsCenterDialog);
+        self.file_operations_center_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        let runtime = self.file_operations_center_runtime.snapshot(&self.transfer_jobs);
+        if runtime.busy || runtime.history_waiting || runtime.queue.active.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
+        self.file_operations_center_host.show(
+            ctx,
+            &mut self.file_operations_center_dialog,
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: navigation_owner,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned && (layer.is_none() || keyboard_owner),
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+        );
+    }
+
+
+    #[cfg(windows)]
+    fn complete_file_operations_center(&mut self, ctx: &egui::Context) {
+        use super::file_operations_center_dialog::Command;
+
+        let Some(completion) = self.file_operations_center_host
+            .complete(ctx, &mut self.file_operations_center_dialog)
+        else {
+            return;
+        };
+        for command in completion.commands {
+            if matches!(command, Command::Closed) {
+                self.close_file_operations_center();
+            } else if completion.origin.as_ref().is_some_and(|origin| {
+                self.file_operations_center_host
+                    .accepts_origin(&self.file_operations_center_dialog, origin)
+            }) {
+                self.file_operations_center_runtime.dispatch(
+                    ctx,
+                    &mut self.file_operations_center_dialog,
+                    &mut self.transfer_jobs,
+                    command,
+                );
+                ctx.request_repaint_of(completion.owner_viewport);
+            }
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+    }
+
+    fn show_password_generator(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+
+        let open = self.password_generator_dialog.open;
+        if !open || (!root_visible && !self.password_generator_host.needs_root_ui_when_hidden(open)) {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.password_generator_host.root_layer();
+        let parent_owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx);
+        let keyboard_owner = parent_owner && focused_response_layer(ctx)
+            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::PasswordGenerator, instance } if keyboard_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("password-generator", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "password-generator/form",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let pinned = self.pinned_panels.contains(&super::Panel::PasswordGeneratorDialog);
+        self.password_generator_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        self.password_generator_host.show(
+            ctx,
+            &mut self.password_generator_dialog,
+            &(),
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: navigation_owner,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned && (layer.is_none() || keyboard_owner),
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+        );
+    }
+
+    fn complete_password_generator(&mut self, ctx: &egui::Context) {
+        self.complete_password_generator_with(ctx, crate::platform::protected_clipboard::copy_secret);
+    }
+
+    fn complete_password_generator_with(
+        &mut self,
+        ctx: &egui::Context,
+        mut publish: impl FnMut(&crate::password_generator::SecretResult) -> Result<
+            crate::platform::protected_clipboard::CopyStatus,
+            crate::platform::protected_clipboard::ClipboardError,
+        >,
+    ) {
+        use super::password_generator_dialog::PasswordGeneratorCommand;
+
+        let Some(completion) = self.password_generator_host.complete(ctx, &mut self.password_generator_dialog) else {
+            return;
+        };
+        for command in completion.commands {
+            match command {
+                PasswordGeneratorCommand::Closed => {
+                    self.password_generator_dialog.close();
+                    self.panel_stack.retain(|panel| *panel != super::Panel::PasswordGeneratorDialog);
+                }
+                PasswordGeneratorCommand::PreferencesChanged(preferences) => {
+                    if let Err(error) = crate::settings::Settings::update_if_changed(&self.settings_path, |settings| {
+                        settings.password_generator = preferences;
+                        Ok(())
+                    }) {
+                        self.report_error_message("password_generator.settings", error.to_string());
+                    }
+                }
+                PasswordGeneratorCommand::Copy(ticket) => {
+                    if completion.origin.as_ref().is_some_and(|origin| {
+                        self.password_generator_host.accepts_origin(&self.password_generator_dialog, origin)
+                    }) {
+                        let _ = self.password_generator_dialog.copy_with(ticket, &mut publish);
+                        ctx.request_repaint_of(completion.owner_viewport);
+                    }
+                }
+            }
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+    }
+
+    fn show_markdown_print(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+
+        let open = self.markdown_print_dialog.current_stamp().is_some();
+        if !open || (!root_visible && !self.markdown_print_host.needs_root_ui_when_hidden(open)) {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.markdown_print_host.root_layer();
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx);
+        let keyboard_owner = owner && focused_response_layer(ctx)
+            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownPrint, instance } if keyboard_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("markdown-print", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "markdown-print/form",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let close_shortcut = layer.is_none() || keyboard_owner;
+        self.markdown_print_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        self.markdown_print_host.show(ctx, &mut self.markdown_print_dialog, &(), HostInput {
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            root_owner: navigation_owner,
+            parent_owner: owner,
+            root_jump_active: self.jump_mode_ui.active_session().is_some(),
+            close_shortcut,
+            allow_os_close: true,
+            confirmation_owner: NavigationOwner::Blocked,
+            parent_instance: 0,
+            root_scopes: (scope.as_ref(), None),
+        });
+    }
+
+    fn open_markdown_print(
+        &mut self,
+        ctx: &egui::Context,
+        request: super::markdown_print::PrintOpen,
+    ) {
+        use super::markdown_print::DocumentStamp;
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+
+        let Some(origin) = request.origin else { return };
+        let draft = match &request.stamp {
+            DocumentStamp::Note { panel, .. } => self.note_panels.iter()
+                .find(|note| note.prompt_identity() == *panel)
+                .and_then(super::NotePanel::print_draft),
+            DocumentStamp::Studio { .. } => self.markdown_studio_dialog.print_draft(),
+        };
+        let Some(draft) = draft else { return };
+        let host = match &draft.stamp {
+            DocumentStamp::Note { host, .. } | DocumentStamp::Studio { host, .. } => *host,
+        };
+        if draft.stamp != request.stamp || !origin.is_current(host, &draft.stamp) {
+            return;
+        }
+        let was_open = self.markdown_print_dialog.current_stamp().is_some();
+        self.markdown_print_dialog.open(draft, ctx);
+        if self.markdown_print_host.open_from_origin(
+            ctx, &self.markdown_print_dialog, was_open, &ChildOpenOrigin::Parent(origin),
+        ) == Some(UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+        }
+    }
+
+    fn current_markdown_output_scene(&self) -> Option<std::sync::Arc<super::markdown_print::SceneReceipt>> {
+        use super::markdown_print::DocumentStamp;
+
+        let receipt = self.markdown_print_dialog.output_scene()?;
+        let live = match &receipt.stamp {
+            DocumentStamp::Note { panel, .. } => self.note_panels.iter()
+                .find(|note| note.prompt_identity() == *panel)
+                .and_then(super::NotePanel::print_draft),
+            DocumentStamp::Studio { .. } => self.markdown_studio_dialog.print_draft(),
+        }?;
+        (live.stamp == receipt.stamp
+            && live.source == receipt.source.as_ref()
+            && live.base == receipt.base)
+            .then_some(receipt)
+    }
+
+    fn run_markdown_output_command(
+        &mut self,
+        ctx: &egui::Context,
+        origin: &super::utility_host::AcceptedParentOpen<u64>,
+        viewport: egui::ViewportId,
+        command: super::markdown_print::PrintHostCommand,
+        choose: impl FnOnce(Option<usize>) -> Result<Option<std::path::PathBuf>, &'static str>,
+    ) {
+        use super::markdown_print::{OutputIntent, PrintHostCommand};
+
+        let PrintHostCommand::Output { intent, scene, hwnd } = command else { return };
+        if !self.markdown_print_host.accepts_origin(&self.markdown_print_dialog, origin) {
+            return;
+        }
+        if matches!(intent, OutputIntent::Cancel) {
+            self.markdown_print_dialog.output.cancel();
+            ctx.request_repaint_of(viewport);
+            return;
+        }
+        let Some(scene) = scene else { return };
+        let still_current = |app: &Self| {
+            app.markdown_print_host.accepts_origin(&app.markdown_print_dialog, origin)
+                && app.current_markdown_output_scene()
+                    .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &scene))
+        };
+        if !still_current(self) {
+            return;
+        }
+        let host = self.markdown_print_host.identity();
+        let can_choose = !self.markdown_print_dialog.output.busy()
+            && !self.markdown_print_dialog.output.confirming();
+        match intent {
+            OutputIntent::ChoosePdf if can_choose => {
+                let result = choose(hwnd);
+                if still_current(self) {
+                    match result {
+                        Ok(Some(path)) => self.markdown_print_dialog.output.review(path, host, scene, ctx, viewport),
+                        Ok(None) => {}
+                        Err(error) => self.markdown_print_dialog.output.report_error(error),
+                    }
+                }
+            }
+            #[cfg(windows)]
+            OutputIntent::ChoosePrinter { current_page, mode } if can_choose => {
+                let result = super::markdown_print::choose_printer(hwnd, scene.scene.pages.len(), current_page);
+                if still_current(self) {
+                    match result {
+                        Ok(Some(choice)) => self.markdown_print_dialog.output.review_printer(choice, mode, host, scene, ctx, viewport),
+                        Ok(None) => {}
+                        Err(error) => self.markdown_print_dialog.output.report_error(error.to_string()),
+                    }
+                }
+            }
+            OutputIntent::Confirm => self.markdown_print_dialog.output.confirm(host, &scene, ctx, viewport),
+            _ => {}
+        }
+        ctx.request_repaint_of(viewport);
+    }
+
+    fn poll_markdown_output(&mut self, ctx: &egui::Context) {
+        if !self.markdown_print_dialog.output.busy()
+            && !self.markdown_print_dialog.output.confirming()
+        {
+            return;
+        }
+        let host = self.markdown_print_host.identity();
+        let viewport = self.markdown_print_host.owner_viewport();
+        // The retained editor completion has already retired any changed draft.
+        let scene = self.markdown_print_dialog.output_scene();
+        let output = &mut self.markdown_print_dialog.output;
+        output.observe(host, scene.as_ref());
+        if let Some((kind, message)) = output.poll(host, scene.as_ref(), ctx, viewport) {
+            if matches!(kind, ToastKind::Error) {
+                self.report_error_message("markdown.pdf", message);
+            } else {
+                self.add_toast(Toast {
+                    kind,
+                    text: message.into(),
+                    options: ToastOptions::default().duration_in_seconds(8.0),
+                    style: Default::default(),
+                });
+            }
+        }
+    }
+
+    fn complete_markdown_print(&mut self, ctx: &egui::Context) {
+        use super::markdown_print::{DocumentStamp, PrintHostCommand};
+
+        let Some(stamp) = self.markdown_print_dialog.current_stamp() else {
+            self.poll_markdown_output(ctx);
+            return;
+        };
+        let draft = match stamp {
+            DocumentStamp::Note { panel, .. } => self.note_panels.iter()
+                .find(|note| note.prompt_identity() == *panel)
+                .and_then(super::NotePanel::print_draft),
+            DocumentStamp::Studio { .. } => self.markdown_studio_dialog.print_draft(),
+        };
+        let viewport = self.markdown_print_host.owner_viewport();
+        if let Some(draft) = draft {
+            self.markdown_print_dialog.refresh(draft, ctx, viewport);
+        } else {
+            self.markdown_print_dialog.close();
+        }
+        if self.markdown_print_dialog.current_stamp().is_none() {
+            self.markdown_print_host.close_from_app(ctx);
+            self.poll_markdown_output(ctx);
+            return;
+        }
+        if let Some(completion) = self.markdown_print_host.complete(ctx, &mut self.markdown_print_dialog) {
+            for command in completion.commands {
+                match command {
+                    PrintHostCommand::Closed => self.markdown_print_dialog.close(),
+                    command @ PrintHostCommand::Output { .. } => {
+                        if let Some(origin) = &completion.origin {
+                            self.run_markdown_output_command(ctx, origin, completion.owner_viewport,
+                                command, super::markdown_print::choose_pdf_destination);
+                        }
+                    }
+                }
+            }
+            if completion.show_root {
+                self.request_launcher_visibility(true);
+            }
+        }
+        self.markdown_print_dialog.poll(ctx);
+        self.poll_markdown_output(ctx);
+    }
+
     fn show_markdown_studio(
         &mut self,
         ctx: &egui::Context,
@@ -6188,6 +7067,12 @@ impl LauncherApp {
         root_visible: bool,
     ) {
         if root_visible || self.markdown_studio_dialog.needs_root_ui_when_hidden() {
+            let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+            let instance = self.markdown_studio_dialog.jump_instance();
+            let scope = if nav == (NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::MarkdownStudio, instance }) {
+                self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("markdown-studio", instance), self.markdown_studio_dialog.jump_generation(), "markdown-studio", ctx.viewport_id(), nav, false)
+            } else { None };
+            self.markdown_studio_dialog.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled(), scope, first_ui_pass && !ctx.will_discard());
             self.markdown_studio_dialog.show_on_root(
                 ctx,
                 first_ui_pass,
@@ -7319,6 +8204,7 @@ impl LauncherApp {
                 command @ (super::FileSearchUiCommand::OpenFolderSize(_)
                 | super::FileSearchUiCommand::InspectFileUsers(_)
                 | super::FileSearchUiCommand::OpenHash(_)
+                | super::FileSearchUiCommand::OpenFileOperations(_)
                 | super::FileSearchUiCommand::OpenPreview { .. }) => {
                     if let Some(origin) = completion.origin.clone() {
                         child_opens.push((origin, command));
@@ -7718,6 +8604,7 @@ impl LauncherApp {
                 catalog: self.plugin_settings_catalog.clone(),
                 navigation: plugin_navigation,
             };
+            self.plugin_settings_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
             self.plugin_settings_host.show(
                 ctx,
                 &mut self.plugin_editor,
@@ -8175,6 +9062,7 @@ impl LauncherApp {
     ) {
         let application_input_allowed = self.native_ui_application_input_allowed(ctx);
         let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        let navigation = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let note_instances: Vec<_> = self
             .note_panels
             .iter()
@@ -8189,7 +9077,56 @@ impl LauncherApp {
             else {
                 continue;
             };
+            let scope = if navigation
+                == (super::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: super::jump_mode::ui::NavigationDialogKind::NotePanel,
+                    instance: identity,
+                })
+                && self.note_panels[index].host_layer_if_root().is_some()
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("note-panel", identity),
+                    self.note_panels[index].jump_generation(),
+                    "note-panel",
+                    ctx.viewport_id(),
+                    navigation,
+                    false,
+                )
+            } else {
+                None
+            };
             let mut panel = self.note_panels.remove(index);
+            let prompt_scope = panel.prompt_current(ctx).and_then(|prompt| {
+                let owner = super::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: prompt.kind(),
+                    instance: identity,
+                };
+                if navigation != owner {
+                    return None;
+                }
+                let scope = self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog(prompt.surface(), identity),
+                    panel.prompt_generation(prompt),
+                    "note-prompt",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )?;
+                let scope = if first_ui_pass && !ctx.will_discard() {
+                    scope
+                } else {
+                    scope.registration_only()
+                };
+                Some((prompt, scope))
+            });
+            panel.set_prompt_scope(prompt_scope);
+            panel.set_jump_scope(scope.map(|scope| {
+                if first_ui_pass && !ctx.will_discard() {
+                    scope
+                } else {
+                    scope.registration_only()
+                }
+            }));
             let mut discard = None;
             let observe = panel.host_layer_if_root().is_some() && note_close_frame.is_some();
             panel.ui_with_host(
@@ -8201,6 +9138,9 @@ impl LauncherApp {
                 root_input_allowed,
                 observe.then_some(&mut discard),
             );
+            panel.set_jump_scope(None);
+            panel.set_prompt_scope(None);
+            panel.configure_child_forms_jump(&self.jump_mode_ui, self.jump_mode_enabled());
             panel.show_child_forms(
                 ctx,
                 first_ui_pass,
@@ -8208,6 +9148,7 @@ impl LauncherApp {
                 root_input_allowed,
                 application_input_allowed,
                 self.jump_mode_ui.active_session().is_some(),
+                Some((&self.jump_mode_ui, navigation)),
             );
             if let Some(observed) = note_close_frame.as_deref_mut().filter(|_| observe) {
                 observed.observe_panel(&panel, discard);
@@ -8228,6 +9169,17 @@ impl LauncherApp {
         first_ui_pass: bool,
         root_visible: bool,
     ) {
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.diagram_studio_dialog.jump_instance();
+        let scope = if navigation_owner == (NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DiagramStudio, instance }) {
+            self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("diagram-studio", instance), self.diagram_studio_dialog.jump_generation(), "diagram-studio", ctx.viewport_id(), navigation_owner, false)
+        } else { None };
+        self.diagram_studio_dialog.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled(), scope, first_ui_pass && !ctx.will_discard());
+        let viewer_instance = self.diagram_studio_dialog.viewer_jump_instance();
+        let viewer_scope = if navigation_owner == (NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DiagramViewer, instance: viewer_instance }) {
+            self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("diagram-viewer", viewer_instance), self.diagram_studio_dialog.viewer_jump_generation(), "diagram-viewer", ctx.viewport_id(), navigation_owner, false)
+        } else { None };
+        self.diagram_studio_dialog.configure_viewer_jump(&self.jump_mode_ui, self.jump_mode_enabled(), viewer_scope, first_ui_pass && !ctx.will_discard());
         let application_input_allowed = self.native_ui_application_input_allowed(ctx);
         let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
         #[cfg(feature = "qa-framebuffer-capture")]
@@ -8544,6 +9496,15 @@ impl LauncherApp {
         _owner_transition_pending: bool,
         jump_escape_preempted: bool,
     ) {
+        use super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let kind = NavigationDialogKind::FolderSize;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.jump_mode_ui.dialog_instance(kind);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::FolderSize, instance } if !egui::Popup::is_any_open(ctx) => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("folder-size", instance), super::jump_mode::TargetGeneration(self.folder_size_dialog.jump_generation()), "folder-size", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
         let input_allowed = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()
@@ -8571,6 +9532,10 @@ impl LauncherApp {
             first_ui_pass,
             self.pinned_panels.contains(&super::Panel::FolderSizeDialog),
             !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+            scope.as_ref(),
+            Some(&self.jump_mode_ui),
+            self.jump_mode_enabled(),
+            instance,
         );
     }
 
@@ -8623,6 +9588,15 @@ impl LauncherApp {
         _owner_transition_pending: bool,
         jump_escape_preempted: bool,
     ) {
+        use super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let kind = NavigationDialogKind::FileLock;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.jump_mode_ui.dialog_instance(kind);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::FileLock, instance } => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("file-lock", instance), super::jump_mode::TargetGeneration(self.file_lock_dialog.jump_generation()), "file-lock", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
         let input_allowed = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()
@@ -8648,6 +9622,10 @@ impl LauncherApp {
             first_ui_pass,
             self.pinned_panels.contains(&super::Panel::FileLockDialog),
             !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+            scope.as_ref(),
+            Some(&self.jump_mode_ui),
+            self.jump_mode_enabled(),
+            instance,
         );
     }
 
@@ -8851,7 +9829,7 @@ impl LauncherApp {
         Ok(true)
     }
 
-    fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+    pub(super) fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         root_visible
             && self.visible_flag.load(Ordering::Relaxed)
             && !self.pin_list_open
@@ -8864,7 +9842,7 @@ impl LauncherApp {
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
     }
 
-    fn native_ui_application_input_allowed(&self, ctx: &egui::Context) -> bool {
+    pub(super) fn native_ui_application_input_allowed(&self, ctx: &egui::Context) -> bool {
         self.native_ui_application_input_allowed_for_snippet_prompt(ctx, false)
     }
 
@@ -9698,6 +10676,9 @@ impl LauncherApp {
 
         navigation_owner != NavigationOwner::Blocked
             && match navigation_owner {
+                NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DataRecoveryConfirmation, instance } => {
+                    self.jump_mode_enabled() && self.data_recovery_confirmation_owner_current(ctx, root_visible, instance)
+                }
                 NavigationOwner::SnippetPrompt { generation } => {
                     self.jump_mode_enabled()
                         && self.snippet_prompt_native_ui_owner_current(ctx, root_visible)
@@ -9709,6 +10690,41 @@ impl LauncherApp {
                 }
                 _ => self.jump_mode_host_input_allowed(ctx, root_visible),
             }
+    }
+
+    fn data_recovery_confirmation_identity(&self) -> Option<(u64, u64)> {
+        let (generation, parent_epoch) = self.pending_data_recovery_owner?;
+        (self.pending_data_recovery.is_some()
+            && self.confirm_modal.is_open()
+            && self.confirm_modal.generation() == generation
+            && self.data_recovery_dialog.open
+            && self.data_recovery_dialog.ui_epoch() == parent_epoch)
+            .then_some((generation, parent_epoch))
+    }
+
+    fn data_recovery_confirmation_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        generation: u64,
+    ) -> bool {
+        let layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(("data-recovery-confirmation", generation)),
+        );
+        self.data_recovery_confirmation_identity()
+            .is_some_and(|(current, _)| current == generation)
+            && root_visible
+            && self.visible_flag.load(Ordering::Relaxed)
+            && !self.pin_list_open
+            && !self.ocr_surface_visible()
+            && !self.action_sheet.is_open()
+            && self.native_ui_application_input_allowed(ctx)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && !egui::Popup::is_any_open(ctx)
+            && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
     }
 
     fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
@@ -9821,6 +10837,39 @@ impl LauncherApp {
             )
     }
 
+    fn query_session_allows_workflow(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        geometry: Option<QueryShowGeometry>,
+        accepted_mouse_interaction: bool,
+        owner_transition_pending: bool,
+    ) -> bool {
+        let Some(session) = self.query_focus_session.as_ref() else {
+            return false;
+        };
+        if session.origin != super::QueryFocusOrigin::Mouse {
+            return true;
+        }
+        self.query_focus_mouse_session_has_keyboard_authority(
+            ctx,
+            root_visible,
+            geometry,
+            accepted_mouse_interaction,
+            false,
+        ) && (!self.jump_mode_enabled()
+            || (!owner_transition_pending
+                && self.jump_mode_ui.frame_navigation_owner()
+                    == crate::gui::jump_mode::ui::NavigationOwner::Root)
+            || !self.query_focus_mouse_session_owns_ordinary_root_keyboard(
+                ctx,
+                root_visible,
+                geometry,
+                accepted_mouse_interaction,
+                false,
+            ))
+    }
+
     fn jump_mode_unsupported_panel_open(&self) -> bool {
         Self::TRACKED_PANELS
             .iter()
@@ -9834,9 +10883,26 @@ impl LauncherApp {
                         | super::Panel::TimerDialog
                         | super::Panel::PasteSequenceDialog
                         | super::Panel::FileSearchDialog
+                        | super::Panel::FileSearchPreviewDialog
+                        | super::Panel::QrDialog
+                        | super::Panel::ConvertPanel
+                        | super::Panel::ExplorerTabsDialog
+                        | super::Panel::UnusedAssetsDialog
+                        | super::Panel::ImagePanel
+                        | super::Panel::CalculationPadDialog
+                        | super::Panel::MarkdownStudioDialog
+                        | super::Panel::ProgrammerInspectorDialog
+                        | super::Panel::CalculationSensitivityDialog
+                        | super::Panel::CalculationDependencyDialog
+                        | super::Panel::HashGeneratorDialog
                         | super::Panel::SnippetDialog
                         | super::Panel::ClipboardDialog
                         | super::Panel::JsonUtilityDialog
+                        | super::Panel::CalculationChartDialog
+                        | super::Panel::PasswordGeneratorDialog
+                        | super::Panel::DownloadsTriageDialog
+                        | super::Panel::NotificationInboxDialog
+                        | super::Panel::FileOperationsCenterDialog
                         | super::Panel::ZipExtractorDialog
                         | super::Panel::RegexTesterDialog
                         | super::Panel::XmlToolkitDialog
@@ -9844,6 +10910,11 @@ impl LauncherApp {
                         | super::Panel::ImageCompareDialog
                         | super::Panel::DuplicateFinderDialog
                         | super::Panel::FolderSizeDialog
+                        | super::Panel::DateTimeStudioDialog
+                        | super::Panel::DataRecoveryDialog
+                        | super::Panel::CalendarPopover
+                        | super::Panel::CalendarEventDetails
+                        | super::Panel::CalendarEventEditor
                         | super::Panel::FileLockDialog
                         | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
@@ -9912,9 +10983,50 @@ impl LauncherApp {
                 self.json_utility_dialog.open && self.json_utility_host.root_layer().is_some(),
             ),
             (
+                crate::gui::jump_mode::ui::NavigationDialogKind::CalculationChart,
+                self.calculation_chart_dialog.open && self.calculation_chart_host.root_layer().is_some(),
+            ),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::FilePreview,
+                self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::HotFolder, self.hotfolder_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::DataRecovery, self.data_recovery_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::ProgrammerInspector, self.programmer_inspector_dialog.open && self.programmer_inspector_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::CalculationSensitivity, self.calculation_sensitivity_dialog.open && self.calculation_sensitivity_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::CalculationDependencies, self.calculation_dependency_dialog.open && self.calculation_dependency_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::UnusedNoteAssets, self.unused_assets_dialog.open && self.unused_assets_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::NoteTemplates, self.notes_dialog.template_manager.is_open() && self.note_templates_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::TemplateDelete, self.notes_dialog.template_manager.delete_instance().is_some() && self.note_templates_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::Convert, self.convert_panel.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::QrGenerator, self.qr_dialog.open && self.qr_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::ExplorerTabs, self.explorer_tabs_dialog.open && self.explorer_tabs_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::HashGenerator,
+                self.hash_generator_dialog.open && self.hash_generator_host.root_layer().is_some()),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::PasswordGenerator,
+                self.password_generator_dialog.open && self.password_generator_host.root_layer().is_some(),
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::FileOperations,
+                self.file_operations_center_is_open() && self.file_operations_center_root_layer().is_some(),
+            ),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::DownloadsTriage,
+                self.downloads_triage_is_open() && self.downloads_triage_root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::NotificationInbox,
+                self.notification_inbox_dialog.open && self.notification_inbox_host.root_layer().is_some()),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::MarkdownPrint,
+                self.markdown_print_dialog.current_stamp().is_some() && self.markdown_print_host.root_layer().is_some(),
+            ),
+            (
                 crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
                 self.zip_extractor_dialog.open,
             ),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::FileLock, self.file_lock_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::FolderSize, self.folder_size_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::DateTimeStudio, self.date_time_studio_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::Calendar, self.calendar_popover_open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::CalendarDetails, self.calendar_details_open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::CalendarEditor, self.calendar_editor_open),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::RegexTester,
                 self.regex_tester_dialog.open,
@@ -9985,7 +11097,12 @@ impl LauncherApp {
             .snippet_prompt_dialog
             .session()
             .map(|session| session.generation);
-        let (mut candidate, mut combo_popup) = if prompt_is_open {
+        let (mut candidate, mut combo_popup) = if let Some((generation, _)) = self.data_recovery_confirmation_identity() {
+            let owner = if self.jump_mode_enabled() && self.data_recovery_confirmation_owner_current(ctx, root_visible, generation) {
+                NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DataRecoveryConfirmation, instance: generation }
+            } else { NavigationOwner::Blocked };
+            (owner, None)
+        } else if prompt_is_open {
             match (prompt_native_owner, prompt_generation) {
                 (true, Some(generation))
                     if self.jump_mode_enabled()
@@ -10034,13 +11151,35 @@ impl LauncherApp {
                     .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
                 dashboard_editor_layer: self.dashboard_editor.host_layer_if_root(),
                 file_search_layer: self.file_search_host.root_layer(),
-                hosted_utility_layers: NavigationDialogKind::ALL.map(|kind| match kind {
+                hosted_utility_layers: super::jump_mode::ui::NavigationDialogSlots::for_kinds(|kind| match kind {
                     NavigationDialogKind::BatchRename => self.batch_rename_host.root_layer(),
                     NavigationDialogKind::SearchReplace => self.search_replace_host.root_layer(),
                     NavigationDialogKind::ClipboardHistory => {
                         self.clipboard_history_host.root_layer()
                     }
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
+                    NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
+                    NavigationDialogKind::PluginSettings => self.plugin_settings_host.root_layer(),
+                    NavigationDialogKind::DiagramStudio => self.diagram_studio_dialog.owner_layer_if_root(),
+                    NavigationDialogKind::DiagramViewer => self.diagram_studio_dialog.embedded_viewer_layer_if_root(),
+                    NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
+                    NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
+                    NavigationDialogKind::HotFolder => self.hotfolder_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hotfolder_manager_window"))),
+                    NavigationDialogKind::DataRecovery => self.data_recovery_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Data & Recovery")))),
+                    NavigationDialogKind::ProgrammerInspector => self.programmer_inspector_host.root_layer(),
+                    NavigationDialogKind::CalculationSensitivity => self.calculation_sensitivity_host.root_layer(),
+                    NavigationDialogKind::CalculationDependencies => self.calculation_dependency_host.root_layer(),
+                    NavigationDialogKind::UnusedNoteAssets => self.unused_assets_host.root_layer(),
+                    NavigationDialogKind::NoteTemplates => self.note_templates_host.root_layer(),
+                    NavigationDialogKind::TemplateDelete => self.notes_dialog.template_manager.delete_instance().and(self.note_templates_host.root_layer()).map(|_| egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Delete Template?")))),
+                    NavigationDialogKind::Convert => self.convert_panel.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"))),
+                    NavigationDialogKind::QrGenerator => self.qr_host.root_layer(),
+                    NavigationDialogKind::ExplorerTabs => self.explorer_tabs_host.root_layer(),
+                    NavigationDialogKind::MarkdownPrint => self.markdown_print_host.root_layer(),
+                    NavigationDialogKind::PasswordGenerator => self.password_generator_host.root_layer(),
+                    NavigationDialogKind::FileOperations => self.file_operations_center_root_layer(),
+                    NavigationDialogKind::DownloadsTriage => self.downloads_triage_root_layer(),
+                    NavigationDialogKind::NotificationInbox => self.notification_inbox_host.root_layer(),
                     NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
                     _ => None,
                 }),
@@ -10052,7 +11191,7 @@ impl LauncherApp {
                     self.mouse_gestures_host
                         .root_layer(super::mouse_form_host::MOUSE_GESTURES),
                 ],
-                dialogs: NavigationDialogKind::ALL.map(|kind| {
+                dialogs: super::jump_mode::ui::NavigationDialogSlots::for_kinds(|kind| {
                     let current = self.jump_mode_ui.dialog_instance(kind);
                     if kind == NavigationDialogKind::RegexTester {
                         self.regex_tester_dialog.root_navigation_instance(current)
@@ -10066,6 +11205,18 @@ impl LauncherApp {
                         self.duplicate_finder_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::ZipExtractor {
                         self.zip_extractor_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::FileLock {
+                        self.file_lock_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::FolderSize {
+                        self.folder_size_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::DateTimeStudio {
+                        self.date_time_studio_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::Calendar {
+                        self.calendar_panel_root_layer(super::Panel::CalendarPopover).and(current)
+                    } else if kind == NavigationDialogKind::CalendarDetails {
+                        self.calendar_panel_root_layer(super::Panel::CalendarEventDetails).and(current)
+                    } else if kind == NavigationDialogKind::CalendarEditor {
+                        self.calendar_panel_root_layer(super::Panel::CalendarEventEditor).and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -10078,6 +11229,50 @@ impl LauncherApp {
                         self.clipboard_history_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::JsonUtility {
                         self.json_utility_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::PasswordGenerator {
+                        self.password_generator_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::NotificationInbox {
+                        self.notification_inbox_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::DownloadsTriage {
+                        self.downloads_triage_root_layer().and(current)
+                    } else if kind == NavigationDialogKind::FileOperations {
+                        self.file_operations_center_root_layer().and(current)
+                    } else if kind == NavigationDialogKind::MarkdownPrint {
+                        self.markdown_print_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::CalculationChart {
+                        self.calculation_chart_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::PluginSettings {
+                        self.plugin_settings_host.root_layer().map(|_| self.plugin_editor.host_session())
+                    } else if kind == NavigationDialogKind::DiagramStudio {
+                        self.diagram_studio_dialog.owner_layer_if_root().map(|_| self.diagram_studio_dialog.jump_instance())
+                    } else if kind == NavigationDialogKind::DiagramViewer {
+                        self.diagram_studio_dialog.embedded_viewer_layer_if_root().map(|_| self.diagram_studio_dialog.viewer_jump_instance())
+                    } else if kind == NavigationDialogKind::FilePreview {
+                        self.file_preview_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::HotFolder {
+                        self.hotfolder_dialog.open.then_some(()).and(current)
+                    } else if kind == NavigationDialogKind::DataRecovery {
+                        self.data_recovery_dialog.open.then_some(()).and(current)
+                    } else if kind == NavigationDialogKind::ProgrammerInspector {
+                        self.programmer_inspector_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::CalculationSensitivity {
+                        self.calculation_sensitivity_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::CalculationDependencies {
+                        self.calculation_dependency_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::UnusedNoteAssets {
+                        self.unused_assets_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::NoteTemplates {
+                        self.note_templates_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::TemplateDelete {
+                        self.note_templates_host.root_layer().and(self.notes_dialog.template_manager.delete_instance())
+                    } else if kind == NavigationDialogKind::Convert {
+                        self.convert_panel.open.then_some(()).and(current)
+                    } else if kind == NavigationDialogKind::QrGenerator {
+                        self.qr_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::ExplorerTabs {
+                        self.explorer_tabs_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::HashGenerator {
+                        self.hash_generator_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::Snippets {
                         self.snippet_window_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MouseSettings {
@@ -10119,6 +11314,111 @@ impl LauncherApp {
                 );
                 (owner, combo_popup)
             };
+            let (owner, combo_popup) = if let Some(panel) = self.image_panels.iter().find(|panel| {
+                panel.open
+                    && panel.host.root_layer().is_some_and(|layer| {
+                        Some(layer) == super::jump_mode::ui::visible_top_middle_layer(ctx)
+                    })
+            }) {
+                let layer = panel.host.root_layer();
+                let focused = super::jump_mode::ui::focused_response_layer(ctx);
+                let allowed = !egui::Popup::is_any_open(ctx)
+                    && focused.is_none_or(|focus| {
+                        Some(focus) == layer || focus.order == egui::Order::Background
+                    });
+                let owner = if allowed {
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::ImageViewer,
+                        instance: panel.session(),
+                    }
+                } else {
+                    NavigationOwner::Blocked
+                };
+                (owner, None)
+            } else {
+                (owner, combo_popup)
+            };
+            let reference_layer = self.calculation_pad_dialog.examples_layer_if_root();
+            let (owner, combo_popup) = if reference_layer.is_some()
+                && reference_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let allowed = self.calculation_pad_dialog.reference_jump_available() && !egui::Popup::is_any_open(ctx)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
+                        Some(focus) == reference_layer || focus.order == egui::Order::Background);
+                (if allowed { NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationReference, instance: self.calculation_pad_dialog.reference_jump_instance() } } else { NavigationOwner::Blocked }, None)
+            } else { (owner, combo_popup) };
+            let pad_layer = self.calculation_pad_dialog.host_layer_if_root();
+            let (owner, combo_popup) = if pad_layer.is_some()
+                && pad_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let pad_owner = NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationPad, instance: self.calculation_pad_dialog.jump_instance() };
+                let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, pad_owner);
+                let allowed = self.calculation_pad_dialog.jump_parent_available()
+                    && if self.calculation_pad_dialog.inline_child_owns_root_escape(ctx) { true }
+                    else if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
+                        super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
+                            Some(focus) == pad_layer || focus.order == egui::Order::Background)
+                    };
+                if allowed { (pad_owner, popup) } else { (NavigationOwner::Blocked, None) }
+            } else { (owner, combo_popup) };
+            let studio_layer = self.markdown_studio_dialog.host_layer_if_root();
+            let (owner, combo_popup) = if studio_layer.is_some()
+                && studio_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let studio_owner = NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownStudio, instance: self.markdown_studio_dialog.jump_instance() };
+                let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, studio_owner);
+                let allowed = self.markdown_studio_dialog.jump_parent_available()
+                    && if self.markdown_studio_dialog.has_pending_decision() {
+                        self.markdown_studio_dialog.pending_decision_owns_root(ctx)
+                    } else if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
+                        super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus|
+                            Some(focus) == studio_layer || focus.order == egui::Order::Background)
+                    };
+                if allowed { (studio_owner, popup) } else { (NavigationOwner::Blocked, None) }
+            } else { (owner, combo_popup) };
+            let diagram_layer = self.diagram_studio_dialog.owner_layer_if_root();
+            let (owner, combo_popup) = if diagram_layer.is_some() && diagram_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let diagram_owner = NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramStudio, instance: self.diagram_studio_dialog.jump_instance() };
+                let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, diagram_owner);
+                let allowed = if egui::Popup::is_any_open(ctx) { popup.is_some() } else {
+                    super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| Some(focus) == diagram_layer || focus.order == egui::Order::Background)
+                };
+                if allowed { (diagram_owner, popup) } else { (NavigationOwner::Blocked, None) }
+            } else { (owner, combo_popup) };
+            let viewer_layer = self.diagram_studio_dialog.embedded_viewer_layer_if_root();
+            let (owner, combo_popup) = if viewer_layer.is_some() && viewer_layer == super::jump_mode::ui::visible_top_middle_layer(ctx) {
+                let allowed = !egui::Popup::is_any_open(ctx)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| Some(focus) == viewer_layer);
+                (if allowed { NavigationOwner::Dialog { kind: NavigationDialogKind::DiagramViewer, instance: self.diagram_studio_dialog.viewer_jump_instance() } } else { NavigationOwner::Blocked }, None)
+            } else { (owner, combo_popup) };
+            let foreground_layer = super::jump_mode::ui::visible_top_middle_layer(ctx);
+            let (owner, combo_popup) = if let Some((panel, prompt)) = self.note_panels.iter().find_map(|panel|
+                panel.host_layer_if_root().and_then(|_| panel.prompt_current(ctx).map(|prompt| (panel, prompt)))) {
+                (NavigationOwner::Dialog { kind: prompt.kind(), instance: panel.prompt_identity() }, None)
+            } else if let Some(form) = self
+                .note_panels
+                .iter()
+                .find_map(|panel| panel.root_form_navigation(ctx))
+            {
+                (form, None)
+            } else if let Some(panel) = self.note_panels.iter().find(|panel| {
+                panel
+                    .host_layer_if_root()
+                    .is_some_and(|layer| Some(layer) == foreground_layer)
+            }) {
+                let note_owner = NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::NotePanel,
+                    instance: panel.prompt_identity(),
+                };
+                let popup = self.jump_mode_ui.resolve_combo_popup_owner(ctx, note_owner);
+                let allowed = if egui::Popup::is_any_open(ctx) {
+                    popup.is_some()
+                } else {
+                    super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                        Some(layer) == foreground_layer || layer.order == egui::Order::Background
+                    })
+                };
+                if allowed { (note_owner, popup) } else { (NavigationOwner::Blocked, None) }
+            } else {
+                (owner, combo_popup)
+            };
             let owner = match owner {
                 NavigationOwner::Dialog {
                     kind: NavigationDialogKind::Snippets,
@@ -10152,7 +11452,8 @@ impl LauncherApp {
                 }
                 NavigationOwner::Notes { .. }
                     if self.notes_dialog.host_layer_if_root().is_none()
-                        || self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+                        || (self.notes_dialog.has_open_context_menu()
+                            && combo_popup.is_none())
                         || (self.unused_assets_dialog.open
                             && self.unused_assets_host.root_layer().is_some()) =>
                 {
@@ -10384,7 +11685,7 @@ impl LauncherApp {
         (candidate, supported_dialog_visibility_changed, combo_popup)
     }
 
-    fn resolve_jump_mode_navigation_owner(
+    pub(super) fn resolve_jump_mode_navigation_owner(
         &mut self,
         ctx: &egui::Context,
         root_visible: bool,
@@ -10437,7 +11738,7 @@ impl LauncherApp {
         let selection_changed = self.selected != Some(index);
         self.selected = Some(index);
         if let Some(query_response) = query_response {
-            query_response.request_focus();
+            request_root_query_focus(query_response);
         }
         if selection_changed {
             ctx.request_repaint();
@@ -10557,6 +11858,10 @@ impl LauncherApp {
         use egui::*;
 
         let ctx = ui.ctx().clone();
+        #[cfg(windows)]
+        {
+            self.activity_dialog.transfer_navigation = None;
+        }
         let mut frame_logic = self.root_frame_logic.clone().unwrap_or_default();
         let first_ui_pass = frame_logic.ui_passes == 0;
         frame_logic.ui_passes = frame_logic.ui_passes.saturating_add(1);
@@ -10709,6 +12014,13 @@ impl LauncherApp {
                 frame_logic.should_be_visible,
                 navigation_owner_candidate,
             );
+        if first_ui_pass && self.jump_mode_ui.active_session().is_none()
+            && self.note_templates_host.root_layer().is_some()
+            && self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
+            && !self.ocr_surface_visible() && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open() && !self.pin_list_open {
+            self.notes_dialog.template_manager.stage_delete_escape(&ctx);
+        }
         let jump_session_escape_preempted = self.jump_mode_ui.active_session().is_some()
             && ctx.input(|input| input.key_pressed(egui::Key::Escape));
         self.jump_mode_ui
@@ -10784,6 +12096,13 @@ impl LauncherApp {
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_qr_host(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
+            self.show_markdown_print(&ctx, first_ui_pass, false);
+            self.show_password_generator(&ctx, first_ui_pass, false);
+            #[cfg(windows)]
+            self.show_file_operations_center(&ctx, first_ui_pass, false);
+            #[cfg(windows)]
+            self.show_downloads_triage(&ctx, first_ui_pass, false);
+            self.show_notification_inbox(&ctx, first_ui_pass, false);
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
             self.show_note_panels(&ctx, first_ui_pass, false, None);
             self.show_mkmacro_editor(&ctx, first_ui_pass, false);
@@ -11252,10 +12571,11 @@ impl LauncherApp {
                 {
                     self.query_focus_session = None;
                 }
-            let query_navigation_allowed = (ordinary_root_query_allowed
-                && self.query_focus_ordinary_context().as_ref()
-                    .is_none_or(|context| context.ordinary_panel_layers.is_empty()))
-                || query_focus_session_active;
+                let ordinary_panel_open = self
+                    .query_focus_ordinary_context()
+                    .is_some_and(|context| !context.ordinary_panel_layers.is_empty());
+                let query_navigation_allowed = (ordinary_root_query_allowed && !ordinary_panel_open)
+                    || query_focus_session_active;
                 let pending_show_can_enable_query = !root_navigation_allowed
                     && self.pending_show_query_focus_can_enable_query(
                         &ctx,
@@ -11271,18 +12591,51 @@ impl LauncherApp {
                     || notes_query_bridge_candidate
                     || self.query_mouse_focus_available(&ctx, previous_query_geometry));
                 let query_owned_focus = query_navigation_allowed
-                    && ui.ctx().memory(|memory| memory.has_focus(input_id));
-                let numpad_navigation = if first_ui_pass && query_navigation_allowed {
-                    ui.ctx().input_mut(|input| {
-                        consume_physical_numpad_navigation(
-                            query_owned_focus,
-                            input,
-                            &NativeNumpadKeyStateProbe,
+                    && ctx.memory(|memory| memory.has_focus(input_id))
+                    && ctx.input(|input| input.focused);
+                let focused_result = ctx.memory(|memory| memory.focused()).and_then(|focused| {
+                    self.root_list_geometry
+                        .rendered_result_ids
+                        .iter()
+                        .find(|(index, id)| *id == focused && *index < self.results.len())
+                        .map(|(index, _)| *index)
+                });
+                let query_navigation = if first_ui_pass
+                    && query_navigation_allowed
+                    && (query_owned_focus || focused_result.is_some())
+                    && ctx.input(|input| input.focused)
+                    && query_editor_interactive
+                    && !action_sheet_blocks_launcher_input
+                    && self.jump_mode_ui.active_session().is_none()
+                    && if ordinary_panel_open {
+                        self.query_session_allows_workflow(
+                            &ctx,
+                            frame_logic.should_be_visible,
+                            previous_query_geometry,
+                            false,
+                            owner_transition_pending,
                         )
-                    })
+                    } else {
+                        ordinary_root_query_allowed
+                    }
+                {
+                    let grid = self.resolved_grid_layout && !self.results.is_empty();
+                    ctx.input_mut(|input| take_query_navigation(input, grid))
                 } else {
                     Vec::new()
                 };
+                if !query_navigation.is_empty() {
+                    if let Some(index) = focused_result {
+                        self.selected = Some(index);
+                        // Reclaim text entry before TextEdit can collapse its
+                        // unfocused caret/selection. Do not synthesize Tab.
+                        ctx.memory_mut(|memory| memory.request_focus(input_id));
+                    }
+                    ctx.memory_mut(|memory| {
+                        memory.move_focus(egui::FocusDirection::None);
+                        memory.set_focus_lock_filter(input_id, ROOT_QUERY_EVENT_FILTER);
+                    });
+                }
 
                 // Capture cursor state before TextEdit processing: an
                 // unfocused widget can collapse a selection while a delayed
@@ -11291,6 +12644,9 @@ impl LauncherApp {
                 // delayed frames share the same original caret state.
                 let query_cursor_before_show_focus = self
                     .pending_show_query_focus
+                    .and_then(|_| egui::TextEdit::load_state(ui.ctx(), input_id))
+                    .and_then(|state| state.cursor.char_range());
+                let query_cursor_before_result_focus = focused_result
                     .and_then(|_| egui::TextEdit::load_state(ui.ctx(), input_id))
                     .and_then(|state| state.cursor.char_range());
                 if let (Some(pending), Some(cursor_range)) = (
@@ -11307,10 +12663,20 @@ impl LauncherApp {
                     input_id,
                     self.query_scale,
                     !action_sheet_blocks_launcher_input && query_editor_interactive,
-                    query_owned_focus,
+                    query_owned_focus || !query_navigation.is_empty(),
                 )
                 .output;
                 let query_text_edited = query_output.response.changed();
+                if !query_output.response.has_focus()
+                    && !query_text_edited
+                    && let Some(cursor_range) = query_cursor_before_result_focus
+                {
+                    // Tab may leave a real result focused for many frames.
+                    // TextEdit's unfocused rendering must not erase the
+                    // selection before a later NumPad return to the query.
+                    query_output.state.cursor.set_char_range(Some(cursor_range));
+                    query_output.state.clone().store(ui.ctx(), input_id);
+                }
                 current_query_geometry = Some(QueryShowGeometry {
                     rect: query_output.response.rect,
                     clip_rect: query_clip_rect,
@@ -11453,7 +12819,7 @@ impl LauncherApp {
                 let show_focus_requested = show_query_focus_revision.is_some()
                     && !query_response.has_focus();
                 if programmatic_query_focus_requested || show_focus_requested {
-                    query_response.request_focus();
+                    request_root_query_focus(&query_response);
                 }
                 if show_query_focus_revision.is_some()
                     && let (Some(root_identity), Some(ordinary_context)) = (
@@ -11513,45 +12879,15 @@ impl LauncherApp {
                     clip_rect: query_clip_rect,
                     layer_id: query_response.layer_id,
                 };
-                let query_focus_mouse_keyboard_authority = self
-                    .query_focus_mouse_session_has_keyboard_authority(
-                        &ctx,
-                        frame_logic.should_be_visible,
-                        Some(query_response_geometry),
-                        current_query_mouse_focus_accepted,
-                        false,
-                    );
-                let query_focus_mouse_root_authority = self
-                    .query_focus_mouse_session_owns_ordinary_root_keyboard(
-                        &ctx,
-                        frame_logic.should_be_visible,
-                        Some(query_response_geometry),
-                        current_query_mouse_focus_accepted,
-                        false,
-                    );
-                let query_focus_mouse_root_owner_current = !self.jump_mode_enabled()
-                    || (!owner_transition_pending
-                        && self.jump_mode_ui.frame_navigation_owner()
-                            == crate::gui::jump_mode::ui::NavigationOwner::Root);
-                let query_focus_session_keyboard_authority =
-                    self.query_focus_session.as_ref().is_some_and(|session| {
-                        match session.origin {
-                            super::QueryFocusOrigin::Mouse => {
-                                query_focus_mouse_keyboard_authority
-                                    && (!query_focus_mouse_root_authority
-                                        || query_focus_mouse_root_owner_current)
-                            }
-                            super::QueryFocusOrigin::Show | super::QueryFocusOrigin::Hint { .. } => {
-                                query_focus_session_valid
-                            }
-                        }
-                    });
-                let query_workflow_allowed = if self
-                    .query_focus_ordinary_context()
-                    .as_ref()
-                    .is_some_and(|context| !context.ordinary_panel_layers.is_empty())
-                {
-                    query_focus_session_valid && query_focus_session_keyboard_authority
+                let query_workflow_allowed = if ordinary_panel_open {
+                    query_focus_session_valid
+                        && self.query_session_allows_workflow(
+                            &ctx,
+                            frame_logic.should_be_visible,
+                            Some(query_response_geometry),
+                            current_query_mouse_focus_accepted,
+                            owner_transition_pending,
+                        )
                 } else {
                     ordinary_root_query_allowed
                 };
@@ -11585,12 +12921,24 @@ impl LauncherApp {
                     self.navigate_query_history(direction);
                 }
 
-                if first_ui_pass
-                    && !action_sheet_blocks_launcher_input
-                    && query_workflow_allowed
-                {
-                    for direction in numpad_navigation {
-                        self.handle_key(direction.navigation_key());
+                // Capture above is the authoritative ownership decision. A
+                // TextEdit focus transition must not discard accepted events.
+                if !query_navigation.is_empty() {
+                    for navigation in query_navigation {
+                        match navigation {
+                            QueryNavigation::Move(key) => {
+                                self.handle_key(key);
+                            }
+                            QueryNavigation::EnterResults => {
+                                if self.selected.is_none() && !self.results.is_empty() {
+                                    self.selected = Some(0);
+                                }
+                            }
+                            QueryNavigation::ReturnToQuery => self.selected = None,
+                        }
+                    }
+                    if !query_response.has_focus() {
+                        request_root_query_focus(&query_response);
                     }
                 }
 
@@ -11632,6 +12980,7 @@ impl LauncherApp {
                 });
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
+                    && !self.note_panels.iter().any(|panel| panel.host_layer_if_root().is_some() && panel.prompt_current(&ctx).is_some())
                     && (escape_modifiers.is_some() || find_shortcut_modifiers.is_some())
                 {
                     let escape = escape_modifiers.is_some();
@@ -11672,6 +13021,9 @@ impl LauncherApp {
                     && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.data_recovery_confirmation_identity().is_some_and(|(generation, _)| {
+                        self.data_recovery_confirmation_owner_current(&ctx, frame_logic.should_be_visible, generation)
+                    })
                     && !self.date_time_studio_root_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.image_compare_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.duplicate_finder_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
@@ -11685,19 +13037,23 @@ impl LauncherApp {
                         .embedded_viewer_owns_root_input(&ctx)
                     && !self
                         .diagram_studio_dialog
-                        .docked_owner_owns_root_input(&ctx)
+                        .owner_owns_root_input(&ctx)
                     && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
+                    && !self.calculation_pad_dialog.reference_owns_root_shortcuts(&ctx)
                     && !self.calculation_pad_dialog.editor_tools_own_root_escape(&ctx)
+                    && !self.calculation_pad_dialog.inline_child_owns_root_escape(&ctx)
                     && !self
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
+                    && !self.markdown_studio_dialog.pending_decision_owns_root(&ctx)
                     && !self.notes_dialog.owns_root_input(&ctx)
                     && !self.mkmacro_dialog.owns_root_input(&ctx)
                     && !self.dashboard_editor.owns_root_input(&ctx)
                     && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                    && !self.hotfolder_inline_owns_escape(&ctx, frame_logic.should_be_visible)
                 {
                     #[cfg(test)]
                     {
@@ -11781,10 +13137,12 @@ impl LauncherApp {
                         .embedded_viewer_owns_root_input(&ctx)
                     && !self
                         .diagram_studio_dialog
-                        .docked_owner_owns_root_input(&ctx)
+                        .owner_owns_root_input(&ctx)
                     && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
+                    && !self.calculation_pad_dialog.reference_owns_root_shortcuts(&ctx)
+                    && !self.calculation_pad_dialog.inline_child_owns_root_escape(&ctx)
                     && !self
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
@@ -11796,26 +13154,6 @@ impl LauncherApp {
                 {
                     let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
                     ctx.input_mut(|input| input.consume_key(modifiers, egui::Key::W));
-                }
-
-                if first_ui_pass
-                    && !action_sheet_blocks_launcher_input
-                    && query_workflow_allowed
-                    && history_direction.is_none()
-                    && Self::launcher_query_keyboard_enabled(query_has_focus)
-                {
-                    for key in [
-                        egui::Key::ArrowDown,
-                        egui::Key::ArrowUp,
-                        egui::Key::PageDown,
-                        egui::Key::PageUp,
-                        egui::Key::ArrowLeft,
-                        egui::Key::ArrowRight,
-                    ] {
-                        if ctx.input(|i| i.key_pressed(key)) {
-                            self.handle_key(key);
-                        }
-                    }
                 }
 
                 let tab = query_autocomplete_tab_consumed
@@ -11909,6 +13247,7 @@ impl LauncherApp {
                     } = query_registration
                     {
                         directive.apply_to_response(&query_response);
+                        retain_root_query_arrow_focus(&query_response);
                     }
                 }
                 let notes_query_geometry = QueryShowGeometry {
@@ -11945,6 +13284,7 @@ impl LauncherApp {
                     )
                 {
                     directive.apply_to_response(&query_response);
+                    retain_root_query_arrow_focus(&query_response);
                     if query_response.has_focus()
                         && ctx.memory(|memory| memory.has_focus(query_input_id))
                         && let (Some(root_identity), Some(ordinary_context)) = (
@@ -11982,6 +13322,7 @@ impl LauncherApp {
                 self.render_root_toasts(ui, bounds);
             }
 
+            self.root_list_geometry.rendered_result_ids.clear();
             if use_dashboard {
                 if first_ui_pass && !self.suggestions.is_empty() {
                     self.autocomplete_index = 0;
@@ -12136,8 +13477,11 @@ impl LauncherApp {
                                 if !self.root_list_geometry.owned_context_menu_is_open() {
                                     self.root_list_geometry.clear_popup_owner();
                                 }
+                                let selected =
+                                    self.selected.filter(|index| *index < self.results.len());
                                 if let Some(selected) =
-                                    self.selected.filter(|index| *index < self.results.len())
+                                    self.root_list_geometry
+                                        .selection_to_reveal(selected, viewport.height())
                                 {
                                     let column = selected % cols;
                                     let row = selected / cols;
@@ -12252,6 +13596,9 @@ impl LauncherApp {
                                             .push((idx, action.action.clone()));
                                         #[cfg(test)]
                                         self.test_root_rendered_row_ids.push((idx, resp.id));
+                                        self.root_list_geometry
+                                            .rendered_result_ids
+                                            .push((idx, resp.id));
                                         #[cfg(test)]
                                         self.test_root_rendered_row_rects.push((idx, resp.rect));
                                         rows_built = rows_built.saturating_add(1);
@@ -12324,9 +13671,12 @@ impl LauncherApp {
                                 if !self.root_list_geometry.owned_context_menu_is_open() {
                                     self.root_list_geometry.clear_popup_owner();
                                 }
-                                if let Some(selected) = self
+                                let selected = self
                                     .selected
-                                    .filter(|index| *index < self.root_list_geometry.row_tops.len())
+                                    .filter(|index| *index < self.root_list_geometry.row_tops.len());
+                                if let Some(selected) =
+                                    self.root_list_geometry
+                                        .selection_to_reveal(selected, viewport.height())
                                 {
                                     let selected_rect = egui::Rect::from_min_size(
                                         content_origin
@@ -12496,6 +13846,9 @@ impl LauncherApp {
                                     self.test_root_rendered_rows.push((idx, a.action.clone()));
                                     #[cfg(test)]
                                     self.test_root_rendered_row_ids.push((idx, resp.id));
+                                    self.root_list_geometry
+                                        .rendered_result_ids
+                                        .push((idx, resp.id));
                                     #[cfg(test)]
                                     self.test_root_rendered_row_rects.push((idx, resp.rect));
                                     rows_built = rows_built.saturating_add(1);
@@ -12808,6 +14161,12 @@ impl LauncherApp {
                 catalog: self.plugin_settings_catalog.clone(),
                 navigation: navigation_observer.clone(),
             };
+            let navigation_owner = self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+            let instance = self.plugin_editor.host_session();
+            let jump_scope = if navigation_owner == (super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::PluginSettings, instance }) {
+                self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("plugin-settings", instance), self.plugin_editor.jump_generation(&runtime), "plugin-settings/form", ctx.viewport_id(), navigation_owner, false)
+            } else { None };
+            self.plugin_settings_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
             let root_input = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible);
             let native_input = self.native_ui_application_input_allowed(&ctx);
             let can_close = !self.pinned_panels.contains(&super::Panel::Plugins);
@@ -12820,14 +14179,14 @@ impl LauncherApp {
                     root_visible: frame_logic.should_be_visible,
                     root_input,
                     native_input,
-                    root_owner: super::jump_mode::ui::NavigationOwner::Blocked,
+                    root_owner: navigation_owner,
                     parent_owner: owner_current,
                     root_jump_active: self.jump_mode_ui.active_session().is_some(),
                     close_shortcut: can_close,
                     allow_os_close: can_close,
                     confirmation_owner: super::jump_mode::ui::NavigationOwner::Blocked,
-                    parent_instance: 0,
-                    root_scopes: (None, None),
+                    parent_instance: instance,
+                    root_scopes: (jump_scope.as_ref(), None),
                 },
             );
         }
@@ -13141,12 +14500,18 @@ impl LauncherApp {
             !self.screenshot_editors.is_empty(),
             || Some(self.pinboard_capture.pinboard().image_bytes() as u64),
         ) {
-            let super::activity_dialog::ActivityDialogAction::Navigate(owner) = action;
+            let super::activity_dialog::ActivityDialogAction::Navigate(key) = action;
+            #[cfg(windows)]
+            if key.owner() == crate::activity::ActivityOwner::FileTransfer {
+                self.activity_dialog.transfer_navigation = Some(key);
+                continue;
+            }
             self.force_close_panel(super::Panel::ActivityDialog);
-            let panel = match owner {
+            let panel = match key.owner() {
                 crate::activity::ActivityOwner::FileSearch => Some(super::Panel::FileSearchDialog),
                 crate::activity::ActivityOwner::FolderSize => Some(super::Panel::FolderSizeDialog),
                 crate::activity::ActivityOwner::Recording => Some(super::Panel::RecordingDialog),
+                crate::activity::ActivityOwner::FileTransfer => None,
                 crate::activity::ActivityOwner::Table => Some(super::Panel::TableUtilityDialog),
                 crate::activity::ActivityOwner::DuplicateFinder => {
                     Some(super::Panel::DuplicateFinderDialog)
@@ -13204,14 +14569,32 @@ impl LauncherApp {
             self.show_calculation_sensitivity(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_explorer_tabs(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_markdown_print(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_password_generator(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        #[cfg(windows)]
+        self.show_file_operations_center(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        #[cfg(windows)]
+        self.show_downloads_triage(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_notification_inbox(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
             &ctx,
             first_ui_pass,
             frame_logic.should_be_visible,
             jump_session_escape_preempted,
         );
+        let convert_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"));
+        let popup = self.convert_panel.owned_popup_layer(&ctx, convert_layer);
+        let convert_owner = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
+            && super::jump_mode::ui::visible_top_middle_layer(&ctx) == Some(convert_layer)
+            && (!egui::Popup::is_any_open(&ctx) || popup.is_some())
+            && super::jump_mode::ui::focused_response_layer(&ctx).is_none_or(|focus| focus == convert_layer || Some(focus) == popup || focus.order == egui::Order::Background);
+        let nav = self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let scope = match nav {
+            super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::Convert, instance } if convert_owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("convert-panel", instance), super::jump_mode::TargetGeneration(self.convert_panel.jump_generation()), "convert-panel/form", ctx.viewport_id(), nav, false),
+            _ => None,
+        }.map(|scope| if first_ui_pass && !ctx.will_discard() { scope } else { scope.registration_only() });
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
-        let _ = conv_panel.ui(&ctx, first_ui_pass);
+        let _ = conv_panel.ui_with_jump(&ctx, first_ui_pass, convert_owner, scope.as_ref());
         self.convert_panel = conv_panel;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(&ctx, self);
@@ -13251,7 +14634,31 @@ impl LauncherApp {
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
         cpu_dlg.ui(&ctx, self);
         self.cpu_list_dialog = cpu_dlg;
-        let (data_actions, data_notices) = self.data_recovery_dialog.ui(&ctx);
+        let data_owner = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
+            && super::jump_mode::ui::visible_top_middle_layer(&ctx)
+                == Some(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new(Some("Data & Recovery")),
+                ))
+            && !egui::Popup::is_any_open(&ctx);
+        let navigation_owner = self.jump_mode_ui.frame_navigation_owner();
+        let data_scope = match navigation_owner {
+            super::jump_mode::ui::NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::DataRecovery,
+                instance,
+            } if data_owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("data-recovery", instance),
+                super::jump_mode::TargetGeneration(self.data_recovery_dialog.ui_epoch()),
+                "data-recovery",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
+        let (_, data_notices) =
+            self.data_recovery_dialog
+                .ui(&ctx, data_owner, first_ui_pass, data_scope.as_ref());
         if first_ui_pass {
             for notice in data_notices {
                 if notice.error {
@@ -13267,21 +14674,6 @@ impl LauncherApp {
                     });
                 }
             }
-            for action in data_actions {
-                match action {
-                    DataRecoveryUiAction::OpenPath(path) => {
-                        if let Err(error) = open::that(&path) {
-                            self.report_error_message(
-                                "data",
-                                format!("Failed to open {}: {error}", path.display()),
-                            );
-                        }
-                    }
-                    DataRecoveryUiAction::Confirm(intent) => {
-                        self.queue_data_recovery_confirmation(intent);
-                    }
-                }
-            }
         }
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(&ctx, self);
@@ -13292,24 +14684,99 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             jump_session_escape_preempted,
         );
-        let confirmation_result = self.confirm_modal.ui(&ctx);
-        if first_ui_pass {
-            match confirmation_result {
-                ConfirmationResult::Confirmed => {
-                    if self.pending_data_recovery.is_some() {
-                        self.resolve_data_recovery_confirmation(true);
+        if let Some((generation, parent_epoch)) = self.pending_data_recovery_owner
+            && self.data_recovery_confirmation_identity().is_none()
+        {
+            if self.confirm_modal.generation() == generation
+                && self.confirm_modal.is_open()
+                && (!self.data_recovery_dialog.open
+                    || self.data_recovery_dialog.ui_epoch() != parent_epoch)
+            {
+                self.confirm_modal.close();
+            }
+            self.pending_data_recovery = None;
+            self.pending_data_recovery_owner = None;
+            self.pending_data_confirmation_pass = None;
+        }
+        if let Some((generation, parent_epoch)) = self.data_recovery_confirmation_identity() {
+            let owner = self.data_recovery_confirmation_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                generation,
+            );
+            let nav_owner = super::jump_mode::ui::NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::DataRecoveryConfirmation,
+                instance: generation,
+            };
+            let scope = (owner && self.jump_mode_ui.frame_navigation_owner() == nav_owner)
+                .then(|| {
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        super::jump_mode::SurfaceId::dialog(
+                            "data-recovery-confirmation",
+                            generation,
+                        ),
+                        super::jump_mode::TargetGeneration(generation),
+                        "data-recovery-confirmation",
+                        ctx.viewport_id(),
+                        nav_owner,
+                        false,
+                    )
+                })
+                .flatten()
+                .map(|scope| {
+                    if first_ui_pass && !ctx.will_discard() {
+                        scope
                     } else {
+                        scope.registration_only()
+                    }
+                });
+            let mut modal = self.confirm_modal.clone();
+            let mut result = modal.ui_with_jump_mode(
+                &ctx,
+                egui::Id::new(("data-recovery-confirmation", generation)),
+                scope.as_ref(),
+                owner,
+                owner && first_ui_pass && !ctx.will_discard(),
+            );
+            if owner
+                && first_ui_pass
+                && !ctx.will_discard()
+                && !jump_session_escape_preempted
+                && self.jump_mode_ui.active_session().is_none()
+                && ctx
+                    .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                result = ConfirmationResult::Cancelled;
+            }
+            if result != ConfirmationResult::None
+                && owner
+                && first_ui_pass
+                && !ctx.will_discard()
+                && let Some(intent) = self.pending_data_recovery.clone()
+            {
+                self.pending_data_confirmation_pass = Some(PendingDataConfirmationPass {
+                    pass: super::utility_host::ViewportPassProvenance::current(
+                        &ctx,
+                        egui::ViewportId::ROOT,
+                    ),
+                    modal_generation: generation,
+                    parent_epoch,
+                    intent,
+                    result,
+                });
+            }
+        } else {
+            let confirmation_result = self.confirm_modal.ui(&ctx);
+            if first_ui_pass {
+                match confirmation_result {
+                    ConfirmationResult::Confirmed => {
                         self.resolve_pending_confirmation(true);
                     }
-                }
-                ConfirmationResult::Cancelled => {
-                    if self.pending_data_recovery.is_some() {
-                        self.resolve_data_recovery_confirmation(false);
-                    } else {
+                    ConfirmationResult::Cancelled => {
                         self.resolve_pending_confirmation(false);
                     }
+                    ConfirmationResult::None => {}
                 }
-                ConfirmationResult::None => {}
             }
         }
         let prompt_native_owner =
@@ -14005,6 +15472,7 @@ impl LauncherApp {
                 continue;
             };
             match note_effect {
+                super::note_panel::NotePanelEffect::OpenPrint(request) => self.open_markdown_print(ctx, request),
                 super::note_panel::NotePanelEffect::Export(request) => {
                     self.complete_note_markdown_export(ctx, panel_index, &request);
                 }
@@ -14153,8 +15621,78 @@ impl LauncherApp {
         ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 
+    #[cfg(windows)]
+    fn complete_transfer_activity_navigation(&mut self, ctx: &egui::Context) {
+        let Some(key) = self.activity_dialog.transfer_navigation.take() else {
+            return;
+        };
+        if !self.activity_dialog.open {
+            return;
+        }
+        let snapshot = self.transfer_jobs.snapshot();
+        let exact_job = snapshot
+            .active
+            .iter()
+            .chain(&snapshot.queued)
+            .chain(&snapshot.history)
+            .find(|job| job.activity == Some(key))
+            .map(|job| job.id);
+        if let Some(job) = exact_job {
+            self.force_close_panel(super::Panel::ActivityDialog);
+            self.file_operations_center_dialog.focus_job(Some(job));
+            self.focus_panel(super::Panel::FileOperationsCenterDialog);
+        } else {
+            self.activity_dialog.transfer_job_expired = true;
+        }
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
+        self.complete_hotfolder_manager(ctx);
         let mut effects = Vec::new();
+        if let Some(pending) = self.pending_data_confirmation_pass.take()
+            && pending.pass.was_retained(ctx)
+            && self.data_recovery_confirmation_identity()
+                == Some((pending.modal_generation, pending.parent_epoch))
+            && self.pending_data_recovery.as_ref() == Some(&pending.intent)
+            && self.data_recovery_confirmation_owner_current(ctx, true, pending.modal_generation)
+        {
+            self.confirm_modal.close();
+            self.resolve_data_recovery_confirmation(
+                pending.result == ConfirmationResult::Confirmed,
+            );
+        }
+        let data_owner_current = self.native_ui_host_input_allowed(ctx, true)
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                == Some(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new(Some("Data & Recovery")),
+                ))
+            && !egui::Popup::is_any_open(ctx);
+        for action in self
+            .data_recovery_dialog
+            .complete_ui(ctx, data_owner_current)
+        {
+            match action {
+                DataRecoveryUiAction::OpenPath(path) => {
+                    if let Err(error) = open::that(&path) {
+                        self.report_error_message(
+                            "data",
+                            format!("Failed to open {}: {error}", path.display()),
+                        );
+                    }
+                }
+                DataRecoveryUiAction::Confirm(intent) => {
+                    self.queue_data_recovery_confirmation(intent)
+                }
+                DataRecoveryUiAction::CopyDiagnostics(text) => {
+                    effects.push(RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::DataRecovery,
+                        text,
+                    })
+                }
+            }
+        }
         if let Some(text) = self.complete_mouse_gestures_host(ctx) {
             effects.push(RootDialogEffect::CopyText {
                 owner: DialogCopyOwner::MouseGestures,
@@ -15239,6 +16777,15 @@ impl LauncherApp {
                 continue;
             }
             match command {
+                super::FileSearchUiCommand::OpenFileOperations(path) => {
+                    #[cfg(windows)]
+                    self.open_file_operations_from_origin(
+                        Some(vec![path]),
+                        &super::utility_host::ChildOpenOrigin::Parent(origin),
+                    );
+                    #[cfg(not(windows))]
+                    let _ = path;
+                }
                 super::FileSearchUiCommand::OpenHash(path) => {
                     let was_open = self.hash_generator_dialog.open;
                     self.hash_generator_dialog.open_with_file(path);
@@ -15278,7 +16825,7 @@ impl LauncherApp {
                 }
                 super::FileSearchUiCommand::OpenFolderSize(path) => {
                     self.folder_size_dialog
-                        .open_from_file_search(ctx, path, origin);
+                        .open_from_parent(ctx, path, origin);
                     folder_focus = true;
                 }
                 super::FileSearchUiCommand::InspectFileUsers(path) => {
@@ -15524,6 +17071,11 @@ impl LauncherApp {
                         DialogCopyOwner::DateTimeStudio => {
                             self.date_time_studio_dialog.copy_completed(result)
                         }
+                        DialogCopyOwner::DataRecovery => {
+                            if let Err(error) = result {
+                                self.report_error_message("data.copy", error);
+                            }
+                        }
                         DialogCopyOwner::ImageCompare => {
                             if let Err(error) = result {
                                 self.report_error_message("image_compare.copy", error);
@@ -15684,11 +17236,15 @@ impl LauncherApp {
 impl eframe::App for LauncherApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.guard_overlay_app_exit(ctx);
+        self.wake_inbox_calendar_if_changed();
+        self.refresh_inbox_windows_access(ctx);
         self.begin_root_frame_logic(ctx, frame);
     }
 
     fn logic_only(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.guard_overlay_app_exit(ctx);
+        self.wake_inbox_calendar_if_changed();
+        self.refresh_inbox_windows_access(ctx);
         self.run_hidden_logic_tick(ctx, frame);
     }
 
@@ -15702,6 +17258,12 @@ impl eframe::App for LauncherApp {
             || self.screenshot_countdown.is_busy()
             || self.notes_dialog.needs_root_ui_when_hidden()
             || self.markdown_studio_dialog.needs_root_ui_when_hidden()
+            || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
+            || self.markdown_print_dialog.output.busy()
+            || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
+                || self.file_operations_center_needs_root_ui()
+                || self.downloads_triage_needs_root_ui()
+                || self.notification_inbox_host.needs_root_ui_when_hidden(self.notification_inbox_dialog.open)
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.recording_dialog.needs_setup_root_ui_when_hidden()
@@ -15781,6 +17343,13 @@ impl eframe::App for LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
         }
+        let markdown_effect = match markdown_effect {
+            Some(super::MarkdownStudioEffect::OpenPrint(request)) => {
+                self.open_markdown_print(_ctx, request);
+                None
+            }
+            other => other,
+        };
         if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
             && self.markdown_studio_dialog.accepts_diagram_origin(&origin)
             && let Some(receipt) = origin.host_origin.clone()
@@ -15800,6 +17369,15 @@ impl eframe::App for LauncherApp {
         }
         let note_aux_visibility = self.complete_note_auxiliaries(_ctx);
         self.complete_markdown_diagram_handoff(_ctx);
+        self.complete_markdown_print(_ctx);
+        self.complete_password_generator(_ctx);
+        self.complete_notification_inbox(_ctx);
+        #[cfg(windows)]
+        {
+            self.complete_file_operations_center(_ctx);
+            self.complete_downloads_triage(_ctx);
+            self.complete_transfer_activity_navigation(_ctx);
+        }
         self.complete_quick_notes_dialog(_ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(_ctx);
@@ -15816,6 +17394,7 @@ impl eframe::App for LauncherApp {
         self.recording_dialog.retire_recording_outline();
         crate::paste_sequence::admission::physical_paste_bridge()
             .invalidate_owner(self.event_sink.owner_id());
+        self.notification_windows_consent.stop();
         self.hotfolder_action_adapter.set_active(false);
         self.hotfolder_action_pump.set_active(false);
         self.hotfolder_runtime.shutdown_and_reap();
@@ -15823,6 +17402,8 @@ impl eframe::App for LauncherApp {
         self.xml_toolkit_dialog.shutdown();
         #[cfg(windows)]
         self.archive_session.shutdown();
+        #[cfg(windows)]
+        self.transfer_jobs.shutdown();
         #[cfg(windows)]
         self.zip_creation_session.shutdown();
         self.table_utility_dialog.shutdown();
@@ -15907,6 +17488,9 @@ impl eframe::App for LauncherApp {
             }
         } else if let Err(error) = usage::save_usage(USAGE_FILE, &self.usage) {
             self.report_error("usage.save_on_exit", error);
+        }
+        if let Some(inbox) = &mut self.notification_inbox {
+            inbox.shutdown();
         }
     }
 }
@@ -16014,6 +17598,13 @@ impl LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
         }
+        let markdown_effect = match markdown_effect {
+            Some(super::MarkdownStudioEffect::OpenPrint(request)) => {
+                self.open_markdown_print(ctx, request);
+                None
+            }
+            other => other,
+        };
         if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
             && self.markdown_studio_dialog.accepts_diagram_origin(&origin)
             && let Some(receipt) = origin.host_origin.clone()
@@ -16028,6 +17619,13 @@ impl LauncherApp {
         }
         let note_aux_visibility = self.complete_note_auxiliaries(ctx);
         self.complete_markdown_diagram_handoff(ctx);
+        self.complete_markdown_print(ctx);
+        self.complete_password_generator(ctx);
+        #[cfg(windows)]
+        self.complete_file_operations_center(ctx);
+        #[cfg(windows)]
+        self.complete_downloads_triage(ctx);
+        self.complete_notification_inbox(ctx);
         self.complete_quick_notes_dialog(ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(ctx);
@@ -17133,10 +18731,6 @@ mod tests {
     }
 
     use crate::{
-        gui::numpad_navigation::{
-            LauncherNumpadNavigation, NumpadKeyStateProbe, PhysicalDigitKeyState,
-            PhysicalNumpadKey, consume_physical_numpad_navigation,
-        },
         mkmacro::{LauncherCommandBroker, LauncherCommandResponse, RunControl},
         plugin::{Plugin, PluginManager},
         settings::Settings,
@@ -20326,6 +21920,85 @@ mod tests {
     }
 
     #[test]
+    fn docked_note_form_jump_focuses_and_escape_closes_only_the_current_form() {
+        use super::super::note_form_dialog::FormKind;
+        use super::super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let mut panel = launcher_show_owner_note("jump-table-form");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        let original = panel.note_content().to_owned();
+        app.push_note_panel(panel);
+
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                app,
+                events,
+                false,
+                egui::vec2(1200.0, 900.0),
+            )
+            .drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        app.note_panels[0].test_begin_custom_table_builder(&ctx);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.note_panels[0].test_custom_table_builder_layer().unwrap();
+        let session = app.note_panels[0].test_form_session(FormKind::Table).unwrap();
+        ctx.move_to_top(layer);
+        frame(&mut app, Vec::new());
+        let rect = app.note_panels[0].test_custom_table_builder_rect().unwrap();
+        let title = egui::Rect::from_min_size(
+            rect.min + egui::vec2(96.0, 10.0),
+            egui::vec2(4.0, 4.0),
+        );
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(title, pressed));
+        }
+        frame(&mut app, Vec::new());
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog { kind: NavigationDialogKind::NoteFormTable, instance: session },
+        );
+        let insert = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Insert")
+            .expect("current table Insert").response_id();
+        let arm = |app: &mut LauncherApp| {
+            frame(app, vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ]);
+            frame(app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Insert");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(insert));
+        assert_eq!(app.note_panels[0].note_content(), original);
+        assert_eq!(app.note_panels[0].test_form_session(FormKind::Table), Some(session));
+
+        arm(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        frame(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(app.note_panels[0].test_form_session(FormKind::Table), Some(session));
+        frame(&mut app, vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)]);
+        app.set_jump_mode_enabled(false);
+        frame(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.note_panels[0].open);
+        assert_eq!(app.note_panels[0].test_form_session(FormKind::Table), None);
+        assert_eq!(app.note_panels[0].note_content(), original);
+    }
+
+    #[test]
     fn native_note_form_preserves_draft_and_applies_captured_selection() {
         use super::super::note_form_dialog::{FormHost, FormKind, Link};
         use crate::settings::NoteViewMode;
@@ -20462,9 +22135,20 @@ mod tests {
         assert!(app.query.contains('λ'));
         app.request_launcher_visibility(false);
         let child = FormHost::<Link>::test_viewport(session);
+        app.set_jump_mode_enabled(true);
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
         }
+        let target = app.note_panels[0].test_link_form_jump().retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Link URL").expect("current native URL target");
+        assert_eq!(target.viewport(), child);
+        run_host_viewport_frame(&ctx, &mut app, child, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false, false);
+        run_host_viewport_frame(&ctx, &mut app, child, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false, false);
+        let hint = app.note_panels[0].test_link_form_jump().active_session().unwrap().hint_map().assignments().iter()
+            .find(|assignment| assignment.target().label() == "Link URL").unwrap().hint().as_str().to_owned();
+        run_host_viewport_frame(&ctx, &mut app, child, vec![egui::Event::Text(hint)], false, false);
+        assert_eq!(app.note_panels[0].test_form_text(FormKind::Link), Some(""));
+        assert_eq!(app.note_panels[0].test_link_form_label(), Some("αβ"));
         let control = |app: &LauncherApp, name: &str| {
             let (rect, clip, enabled) = app.note_panels[0]
                 .test_form_control(FormKind::Link, name)
@@ -20476,17 +22160,6 @@ mod tests {
             );
             visible
         };
-        let url = control(&app, "url");
-        for pressed in [true, false] {
-            run_host_viewport_frame(
-                &ctx,
-                &mut app,
-                child,
-                tool_dialog_pointer_events(url, pressed),
-                false,
-                false,
-            );
-        }
         run_host_viewport_frame(
             &ctx,
             &mut app,
@@ -20594,6 +22267,1086 @@ mod tests {
                 .is_none()
         );
         workers.join_all();
+    }
+
+    #[test]
+    fn note_panel_native_jump_focuses_source_and_preserves_multiline_input() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.note_panel_default_size = (900.0, 700.0);
+                let mut panel = launcher_show_owner_note("native-jump-note");
+                panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+                panel.test_pop_out();
+                let identity = panel.prompt_identity();
+                let original = panel.note_content().to_owned();
+                let query = app.query.clone();
+                app.note_panels.push(panel);
+                let viewport = egui::ViewportId::from_hash_of(("note-panel-editor", identity));
+                for _ in 0..6 {
+                    run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                }
+                app.note_panels[0].open_find();
+                for _ in 0..3 {
+                    run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                }
+                let find = app.note_panels[0].test_find_query_widget_id().unwrap();
+                assert_eq!(
+                    super::immediate_viewport_test_focused_id(),
+                    Some((viewport, Some(find)))
+                );
+                let editor = app.note_panels[0].test_editor_widget_id().unwrap();
+                let registry = app.note_panels[0].test_native_jump().retained_registry();
+                let target = registry
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Note source editor")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "editor absent with Find open; targets: {:?}",
+                            registry
+                                .targets()
+                                .iter()
+                                .map(|target| target.metadata().label())
+                                .collect::<Vec<_>>()
+                        )
+                    });
+                assert_eq!(target.response_id(), editor);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                    false,
+                );
+                let hint = app.note_panels[0]
+                    .test_native_jump()
+                    .active_session()
+                    .unwrap()
+                    .hint_map()
+                    .assignments()
+                    .iter()
+                    .find(|assignment| assignment.target().label() == "Note source editor")
+                    .unwrap()
+                    .hint()
+                    .as_str()
+                    .to_owned();
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![egui::Event::Text(hint)],
+                    false,
+                    false,
+                );
+                assert_eq!(
+                    super::immediate_viewport_test_focused_id(),
+                    Some((viewport, Some(editor)))
+                );
+                assert_eq!(app.note_panels[0].note_content(), original);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![egui::Event::Text("λ".into())],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![egui::Event::Text("β".into())],
+                    false,
+                    false,
+                );
+                assert!(app.note_panels[0].note_content().contains("λ\nβ"));
+                assert_eq!(app.query, query);
+                // Publish the current target generation after the accepted source edit.
+                run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                    false,
+                );
+                assert!(
+                    app.note_panels[0]
+                        .test_native_jump()
+                        .active_session()
+                        .is_some()
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                assert!(
+                    app.note_panels[0]
+                        .test_native_jump()
+                        .active_session()
+                        .is_none()
+                );
+                assert!(app.note_panels[0].is_find_open());
+                assert!(app.note_panels[0].open);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn note_panel_outline_review_hint_requires_activation_and_tracks_revision() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            app.note_settings.outline_sidebar_enabled = true;
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.note_panel_default_size = (900.0, 640.0);
+            let mut panel = launcher_show_owner_note("jump-outline-review");
+            panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+            panel.test_outline_review_fixture();
+            app.note_panels.push(panel);
+            let frame = |app: &mut LauncherApp, events| run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+            for _ in 0..5 { frame(&mut app, Vec::new()); }
+            let layer = app.note_panels[0].host_layer_if_root().unwrap();
+            ctx.move_to_top(layer);
+            for _ in 0..4 { frame(&mut app, Vec::new()); }
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let title = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { frame(&mut app, tool_dialog_pointer_events(title, pressed)); }
+            for _ in 0..4 { frame(&mut app, Vec::new()); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Cancel move").cloned().expect("review target");
+            let original = app.note_panels[0].note_content().to_owned();
+            frame(&mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())]);
+            frame(&mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+            let hint = dialog_hint_for_label(&app, "Cancel move");
+            frame(&mut app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.note_panels[0].note_content(), original);
+            assert!(app.note_panels[0].test_outline_review_active());
+            frame(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)]);
+            assert!(!app.note_panels[0].test_outline_review_active());
+            assert_eq!(app.note_panels[0].note_content(), original);
+            frame(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)]);
+            app.note_panels[0].test_outline_review_fixture();
+            for _ in 0..4 { frame(&mut app, Vec::new()); }
+            let confirm = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Confirm section move").cloned().expect("confirm target");
+            frame(&mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())]);
+            frame(&mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+            let hint = dialog_hint_for_label(&app, "Confirm section move");
+            frame(&mut app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(confirm.response_id()));
+            assert_eq!(app.note_panels[0].note_content(), original);
+            frame(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)]);
+            assert!(!app.note_panels[0].test_outline_review_active());
+            assert_ne!(app.note_panels[0].note_content(), original);
+            frame(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)]);
+            app.note_panels[0].test_outline_review_fixture();
+            let generation = app.note_panels[0].jump_generation();
+            app.note_panels[0].replace_content_from_mutation("# Changed".into(), 1.0);
+            assert_ne!(app.note_panels[0].jump_generation(), generation);
+            for _ in 0..3 { frame(&mut app, Vec::new()); }
+            assert!(!app.note_panels[0].test_outline_review_active());
+            assert_eq!(app.note_panels[0].note_content(), "# Changed");
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn note_panel_outline_hint_focuses_before_selection() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                app.note_settings.outline_sidebar_enabled = true;
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.note_panel_default_size = (900.0, 640.0);
+                let mut panel = launcher_show_owner_note("jump-outline");
+                panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+                panel.test_outline_fixture();
+                app.note_panels.push(panel);
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+                };
+                for _ in 0..5 {
+                    frame(&mut app, Vec::new());
+                }
+                let layer = app.note_panels[0].host_layer_if_root().unwrap();
+                ctx.move_to_top(layer);
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                let registry = app.jump_mode_ui.retained_registry();
+                let row = registry
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Heading Two")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "outline target absent with owner {:?}; visible targets: {:?}",
+                            app.jump_mode_ui.frame_navigation_owner(),
+                            registry
+                                .metadata()
+                                .map(|target| target.label())
+                                .collect::<Vec<_>>()
+                        )
+                    })
+                    .response_id();
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Heading Two");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(row));
+                assert_eq!(app.note_panels[0].test_outline_selection(), None);
+                assert_eq!(app.note_panels[0].note_content(), "# One\n# Two");
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                assert_eq!(app.note_panels[0].test_outline_selection(), Some(6));
+                assert_eq!(app.note_panels[0].note_content(), "# One\n# Two");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn note_markdown_toolbar_jump_tracks_only_current_submenu() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (900.0, 680.0);
+        let mut panel = launcher_show_owner_note("jump-markdown-menu");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        let source = panel.note_content().to_owned();
+        app.push_note_panel(panel);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.note_panels[0].host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let (markdown, menu, clip) = app.note_panels[0].test_markdown_toolbar_menu().unwrap();
+        assert!(clip.contains_rect(menu));
+        let menu_id = markdown.with("popup");
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| {
+                    target.response_id() == markdown && target.metadata().label() == "Markdown"
+                }),
+            "the rendered Note toolbar publishes its actual menu opener"
+        );
+        ctx.memory_mut(|memory| memory.request_focus(markdown));
+        frame(&mut app, Vec::new());
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        assert!(egui::Popup::is_id_open(&ctx, menu_id));
+        let registry = app.jump_mode_ui.retained_registry();
+        let anchor = registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Block snippet")
+            .unwrap_or_else(|| {
+                panic!(
+                    "current Block snippet opener; owner {:?}, targets {:?}",
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    registry
+                        .metadata()
+                        .map(|target| target.label())
+                        .collect::<Vec<_>>()
+                )
+            })
+            .response_id();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Block snippet");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(anchor));
+        assert_eq!(app.note_panels[0].note_content(), source);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let registry = app.jump_mode_ui.retained_registry();
+        assert!(
+            !registry
+                .metadata()
+                .any(|target| target.label() == "Add Checkbox")
+        );
+        let heading = registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Heading 2")
+            .expect("current submenu heading")
+            .response_id();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Heading 2");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(heading));
+        assert_eq!(app.note_panels[0].note_content(), source);
+
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(egui::Popup::is_id_open(&ctx, menu_id));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(anchor));
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, menu_id));
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(app.note_panels[0].open);
+    }
+
+
+    #[test]
+    fn note_editor_context_jump_follows_the_keyboard_popup_and_unwinds_each_level() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (900.0, 680.0);
+        let mut panel = launcher_show_owner_note("jump-editor-context");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        let source = panel.note_content().to_owned();
+        app.push_note_panel(panel);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.note_panels[0].host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let editor = app.note_panels[0].test_editor_widget_id().unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        frame(&mut app, Vec::new());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(editor));
+        let popup = editor.with("popup");
+        frame(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::CTRL),
+                key_press(egui::Key::Period, egui::Modifiers::CTRL),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![
+                key_release(egui::Key::Period, egui::Modifiers::CTRL),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        let hint_target = |app: &mut LauncherApp, label| {
+            let response = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .unwrap_or_else(|| panic!("missing current menu target {label}"))
+                .response_id();
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(response));
+            assert_eq!(app.note_panels[0].note_content(), source);
+            response
+        };
+        let enter = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+        };
+        let markdown = hint_target(&mut app, "Markdown");
+        enter(&mut app);
+        let block = hint_target(&mut app, "Block snippet");
+        enter(&mut app);
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Add Checkbox")
+        );
+        hint_target(&mut app, "Heading 2");
+
+        app.set_jump_mode_enabled(false);
+        for expected in [Some(block), Some(markdown), Some(editor)] {
+            frame(
+                &mut app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            assert_eq!(ctx.memory(|memory| memory.focused()), expected);
+            assert_eq!(
+                egui::Popup::is_id_open(&ctx, popup),
+                expected != Some(editor)
+            );
+            frame(
+                &mut app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+        }
+        assert!(app.note_panels[0].open);
+        assert_eq!(app.note_panels[0].note_content(), source);
+    }
+
+
+    #[test]
+    fn note_preview_image_size_menu_keeps_keyboard_focus_during_width_edits() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let asset = workspace.root().join("size-fixture.png");
+        image::RgbaImage::from_pixel(80, 56, image::Rgba([32, 64, 96, 255]))
+            .save(&asset)
+            .unwrap();
+        let path = asset.to_string_lossy().replace('\\', "/");
+        let source = |width| format!("![Sample]({path}|{width})");
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (900.0, 680.0);
+        app.note_images_as_links = false;
+        let mut panel = launcher_show_owner_note("jump-preview-image-size");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+        panel.replace_content_from_mutation(source(80), 0.0);
+        app.push_note_panel(panel);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.note_panels[0].host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let target = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .unwrap_or_else(|| panic!("missing current preview image target {label}"))
+                .response_id()
+        };
+        let image = target(&app, "Open image");
+        let popup = image.with("popup");
+        ctx.memory_mut(|memory| memory.request_focus(image));
+        frame(&mut app, Vec::new());
+        let open = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                    key_press(egui::Key::F10, egui::Modifiers::SHIFT),
+                ],
+            );
+            frame(
+                app,
+                vec![
+                    key_release(egui::Key::F10, egui::Modifiers::SHIFT),
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+            assert!(egui::Popup::is_id_open(&ctx, popup));
+        };
+        open(&mut app);
+        let width = target(&app, "Image width");
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, "Image width");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(width));
+        assert_eq!(app.note_panels[0].note_content(), source(80));
+        for expected in [81, 82] {
+            frame(
+                &mut app,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+            );
+            frame(
+                &mut app,
+                vec![key_release(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+            );
+            assert_eq!(app.note_panels[0].note_content(), source(expected));
+            assert!(egui::Popup::is_id_open(&ctx, popup));
+        }
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(image));
+        assert!(app.image_panels.is_empty());
+        assert!(app.note_panels[0].open);
+
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        app.set_jump_mode_enabled(true);
+        app.note_panel_default_size = (900.0, 700.0);
+        app.note_panels[0].test_pop_out();
+        let identity = app.note_panels[0].prompt_identity();
+        let viewport = egui::ViewportId::from_hash_of(("note-panel-editor", identity));
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let native_image = app.note_panels[0]
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Open image")
+            .expect("rendered native image")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app.note_panels[0]
+            .test_native_jump()
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == "Open image")
+            .unwrap()
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(native_image)))
+        );
+        native(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                key_press(egui::Key::F10, egui::Modifiers::SHIFT),
+            ],
+        );
+        native(
+            &mut app,
+            vec![
+                key_release(egui::Key::F10, egui::Modifiers::SHIFT),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let native_labels = |app: &LauncherApp, label| {
+            app.note_panels[0]
+                .test_native_jump()
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == label)
+        };
+        assert!(native_labels(&app, "Image width"));
+        assert!(!native_labels(&app, "Open image"));
+        let changed = format!("![Changed source]({path}|92)");
+        app.note_panels[0].replace_content_from_mutation(changed.clone(), 1.0);
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        assert!(!native_labels(&app, "Image width"));
+        assert!(native_labels(&app, "Open image"));
+        assert_eq!(app.note_panels[0].note_content(), changed);
+    }
+
+    #[test]
+    fn note_panel_preview_task_jump_focus_is_not_activation() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                app.note_settings.task_lists_enabled = true;
+                app.note_settings.interactive_checkboxes_enabled = true;
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let note = crate::plugins::note::Note {
+                    title: "Preview task".into(),
+                    path: std::path::PathBuf::new(),
+                    content: "# Heading\n\n- [ ] item".into(),
+                    tags: Vec::new(),
+                    links: Vec::new(),
+                    slug: "jump-preview-task".into(),
+                    alias: None,
+                    aliases: Vec::new(),
+                    entity_refs: Vec::new(),
+                };
+                let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+                panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+                app.note_panels.push(panel);
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas()
+                };
+                for _ in 0..5 {
+                    frame(&mut app, Vec::new());
+                }
+                let layer = app.note_panels[0].host_layer_if_root().unwrap();
+                ctx.move_to_top(layer);
+                for _ in 0..3 {
+                    frame(&mut app, Vec::new());
+                }
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Task on line 3")
+                    .cloned()
+                    .expect("task checkbox target");
+                let original = app.note_panels[0].note_content().to_owned();
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Task on line 3");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.note_panels[0].note_content(), original);
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Space, egui::Modifiers::NONE)],
+                );
+                assert!(app.note_panels[0].note_content().contains("[x]"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn note_panel_jump_focuses_source_and_preserves_multiline_input() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let mut panel = launcher_show_owner_note("jump-note-panel");
+                panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+                let instance = panel.prompt_identity();
+                let original = panel.note_content().to_owned();
+                let original_query = app.query.clone();
+                app.note_panels.push(panel);
+
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+                };
+                for _ in 0..5 {
+                    frame(&mut app, Vec::new());
+                }
+                let layer = app.note_panels[0].host_layer_if_root().unwrap();
+                ctx.move_to_top(layer);
+                for _ in 0..3 {
+                    frame(&mut app, Vec::new());
+                }
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::NotePanel,
+                        instance
+                    }
+                );
+                let editor = app.note_panels[0].test_editor_widget_id().unwrap();
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                assert!(targets.iter().any(|target| {
+                    target.metadata().label() == "Note source editor"
+                        && target.response_id() == editor
+                }));
+                assert!(
+                    !targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Search query")
+                );
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Note source editor");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(editor));
+                assert_eq!(app.note_panels[0].note_content(), original);
+
+                frame(&mut app, vec![egui::Event::Text("λ".into())]);
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                frame(&mut app, vec![egui::Event::Text("β".into())]);
+                assert!(app.note_panels[0].note_content().contains("λ\nβ"));
+                assert_eq!(app.query, original_query);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn image_viewer_jump_uses_foreground_session_without_activation() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                let first = workspace.root().join("jump-first.png");
+                let second = workspace.root().join("jump-second.png");
+                let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([30, 60, 90, 255]));
+                image.save(&first).unwrap();
+                image.save(&second).unwrap();
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.open_image_panel(&first);
+                app.open_image_panel(&second);
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let first_session = app.image_panels[0].session();
+                let second_session = app.image_panels[1].session();
+                assert_ne!(first_session, second_session);
+                let first_layer = app.image_panels[0].host.root_layer().unwrap();
+                ctx.move_to_top(first_layer);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let rect = ctx
+                    .memory(|memory| memory.area_rect(first_layer.id))
+                    .unwrap();
+                let title = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(title, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::ImageViewer,
+                        instance: first_session
+                    }
+                );
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Open in Default Viewer")
+                    .cloned()
+                    .unwrap();
+                assert_eq!(
+                    target.id().surface(),
+                    &super::super::jump_mode::SurfaceId::dialog("image-viewer", first_session)
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Open in Default Viewer");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.image_panels[0].test_external_opens(), 0);
+                assert_eq!(app.image_panels[1].test_external_opens(), 0);
+                let second_layer = app.image_panels[1].host.root_layer().unwrap();
+                ctx.move_to_top(second_layer);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert_eq!(
+                    super::super::jump_mode::ui::visible_top_middle_layer(&ctx),
+                    Some(second_layer)
+                );
+                let second_rect = ctx
+                    .memory(|memory| memory.area_rect(second_layer.id))
+                    .unwrap();
+                let second_title = egui::Rect::from_min_size(
+                    second_rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(second_title, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::ImageViewer,
+                        instance: second_session
+                    }
+                );
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                let current = super::super::jump_mode::SurfaceId::dialog("image-viewer", second_session);
+                assert!(targets.iter().any(|target| {
+                    target.id().surface() == &current
+                        && target.metadata().label() == "Open in Default Viewer"
+                }));
+                assert!(targets.iter().all(|target| target.id().surface() == &current));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -20971,6 +23724,7 @@ mod tests {
         app.open_note_panel("source", None);
         app.note_panels[0].test_set_view_mode(crate::settings::NoteViewMode::Preview);
         app.note_panels[0].test_pop_out();
+        app.set_jump_mode_enabled(true);
         app.request_launcher_visibility(false);
         let source = egui::ViewportId::from_hash_of((
             "note-panel-editor",
@@ -20983,6 +23737,18 @@ mod tests {
             .test_todo_link()
             .expect("rendered todo link");
         assert!(enabled && clip.contains_rect(link));
+        let target = app.note_panels[0].test_native_jump().retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Open linked todo").cloned().expect("todo target");
+        run_host_viewport_frame(&ctx, &mut app, source, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false, false);
+        run_host_viewport_frame(&ctx, &mut app, source, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false, false);
+        let hint = app.note_panels[0].test_native_jump().active_session().unwrap().hint_map().assignments().iter()
+            .find(|assignment| assignment.target().label() == "Open linked todo").unwrap().hint().as_str().to_owned();
+        run_host_viewport_frame(&ctx, &mut app, source, vec![egui::Event::Text(hint)], false, false);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((source, Some(target.response_id())))
+        );
+        assert!(!app.todo_view_dialog.open);
         run_host_viewport_frame(
             &ctx,
             &mut app,
@@ -21328,6 +24094,246 @@ mod tests {
         workers.join_all();
     }
 
+    fn open_test_note_template_delete(ctx: &egui::Context, app: &mut LauncherApp) -> egui::Rect {
+        crate::plugins::note::save_template("pending", "fixture body").unwrap();
+        prepare_tool_dialog_root(ctx, app);
+        app.open_note_templates_from_origin(
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        for _ in 0..5 {
+            run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (rect, clip, enabled) = app
+            .notes_dialog
+            .template_manager
+            .test_control("delete-row/pending")
+            .expect("current template row Delete");
+        let rect = rect.intersect(clip);
+        assert!(
+            enabled && rect.is_positive(),
+            "the docked template row is interactive"
+        );
+        for pressed in [true, false] {
+            run_tool_dialog_frame(ctx, app, tool_dialog_pointer_events(rect, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.notes_dialog.template_manager.test_draft().2,
+            Some("pending")
+        );
+        for _ in 0..4 {
+            run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (rect, clip, enabled) = app
+            .notes_dialog
+            .template_manager
+            .test_control("delete-cancel")
+            .expect("current delete-window Cancel");
+        assert!(
+            enabled && rect.intersect(clip).is_positive(),
+            "the exact child must accept ordinary input; top={:?}, focus={:?}, root={:?}, root_input={}",
+            super::super::jump_mode::ui::visible_top_middle_layer(ctx),
+            super::super::jump_mode::ui::focused_response_layer(ctx),
+            app.note_templates_host.root_layer(),
+            app.native_ui_host_input_allowed(ctx, true),
+        );
+        rect.intersect(clip)
+    }
+
+    #[test]
+    fn note_templates_delete_cancel_works_with_jump_disabled() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(false);
+                let target = open_test_note_template_delete(&ctx, &mut app);
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(target, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                assert_eq!(app.notes_dialog.template_manager.test_draft().2, None);
+                assert!(app.notes_dialog.template_manager.is_open());
+                assert_eq!(
+                    crate::plugins::note::get_template("pending").unwrap(),
+                    "fixture body"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn note_templates_native_delete_child_has_own_targets() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use super::super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                app.notes_dialog.open();
+                app.notes_dialog.test_popout();
+                let pass = super::super::utility_host::ViewportPassProvenance::current(
+                    &ctx,
+                    egui::ViewportId::ROOT,
+                );
+                ctx.run_ui(egui::RawInput::default(), |_| {})
+                    .drop_without_applying_deltas();
+                let origin = app.notes_dialog.test_open_receipt(&ctx, pass).unwrap();
+                let parent = super::super::utility_host::ChildOpenOrigin::Parent(origin);
+                app.open_note_templates_from_origin(&parent);
+                assert!(app.note_templates_host.is_popped_out());
+                app.notes_dialog
+                    .template_manager
+                    .test_set_draft("draft", "body");
+                let instance = app.notes_dialog.template_manager.delete_instance().unwrap();
+                let viewport =
+                    super::super::utility_window_host::NoteTemplatesWindowHost::test_viewport(
+                        app.notes_dialog.template_manager.epoch(),
+                    );
+                for _ in 0..8 {
+                    run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                }
+                assert_eq!(
+                    app.note_templates_host.test_native_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::TemplateDelete,
+                        instance
+                    }
+                );
+                assert!(
+                    app.note_templates_host
+                        .test_native_target("Delete Template")
+                        .is_some()
+                );
+                assert!(
+                    app.note_templates_host
+                        .test_native_target("Cancel Delete")
+                        .is_some()
+                );
+                assert!(
+                    app.note_templates_host
+                        .test_native_target("Save Template")
+                        .is_none()
+                );
+                assert_eq!(
+                    app.notes_dialog.template_manager.test_draft().2,
+                    Some("pending")
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn unused_note_assets_hint_focuses_without_toggling_or_deleting() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            let path = workspace.root().join("unused.png");
+            std::fs::write(&path, b"asset").unwrap();
+            app.unused_assets_dialog.test_set_inventory(vec!["unused.png".into()], workspace.root().to_path_buf());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.open_unused_assets_from_origin(&super::super::utility_host::ChildOpenOrigin::<()>::Root);
+            for _ in 0..5 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let layer = app.unused_assets_host.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let title = egui::Rect::from_min_size(rect.min + egui::vec2(60.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(title, pressed), false).drop_without_applying_deltas(); }
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            assert!(app.jump_mode_ui.retained_registry().targets().iter().any(|target| target.metadata().label() == "Select unused.png"));
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false).drop_without_applying_deltas();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false).drop_without_applying_deltas();
+            let hint = dialog_hint_for_label(&app, "Select unused.png");
+            run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
+            assert_eq!(app.unused_assets_dialog.test_selection(), &[false]);
+            assert_eq!(std::fs::read(&path).unwrap(), b"asset");
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::NONE)], false).drop_without_applying_deltas();
+            assert_eq!(app.unused_assets_dialog.test_selection(), &[true]);
+            assert_eq!(std::fs::read(&path).unwrap(), b"asset");
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn note_templates_delete_hint_focuses_without_deleting() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                open_test_note_template_delete(&ctx, &mut app);
+                assert!(
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .any(|target| target.metadata().label() == "Delete Template")
+                );
+                assert!(
+                    !app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .any(|target| target.metadata().label() == "Save Template")
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Delete Template");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    app.notes_dialog.template_manager.test_draft().2,
+                    Some("pending")
+                );
+                assert_eq!(
+                    crate::plugins::note::get_template("pending").unwrap(),
+                    "fixture body"
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(app.notes_dialog.template_manager.test_draft().2, None);
+                assert!(app.notes_dialog.template_manager.is_open());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn note_auxiliary_hosts_reuse_instances_and_parent_presentation() {
         #[inline(never)]
@@ -21384,6 +24390,78 @@ mod tests {
         app.notes_dialog.close_from_app(&ctx);
         assert!(!app.notes_dialog.accepts_note_open(&origin));
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn notification_inbox_both_commands_open_the_same_retained_host_without_setup() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (mut app, _profile) = new_prompt_app(&ctx);
+                let inbox_plugin = crate::plugins::notification_inbox::NotificationInboxPlugin;
+                for alias in ["inbox", "notifications"] {
+                    let action = crate::plugin::Plugin::search(&inbox_plugin, alias).pop().unwrap();
+                    let invocation = crate::commands::parse_command(
+                        action,
+                        None,
+                        crate::commands::ActivationSource::Enter,
+                    )
+                    .unwrap();
+                    assert!(matches!(
+                        invocation.command,
+                        crate::commands::Command::Dialog(crate::commands::DialogCommand::NotificationInbox)
+                    ));
+                    app.dispatch_command_invocation(invocation);
+                    assert!(app.notification_inbox_dialog.open);
+                }
+                let session = app.notification_inbox_dialog.session();
+                assert!(app.notification_inbox.is_some());
+                app.close_notification_inbox();
+                assert!(!app.notification_inbox_dialog.open);
+                app.open_notification_inbox();
+                assert_ne!(app.notification_inbox_dialog.session(), session);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_operations_center_activity_requires_a_retained_exact_job() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::activity::{ActivityIncarnation, ActivityOperation, ActivityOwner, ActivitySlot};
+
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (mut app, _profile) = new_prompt_app(&ctx);
+                let aged_out = app
+                    .activity_center
+                    .start(
+                        ActivityOwner::FileTransfer,
+                        ActivitySlot::Primary,
+                        ActivityIncarnation::new(1),
+                        ActivityOperation::TransferFiles,
+                    )
+                    .unwrap();
+                app.activity_dialog.open();
+                app.activity_dialog.transfer_navigation = Some(aged_out.key());
+                assert!(!app.activity_dialog.transfer_job_expired);
+
+                app.complete_transfer_activity_navigation(&ctx);
+
+                assert!(app.activity_dialog.open);
+                assert!(app.activity_dialog.transfer_job_expired);
+                assert!(app.activity_dialog.transfer_navigation.is_none());
+                assert!(!app.file_operations_center_dialog.open);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -23134,6 +26212,89 @@ mod tests {
     }
 
     #[test]
+    fn sensitivity_jump_input_option_focuses_without_changing_settings() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| style.animation_time = 0.0);
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::CalculationPadDialog);
+            app.calculation_pad_dialog.test_replace_source("x = 1\ny = 2\nx + y");
+            let input = app.calculation_pad_dialog.test_line_id(0).unwrap();
+            app.calculation_pad_dialog.test_set_sensitivity(crate::calculation_pad::SensitivitySettings {
+                input_name: "x".into(), definition: crate::calculation_pad::SensitivityDefinition {
+                    input, start: "1".into(), end: "3".into(),
+                    sampling: crate::calculation_pad::Sampling::Count(3), outputs: vec![],
+                },
+            });
+            let root = egui::ViewportId::ROOT;
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            open_pad_config_menu(&ctx, &mut app, root, Some("Tools"));
+            let (button, clip, enabled) = app.calculation_pad_dialog.test_sensitivity_open().unwrap();
+            assert!(enabled && clip.contains_rect(button));
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(button, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let layer = app.calculation_sensitivity_host.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let title = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(title, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let input_rect = app.jump_mode_ui.retained_registry().targets().iter()
+                .find(|target| target.metadata().label() == "Input").unwrap().clipped_rect();
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(input_rect, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter()
+                .find(|target| target.metadata().label() == "y · line 2").cloned().expect("current input option is owned by the popup");
+            let before = app.calculation_pad_dialog.sensitivity_runtime(false).settings;
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false, false);
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false, false);
+            let hint = dialog_hint_for_label(&app, "y · line 2");
+            run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::Text(hint)], false, false);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.calculation_pad_dialog.sensitivity_runtime(false).settings, before);
+            assert!(app.calculation_pad_dialog.test_sensitivity_table().is_none());
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn dependency_jump_hint_focuses_line_without_selecting() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| style.animation_time = 0.0);
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::CalculationPadDialog);
+            app.calculation_pad_dialog.test_replace_source("α = 2\nα + 1");
+            let root = egui::ViewportId::ROOT;
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            open_pad_config_menu(&ctx, &mut app, root, Some("Tools"));
+            let (button, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
+            assert!(enabled && clip.contains_rect(button));
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(button, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let layer = app.calculation_dependency_host.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let title = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(title, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let label = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label().starts_with("r2 ·")).unwrap().metadata().label().to_owned();
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false, false);
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false, false);
+            let hint = dialog_hint_for_label(&app, &label);
+            run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::Text(hint)], false, false);
+            assert!(app.calculation_dependency_dialog.test_selected().is_none());
+            assert!(app.calculation_pad_dialog.inspector_context().selected_line.is_none());
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)], false, false);
+            assert!(app.calculation_dependency_dialog.test_selected().is_some());
+            assert!(app.calculation_pad_dialog.inspector_context().selected_line.is_none());
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
     fn dependency_explorer_opens_browses_and_navigates_current_pad() {
         #[inline(never)]
         fn boxed_app(
@@ -23367,6 +26528,1350 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
             "a second completion does not emit the same copy twice"
         );
+    }
+
+    #[test]
+    fn hotfolder_confirmation_jump_focus_does_not_accept() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.open_hotfolder_manager();
+                app.hotfolder_dialog.test_set_clear_confirmation(true);
+
+                let frame = |app: &mut LauncherApp, events, discard| {
+                    run_tool_dialog_frame(&ctx, app, events, discard)
+                        .drop_without_applying_deltas();
+                };
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new(), false);
+                }
+                let layer = egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("hotfolder_manager_window"),
+                );
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed), false);
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new(), false);
+                }
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                let keep_history = targets
+                    .iter()
+                    .find(|target| target.metadata().label() == "Keep History")
+                    .expect("the current decision owns Keep History")
+                    .response_id();
+                assert!(!targets.iter().any(|target| target.metadata().label() == "New Rule"));
+
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                );
+                let hint = dialog_hint_for_label(&app, "Keep History");
+                frame(&mut app, vec![egui::Event::Text(hint)], false);
+                assert_eq!(ctx.memory(|m| m.focused()), Some(keep_history));
+                assert!(app.hotfolder_dialog.test_clear_confirmation());
+
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    true,
+                );
+                assert!(app.hotfolder_dialog.test_clear_confirmation());
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                );
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                );
+                assert!(!app.hotfolder_dialog.test_clear_confirmation());
+
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                );
+                app.hotfolder_dialog.test_set_clear_confirmation(true);
+                frame(&mut app, Vec::new(), false);
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                );
+                assert!(!app.hotfolder_dialog.test_clear_confirmation());
+                assert!(app.hotfolder_dialog.open);
+                assert!(app.visible_flag.load(std::sync::atomic::Ordering::Relaxed));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn convert_jump_open_combo_exposes_owned_options_without_selecting() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.focus_panel(super::super::Panel::ConvertPanel);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer =
+                    egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"));
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(title, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let category = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Category")
+                    .unwrap()
+                    .clipped_rect();
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(category, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert!(egui::Popup::is_any_open(&ctx));
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                let target = targets
+                    .iter()
+                    .find(|target| target.metadata().label() == "Area")
+                    .cloned()
+                    .expect("the visible Area option belongs to the active popup");
+                assert!(
+                    !targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Value")
+                );
+                let before = app.convert_panel.test_category_label();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Area");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.convert_panel.test_category_label(), before);
+                assert!(egui::Popup::is_any_open(&ctx));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn convert_jump_replay_retains_value_without_effect() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.focus_panel(super::super::Panel::ConvertPanel);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer =
+                    egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"));
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..3 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), true).drop_without_applying_deltas();
+                let instance = app
+                    .jump_mode_ui
+                    .dialog_instance(NavigationDialogKind::Convert)
+                    .unwrap();
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::Convert,
+                        instance
+                    }
+                );
+                assert!(
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .any(|target| target.metadata().label() == "Value")
+                );
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn qr_jump_replay_retains_targets_without_effects() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::QrDialog);
+            app.qr_dialog.set_source("retained source".into());
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let layer = app.qr_host.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let point = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] {
+                run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(point, pressed), false).drop_without_applying_deltas();
+            }
+            for _ in 0..3 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let before = app.qr_dialog.source.clone();
+            let correction = app.qr_dialog.error_correction;
+            let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), true).drop_without_applying_deltas();
+            let instance = app.jump_mode_ui.dialog_instance(NavigationDialogKind::QrGenerator).unwrap();
+            assert_eq!(app.jump_mode_ui.frame_navigation_owner(), NavigationOwner::Dialog { kind: NavigationDialogKind::QrGenerator, instance });
+            assert!(app.jump_mode_ui.retained_registry().targets().iter().any(|target| target.metadata().label() == "Text or URL"));
+            assert_eq!(app.qr_dialog.source, before);
+            assert_eq!(app.qr_dialog.error_correction, correction);
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn file_lock_jump_focus_does_not_open_picker() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::FileLockDialog);
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let layer = app.file_lock_dialog.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let point = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(point, pressed), false).drop_without_applying_deltas(); }
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Choose file").cloned().unwrap();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false).drop_without_applying_deltas();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false).drop_without_applying_deltas();
+            let hint = dialog_hint_for_label(&app, "Choose file");
+            run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.file_lock_dialog.file_picker_calls_for_test(), 0);
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn folder_size_jump_focus_does_not_open_picker() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::FolderSizeDialog);
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let layer = app.folder_size_dialog.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let point = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(point, pressed), false).drop_without_applying_deltas(); }
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Choose folder").cloned().unwrap();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false).drop_without_applying_deltas();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false).drop_without_applying_deltas();
+            let hint = dialog_hint_for_label(&app, "Choose folder");
+            run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.folder_size_dialog.folder_picker_calls_for_test(), 0);
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn hash_jump_focus_does_not_calculate() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.focus_panel(super::super::Panel::HashGeneratorDialog);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer = app.hash_generator_host.root_layer().unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let instance = app
+                    .jump_mode_ui
+                    .dialog_instance(NavigationDialogKind::HashGenerator)
+                    .unwrap();
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::HashGenerator,
+                        instance
+                    },
+                );
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Calculate")
+                    .cloned()
+                    .unwrap();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Calculate");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(!app.hash_generator_dialog.is_running());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn chart_jump_targets_follow_docked_and_native_owner() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("values = [1, 2]");
+        app.focus_panel(super::super::Panel::CalculationChartDialog);
+        for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+        let layer = app.calculation_chart_host.root_layer().unwrap();
+        let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+        let point = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+        for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(point, pressed), false).drop_without_applying_deltas(); }
+        for _ in 0..12 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+        let instance = app.jump_mode_ui.dialog_instance(NavigationDialogKind::CalculationChart).unwrap();
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), NavigationOwner::Dialog { kind: NavigationDialogKind::CalculationChart, instance }, "top={:?} focus={:?} chart={layer:?}", super::super::jump_mode::ui::visible_top_middle_layer(&ctx), super::super::jump_mode::ui::focused_response_layer(&ctx));
+        let target = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "X label").cloned().unwrap_or_else(|| panic!("chart label target: labels={:?}, area={:?}, chart_open={}", app.jump_mode_ui.retained_registry().targets().iter().map(|target| target.metadata().label()).collect::<Vec<_>>(), ctx.memory(|memory| memory.area_rect(layer.id)), app.calculation_chart_dialog.open));
+        let before = app.calculation_pad_dialog.chart_runtime(false).definition;
+        let before_targets = app.jump_mode_ui.retained_registry().targets().iter().map(|target| format!("{:?}", target.id())).collect::<Vec<_>>();
+        let zoom_response = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Zoom out").map(|target| target.response_id());
+        let before_zoom = zoom_response.and_then(|id| ctx.read_response(id)).map(|response| response.rect);
+        run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false).drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some(), "owner={:?} outcome={:?} top={:?} focus={:?} zoom={:?}->{:?} before={:?} after={:?}", app.jump_mode_ui.frame_navigation_owner(), app.jump_mode_ui.last_outcome(), super::super::jump_mode::ui::visible_top_middle_layer(&ctx), super::super::jump_mode::ui::focused_response_layer(&ctx), before_zoom, zoom_response.and_then(|id| ctx.read_response(id)).map(|response| response.rect), before_targets, app.jump_mode_ui.retained_registry().targets().iter().map(|target| format!("{:?}", target.id())).collect::<Vec<_>>());
+        run_tool_dialog_frame(&ctx, &mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false).drop_without_applying_deltas();
+        let hint = dialog_hint_for_label(&app, "X label");
+        run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+        assert_eq!(app.calculation_pad_dialog.chart_runtime(false).definition, before);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())]);
+            frame(app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        focus(&mut app, "X vector");
+        assert!(!egui::Popup::is_any_open(&ctx));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        let label = "values (2 values)";
+        let target = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("docked chart X vector option").response_id();
+        assert!(!app.jump_mode_ui.retained_registry().metadata().any(|target| target.label() == "X label"));
+        focus(&mut app, label);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(target));
+        assert_eq!(app.calculation_pad_dialog.chart_runtime(false).definition, before);
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(matches!(
+            app.calculation_pad_dialog.chart_runtime(false).definition.map(|definition| definition.source),
+            Some(crate::calculation_pad::ChartSource::Vectors {
+                x: Some(crate::calculation_pad::ChartVectorReference::Named { name }),
+                ..
+            }) if name == "values"
+        ));
+        if egui::Popup::is_any_open(&ctx) {
+            chord(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        }
+        for _ in 0..2 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+        let pop = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Pop Out").unwrap().clipped_rect();
+        for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop, pressed), false).drop_without_applying_deltas(); }
+        assert!(app.calculation_chart_host.root_layer().is_none());
+        let viewport = super::super::utility_window_host::CalculationChartWindowHost::test_viewport(app.calculation_chart_dialog.epoch());
+        for _ in 0..4 { super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || { app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0.drop_without_applying_deltas(); }); }
+        assert!(app.calculation_chart_host.test_native_target("X label").is_some());
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        let opener = app.calculation_chart_host.test_native_target("X vector").expect("native X vector opener");
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(opener, pressed));
+        }
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let label = "Indexes 0…N−1";
+        let target = app.calculation_chart_host.test_native_jump().retained_registry()
+            .targets().iter().find(|target| target.metadata().label() == label)
+            .expect("current native index option").response_id();
+        let before = app.calculation_pad_dialog.chart_runtime(false).definition;
+        native(&mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())]);
+        native(&mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)]);
+        let hint = app.calculation_chart_host.test_native_jump().active_session()
+            .expect("native chart popup hints").hint_map().assignments().iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("native index hint").hint().as_str().to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(super::immediate_viewport_test_focused_id(), Some((viewport, Some(target))));
+        assert_eq!(app.calculation_pad_dialog.chart_runtime(false).definition, before);
+        native(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)]);
+        native(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)]);
+        assert!(matches!(
+            app.calculation_pad_dialog.chart_runtime(false).definition.map(|definition| definition.source),
+            Some(crate::calculation_pad::ChartSource::Vectors { x: None, .. })
+        ));
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn diagram_studio_jump_source_keeps_fresh_text_in_the_docked_and_native_editor() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let key = crate::settings::UtilityToolKey::parse("diagram-studio").unwrap();
+        app.utility_presentation_manager.remember(
+            &ctx,
+            key,
+            crate::settings::RememberedPresentation::Docked,
+        );
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let original = "flowchart TD\nA-->B";
+        app.diagram_studio_dialog.test_replace_source(original);
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            root(&mut app, Vec::new());
+        }
+        let layer = app
+            .diagram_studio_dialog
+            .owner_layer_if_root()
+            .expect("docked Diagram Studio");
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let label = "Diagram source editor";
+        let source = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("docked source target")
+            .response_id();
+        let arm_root = |app: &mut LauncherApp| {
+            root(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            root(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, label);
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(source));
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), original);
+        root(
+            &mut app,
+            vec![key_press(egui::Key::End, egui::Modifiers::COMMAND)],
+        );
+        root(
+            &mut app,
+            vec![key_release(egui::Key::End, egui::Modifiers::COMMAND)],
+        );
+        root(&mut app, vec![egui::Event::Text("λ".into())]);
+        let docked = app.diagram_studio_dialog.test_session().draft().to_owned();
+        assert!(docked.contains('λ'));
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+
+        let root_key = |app: &mut LauncherApp, key| {
+            root(app, vec![key_press(key, egui::Modifiers::NONE)]);
+            root(app, vec![key_release(key, egui::Modifiers::NONE)]);
+        };
+        let close_label = "Close";
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, "File");
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        root_key(&mut app, egui::Key::Enter);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == label)
+        );
+        arm_root(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        root_key(&mut app, egui::Key::Escape);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+
+        let close = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == close_label)
+            .expect("docked File Close response")
+            .response_id();
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, close_label);
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(close));
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+        root_key(&mut app, egui::Key::Enter);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == label)
+        );
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, "Cancel");
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+        root(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        root(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+
+        arm_root(&mut app);
+        let hint = dialog_hint_for_label(&app, "Pop Out");
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(app.diagram_studio_dialog.owner_layer_if_root(), Some(layer));
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+        root(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        root(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(app.diagram_studio_dialog.owner_layer_if_root().is_none());
+
+        let viewport = super::super::diagram_studio::viewport_id();
+        let native = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_size(viewport, egui::vec2(1200.0, 900.0), || {
+                run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+            });
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let source = app
+            .diagram_studio_dialog
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| panic!(
+                "native Diagram source missing: viewport={:?}, immediate={}, body={}, application_input={}, keyboard_owner={:?}, enabled_source={}, focus={:?}, labels={:?}",
+                app.diagram_studio_dialog.test_last_callback().0,
+                matches!(app.diagram_studio_dialog.test_last_callback().1, Some(egui::ViewportClass::Immediate)),
+                app.diagram_studio_dialog.test_last_callback().2,
+                app.diagram_studio_dialog.test_last_callback().3,
+                app.diagram_studio_dialog.test_native_jump().frame_navigation_owner(),
+                app.diagram_studio_dialog.test_source_editor_enabled(),
+                super::immediate_viewport_test_focused_id(),
+                app.diagram_studio_dialog.test_native_jump().retained_registry().metadata().map(|target| target.label()).collect::<Vec<_>>(),
+            ))
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .diagram_studio_dialog
+            .test_native_jump()
+            .active_session()
+            .expect("native Diagram Studio hints")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("native Diagram source hint")
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(source)))
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), docked);
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(&mut app, vec![egui::Event::Text("π".into())]);
+        let draft = app.diagram_studio_dialog.test_session().draft().to_owned();
+        assert!(draft.contains('λ'));
+        assert!(draft.contains("π") && draft.matches('\n').count() > docked.matches('\n').count());
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+
+        let focus_native = |app: &mut LauncherApp, label| {
+            native(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            native(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = app
+                .diagram_studio_dialog
+                .test_native_jump()
+                .active_session()
+                .expect("native Diagram menu hints")
+                .hint_map()
+                .assignments()
+                .iter()
+                .find(|assignment| assignment.target().label() == label)
+                .expect("current native menu action hint")
+                .hint()
+                .as_str()
+                .to_owned();
+            native(app, vec![egui::Event::Text(hint)]);
+        };
+        let native_enter = |app: &mut LauncherApp| {
+            native(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            native(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+        };
+        focus_native(&mut app, "File");
+        native_enter(&mut app);
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let close = app
+            .diagram_studio_dialog
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == close_label)
+            .expect("native File Close response")
+            .response_id();
+        focus_native(&mut app, close_label);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(close)))
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        native_enter(&mut app);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+    }
+
+    #[test]
+    fn diagram_embedded_dirty_escape_respects_root_query_focus() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(true);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let draft = "flowchart TD\nA-->B";
+        app.diagram_studio_dialog.test_replace_source(draft);
+        let frame = |app: &mut LauncherApp, events| {
+            let mut input = actual_query_input(true);
+            input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 1000.0)));
+            input.events = events;
+            app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+                ui.ctx().set_embed_viewports(true);
+                app.render_root_ui(ui);
+            }).0.drop_without_applying_deltas();
+        };
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(matches!(
+            app.diagram_studio_dialog.test_last_callback().1,
+            Some(egui::ViewportClass::EmbeddedWindow)
+        ));
+        app.diagram_studio_dialog.request_close();
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+
+        let query = egui::Id::new("query_input");
+        assert!(ctx.read_response(query).is_some());
+        ctx.memory_mut(|memory| memory.request_focus(query));
+        assert!(!app.diagram_studio_dialog.owner_owns_root_input(&ctx));
+        let escape = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+        };
+        escape(&mut app);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+
+        prepare_tool_dialog_root(&ctx, &mut app);
+        ctx.memory_mut(|memory| memory.surrender_focus(query));
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        ctx.move_to_top(app.diagram_studio_dialog.owner_layer_if_root().expect("reopened embedded owner"));
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let cancel = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Cancel")
+            .expect("embedded Diagram Studio dirty Cancel response")
+            .response_id();
+        ctx.memory_mut(|memory| memory.request_focus(cancel));
+        assert!(app.diagram_studio_dialog.owner_owns_root_input(&ctx));
+        escape(&mut app);
+        assert!(app.diagram_studio_dialog.open);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+    }
+
+    #[test]
+    fn diagram_colors_hints_preserve_source_until_fresh_apply() {
+        use crate::settings::{RememberedPresentation, UtilityToolKey};
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.utility_presentation_manager.remember(
+            &ctx,
+            UtilityToolKey::parse("diagram-studio").unwrap(),
+            RememberedPresentation::Docked,
+        );
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let source = "flowchart TD\nA-->B";
+        app.diagram_studio_dialog.test_replace_source(source);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        ctx.move_to_top(app.diagram_studio_dialog.owner_layer_if_root().unwrap());
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let key = |app: &mut LauncherApp, key| {
+            frame(app, vec![key_press(key, egui::Modifiers::NONE)]);
+            frame(app, vec![key_release(key, egui::Modifiers::NONE)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        focus(&mut app, "Colors");
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        key(&mut app, egui::Key::Enter);
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "Color preset");
+        key(&mut app, egui::Key::Enter);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        focus(&mut app, "Forest");
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        key(&mut app, egui::Key::Enter);
+        if egui::Popup::is_any_open(&ctx) {
+            key(&mut app, egui::Key::Escape);
+        }
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "Fill");
+        frame(&mut app, vec![egui::Event::Text("#234567".into())]);
+
+        let apply_label = "Apply colors";
+        for _ in 0..12 {
+            if app
+                .jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == apply_label)
+            {
+                break;
+            }
+            key(&mut app, egui::Key::Tab);
+            for _ in 0..3 {
+                frame(&mut app, Vec::new());
+            }
+        }
+        focus(&mut app, apply_label);
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        let before = app.diagram_studio_dialog.test_session().undo_depth();
+        key(&mut app, egui::Key::Enter);
+        let document = app.diagram_studio_dialog.test_session();
+        let style = crate::diagram::mermaid_source_style(document.draft()).unwrap();
+        assert_eq!(style.theme, Some(crate::diagram::MermaidTheme::Forest));
+        assert_eq!(
+            style.theme_variables.primary_color.map(|color| color.hex()),
+            Some("#234567".into()),
+        );
+        assert_eq!(document.undo_depth(), before + 1);
+    }
+
+    #[test]
+    fn diagram_visual_property_hint_waits_for_apply_to_change_the_object() {
+        use crate::settings::{RememberedPresentation, UtilityToolKey};
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.utility_presentation_manager.remember(
+            &ctx,
+            UtilityToolKey::parse("diagram-studio").unwrap(),
+            RememberedPresentation::Docked,
+        );
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1520.0, 1120.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        ctx.move_to_top(app.diagram_studio_dialog.owner_layer_if_root().unwrap());
+        let settle = |app: &mut LauncherApp| {
+            for _ in 0..5 {
+                frame(app, Vec::new());
+            }
+        };
+        settle(&mut app);
+        let key = |app: &mut LauncherApp, key, mods| {
+            frame(app, vec![key_press(key, mods)]);
+            frame(app, vec![key_release(key, mods)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        for label in ["File", "New Visual", "Add text"] {
+            let before = app
+                .diagram_studio_dialog
+                .test_selected_visual_text()
+                .map(str::to_owned);
+            focus(&mut app, label);
+            assert_eq!(
+                app.diagram_studio_dialog.test_selected_visual_text(),
+                before.as_deref()
+            );
+            key(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+            settle(&mut app);
+        }
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("New text")
+        );
+        focus(&mut app, "Ink");
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("New text")
+        );
+        let inspector = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Ink")
+            .expect("visible Visual object ink").clipped_rect().center();
+        let reveal_in_inspector = |app: &mut LauncherApp, label| {
+            for _ in 0..8 {
+                if app.jump_mode_ui.retained_registry().targets().iter().any(|target|
+                    target.eligible() && target.metadata().label() == label) {
+                    return;
+                }
+                frame(app, vec![
+                    egui::Event::PointerMoved(inspector),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -50.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                settle(app);
+            }
+            panic!("expected visible Visual property {label:?}");
+        };
+        reveal_in_inspector(&mut app, "Text");
+        focus(&mut app, "Text");
+        key(&mut app, egui::Key::A, egui::Modifiers::COMMAND);
+        frame(
+            &mut app,
+            vec![egui::Event::Text("Keyboard revision".into())],
+        );
+        settle(&mut app);
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("New text")
+        );
+
+        reveal_in_inspector(&mut app, "Apply properties");
+        focus(&mut app, "Apply properties");
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("New text")
+        );
+        key(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.diagram_studio_dialog.test_selected_visual_text(),
+            Some("Keyboard revision")
+        );
+    }
+
+    #[test]
+    fn diagram_viewer_jump_has_its_own_docked_and_native_owner() {
+        use crate::settings::{RememberedPresentation, UtilityToolKey};
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        for key in ["diagram-studio", "diagram-viewer"] {
+            app.utility_presentation_manager.remember(
+                &ctx,
+                UtilityToolKey::parse(key).unwrap(),
+                RememberedPresentation::Docked,
+            );
+        }
+        app.focus_panel(super::super::Panel::DiagramStudioDialog);
+        let draft = "flowchart TD\nA[Alpha] --> B[Bravo]";
+        app.diagram_studio_dialog.test_replace_source(draft);
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1520.0, 1120.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            root(&mut app, Vec::new());
+        }
+        let studio = app.diagram_studio_dialog.owner_layer_if_root().unwrap();
+        ctx.move_to_top(studio);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let arm_root = |app: &mut LauncherApp| {
+            root(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            root(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        let focus_root = |app: &mut LauncherApp, label| {
+            arm_root(app);
+            let hint = dialog_hint_for_label(app, label);
+            root(app, vec![egui::Event::Text(hint)]);
+        };
+        let enter_root = |app: &mut LauncherApp| {
+            root(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            root(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+        };
+        focus_root(&mut app, "Open viewer");
+        assert!(
+            app.diagram_studio_dialog
+                .embedded_viewer_layer_if_root()
+                .is_none()
+        );
+        enter_root(&mut app);
+        for _ in 0..5 {
+            root(&mut app, Vec::new());
+        }
+        let viewer = app
+            .diagram_studio_dialog
+            .embedded_viewer_layer_if_root()
+            .expect("docked Viewer layer");
+        ctx.move_to_top(viewer);
+        let header = ctx
+            .memory(|memory| memory.area_rect(viewer.id))
+            .expect("Viewer area");
+        let title =
+            egui::Rect::from_min_size(header.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(title, pressed));
+        }
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Diagram source editor")
+        );
+        focus_root(&mut app, "Pop Out");
+        assert_eq!(
+            app.diagram_studio_dialog.embedded_viewer_layer_if_root(),
+            Some(viewer)
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+        enter_root(&mut app);
+        assert!(
+            app.diagram_studio_dialog
+                .embedded_viewer_layer_if_root()
+                .is_none()
+        );
+
+        let viewport = super::super::diagram_studio::viewer_viewport_id();
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false)
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let label = "Close viewer";
+        let jump = app.diagram_studio_dialog.test_viewer_jump();
+        assert!(
+            !jump
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Diagram source editor")
+        );
+        let close = jump
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("actual native Viewer close")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .diagram_studio_dialog
+            .test_viewer_jump()
+            .active_session()
+            .expect("native Viewer hints")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("native Close viewer hint")
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(close)))
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        assert!(!app.diagram_studio_dialog.test_is_viewer_open());
+        assert_eq!(
+            app.diagram_studio_dialog.owner_layer_if_root(),
+            Some(studio)
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), draft);
     }
 
     #[test]
@@ -23645,6 +28150,552 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
             [RootDialogEffect::SaveConverterPreferences]
         ));
+    }
+
+    #[test]
+    fn data_recovery_confirmation_jump_requires_retained_fresh_cancel() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.data_recovery_dialog
+                    .open(crate::commands::DataDialogFocus::Overview)
+                    .unwrap();
+                app.focus_panel(super::super::Panel::DataRecoveryDialog);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let intent = PendingRecoveryIntent::Reset {
+                    store_id: crate::persistence::PersistentStoreId::Settings,
+                };
+                app.queue_data_recovery_confirmation(intent.clone());
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                assert!(
+                    targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Confirm")
+                );
+                assert!(
+                    targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Cancel")
+                );
+                assert!(
+                    !targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Backups")
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.jump_mode_ui.active_session().is_some());
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.confirm_modal.is_open());
+                assert_eq!(app.pending_data_recovery, Some(intent.clone()));
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Cancel");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(app.pending_data_recovery, Some(intent.clone()));
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    true,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(app.pending_data_recovery, Some(intent));
+                assert!(app.confirm_modal.is_open());
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.pending_data_recovery.is_none());
+                assert!(!app.confirm_modal.is_open());
+                assert!(app.data_recovery_dialog.open);
+                for jump_enabled in [true, false] {
+                    app.set_jump_mode_enabled(jump_enabled);
+                    app.queue_data_recovery_confirmation(PendingRecoveryIntent::Reset {
+                        store_id: crate::persistence::PersistentStoreId::Settings,
+                    });
+                    for _ in 0..6 {
+                        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                            .drop_without_applying_deltas();
+                    }
+                    assert!(app.confirm_modal.is_open());
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    assert!(
+                        !app.confirm_modal.is_open(),
+                        "Escape cancels the current child"
+                    );
+                    assert!(app.pending_data_recovery.is_none());
+                    assert!(
+                        app.data_recovery_dialog.open,
+                        "Escape must preserve the parent"
+                    );
+                    assert!(
+                        app.visible_flag_state(),
+                        "Escape must not hide the launcher"
+                    );
+                }
+                app.queue_data_recovery_confirmation(PendingRecoveryIntent::Reset {
+                    store_id: crate::persistence::PersistentStoreId::Settings,
+                });
+                app.confirm_modal
+                    .open_custom("A different request", "Generic confirmation");
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                    .drop_without_applying_deltas();
+                assert!(app.pending_data_recovery.is_none());
+                assert!(
+                    app.confirm_modal.is_open(),
+                    "replacing the modal must not close the generic request"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn data_recovery_jump_focus_and_discard_do_not_change_section() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.data_recovery_dialog
+                    .open(crate::commands::DataDialogFocus::Overview)
+                    .unwrap();
+                app.focus_panel(super::super::Panel::DataRecoveryDialog);
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer =
+                    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Data & Recovery")));
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Backups")
+                    .cloned()
+                    .unwrap();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Backups");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(
+                    app.data_recovery_dialog.test_section(),
+                    super::super::data_recovery_dialog::DataDialogSection::StorageHealth
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    true,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.data_recovery_dialog.test_section(),
+                    super::super::data_recovery_dialog::DataDialogSection::StorageHealth
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.data_recovery_dialog.test_section(),
+                    super::super::data_recovery_dialog::DataDialogSection::Backups
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn calendar_editor_jump_focus_requires_fresh_save_activation() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.open_calendar_editor(None, None);
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer = app
+                    .calendar_panel_root_layer(super::super::Panel::CalendarEventEditor)
+                    .unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Save event")
+                    .cloned()
+                    .expect("editor owns Save");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Save event");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(!app.calendar_event_editor.test_has_error("title"));
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.calendar_editor_open);
+                assert!(app.calendar_event_editor.test_has_error("title"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn calendar_jump_focus_then_enter_changes_month_once() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let date = chrono::NaiveDate::from_ymd_opt(2026, 4, 12).unwrap();
+                app.open_calendar_popover(Some(date));
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer = app
+                    .calendar_panel_root_layer(super::super::Panel::CalendarPopover)
+                    .unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Next month")
+                    .cloned()
+                    .expect("Calendar owns its toolbar");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Next month");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.calendar_selected_date, Some(date));
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.calendar_selected_date,
+                    chrono::NaiveDate::from_ymd_opt(2026, 5, 12)
+                );
+                assert!(!app.calendar_editor_open);
+
+                let focus_date = |app: &mut LauncherApp, label: &str| {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        app,
+                        vec![
+                            key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                            egui::Event::Text(" ".into()),
+                        ],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    run_tool_dialog_frame(
+                        &ctx,
+                        app,
+                        vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    let before = app.calendar_selected_date;
+                    let hint = dialog_hint_for_label(app, label);
+                    run_tool_dialog_frame(&ctx, app, vec![egui::Event::Text(hint)], false)
+                        .drop_without_applying_deltas();
+                    assert_eq!(app.calendar_selected_date, before);
+                    assert!(!app.calendar_editor_open);
+                };
+
+                focus_date(&mut app, "Date 2026-05-14");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.calendar_selected_date,
+                    chrono::NaiveDate::from_ymd_opt(2026, 5, 15)
+                );
+                assert!(!app.calendar_editor_open);
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+
+                focus_date(&mut app, "Date 2026-05-13");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.calendar_editor_open);
+                assert_eq!(app.calendar_event_editor.test_start_date(), "2026-05-13");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -25318,7 +30369,7 @@ mod tests {
             }
             assert!(!app.programmer_inspector_dialog.open);
             workers.join_all();
-            let saved = crate::settings::Settings::load(path).unwrap();
+            let saved = crate::settings::Settings::load(&path).unwrap();
             assert_eq!(
                 saved.utility_presentations.get(key),
                 Some(crate::settings::RememberedPresentation::Popout)
@@ -25383,7 +30434,7 @@ mod tests {
             assert!(!app2.programmer_inspector_host.is_popped_out());
             workers2.join_all();
             assert_eq!(
-                crate::settings::Settings::load(path)
+                crate::settings::Settings::load(&path)
                     .unwrap()
                     .utility_presentations
                     .get(key),
@@ -25421,6 +30472,38 @@ mod tests {
         assert!(!app.calculation_pad_dialog.test_completion_visible());
         run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false, false);
         assert!(app.calculation_pad_dialog.test_close_pending());
+    }
+
+    #[test]
+    fn programmer_inspector_jump_focuses_bit_without_toggling() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| style.animation_time = 0.0);
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+            let root = egui::ViewportId::ROOT;
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let layer = app.programmer_inspector_host.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let title = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(title, pressed), false, false); }
+            for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter()
+                .find(|target| target.eligible() && target.metadata().label().strip_prefix("Bit ").is_some_and(|index| index.parse::<u32>().is_ok())).cloned().expect("visible bit-cell target");
+            let label = target.metadata().label().to_owned();
+            let before = app.programmer_inspector_dialog.test_value();
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false, false);
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false, false);
+            let hint = dialog_hint_for_label(&app, &label);
+            run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::Text(hint)], false, false);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.programmer_inspector_dialog.test_value(), before);
+            run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)], false, false);
+            assert_ne!(app.programmer_inspector_dialog.test_value(), before);
+        }).unwrap().join().unwrap();
     }
 
     #[test]
@@ -27033,6 +32116,104 @@ mod tests {
             assert_eq!(host.presentation(), UtilityPresentation::Docked);
         }
         workers2.join_all();
+    }
+
+    #[test]
+    fn date_time_studio_jump_focus_requires_fresh_copy_activation() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::commands::DialogCommandHost;
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                DialogCommandHost::open_date_time_studio_dialog(&mut app);
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer = app.date_time_studio_dialog.root_layer().unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Copy difference")
+                    .cloned()
+                    .expect("current copy target");
+                let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Copy difference");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).iter().any(
+                    |effect| matches!(
+                        effect,
+                        RootDialogEffect::CopyText {
+                            owner: DialogCopyOwner::DateTimeStudio,
+                            ..
+                        }
+                    )
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -29601,6 +34782,141 @@ mod tests {
     }
 
     #[test]
+    fn folder_size_keyboard_focus_and_activate_drills_selected_directory() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                ctx.all_styles_mut(|style| style.animation_time = 0.0);
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let fixture = crate::folder_size::disposable_scan_fixture_root();
+                std::fs::create_dir_all(fixture.path().join("outer/inner")).unwrap();
+                std::fs::write(fixture.path().join("direct.txt"), b"direct contents").unwrap();
+                open_folder_size_through_plugin(&mut app);
+                let root = egui::ViewportId::ROOT;
+                app.folder_size_dialog
+                    .set_folder_choice_for_test(Some(fixture.path().to_path_buf()));
+                click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+                click_folder_size_host_control(&ctx, &mut app, root, "scan");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while app.folder_size_dialog.session_view_for_test().is_busy() {
+                    run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+                click_folder_size_host_control(&ctx, &mut app, root, "sort/Name");
+                click_folder_size_host_control(&ctx, &mut app, root, "row/direct.txt");
+                run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+                assert_eq!(
+                    app.folder_size_dialog.test_selected_row_path(),
+                    Some(fixture.path().join("direct.txt")),
+                    "the file is the accepted selection before the arrow key",
+                );
+                let file_target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Entry direct.txt")
+                    .expect("the selected file is a current keyboard target");
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(file_target.response_id())
+                );
+                assert_eq!(
+                    app.folder_size_dialog.test_action_enabled("drill"),
+                    Some(false)
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    vec![key_press(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    vec![key_release(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert_eq!(
+                    app.folder_size_dialog.test_selected_row_path(),
+                    Some(fixture.path().join("outer")),
+                    "ArrowDown selects the next directory in the sorted current list",
+                );
+                assert_eq!(
+                    app.folder_size_dialog.test_action_enabled("drill"),
+                    Some(true)
+                );
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Open in Folder Size")
+                    .cloned()
+                    .expect("selected directory offers a Jump target");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Open in Folder Size");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(app.folder_size_dialog.test_navigation_state().2.is_none());
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.folder_size_dialog.test_navigation_state().3.as_deref(),
+                    Some(fixture.path().join("outer").as_path())
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn folder_size_treemap_links_selection_drill_and_view_modes() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
@@ -31337,6 +36653,1578 @@ mod tests {
         assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
         assert!(!app.markdown_studio_dialog.test_is_dirty());
         assert_eq!(app.markdown_studio_dialog.test_undo_depth(), 0);
+    }
+
+
+
+
+
+
+    fn show_docked_pad_jump_fixture(ctx: &egui::Context, app: &mut LauncherApp, source: &str) {
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(ctx, app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source(source);
+        for _ in 0..6 {
+            pad_jump_test_frame(ctx, app, Vec::new());
+        }
+        ctx.move_to_top(app.calculation_pad_dialog.host_layer_if_root().unwrap());
+        for _ in 0..4 {
+            pad_jump_test_frame(ctx, app, Vec::new());
+        }
+    }
+
+    fn pad_jump_test_frame(ctx: &egui::Context, app: &mut LauncherApp, events: Vec<egui::Event>) {
+        run_tool_dialog_frame_at_size(ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+            .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn calculation_pad_result_context_hints_navigate_only_after_fresh_enter() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "amount = 7\nmeasure = amount + 1";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        let result = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Result r2 · measure")
+            .expect("retained exact result response")
+            .response_id();
+        focus(&mut app, "Result r2 · measure");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(result));
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert!(!app.calculation_pad_dialog.test_has_selected_result());
+        chord(&mut app, egui::Key::Tab, egui::Modifiers::SHIFT);
+        let previous = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Result r1 · amount")
+            .expect("prior result row")
+            .response_id();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(previous));
+        chord(&mut app, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(result));
+        chord(&mut app, egui::Key::F10, egui::Modifiers::SHIFT);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let popup = result.with("popup");
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        let go = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Go to source")
+            .expect("retained current row action")
+            .response_id();
+        focus(&mut app, "Go to source");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(go));
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert!(!app.calculation_pad_dialog.test_has_selected_result());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let editor = egui::Id::new("calculation-pad-source");
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(editor));
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        let selection = state.cursor.char_range().unwrap();
+        assert_eq!(selection.primary.index.0, original.find("measure").unwrap());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn calculation_pad_input_hints_require_fresh_select_and_apply() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "amount = 7\namount + 1";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        app.calculation_pad_dialog
+            .test_show_input_and_watch_panels();
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+
+        focus(&mut app, "Choose inputs");
+        assert_eq!(app.calculation_pad_dialog.test_selected_input_count(), 0);
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        let candidate = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label().contains("amount")
+                    && target.metadata().kind() == super::super::jump_mode::TargetKind::Checkbox
+            })
+            .expect("current amount chooser checkbox");
+        let label = candidate.metadata().label().to_owned();
+        let id = candidate.response_id();
+        focus(&mut app, &label);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(app.calculation_pad_dialog.test_selected_input_count(), 0);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(app.calculation_pad_dialog.test_selected_input_count(), 1);
+        if egui::Popup::is_any_open(&ctx) {
+            chord(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        }
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "amount value");
+        chord(&mut app, egui::Key::A, egui::Modifiers::COMMAND);
+        frame(&mut app, vec![egui::Event::Text("9".into())]);
+        frame(&mut app, Vec::new());
+        focus(&mut app, "Apply amount");
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("amount = 9\namount + 1")
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "Calculation Pad source editor");
+        chord(&mut app, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn calculation_pad_input_chooser_tab_reveals_offscreen_checks() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let source = (0..20)
+            .map(|index| format!("amount{index} = {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        show_docked_pad_jump_fixture(&ctx, &mut app, &source);
+        app.calculation_pad_dialog
+            .test_show_input_and_watch_panels();
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        focus(&mut app, "Choose inputs");
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let later = "amount12 · line 13";
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == later)
+        );
+        focus(&mut app, "amount0 · line 1");
+        for _ in 0..12 {
+            chord(&mut app, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        let focused = ctx
+            .memory(|memory| memory.focused())
+            .expect("chooser retains ordinary Tab focus");
+        let target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.response_id() == focused)
+            .expect("focused offscreen checkbox was revealed");
+        assert_eq!(target.metadata().label(), later);
+        assert_eq!(app.calculation_pad_dialog.test_selected_input_count(), 0);
+    }
+
+    #[test]
+    fn calculation_pad_watch_reorder_keeps_focus_on_its_named_control() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "alpha = 1\nbeta = 2\ngamma = 3";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        app.calculation_pad_dialog
+            .test_show_input_and_watch_panels();
+        app.calculation_pad_dialog
+            .test_set_watch_names(&["alpha", "beta", "gamma"]);
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let label = "Move alpha down";
+        let response = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("current alpha watch move")
+            .response_id();
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(response));
+        assert_eq!(
+            app.calculation_pad_dialog.test_watch_names(),
+            ["alpha", "beta", "gamma"]
+        );
+
+        for expected in [["beta", "alpha", "gamma"], ["beta", "gamma", "alpha"]] {
+            frame(
+                &mut app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            frame(
+                &mut app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            assert_eq!(app.calculation_pad_dialog.test_watch_names(), expected);
+            if expected[1] == "alpha" {
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(response));
+            }
+        }
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn calculation_pad_replace_hint_keeps_typing_in_the_editor_tool() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "amount = 7";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Calculation Pad source editor");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        chord(&mut app, egui::Key::H, egui::Modifiers::COMMAND);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(
+            app.calculation_pad_dialog.test_editor_tools(),
+            (true, "", "")
+        );
+        let replacement_id = egui::Id::new("calculation-pad-replace");
+        let replacement_label = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.response_id() == replacement_id)
+            .expect("retained replacement entry")
+            .metadata()
+            .label()
+            .to_owned();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, &replacement_label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(replacement_id));
+        assert_eq!(
+            app.calculation_pad_dialog.test_editor_tools(),
+            (true, "", "")
+        );
+        frame(&mut app, vec![egui::Event::Text("雪".into())]);
+        assert_eq!(
+            app.calculation_pad_dialog.test_editor_tools(),
+            (true, "", "雪")
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        arm(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        chord(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.calculation_pad_dialog.test_editor_tools().0);
+        chord(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.calculation_pad_dialog.test_editor_tools().0);
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn calculation_pad_completion_hint_requires_fresh_acceptance() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        show_docked_pad_jump_fixture(&ctx, &mut app, "");
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Calculation Pad source editor");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        frame(&mut app, vec![egui::Event::Text("sqr".into())]);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqr"));
+        assert!(app.calculation_pad_dialog.test_completion_visible());
+        let candidate = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label().contains("sqrt"))
+            .expect("current sqrt completion response");
+        let id = candidate.response_id();
+        let label = candidate.metadata().label().to_owned();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, &label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqr"));
+        assert!(app.calculation_pad_dialog.test_completion_visible());
+
+        let editor = egui::Id::new("calculation-pad-source");
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(0),
+            )));
+        state.store(&ctx, editor);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqr"));
+
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Calculation Pad source editor");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::End, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::End, egui::Modifiers::NONE)],
+        );
+        frame(&mut app, Vec::new());
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, &label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqr"));
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("sqrt()"));
+        assert!(!app.calculation_pad_dialog.test_completion_visible());
+    }
+
+    #[test]
+    fn calculation_pad_rename_hints_focus_the_current_review_without_applying() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original = "amount = 7\namount + 1";
+        show_docked_pad_jump_fixture(&ctx, &mut app, original);
+        let frame = |app: &mut LauncherApp, events| pad_jump_test_frame(&ctx, app, events);
+        let chord = |app: &mut LauncherApp, key, modifiers| {
+            frame(app, vec![key_press(key, modifiers)]);
+            frame(app, vec![key_release(key, modifiers)]);
+        };
+        let focus = |app: &mut LauncherApp, label| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+        };
+        focus(&mut app, "Calculation Pad source editor");
+        chord(&mut app, egui::Key::Home, egui::Modifiers::COMMAND);
+        chord(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        chord(&mut app, egui::Key::F10, egui::Modifiers::SHIFT);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let popup = egui::Id::new("calculation-pad-source").with("popup");
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        focus(&mut app, "Rename Variable");
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Calculation Pad source editor")
+        );
+        focus(&mut app, "New name");
+        chord(&mut app, egui::Key::A, egui::Modifiers::COMMAND);
+        frame(&mut app, vec![egui::Event::Text("total".into())]);
+        frame(&mut app, Vec::new());
+        focus(&mut app, "Preview rename");
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Apply rename")
+        );
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus(&mut app, "Apply rename");
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        chord(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("total = 7\ntotal + 1")
+        );
+    }
+
+    #[test]
+    fn calculation_pad_document_decision_hints_and_escape_keep_the_dirty_draft() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "draft = 42";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.calculation_pad_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        app.calculation_pad_dialog.request_close();
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            app.calculation_pad_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        let registry = app.jump_mode_ui.retained_registry();
+        assert_eq!(registry.len(), 3);
+        let discard = registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Discard")
+            .expect("current Pad Discard")
+            .response_id();
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        let escape = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Discard");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(discard));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        arm(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        escape(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            app.calculation_pad_dialog
+                .test_pending_transition()
+                .is_some()
+        );
+        app.set_jump_mode_enabled(false);
+        escape(&mut app);
+        assert!(
+            app.calculation_pad_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert!(app.calculation_pad_dialog.open);
+        assert!(app.calculation_pad_dialog.test_is_dirty());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        assert!(app.visible_flag_state());
+
+        app.calculation_pad_dialog
+            .test_apply_save_as("Conflict fixture");
+        let saved = app
+            .calculation_pad_dialog
+            .test_current_document_id()
+            .unwrap();
+        let modified = "draft = 43";
+        app.calculation_pad_dialog.test_replace_source(modified);
+        app.calculation_pad_dialog.test_stage_disk_conflict();
+        app.set_jump_mode_enabled(true);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let registry = app.jump_mode_ui.retained_registry();
+        assert!(
+            registry
+                .metadata()
+                .any(|target| target.label() == "Keep Editing")
+        );
+        assert!(
+            !registry
+                .metadata()
+                .any(|target| target.label() == "Config Menu")
+        );
+        let save_as = registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Save As…")
+            .expect("current conflict offers a safe copy route")
+            .response_id();
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Save As…");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(save_as));
+        assert_eq!(
+            app.calculation_pad_dialog.test_current_document_id(),
+            Some(saved)
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(modified));
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Document name")
+        );
+        assert_eq!(
+            app.calculation_pad_dialog.test_current_document_id(),
+            Some(saved)
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(modified));
+    }
+
+    #[test]
+    fn calculation_pad_config_menu_hints_follow_the_innermost_options() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "amount = 7";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.calculation_pad_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let target = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let hint_focus = |app: &mut LauncherApp, label| {
+            let id = target(app, label).unwrap_or_else(|| panic!("no current Pad target {label}"));
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+            id
+        };
+        let enter = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+        };
+        let config = hint_focus(&mut app, "Config Menu");
+        let popup = config.with("popup");
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        enter(&mut app);
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert!(target(&app, "Calculation Pad source editor").is_none());
+        let submenu = hint_focus(&mut app, "Source display");
+        enter(&mut app);
+        assert!(target(&app, "Document").is_none());
+        let before = app.calculation_pad_dialog.test_display_preferences();
+        hint_focus(&mut app, "Word wrap");
+        assert_eq!(
+            app.calculation_pad_dialog.test_display_preferences(),
+            before
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(submenu));
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn calculation_reference_review_fences_current_caret_and_unwinds_before_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "threshold = 7\nthreshold";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let pad_layer = app.calculation_pad_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(pad_layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let editor = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Calculation Pad source editor")
+            .expect("current Pad source")
+            .response_id();
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        frame(&mut app, Vec::new());
+        frame(&mut app, vec![key_press(egui::Key::End, egui::Modifiers::NONE)]);
+        frame(&mut app, vec![key_release(egui::Key::End, egui::Modifiers::NONE)]);
+        app.calculation_pad_dialog.test_open_examples();
+        app.calculation_pad_dialog
+            .test_prepare_reference_review(&ctx);
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.calculation_pad_dialog.examples_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let bounds = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+        let title =
+            egui::Rect::from_min_size(bounds.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(title, pressed));
+        }
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let labels = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let confirm = labels(&app, "Confirm Insert").expect("actual reviewed insert response");
+        assert!(labels(&app, "Search API reference").is_none());
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, "Confirm Insert");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(confirm));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        assert!(labels(&app, "Cancel insertion").is_some());
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!app.calculation_pad_dialog.test_has_reference_review());
+        assert!(
+            app.calculation_pad_dialog
+                .examples_layer_if_root()
+                .is_some()
+        );
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        app.set_jump_mode_enabled(true);
+        app.calculation_pad_dialog
+            .test_prepare_reference_review(&ctx);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(labels(&app, "Confirm Insert").is_some());
+        let changed = "threshold = 8\nthreshold";
+        app.calculation_pad_dialog.test_replace_source(changed);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(labels(&app, "Confirm Insert").is_none());
+        assert!(!app.calculation_pad_dialog.test_has_reference_review());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(changed));
+    }
+
+    #[test]
+    fn calculation_reference_jump_owns_search_without_retargeting_pad() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "draft = 42";
+        app.calculation_pad_dialog.test_replace_source(original);
+        app.calculation_pad_dialog.test_open_examples();
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let reference = app.calculation_pad_dialog.examples_layer_if_root().unwrap();
+        ctx.move_to_top(reference);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let bounds = ctx.memory(|memory| memory.area_rect(reference.id)).unwrap();
+        let title =
+            egui::Rect::from_min_size(bounds.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(title, pressed));
+        }
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let target = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let focus_hint = |app: &mut LauncherApp, label| {
+            let response =
+                target(app, label).unwrap_or_else(|| panic!("no current Reference target {label}"));
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(response));
+        };
+        assert!(target(&app, "Calculation Pad source editor").is_none());
+        focus_hint(&mut app, "API Reference");
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        focus_hint(&mut app, "Search API reference");
+        frame(&mut app, vec![egui::Event::Text("pop".into())]);
+        frame(&mut app, Vec::new());
+        assert_eq!(app.calculation_pad_dialog.test_reference_query(), "pop");
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        assert!(target(&app, "Calculation Pad source editor").is_none());
+
+        focus_hint(&mut app, "Dock or pop out");
+        assert!(!app.calculation_pad_dialog.test_reference_is_popout());
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(app.calculation_pad_dialog.test_reference_is_popout());
+        let viewport = egui::ViewportId::from_hash_of("calculation_pad_reference_native_viewport");
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let jump = app.calculation_pad_dialog.test_reference_jump();
+        let search = jump
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Search API reference")
+            .expect("current native Reference search")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .calculation_pad_dialog
+            .test_reference_jump()
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == "Search API reference")
+            .unwrap()
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(search)))
+        );
+        assert_eq!(app.calculation_pad_dialog.test_reference_query(), "pop");
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        assert!(
+            app.calculation_pad_dialog
+                .test_reference_jump()
+                .active_session()
+                .is_some()
+        );
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(app.calculation_pad_dialog.test_reference_is_popout());
+        assert!(
+            app.calculation_pad_dialog
+                .test_reference_jump()
+                .active_session()
+                .is_none()
+        );
+        app.set_jump_mode_enabled(false);
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!app.calculation_pad_dialog.test_reference_is_popout());
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn calculation_pad_jump_source_restores_ordinary_multiline_input_in_both_hosts() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "x = 1";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1400.0, 1000.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.calculation_pad_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let label = "Calculation Pad source editor";
+        let id = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("current docked Pad source")
+            .response_id();
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, label);
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        frame(&mut app, vec![egui::Event::Text("α".into())]);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(&mut app, vec![egui::Event::Text("β".into())]);
+        let docked = app.calculation_pad_dialog.test_source().unwrap().to_owned();
+        assert!(docked.contains("α\nβ"), "docked draft {docked:?}");
+
+        app.calculation_pad_dialog.test_popout_pad(&ctx);
+        let viewport = egui::ViewportId::from_hash_of("calculation_pad_native_viewport");
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        for _ in 0..6 {
+            native(&mut app, Vec::new());
+        }
+        let id = app
+            .calculation_pad_dialog
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .expect("current native Pad source")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .calculation_pad_dialog
+            .test_native_jump()
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .unwrap()
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(id)))
+        );
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some(docked.as_str())
+        );
+        native(&mut app, vec![egui::Event::Text("δ".into())]);
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(&mut app, vec![egui::Event::Text("ε".into())]);
+        assert!(
+            app.calculation_pad_dialog
+                .test_source()
+                .unwrap()
+                .contains("δ\nε")
+        );
+    }
+
+    #[test]
+    fn markdown_studio_jump_source_focus_preserves_unicode_multiline() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+                app.markdown_studio_dialog.test_replace_source("draft");
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas()
+                };
+                for _ in 0..6 {
+                    frame(&mut app, Vec::new());
+                }
+                let layer = app.markdown_studio_dialog.host_layer_if_root().unwrap();
+                ctx.move_to_top(layer);
+                for _ in 0..3 {
+                    frame(&mut app, Vec::new());
+                }
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Markdown source editor")
+                    .cloned()
+                    .expect("source target");
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Markdown source editor");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.markdown_studio_dialog.test_source(), Some("draft"));
+                frame(&mut app, vec![egui::Event::Text("λ".into())]);
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                frame(&mut app, vec![egui::Event::Text("β".into())]);
+                assert!(
+                    app.markdown_studio_dialog
+                        .test_source()
+                        .unwrap()
+                        .contains("λ\nβ")
+                );
+
+                frame(&mut app, Vec::new());
+                app.markdown_studio_dialog.test_pop_out();
+                let viewport = egui::ViewportId::from_hash_of("markdown_studio_viewport");
+                let native = |app: &mut LauncherApp, events| {
+                    run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+                };
+                for _ in 0..6 {
+                    native(&mut app, Vec::new());
+                }
+                let editor = app.markdown_studio_dialog.test_editor_id().unwrap();
+                let jump = app.markdown_studio_dialog.test_native_jump();
+                assert!(jump.retained_registry().targets().iter().any(|target| {
+                    target.metadata().label() == "Markdown source editor"
+                        && target.response_id() == editor
+                }));
+                let before = app.markdown_studio_dialog.test_source().unwrap().to_owned();
+                native(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                native(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = app
+                    .markdown_studio_dialog
+                    .test_native_jump()
+                    .active_session()
+                    .unwrap()
+                    .hint_map()
+                    .assignments()
+                    .iter()
+                    .find(|assignment| assignment.target().label() == "Markdown source editor")
+                    .unwrap()
+                    .hint()
+                    .as_str()
+                    .to_owned();
+                native(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(
+                    super::immediate_viewport_test_focused_id(),
+                    Some((viewport, Some(editor)))
+                );
+                assert_eq!(
+                    app.markdown_studio_dialog.test_source(),
+                    Some(before.as_str())
+                );
+                native(&mut app, vec![egui::Event::Text("δ".into())]);
+                native(
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                native(
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                );
+                native(&mut app, vec![egui::Event::Text("ε".into())]);
+                assert!(
+                    app.markdown_studio_dialog
+                        .test_source()
+                        .unwrap()
+                        .contains("δ\nε")
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+
+    #[test]
+    fn markdown_studio_jump_insert_menu_focus_precedes_one_ordinary_edit() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+        let original = "Élan";
+        app.markdown_studio_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 980.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.markdown_studio_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let response = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let hint_focus = |app: &mut LauncherApp, label| {
+            let widget =
+                response(app, label).unwrap_or_else(|| panic!("no current Studio target {label}"));
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(widget));
+            widget
+        };
+        let enter = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+        };
+        let insert = hint_focus(&mut app, "Insert");
+        let popup = insert.with("popup");
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        enter(&mut app);
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert!(response(&app, "Markdown source editor").is_none());
+        hint_focus(&mut app, "Heading 2");
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
+        let undo_before = app.markdown_studio_dialog.test_undo_depth();
+        enter(&mut app);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert!(
+            app.markdown_studio_dialog
+                .test_source()
+                .unwrap()
+                .contains("## ")
+        );
+        assert_eq!(
+            app.markdown_studio_dialog.test_undo_depth(),
+            undo_before + 1
+        );
+
+        hint_focus(&mut app, "Undo");
+        enter(&mut app);
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
+    }
+
+
+    #[test]
+    fn markdown_studio_transition_hints_and_escape_preserve_the_dirty_draft() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+        let original = "# Unsaved résumé\n\nBody";
+        app.markdown_studio_dialog.test_replace_source(original);
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 980.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.markdown_studio_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let outline = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Outline")
+            .expect("actual Studio outline header")
+            .response_id();
+        ctx.memory_mut(|memory| memory.request_focus(outline));
+        frame(&mut app, Vec::new());
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|target| target.label() == "Heading Unsaved résumé")
+        );
+        app.markdown_studio_dialog.request_close();
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        let discard = app
+            .markdown_studio_dialog
+            .test_discard_id()
+            .expect("current dirty decision");
+        let registry = app.jump_mode_ui.retained_registry();
+        assert!(registry.targets().iter().any(|target| {
+            target.response_id() == discard && target.metadata().label() == "Discard changes"
+        }));
+        assert_eq!(registry.len(), 3);
+        let arm = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+        };
+        let escape = |app: &mut LauncherApp| {
+            frame(
+                app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+        };
+        arm(&mut app);
+        let hint = dialog_hint_for_label(&app, "Discard changes");
+        frame(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(discard));
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
+        assert!(app.markdown_studio_dialog.test_is_dirty());
+        arm(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        escape(&mut app);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.markdown_studio_dialog.test_discard_id().is_some());
+        app.set_jump_mode_enabled(false);
+        escape(&mut app);
+        frame(&mut app, Vec::new());
+        assert!(app.markdown_studio_dialog.open);
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(original));
+        assert!(app.markdown_studio_dialog.test_is_dirty());
+        assert!(app.markdown_studio_dialog.test_discard_id().is_none());
+        assert!(app.visible_flag_state());
     }
 
     #[test]
@@ -45031,6 +51919,261 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         (app, directory)
+    }
+
+    #[test]
+    fn password_generator_keyboard_activation_persists_preferences_and_registers_native_controls() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::commands::{
+                    ActivationSource, CommandBus, CommandInvocation, HistoryPolicy, parse_action,
+                };
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                use crate::gui::password_generator_dialog::PasswordGeneratorDialog;
+                use crate::gui::utility_window_host::{HostedUtilityDialog, UtilityWindowHost};
+
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (mut app, directory) = new_prompt_app(&ctx);
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let action = Action {
+                    label: "Open Password Generator".into(),
+                    desc: "Generate passwords and passphrases".into(),
+                    action: "password:generator".into(),
+                    args: None,
+                };
+                let invocation = CommandInvocation {
+                    command: parse_action(&action).unwrap(),
+                    original_action: action,
+                    query_override: None,
+                    source: ActivationSource::Enter,
+                };
+                let outcome = CommandBus.dispatch(&invocation, &mut app).unwrap();
+                assert_eq!(outcome.history, HistoryPolicy::Skip);
+                assert!(app.password_generator_dialog.open);
+                assert!(app.password_generator_dialog.test_result_id().is_none());
+
+                let render = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false)
+                        .drop_without_applying_deltas();
+                };
+                for _ in 0..4 {
+                    render(&mut app, Vec::new());
+                }
+                let layer = app.password_generator_host.root_layer().unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    render(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    render(&mut app, Vec::new());
+                }
+                let kind = NavigationDialogKind::PasswordGenerator;
+                let instance = app.jump_mode_ui.dialog_instance(kind).unwrap();
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog { kind, instance },
+                );
+                let generate = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Generate")
+                    .unwrap()
+                    .response_id();
+
+                render(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                render(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Generate");
+                render(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(generate));
+                assert!(app.password_generator_dialog.test_result_id().is_none());
+
+                render(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)]);
+                render(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)]);
+                assert!(app.password_generator_dialog.test_result_id().is_some());
+
+                let target = |app: &LauncherApp, label| {
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .find(|target| target.metadata().label() == label)
+                        .unwrap()
+                        .clipped_rect()
+                };
+                let reveal = target(&app, "Reveal");
+                for pressed in [true, false] {
+                    render(&mut app, tool_dialog_pointer_events(reveal, pressed));
+                }
+                render(&mut app, Vec::new());
+                let _conceal = target(&app, "Conceal");
+
+                let result_id = app.password_generator_dialog.test_result_id().unwrap();
+                let copy = target(&app, "Copy result");
+                let mut copies = Vec::new();
+                for discard_release in [false, true] {
+                    render(&mut app, tool_dialog_pointer_events(copy, true));
+                    let mut input = actual_query_input(true);
+                    input.events = tool_dialog_pointer_events(copy, false);
+                    let mut frame = eframe::Frame::_new_kittest();
+                    let mut first = true;
+                    with_immediate_viewport_renderer(&ctx, || {
+                        ctx.run_ui(input, |ui| {
+                            app.begin_root_frame_logic(ui.ctx(), &mut frame);
+                            app.render_root_ui(ui);
+                            if discard_release && first {
+                                ui.ctx().request_discard("retain only valid password Copy");
+                            }
+                            first = false;
+                        })
+                    }).drop_without_applying_deltas();
+                    app.complete_password_generator_with(&ctx, |secret| {
+                        copies.push(secret.id());
+                        Ok(crate::platform::protected_clipboard::CopyStatus::AcceptedAndPersisted)
+                    });
+                    app.complete_query_jump_pointer_transfer(&ctx);
+                    app.finish_ui_frame_receipt();
+                    app.complete_jump_mode_frame(&ctx);
+                    assert_eq!(copies, [result_id]);
+                    render(&mut app, Vec::new());
+                }
+
+                let exclude = target(&app, "Exclude ambiguous characters");
+                for pressed in [true, false] {
+                    render(&mut app, tool_dialog_pointer_events(exclude, pressed));
+                }
+                assert!(app.password_generator_dialog.test_result_id().is_none());
+                let saved = Settings::read_current(directory.path().join("settings.json")).unwrap();
+                assert!(saved.password_generator.password.exclude_ambiguous);
+                assert_eq!(&saved.password_generator, app.password_generator_dialog.preferences());
+
+                let pop = target(&app, "Pop Out");
+                for pressed in [true, false] {
+                    render(&mut app, tool_dialog_pointer_events(pop, pressed));
+                }
+                assert!(app.password_generator_host.is_popped_out());
+                assert!(app.password_generator_dialog.open);
+                assert!(eframe::App::needs_root_ui_when_hidden(&app));
+                let viewport = UtilityWindowHost::<PasswordGeneratorDialog>::test_viewport(
+                    app.password_generator_dialog.session(),
+                );
+                // Advance the detached window's initial scroll-area size animation.
+                for _ in 0..24 {
+                    run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+                    if app.password_generator_host.test_native_target("Generate").is_some() {
+                        break;
+                    }
+                }
+                assert_eq!(app.password_generator_host.owner_viewport(), viewport);
+                assert_eq!(
+                    app.password_generator_host.test_native_owner(),
+                    NavigationOwner::Dialog {
+                        kind,
+                        instance: app.password_generator_dialog.session(),
+                    },
+                );
+                assert!(app.password_generator_host.test_native_target("Dock").is_some());
+                assert!(app.password_generator_host.test_native_target("Generate").is_some());
+                assert!(app.password_generator_host.test_native_target("Copy result").is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn markdown_print_pdf_chooser_requires_exact_current_scene_and_cancel_keeps_output_idle() {
+        use super::super::markdown_print::{OutputIntent, PrintHostCommand, SceneReceipt};
+        use super::super::utility_host::{AcceptedParentOpen, ChildOpenOrigin, ViewportPassProvenance};
+        use super::super::utility_window_host::HostedUtilityDialog;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (mut app, _directory) = new_prompt_app(&ctx);
+        app.markdown_studio_dialog.open();
+        let draft = app.markdown_studio_dialog.print_draft().unwrap();
+        app.markdown_print_dialog.open(draft, &ctx);
+        app.markdown_print_host.open_from_origin(&ctx, &app.markdown_print_dialog, false, &ChildOpenOrigin::<()>::Root);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let scene = loop {
+            app.markdown_print_dialog.poll(&ctx);
+            if let Some(scene) = app.current_markdown_output_scene() { break scene; }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+
+        let mut pass = None;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            pass = Some(ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT));
+        }).drop_without_applying_deltas();
+        let pass = pass.unwrap();
+        let origin = AcceptedParentOpen::from_retained(
+            &ctx, app.markdown_print_host.identity(), app.markdown_print_dialog.session(), pass, pass,
+        ).unwrap();
+        let stale = std::sync::Arc::new(SceneReceipt {
+            stamp: scene.stamp.clone(), source: scene.source.clone(), base: scene.base.clone(),
+            settings: scene.settings.clone(), date: scene.date.clone(), scene: scene.scene.clone(),
+        });
+        app.run_markdown_output_command(&ctx, &origin, egui::ViewportId::ROOT, PrintHostCommand::Output {
+            intent: OutputIntent::ChoosePdf, scene: Some(stale), hwnd: Some(1),
+        }, |_| panic!("A stale scene must not open the native chooser"));
+
+        let mut calls = 0;
+        app.run_markdown_output_command(&ctx, &origin, egui::ViewportId::ROOT, PrintHostCommand::Output {
+            intent: OutputIntent::ChoosePdf, scene: Some(scene), hwnd: Some(1),
+        }, |hwnd| {
+            assert_eq!(hwnd, Some(1));
+            calls += 1;
+            Ok(None)
+        });
+        assert_eq!(calls, 1);
+        assert!(!app.markdown_print_dialog.output.busy());
+    }
+
+    #[test]
+    fn markdown_print_native_child_keeps_root_ui_alive_when_launcher_hidden() {
+        use super::super::markdown_print::{AssetBase, DocumentStamp, DraftRef};
+        use super::super::utility_host::{AcceptedParentOpen, ChildOpenOrigin, HostIdentity, UtilityPresentation, ViewportPassProvenance};
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (mut app, _directory) = new_prompt_app(&ctx);
+        let host = HostIdentity { host: UtilityPresentation::Popout, generation: 1 };
+        let mut pass = None;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            pass = Some(ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT));
+        });
+        let pass = pass.unwrap();
+        let receipt = AcceptedParentOpen::from_retained(&ctx, host, 1, pass, pass).unwrap();
+        output.drop_without_applying_deltas();
+        app.markdown_print_dialog.open(DraftRef {
+            stamp: DocumentStamp::Studio { epoch: 1, host, path: None, revision: Some(1) },
+            source: "# Draft",
+            base: AssetBase::Studio(None),
+        }, &ctx);
+        assert_eq!(app.markdown_print_host.open_from_origin(
+            &ctx, &app.markdown_print_dialog, false, &ChildOpenOrigin::Parent(receipt),
+        ), Some(UtilityPresentation::Popout));
+        assert!(eframe::App::needs_root_ui_when_hidden(&app));
+        assert!(app.markdown_print_host.needs_root_ui_when_hidden(true));
+        assert!(crate::settings::UtilityToolKey::parse("markdown-print").is_ok());
     }
 
     struct StartupCaptureBackend {
@@ -59503,6 +66646,139 @@ mod tests {
         drop(workspace);
     }
 
+
+    #[test]
+    fn quick_notes_context_hints_use_only_the_open_row_or_editor_menu() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let draft = "Quick Notes context fixture";
+        let stored_draft = format!("# Context fixture\n\n{draft}");
+        crate::plugins::note::save_notes(&[crate::plugins::note::Note {
+            title: "Context fixture".into(),
+            path: std::path::PathBuf::new(),
+            content: draft.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "quick-note-context".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        }])
+        .unwrap();
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.notes_dialog.open();
+        let frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(1300.0, 900.0))
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..6 {
+            frame(&mut app, Vec::new());
+        }
+        let layer = app.notes_dialog.host_layer_if_root().unwrap();
+        ctx.move_to_top(layer);
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        let response = |app: &LauncherApp, label| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .map(|target| target.response_id())
+        };
+        let open_context = |app: &mut LauncherApp, anchor| {
+            ctx.memory_mut(|memory| memory.request_focus(anchor));
+            frame(app, Vec::new());
+            frame(
+                app,
+                vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                    key_press(egui::Key::F10, egui::Modifiers::SHIFT),
+                ],
+            );
+            frame(
+                app,
+                vec![
+                    key_release(egui::Key::F10, egui::Modifiers::SHIFT),
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+            );
+            for _ in 0..4 {
+                frame(app, Vec::new());
+            }
+            assert!(egui::Popup::is_id_open(&ctx, anchor.with("popup")));
+        };
+        let focus_hint = |app: &mut LauncherApp, label| {
+            let id = response(app, label).unwrap_or_else(|| {
+                panic!(
+                    "no current popup target {label}; owner {:?}, targets {:?}",
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .metadata()
+                        .map(|target| target.label())
+                        .collect::<Vec<_>>(),
+                )
+            });
+            frame(
+                app,
+                vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+            );
+            frame(
+                app,
+                vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            );
+            let hint = dialog_hint_for_label(app, label);
+            frame(app, vec![egui::Event::Text(hint)]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+        };
+        let row = "Context fixture (quick-note-context)";
+        let row_id = response(&app, row).expect("actual Quick Notes row");
+        open_context(&mut app, row_id);
+        assert!(response(&app, row).is_none());
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.notes_query_bridge_provenance().is_some())
+        );
+        focus_hint(&mut app, "Edit");
+        assert!(!app.notes_dialog.test_is_editing());
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(app.notes_dialog.test_is_editing());
+        assert_eq!(app.notes_dialog.test_edit_draft(), stored_draft);
+        let editor = response(&app, "Note content").expect("actual Quick Notes editor");
+        open_context(&mut app, editor);
+        assert!(response(&app, "Note content").is_none());
+        focus_hint(&mut app, "Insert timestamp");
+        assert_eq!(app.notes_dialog.test_edit_draft(), stored_draft);
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, editor.with("popup")));
+        assert!(app.notes_dialog.test_is_editing());
+        assert_eq!(app.notes_dialog.test_edit_draft(), stored_draft);
+    }
+
     #[test]
     fn jump_mode_notes_rows_use_visible_slug_identity_and_fresh_enter_opens_exact_note() {
         let ctx = egui::Context::default();
@@ -61264,9 +68540,8 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    hosted_utility_layers: [None;
-                        crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
-                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
+                    hosted_utility_layers: Default::default(),
+                    dialogs: Default::default(),
                 },
             ),
             NavigationOwner::Settings { instance: 1 },
@@ -63362,9 +70637,8 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    hosted_utility_layers: [None;
-                        crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
-                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
+                    hosted_utility_layers: Default::default(),
+                    dialogs: Default::default(),
                 }
             ),
         );
@@ -65728,6 +73002,289 @@ mod tests {
     }
 
     #[test]
+    fn native_note_close_prompt_admits_editor_focus_and_owns_escape() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = true;
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (900.0, 700.0);
+        let mut panel = launcher_show_owner_note("native-close-prompt-jump");
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.test_pop_out();
+        panel.replace_content_from_mutation("dirty note".into(), 1.0);
+        let viewport = egui::ViewportId::from_hash_of(("note-panel-editor", panel.prompt_identity()));
+        app.note_panels.push(panel);
+
+        let frame = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        for _ in 0..5 {
+            frame(&mut app, Vec::new());
+        }
+        let editor = app.note_panels[0].test_editor_widget_id().unwrap();
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(editor)))
+        );
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(app.note_panels[0].note_close_observation().pending_discard);
+        let registry = app.note_panels[0].test_native_jump().retained_registry();
+        assert!(
+            registry
+                .metadata()
+                .any(|target| target.label() == "Keep Editing")
+        );
+        assert!(
+            !registry
+                .metadata()
+                .any(|target| target.label() == "Note source editor")
+        );
+        frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        assert!(
+            app.note_panels[0]
+                .test_native_jump()
+                .active_session()
+                .is_some()
+        );
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(
+            app.note_panels[0]
+                .test_native_jump()
+                .active_session()
+                .is_none()
+        );
+        assert!(app.note_panels[0].note_close_observation().pending_discard);
+        frame(
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        app.set_jump_mode_enabled(false);
+        frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!app.note_panels[0].note_close_observation().pending_discard);
+        assert!(app.note_panels[0].open);
+        assert_eq!(app.note_panels[0].note_content(), "dirty note");
+    }
+
+    #[test]
+    fn note_conflict_prompt_jump_focus_then_escape_keeps_draft() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let mut panel = launcher_show_owner_note("conflict-prompt-jump");
+                panel.replace_content_from_mutation("dirty draft".into(), 1.0);
+                app.note_save_on_close = false;
+                app.note_confirm_discard_unsaved_changes = true;
+                panel.request_close(&mut app);
+                panel.test_set_overwrite_prompt(true);
+                app.note_panels.push(panel);
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas()
+                };
+                for _ in 0..6 {
+                    frame(&mut app, Vec::new());
+                }
+                let prompt = app.note_panels[0].test_note_prompt_ids().1;
+                let rect = ctx.memory(|memory| memory.area_rect(prompt)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                let registry = app.jump_mode_ui.retained_registry();
+                assert!(
+                    registry
+                        .metadata()
+                        .all(|target| target.label() != "Discard Changes")
+                );
+                let target = registry
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Overwrite")
+                    .cloned()
+                    .expect("conflict target");
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Overwrite");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(app.note_panels[0].test_overwrite_prompt());
+                assert_eq!(app.note_panels[0].note_content(), "dirty draft");
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                );
+                assert!(!app.note_panels[0].test_overwrite_prompt());
+                assert!(app.note_panels[0].note_close_observation().pending_discard);
+                assert_eq!(app.note_panels[0].note_content(), "dirty draft");
+                assert!(app.note_panels[0].open);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn note_close_prompt_jump_focus_and_escape_preserve_dirty_draft() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                app.note_save_on_close = false;
+                app.note_confirm_discard_unsaved_changes = true;
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let mut panel = launcher_show_owner_note("close-prompt-jump");
+                panel.replace_content_from_mutation("dirty draft".into(), 1.0);
+                panel.request_close(&mut app);
+                app.note_panels.push(panel);
+                let frame = |app: &mut LauncherApp, events| {
+                    run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas()
+                };
+                for _ in 0..6 {
+                    frame(&mut app, Vec::new());
+                }
+                let prompt = app.note_panels[0].test_note_prompt_ids().0;
+                let rect = ctx.memory(|memory| memory.area_rect(prompt)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    frame(&mut app, tool_dialog_pointer_events(title, pressed));
+                }
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Discard Changes")
+                    .cloned()
+                    .expect("current close prompt target");
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                assert!(app.jump_mode_ui.active_session().is_some());
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                );
+                assert!(app.jump_mode_ui.active_session().is_none());
+                assert!(app.note_panels[0].note_close_observation().pending_discard);
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                );
+                frame(
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                let hint = dialog_hint_for_label(&app, "Discard Changes");
+                frame(&mut app, vec![egui::Event::Text(hint)]);
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(app.note_panels[0].note_close_observation().pending_discard);
+                assert_eq!(app.note_panels[0].note_content(), "dirty draft");
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                );
+                assert!(!app.note_panels[0].note_close_observation().pending_discard);
+                assert_eq!(app.note_panels[0].note_content(), "dirty draft");
+                assert!(app.note_panels[0].open);
+                let mut panel = app.note_panels.remove(0);
+                panel.request_close(&mut app);
+                app.note_panels.push(panel);
+                app.set_jump_mode_enabled(false);
+                for _ in 0..4 {
+                    frame(&mut app, Vec::new());
+                }
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                );
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                );
+                assert!(!app.note_panels[0].note_close_observation().pending_discard);
+                assert_eq!(app.note_panels[0].note_content(), "dirty draft");
+                assert!(app.note_panels[0].open);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn note_find_shortcut_and_escape_leave_dirty_note_open_until_the_next_escape() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -65987,9 +73544,8 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    hosted_utility_layers: [None;
-                        crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
-                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
+                    hosted_utility_layers: Default::default(),
+                    dialogs: Default::default(),
                 }
             ),
             app.confirm_modal.is_open(),
@@ -66982,6 +74538,20 @@ mod tests {
         );
         assert!(!app.note_panels[0].has_unsaved_changes());
         assert_eq!(app.note_panels[0].test_replacement_history_counts(), (0, 0));
+        let after_discard = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the discarded action preserves the source editor state");
+        let cursor = after_discard.cursor.char_range().expect("source remains selected");
+        let selection = cursor.as_sorted_char_range();
+        assert_eq!((selection.start.0, selection.end.0), (0, 6));
+        let current = (cursor, "éclair".to_owned());
+        assert!(after_discard.undoer().undo(&current).is_none_or(|(_, source)| source == "éclair"));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            false,
+        )
+        .drop_without_applying_deltas();
 
         // The discarded activation consumed the menu event. Re-establish the
         // source selection and keyboard path before submitting a retained pass.
@@ -68860,6 +76430,17 @@ mod tests {
                     ctx.memory(|memory| memory.has_focus(query_id)),
                     "{panel:?}, Jump {jump}"
                 );
+                app.results = two_results();
+                app.invalidate_root_list_results();
+                app.selected = None;
+                notes_query_mouse_run_frame(
+                    &mut app,
+                    &ctx,
+                    screen,
+                    digit_press(egui::Key::Num2, egui::Key::Numpad2, "2"),
+                );
+                assert_eq!(app.selected, Some(0), "{panel:?}, Jump {jump}");
+                assert_eq!(app.query, "root query");
                 notes_query_mouse_type(&mut app, &ctx, screen, "λ🙂");
                 assert!(
                     app.query.contains("λ🙂"),
@@ -71627,10 +79208,17 @@ mod tests {
         app.results = two_results();
         app.invalidate_root_list_results();
         assert!(app.open_action_sheet_for_index(0));
-        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+        let selected = app.selected;
+        let input = egui::RawInput {
+            events: digit_press(egui::Key::Num2, egui::Key::Numpad2, "2"),
+            ..actual_query_input(true)
+        };
+        app.run_root_frame_for_test(&ctx, input, false)
             .0
             .drop_without_applying_deltas();
         assert!(app.action_sheet.is_open());
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.query, "pending caret");
         assert!(app.move_cursor_end);
         app.close_action_sheet();
         focus_launcher_query(&ctx, &mut app);
@@ -71778,212 +79366,6 @@ mod tests {
         assert!(!app.move_cursor_end);
         assert_eq!(app.visibility_revision.current(), revision);
         assert!(app.test_recorded_history_queries.is_empty());
-    }
-
-    struct FakeNumpadProbe {
-        down: Option<PhysicalNumpadKey>,
-        top_row_down: bool,
-        calls: Cell<usize>,
-    }
-
-    impl NumpadKeyStateProbe for FakeNumpadProbe {
-        fn state(&self, key: PhysicalNumpadKey) -> PhysicalDigitKeyState {
-            self.calls.set(self.calls.get() + 1);
-            PhysicalDigitKeyState {
-                numpad_down: self.down == Some(key),
-                top_row_down: self.top_row_down,
-            }
-        }
-    }
-
-    fn render_query_text_edit_frame(
-        ctx: &egui::Context,
-        app: &mut LauncherApp,
-        request_focus: bool,
-        probe: &impl NumpadKeyStateProbe,
-    ) -> (bool, Vec<LauncherNumpadNavigation>) {
-        let mut focused = false;
-        let mut routed = Vec::new();
-        let mut root_ui = test_root_ui(ctx, egui::Id::new("numpad-query-routing-root"));
-        egui::CentralPanel::default().show(&mut root_ui, |ui| {
-            let input_id = egui::Id::new("numpad_routing_query_input");
-            let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
-            routed = ui.ctx().input_mut(|input| {
-                consume_physical_numpad_navigation(query_owned_focus, input, probe)
-            });
-
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut app.query)
-                    .id(input_id)
-                    .desired_width(f32::INFINITY),
-            );
-            if request_focus {
-                response.request_focus();
-            }
-            focused = response.has_focus();
-            for direction in routed.iter().copied() {
-                app.handle_key(direction.navigation_key());
-            }
-        });
-        (focused, routed)
-    }
-
-    fn run_two_frame_query_routing(
-        key: egui::Key,
-        digit: &str,
-        down: Option<PhysicalNumpadKey>,
-        top_row_down: bool,
-        selected: usize,
-    ) -> (LauncherApp, Vec<LauncherNumpadNavigation>, usize) {
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        app.query = "note".into();
-        app.results = (0..8)
-            .map(|index| Action {
-                label: format!("Result {index}"),
-                desc: "Test".into(),
-                action: format!("test:{index}"),
-                args: None,
-            })
-            .collect();
-        app.resolved_grid_layout = true;
-        app.query_results_layout.cols = 3;
-        app.selected = Some(selected);
-        let probe = FakeNumpadProbe {
-            down,
-            top_row_down,
-            calls: Cell::new(0),
-        };
-
-        ctx.begin_pass(egui::RawInput::default());
-        let (focused, routed) = render_query_text_edit_frame(&ctx, &mut app, true, &probe);
-        assert!(focused);
-        assert!(routed.is_empty());
-        ctx.end_pass().drop_without_applying_deltas();
-
-        let input_id = egui::Id::new("numpad_routing_query_input");
-        ctx.data_mut(|data| {
-            let state = data
-                .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(input_id);
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(app.query.chars().count()),
-                )));
-        });
-
-        ctx.begin_pass(egui::RawInput {
-            events: vec![
-                key_press(key, egui::Modifiers::NONE),
-                egui::Event::Text(digit.into()),
-            ],
-            ..Default::default()
-        });
-        let (focused, routed) = render_query_text_edit_frame(&ctx, &mut app, false, &probe);
-        assert!(focused);
-        ctx.end_pass().drop_without_applying_deltas();
-        (app, routed, probe.calls.get())
-    }
-
-    #[test]
-    fn focused_query_text_edit_routes_all_physical_numpad_directions_without_typing() {
-        for (key, digit, physical, selected, expected_selected, expected_direction) in [
-            (
-                egui::Key::Num8,
-                "8",
-                PhysicalNumpadKey::Num8,
-                4,
-                1,
-                LauncherNumpadNavigation::Up,
-            ),
-            (
-                egui::Key::Num2,
-                "2",
-                PhysicalNumpadKey::Num2,
-                1,
-                4,
-                LauncherNumpadNavigation::Down,
-            ),
-            (
-                egui::Key::Num4,
-                "4",
-                PhysicalNumpadKey::Num4,
-                4,
-                3,
-                LauncherNumpadNavigation::Left,
-            ),
-            (
-                egui::Key::Num6,
-                "6",
-                PhysicalNumpadKey::Num6,
-                4,
-                5,
-                LauncherNumpadNavigation::Right,
-            ),
-        ] {
-            let (app, routed, calls) =
-                run_two_frame_query_routing(key, digit, Some(physical), false, selected);
-            assert_eq!(routed, vec![expected_direction]);
-            assert_eq!(calls, 1);
-            assert_eq!(app.query, "note");
-            assert_eq!(app.selected, Some(expected_selected));
-        }
-    }
-
-    #[test]
-    fn focused_query_text_edit_preserves_all_top_row_navigation_digits_as_text() {
-        for (key, digit) in [
-            (egui::Key::Num8, "8"),
-            (egui::Key::Num2, "2"),
-            (egui::Key::Num4, "4"),
-            (egui::Key::Num6, "6"),
-        ] {
-            let (app, routed, calls) = run_two_frame_query_routing(key, digit, None, false, 4);
-            assert_eq!(app.query, format!("note{digit}"));
-            assert_eq!(app.selected, Some(4));
-            assert!(routed.is_empty());
-            assert_eq!(calls, 1);
-        }
-    }
-
-    #[test]
-    fn focused_query_preserves_ambiguous_digit_when_top_row_and_keypad_are_both_down() {
-        let (app, routed, calls) = run_two_frame_query_routing(
-            egui::Key::Num8,
-            "8",
-            Some(PhysicalNumpadKey::Num8),
-            true,
-            4,
-        );
-        assert_eq!(app.query, "note8");
-        assert_eq!(app.selected, Some(4));
-        assert!(routed.is_empty());
-        assert_eq!(calls, 1);
-    }
-
-    #[test]
-    fn numpad_routing_leaves_query_history_shortcuts_available() {
-        let ctx = egui::Context::default();
-        ctx.begin_pass(egui::RawInput {
-            events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
-            ..Default::default()
-        });
-        let probe = FakeNumpadProbe {
-            down: Some(PhysicalNumpadKey::Num8),
-            top_row_down: false,
-            calls: Cell::new(0),
-        };
-
-        assert_eq!(
-            ctx.input_mut(|input| consume_physical_numpad_navigation(true, input, &probe)),
-            Vec::new()
-        );
-        assert_eq!(probe.calls.get(), 0);
-        assert_eq!(
-            ctx.input_mut(|input| LauncherApp::consume_query_history_shortcut(true, input)),
-            Some(QueryHistoryDirection::Older)
-        );
-        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -72256,6 +79638,518 @@ mod tests {
         let mut app = new_app(ctx);
         app.plugins.register(Box::new(FakePlugin));
         app
+    }
+
+    #[test]
+    fn root_query_navigation_mm_numpad_roundtrip_without_tab() {
+        run_root_query_navigation_test(check_mm_numpad_roundtrip_without_tab);
+    }
+
+    fn check_mm_numpad_roundtrip_without_tab() {
+        use egui::Key;
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.plugins
+            .register(Box::new(crate::plugins::multi_manager::MultiManagerPlugin));
+        app.enabled_plugins = None;
+        app.query.clear();
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        let query_id = egui::Id::new("query_input");
+        let mut frame_index = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, frame_index, 960.0, 640.0, events)
+                .drop_without_applying_deltas();
+            frame_index += 1;
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::Text("mm".into())]);
+        assert_eq!(app.query, "mm");
+        assert!(app.results.len() > 2);
+        assert!(
+            app.results
+                .iter()
+                .all(|action| action.action.starts_with("mm:"))
+        );
+        assert!(!app.resolved_grid_layout);
+        let cursor = || {
+            egui::TextEdit::load_state(&ctx, query_id)
+                .unwrap()
+                .cursor
+                .char_range()
+                .unwrap()
+        };
+        let before = cursor();
+        for _ in 0..3 {
+            for (events, expected) in [
+                (digit_press(Key::Num2, Key::Numpad2, "2"), Some(0)),
+                (digit_press(Key::Num2, Key::Numpad2, "2"), Some(1)),
+                (digit_press(Key::Num8, Key::Numpad8, "8"), Some(0)),
+                (digit_press(Key::Num8, Key::Numpad8, "8"), None),
+            ] {
+                frame(&mut app, events);
+                assert_eq!(app.selected, expected);
+                assert_eq!(app.query, "mm");
+                assert_eq!(cursor(), before);
+            }
+        }
+        for (events, expected) in [
+            (digit_press(Key::Num6, Key::Numpad6, "6"), Some(0)),
+            (digit_press(Key::Num4, Key::Numpad4, "4"), None),
+            (
+                vec![physical_key_press(Key::ArrowRight, Key::Numpad6)],
+                Some(0),
+            ),
+            (
+                vec![physical_key_press(Key::ArrowLeft, Key::Numpad4)],
+                None,
+            ),
+        ] {
+            frame(&mut app, events);
+            assert_eq!(app.selected, expected);
+            assert_eq!(cursor(), before);
+        }
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+        for (key, physical, expected) in [
+            (Key::ArrowDown, Key::Numpad2, Some(0)),
+            (Key::ArrowRight, Key::Numpad6, Some(1)),
+            (Key::ArrowDown, Key::Numpad2, Some(4)),
+            (Key::ArrowLeft, Key::Numpad4, Some(3)),
+            (Key::ArrowUp, Key::Numpad8, Some(0)),
+            (Key::ArrowUp, Key::Numpad8, None),
+            (Key::ArrowDown, Key::Numpad2, Some(0)),
+        ] {
+            frame(&mut app, vec![physical_key_press(key, physical)]);
+            assert_eq!(app.selected, expected);
+            assert_eq!(cursor(), before);
+        }
+        frame(&mut app, vec![egui::Event::Text(" settings".into())]);
+        assert_eq!(app.query, "mm settings");
+        assert_eq!(app.selected, None);
+        assert_eq!(app.results.len(), 1);
+        frame(
+            &mut app,
+            vec![physical_key_press(Key::ArrowDown, Key::Numpad2)],
+        );
+        assert_eq!(app.selected, Some(0));
+        frame(
+            &mut app,
+            vec![physical_key_press(Key::ArrowUp, Key::Numpad8)],
+        );
+        assert_eq!(app.selected, None);
+        frame(&mut app, vec![egui::Event::Text(" nonexistent".into())]);
+        assert!(app.results.is_empty());
+        frame(&mut app, digit_press(Key::Num2, Key::Numpad2, "2"));
+        assert_eq!(app.selected, None);
+        assert_eq!(app.query, "mm settings nonexistent");
+    }
+
+    #[test]
+    fn root_query_navigation_recovers_real_tab_focus_and_keeps_accepted_events() {
+        run_root_query_navigation_test(check_tab_focus_and_accepted_events);
+    }
+
+    fn check_tab_focus_and_accepted_events() {
+        use egui::{Key, Modifiers};
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.plugins
+            .register(Box::new(crate::plugins::multi_manager::MultiManagerPlugin));
+        app.enabled_plugins = None;
+        app.query.clear();
+        app.query_autocomplete = false;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        let query_id = egui::Id::new("query_input");
+        let mut frame_index = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, frame_index, 960.0, 640.0, events)
+                .drop_without_applying_deltas();
+            frame_index += 1;
+        };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::Text("mm".into())]);
+        frame(&mut app, vec![key_press(Key::ArrowLeft, Modifiers::SHIFT)]);
+        let cursor = || {
+            egui::TextEdit::load_state(&ctx, query_id)
+                .unwrap()
+                .cursor
+                .char_range()
+                .unwrap()
+        };
+        let before = cursor();
+        assert_ne!(before.primary, before.secondary);
+        frame(&mut app, vec![key_press(Key::Tab, Modifiers::NONE)]);
+        let focused = ctx.memory(|memory| memory.focused()).unwrap();
+        assert!(
+            app.test_root_rendered_row_ids
+                .iter()
+                .any(|(_, id)| *id == focused)
+        );
+        for _ in 0..3 {
+            frame(&mut app, vec![]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(focused));
+            assert_eq!(cursor(), before);
+        }
+        // Actual widget focus, not merely selected-result state, must return.
+        frame(&mut app, digit_press(Key::Num8, Key::Numpad8, "8"));
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        assert_eq!(app.selected, None);
+        assert_eq!(cursor(), before);
+        assert_eq!(app.query, "mm");
+
+        // TextEdit handles Tab after capture; it must not silently discard an
+        // already accepted navigation event when its focus changes.
+        let mut events = vec![key_press(Key::Tab, Modifiers::NONE)];
+        events.extend(digit_press(Key::Num2, Key::Numpad2, "2"));
+        frame(&mut app, events);
+        assert_eq!(app.selected, Some(0));
+        frame(&mut app, digit_press(Key::Num8, Key::Numpad8, "8"));
+        assert_eq!(app.selected, None);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+    }
+
+    #[test]
+    fn root_query_navigation_respects_popup_and_modal_ownership() {
+        run_root_query_navigation_test(check_navigation_popup_and_modal_ownership);
+    }
+
+    fn check_navigation_popup_and_modal_ownership() {
+        use egui::Key;
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, vec![])
+            .drop_without_applying_deltas();
+        let query = app.query.clone();
+        egui::Popup::open_id(&ctx, egui::Id::new("navigation-foreign-popup"));
+        run_root_list_frame(
+            &ctx,
+            &mut app,
+            1,
+            960.0,
+            640.0,
+            digit_press(Key::Num2, Key::Numpad2, "2"),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.selected, None);
+        assert_eq!(app.query, query);
+        egui::Popup::close_all(&ctx);
+        app.confirm_modal
+            .open_custom("Navigation test", "Do not activate");
+        run_root_list_frame(
+            &ctx,
+            &mut app,
+            2,
+            960.0,
+            640.0,
+            vec![physical_key_press(Key::ArrowDown, Key::Numpad2)],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.selected, None);
+        assert_eq!(app.query, query);
+        assert!(app.confirm_modal.is_open());
+    }
+
+    #[test]
+    fn root_query_navigation_delivers_rapid_arrows_and_pages_without_tab() {
+        run_root_query_navigation_test(check_rapid_arrows_and_pages_without_tab);
+    }
+
+    fn check_rapid_arrows_and_pages_without_tab() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.plugins.register(Box::new(FakePlugin));
+        app.enabled_plugins = None;
+        app.page_jump = 2;
+        app.query_autocomplete = false;
+        app.test_skip_history_persistence = true;
+        app.query.clear();
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        let query_id = egui::Id::new("query_input");
+        let mut frame_index = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, frame_index, 960.0, 640.0, events)
+                .drop_without_applying_deltas();
+            frame_index += 1;
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        };
+        use egui::Key;
+        let key = |key| key_press(key, egui::Modifiers::NONE);
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::Text("note list".into())]);
+        assert_eq!(app.query, "note list");
+        assert_eq!(app.results.len(), 3);
+        assert_eq!(app.selected, None);
+
+        frame(&mut app, digit_press(Key::Num2, Key::Numpad2, "2"));
+        assert_eq!(app.query, "note list");
+        assert_eq!(app.selected, Some(0));
+        frame(&mut app, vec![key(Key::ArrowDown), key(Key::ArrowDown)]);
+        assert_eq!(app.selected, Some(2));
+        frame(&mut app, vec![key(Key::ArrowUp), key(Key::ArrowUp)]);
+        assert_eq!(app.selected, Some(0));
+
+        app.selected = None;
+        frame(&mut app, vec![key(Key::PageDown)]);
+        assert_eq!(app.selected, Some(0));
+        frame(&mut app, vec![key(Key::PageDown), key(Key::PageDown)]);
+        assert_eq!(app.selected, Some(2));
+        frame(&mut app, vec![key(Key::PageUp), key(Key::PageUp)]);
+        assert_eq!(app.selected, Some(0));
+        run_root_list_frame(
+            &ctx,
+            &mut app,
+            frame_index,
+            960.0,
+            640.0,
+            vec![key(Key::PageDown), key(Key::Enter)],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.test_last_activation
+                .as_ref()
+                .map(|(action, source)| (action.action.as_str(), *source)),
+            Some(("note:open:gamma", ActivationSource::Enter))
+        );
+    }
+
+    fn physical_key_press(key: egui::Key, physical: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(physical),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn digit_press(key: egui::Key, physical: egui::Key, digit: &str) -> Vec<egui::Event> {
+        vec![
+            physical_key_press(key, physical),
+            egui::Event::Text(digit.into()),
+            key_release(key, egui::Modifiers::NONE),
+        ]
+    }
+
+    #[test]
+    fn root_query_navigation_preserves_editing_and_distinguishes_grid_directions() {
+        run_root_query_navigation_test(check_editing_and_grid_directions);
+    }
+
+    fn check_editing_and_grid_directions() {
+        use egui::Key;
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) =
+            root_list_test_app(&ctx, (0..12).map(root_list_action).collect());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        app.query_autocomplete = false;
+        let query_id = egui::Id::new("query_input");
+        let mut frame_index = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, frame_index, 960.0, 640.0, events)
+                .drop_without_applying_deltas();
+            frame_index += 1;
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        };
+        frame(&mut app, vec![]);
+        // Num Lock off: the logical arrow should work, even though the
+        // physical position is on the keypad.
+        frame(
+            &mut app,
+            vec![physical_key_press(Key::ArrowDown, Key::Numpad2)],
+        );
+        assert_eq!(app.selected, Some(0));
+        let left = key_press(Key::ArrowLeft, egui::Modifiers::NONE);
+        frame(&mut app, vec![left]);
+        assert_eq!(app.selected, Some(0));
+        let cursor = || {
+            egui::TextEdit::load_state(&ctx, query_id)
+                .unwrap()
+                .cursor
+                .char_range()
+                .unwrap()
+        };
+        assert_eq!(cursor().primary.index.0, app.query.chars().count() - 1);
+
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        for (events, expected) in [
+            (digit_press(Key::Num2, Key::Numpad2, "2"), 3),
+            (digit_press(Key::Num6, Key::Numpad6, "6"), 4),
+            (
+                vec![physical_key_press(Key::ArrowRight, Key::ArrowRight)],
+                5,
+            ),
+            (digit_press(Key::Num4, Key::Numpad4, "4"), 4),
+            (vec![physical_key_press(Key::ArrowLeft, Key::Numpad4)], 3),
+            (digit_press(Key::Num8, Key::Numpad8, "8"), 0),
+        ] {
+            let before = cursor();
+            frame(&mut app, events);
+            assert_eq!(app.selected, Some(expected));
+            assert_eq!(cursor(), before);
+        }
+        frame(
+            &mut app,
+            vec![key_press(Key::ArrowLeft, egui::Modifiers::SHIFT)],
+        );
+        assert_ne!(cursor().primary, cursor().secondary);
+        let mut digits = Vec::new();
+        for (key, digit) in [
+            (Key::Num2, "2"),
+            (Key::Num4, "4"),
+            (Key::Num6, "6"),
+            (Key::Num8, "8"),
+        ] {
+            digits.extend(digit_press(key, key, digit));
+        }
+        frame(&mut app, digits);
+        assert_eq!(app.query, "root list fixtu2468e");
+
+        let draft = app.query.clone();
+        let first = app
+            .query_history
+            .older(&draft, || vec!["newer query".into(), "older query".into()])
+            .unwrap();
+        app.apply_history_query(first);
+        let ctrl = |key| key_press(key, egui::Modifiers::CTRL);
+        frame(&mut app, vec![ctrl(Key::ArrowUp)]);
+        assert_eq!(app.query, "older query");
+        frame(&mut app, vec![ctrl(Key::ArrowDown)]);
+        assert_eq!(app.query, "newer query");
+        frame(&mut app, vec![ctrl(Key::ArrowDown)]);
+        assert_eq!(app.query, draft);
+    }
+
+    #[test]
+    fn root_query_navigation_reveals_the_bottom_once_and_keeps_it_stable() {
+        run_root_query_navigation_test(check_page_navigation_bottom_reveal);
+    }
+
+    fn check_page_navigation_bottom_reveal() {
+        use egui::{Key, Modifiers};
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) =
+            root_list_test_app(&ctx, (0..80).map(root_list_action).collect());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = true;
+        app.page_jump = 200;
+        let mut next_frame = 0;
+        let mut frame = |app: &mut LauncherApp, events| {
+            run_root_list_frame(&ctx, app, next_frame, 960.0, 420.0, events)
+                .drop_without_applying_deltas();
+            next_frame += 1;
+        };
+        frame(&mut app, vec![]);
+        frame(
+            &mut app,
+            vec![
+                key_press(Key::PageDown, Modifiers::NONE),
+                key_press(Key::PageDown, Modifiers::NONE),
+            ],
+        );
+        assert_eq!(app.selected, Some(79));
+        for _ in 0..30 {
+            frame(&mut app, vec![]);
+        }
+        let bottom_row_top = |app: &LauncherApp| {
+            let viewport = app.test_root_scroll_viewport_rect.unwrap();
+            let (_, row) = app
+                .test_root_rendered_row_rects
+                .iter()
+                .find(|(index, _)| *index == 79)
+                .expect("the selected bottom row is rendered");
+            assert!(viewport.contains_rect(*row));
+            row.top()
+        };
+        let settled = bottom_row_top(&app);
+        for _ in 0..4 {
+            frame(&mut app, vec![key_press(Key::PageDown, Modifiers::NONE)]);
+            assert_eq!(app.selected, Some(79));
+            assert_eq!(bottom_row_top(&app), settled);
+        }
+        frame(&mut app, vec![key_press(Key::PageUp, Modifiers::NONE)]);
+        assert_eq!(app.selected, Some(0));
+    }
+
+    fn run_root_query_navigation_test(check: fn()) {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(check)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn root_query_navigation_leaves_docked_settings_in_control_and_resumes_after_close() {
+        run_root_query_navigation_test(check_docked_settings_ownership);
+    }
+
+    fn check_docked_settings_ownership() {
+        use egui::{Key, Modifiers};
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "ordinary tool query");
+        let screen = egui::vec2(1600.0, 1200.0);
+        app.show_settings = true;
+        app.settings_editor.settings_search_query = "settings draft".into();
+        launcher_show_owner_seed_window_position_at(
+            &ctx,
+            crate::gui::jump_mode::ui::settings_layer_id(),
+            "Settings",
+            screen,
+            egui::pos2(600.0, 700.0),
+        );
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        let (settings_id, settings_rect) = app.settings_editor.test_search_query_response.unwrap();
+        notes_query_mouse_click(&mut app, &ctx, screen, settings_rect);
+        assert!(ctx.memory(|memory| memory.has_focus(settings_id)));
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            digit_press(Key::Num2, Key::Numpad2, "2"),
+        );
+        assert!(app.settings_editor.settings_search_query.contains('2'));
+        assert_eq!(app.query, "ordinary tool query");
+        assert_eq!(app.selected, None);
+
+        app.force_close_panel(Panel::Settings);
+        for _ in 0..3 {
+            notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+        }
+        let query_id = egui::Id::new("query_input");
+        let query_rect = ctx.read_response(query_id).unwrap().rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, query_rect);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        app.results = two_results();
+        app.invalidate_root_list_results();
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![key_press(Key::PageDown, Modifiers::NONE)],
+        );
+        assert_eq!(app.selected, Some(0));
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
     }
 
     fn query_request(id: u64, query: &str) -> crate::mkmacro::LauncherCommandRequest {
@@ -77305,8 +85199,8 @@ mod tests {
         };
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let (wake, _wake_rx) = std::sync::mpsc::channel();
-        let owner = crate::hotkey::reconfiguration::install_main_runtime(wake)
-            .expect("isolated hotkey owner");
+        let owner =
+            crate::hotkey::reconfiguration::install_main_runtime(wake).expect("isolated hotkey owner");
         let ctx = egui::Context::default();
         ctx.all_styles_mut(|style| style.animation_time = 0.0);
         let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
@@ -77322,12 +85216,56 @@ mod tests {
             .sync_enabled_plugins(app.enabled_plugins.as_ref());
         let infos = app.plugins.plugin_infos();
         app.plugin_editor.sync_committed_settings(&settings, infos);
+        app.set_jump_mode_enabled(true);
         prepare_actual_query_frame(&ctx, &mut app);
         app.focus_panel(super::super::Panel::Plugins);
         app.plugin_editor.set_test_filter("draft");
         for _ in 0..4 {
             run_dialog_frame(&ctx, &mut app);
         }
+        let layer = app
+            .plugin_settings_host
+            .root_layer()
+            .expect("docked Plugin Settings");
+        ctx.move_to_top(layer);
+        let (filter, rect) = app
+            .plugin_editor
+            .test_filter_response()
+            .expect("docked Filter");
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(rect, pressed));
+        }
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        let label = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.response_id() == filter)
+            .expect("actual docked Filter target")
+            .metadata()
+            .label()
+            .to_owned();
+        root(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        root(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog_hint_for_label(&app, &label);
+        root(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(filter));
+        assert_eq!(app.plugin_editor.test_filter(), "draft");
         let (button, clip, enabled) = app
             .plugin_settings_host
             .test_button
@@ -77360,21 +85298,57 @@ mod tests {
                     .drop_without_applying_deltas();
             });
         }
-        let (_, filter) = app
+        let native = |app: &mut LauncherApp, events| {
+            run_host_viewport_frame(&ctx, app, viewport, events, false, false);
+        };
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let (filter, _) = app
             .plugin_editor
             .test_filter_response()
             .expect("native filter");
-        for pressed in [true, false] {
-            super::with_immediate_viewport_test_events_for(
-                viewport,
-                tool_dialog_pointer_events(filter, pressed),
-                || {
-                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
-                        .0
-                        .drop_without_applying_deltas();
-                },
-            );
-        }
+        let label = app
+            .plugin_settings_host
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.response_id() == filter)
+            .expect("actual native Filter target")
+            .metadata()
+            .label()
+            .to_owned();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .plugin_settings_host
+            .test_native_jump()
+            .active_session()
+            .expect("Plugin Settings hints in their viewport")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("native Filter hint")
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(filter)))
+        );
+        assert_eq!(app.plugin_editor.test_filter(), "draft");
         super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
         super::with_immediate_viewport_test_events_for(
             viewport,
@@ -77462,22 +85436,61 @@ mod tests {
                 .0
                 .drop_without_applying_deltas();
         });
-        let (_, checkbox, clip, enabled) = app
+        for _ in 0..4 {
+            native(&mut app, Vec::new());
+        }
+        let (label, checkbox, clip, enabled) = app
             .plugin_editor
             .test_plugin_checkbox()
             .expect("current plugin checkbox");
         assert!(enabled && clip.contains_rect(checkbox));
-        for pressed in [true, false] {
-            super::with_immediate_viewport_test_events_for(
-                viewport,
-                tool_dialog_pointer_events(checkbox, pressed),
-                || {
-                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
-                        .0
-                        .drop_without_applying_deltas();
-                },
-            );
-        }
+        let checkbox_id = app
+            .plugin_settings_host
+            .test_native_jump()
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label && target.rect() == checkbox)
+            .expect("exact native plugin row target")
+            .response_id();
+        native(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = app
+            .plugin_settings_host
+            .test_native_jump()
+            .active_session()
+            .expect("current native Plugin Settings hints")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .expect("exact native plugin row hint")
+            .hint()
+            .as_str()
+            .to_owned();
+        native(&mut app, vec![egui::Event::Text(hint)]);
+        assert_eq!(
+            super::immediate_viewport_test_focused_id(),
+            Some((viewport, Some(checkbox_id)))
+        );
+        assert!(!app.settings_save_pending());
+        native(
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        native(
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
         assert!(app.settings_save_pending());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.settings_save_pending() {

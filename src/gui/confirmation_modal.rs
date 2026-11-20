@@ -344,6 +344,7 @@ mod tests {
 #[derive(Debug, Clone)]
 pub struct ConfirmationModal {
     open: bool,
+    generation: u64,
     title: String,
     description: String,
     warning: String,
@@ -356,6 +357,7 @@ impl Default for ConfirmationModal {
     fn default() -> Self {
         Self {
             open: false,
+            generation: 0,
             title: "Confirm destructive action".into(),
             description: String::new(),
             warning: "This action cannot be undone.".into(),
@@ -373,12 +375,16 @@ impl ConfirmationModal {
     pub(crate) fn is_open(&self) -> bool {
         self.open
     }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
 
     #[cfg(test)]
     pub(crate) fn source_copy(&self) -> Option<&str> {
         self.source_label.as_deref()
     }
     pub fn open_custom(&mut self, description: impl Into<String>, warning: impl Into<String>) {
+        self.generation = self.generation.wrapping_add(1).max(1);
         self.title = "Confirm destructive action".into();
         self.description = description.into();
         self.warning = warning.into();
@@ -392,6 +398,7 @@ impl ConfirmationModal {
     }
 
     pub fn open_for_source(&mut self, kind: DestructiveAction, source: Option<ActivationSource>) {
+        self.generation = self.generation.wrapping_add(1).max(1);
         self.title = "Confirm destructive action".into();
         self.description = kind.label().into();
         self.warning = kind.warning().into();

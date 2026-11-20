@@ -48,6 +48,7 @@ pub enum PersistentStoreId {
     Scratchpad,
     QueryHistory,
     ClipboardHistory,
+    NotificationHistory,
     PasteSequences,
     CalculatorHistory,
     Usage,
@@ -66,7 +67,7 @@ pub enum PersistentStoreId {
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -93,6 +94,7 @@ impl PersistentStoreId {
         Self::Scratchpad,
         Self::QueryHistory,
         Self::ClipboardHistory,
+        Self::NotificationHistory,
         Self::PasteSequences,
         Self::CalculatorHistory,
         Self::Usage,
@@ -171,6 +173,7 @@ pub enum StoreHealth {
 enum ProbeKind {
     Json(fn(&Path, &[u8]) -> ProbeResult),
     OpaqueFile,
+    NotificationHistory,
     NotesDirectory,
     AssetsDirectory,
 }
@@ -221,6 +224,7 @@ impl StoreDescriptor {
         match self.probe {
             ProbeKind::Json(validate) => probe_file(path, Some(validate)),
             ProbeKind::OpaqueFile => probe_file(path, None),
+            ProbeKind::NotificationHistory => crate::notifications::probe_history(path),
             ProbeKind::NotesDirectory => probe_directory(path, Some("md")),
             ProbeKind::AssetsDirectory => probe_directory(path, None),
         }
@@ -604,6 +608,15 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             true,
             ProbeKind::Json(probe_json::<Vec<String>>),
         ),
+        Id::NotificationHistory => s(
+            "Notification history",
+            File,
+            Replaceable,
+            Sensitive,
+            Moderate,
+            false,
+            ProbeKind::NotificationHistory,
+        ),
         Id::PasteSequences => s(
             "Paste sequences",
             File,
@@ -790,6 +803,7 @@ fn descriptor_for(
             false,
         ),
         Id::NoteUiState => (root.path().join("note_ui_state.json"), false),
+        Id::NotificationHistory => (root.path().join(crate::notifications::HISTORY_FILE), false),
         Id::DashboardConfig => (dashboard_path.to_path_buf(), dashboard_configured),
         Id::MultiManagerWorkspaces => (
             absolute_from(
@@ -1873,6 +1887,10 @@ mod tests {
                 .backup_policy,
             BackupPolicy::ExcludeReplaceable
         );
+        let notifications = catalog.get(PersistentStoreId::NotificationHistory);
+        assert_eq!(notifications.privacy, StorePrivacy::Sensitive);
+        assert_eq!(notifications.backup_policy, BackupPolicy::ExcludeReplaceable);
+        assert!(!notifications.restore_eligible);
     }
 
     #[test]

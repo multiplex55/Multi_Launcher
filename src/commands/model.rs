@@ -452,6 +452,7 @@ pub enum DialogCommand {
     DateTimeStudio,
     DiagramStudio,
     MarkdownStudio,
+    PasswordGenerator,
     Help,
     Convert,
     Settings,
@@ -463,8 +464,11 @@ pub enum DialogCommand {
     FolderSize,
     FileLock { path: Option<std::path::PathBuf> },
     Activity,
+    FileOperationsCenter,
+    DownloadsTriage,
+    NotificationInbox,
 }
-kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::CalculationPad => "calculation_pad", Self::DateTimeStudio => "date_time_studio", Self::DiagramStudio => "diagram_studio", Self::MarkdownStudio => "markdown_studio", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder", Self::FolderSize => "folder_size", Self::FileLock { .. } => "file_lock", Self::Activity => "activity");
+kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::CalculationPad => "calculation_pad", Self::DateTimeStudio => "date_time_studio", Self::DiagramStudio => "diagram_studio", Self::MarkdownStudio => "markdown_studio", Self::PasswordGenerator => "password_generator", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder", Self::FolderSize => "folder_size", Self::FileLock { .. } => "file_lock", Self::Activity => "activity", Self::FileOperationsCenter => "file_operations_center", Self::DownloadsTriage => "downloads_triage", Self::NotificationInbox => "notification_inbox");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalendarCommand {
     Open { view: String },
@@ -701,8 +705,9 @@ pub enum ClipboardCommand {
     Clear,
     Copy { index: usize },
     SetText { text: String },
+    CopyGeneratedPassword { length: usize },
 }
-kinds!(ClipboardCommand, Self::Dialog => "dialog", Self::Clear => "clear", Self::Copy { .. } => "copy", Self::SetText { .. } => "set_text");
+kinds!(ClipboardCommand, Self::Dialog => "dialog", Self::Clear => "clear", Self::Copy { .. } => "copy", Self::SetText { .. } => "set_text", Self::CopyGeneratedPassword { .. } => "copy_generated_password");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalculatorCommand {
     CopyResult {
