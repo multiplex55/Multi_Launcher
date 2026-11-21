@@ -11072,19 +11072,6 @@ mod tests {
 
     #[test]
     fn tracked_openable_panels_count_as_any_panel_open() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        struct RestoreCurrentDirectory(std::path::PathBuf);
-        impl Drop for RestoreCurrentDirectory {
-            fn drop(&mut self) {
-                let _ = std::env::set_current_dir(&self.0);
-            }
-        }
-        // `new_app` uses relative config paths, and this inventory includes
-        // Clipboard Modify. Isolate its files from the repository workspace.
-        let directory = tempfile::tempdir().unwrap();
-        let original_directory = std::env::current_dir().unwrap();
-        std::env::set_current_dir(directory.path()).unwrap();
-        let _restore_current_directory = RestoreCurrentDirectory(original_directory);
         let ctx = egui::Context::default();
         let openable_panels = LauncherApp::TRACKED_PANELS.iter().copied().filter(|panel| {
             !matches!(
@@ -11098,7 +11085,17 @@ mod tests {
         });
 
         for panel in openable_panels {
-            let mut app = new_app(&ctx);
+            let directory = tempdir().unwrap();
+            let mut settings = Settings::default();
+            settings.paste_sequence.next_hotkey = None;
+            settings.paste_sequence.cancel_hotkey = None;
+            let mut app = LauncherApp::new_isolated_for_test_at(
+                &ctx,
+                directory.path(),
+                settings,
+                Some(std::collections::HashSet::new()),
+                Some(std::collections::HashMap::new()),
+            );
             // Opening Clipboard Modify must use a deterministic backend rather
             // than reading the host clipboard.
             app.clipboard_modify_test_service = Some(std::sync::Arc::new(

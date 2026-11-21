@@ -10897,6 +10897,10 @@ mod tests {
             dialog.session.evaluation_count(),
             copy_all_session(&mut dialog.session),
         );
+        assert_eq!(
+            dialog.session.pending_transition(),
+            Some(PendingTransition::New)
+        );
         // The inline pending-transition decision disables the config menu.
         // Exercise the accepted host-effect boundary directly; the pending
         // document decision remains owned by the session during migration.
@@ -10917,6 +10921,10 @@ mod tests {
         assert!(dialog.host_state.embedded_root_layer().is_some());
         assert!(!dialog.host_state.bootstrap_pending());
         assert!(dialog.needs_root_ui_when_hidden());
+        assert_eq!(
+            dialog.session.pending_transition(),
+            Some(PendingTransition::New)
+        );
         let mut dock = dialog.empty_host_effects(egui::ViewportId::ROOT);
         dock.pass_accepted = true;
         dock.host_request = Some(super::PadHost::Docked);
@@ -10930,6 +10938,10 @@ mod tests {
         for _ in 0..2 {
             frame(&mut dialog, &ctx, initial_size, Vec::new());
         }
+        assert_eq!(
+            dialog.session.pending_transition(),
+            Some(PendingTransition::New)
+        );
         let state_after = (
             dialog.session.current_id(),
             dialog.session.current_name().map(str::to_owned),
