@@ -100,7 +100,7 @@ pub fn read_clipboard() -> Result<ClipboardRead, ClipboardError> {
     platform::read(Duration::from_millis(750))
 }
 
-/// Read one clipboard snapshot for Clipboard Modify; Windows uses a bounded WinRT worker.
+/// Read one clipboard snapshot for Clipboard Modify on a bounded worker.
 pub fn read_clipboard_for_modify() -> Result<ClipboardRead, ClipboardError> {
     platform::read_for_modify(MODIFY_READ_TIMEOUT)
 }
@@ -119,7 +119,6 @@ mod platform {
         sync::{
             Arc, LazyLock,
             atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
-            mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
         },
         thread,
         time::Instant,
@@ -128,7 +127,7 @@ mod platform {
         ApplicationModel::DataTransfer::{
             Clipboard, ClipboardContentOptions, DataPackage, DataPackageView, StandardDataFormats,
         },
-        Foundation::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation},
+        Foundation::{AsyncStatus, IAsyncOperation},
         Storage::Streams::InMemoryRandomAccessStream,
         Win32::{
             Foundation::RPC_E_CHANGED_MODE,
@@ -147,23 +146,16 @@ mod platform {
     #[derive(Clone, Copy)]
     #[repr(u8)]
     enum ReadStage {
-        WorkerAdmission = 0,
+        WorkerAdmission,
         WorkerSpawn,
-        MtaInitialize,
-        GetContent,
-        PrivateMarkerCheck,
-        TextFormat,
-        TextFormatCheck,
-        GetTextAsync,
-        AsyncStatus,
-        CompletionRegistration,
-        CompletionWait,
-        Completion,
-        ErrorCode,
-        GetResults,
-        Cancel,
+        RegisterMarker,
+        OpenClipboard,
+        EnumerateFormats,
+        GetText,
+        GlobalSize,
+        GlobalLock,
+        DecodeText,
         WorkerCleanup,
-        MtaTeardown,
     }
 
     impl ReadStage {
@@ -171,131 +163,71 @@ mod platform {
             match self {
                 Self::WorkerAdmission => "worker_admission",
                 Self::WorkerSpawn => "worker_spawn",
-                Self::MtaInitialize => "RoInitialize(MTA)",
-                Self::GetContent => "Clipboard.GetContent",
-                Self::PrivateMarkerCheck => "DataPackageView.Contains(private-format)",
-                Self::TextFormat => "StandardDataFormats.Text",
-                Self::TextFormatCheck => "DataPackageView.Contains(text-format)",
-                Self::GetTextAsync => "DataPackageView.GetTextAsync",
-                Self::AsyncStatus => "IAsyncOperation.Status",
-                Self::CompletionRegistration => "IAsyncOperation.SetCompleted",
-                Self::CompletionWait => "IAsyncOperation.completion",
-                Self::Completion => "IAsyncOperation.completed",
-                Self::ErrorCode => "IAsyncOperation.ErrorCode",
-                Self::GetResults => "IAsyncOperation.GetResults",
-                Self::Cancel => "IAsyncOperation.Cancel",
-                Self::WorkerCleanup => "WinRT cleanup",
-                Self::MtaTeardown => "RoUninitialize",
+                Self::RegisterMarker => "RegisterClipboardFormatW",
+                Self::OpenClipboard => "OpenClipboard",
+                Self::EnumerateFormats => "EnumClipboardFormats",
+                Self::GetText => "GetClipboardData(CF_UNICODETEXT)",
+                Self::GlobalSize => "GlobalSize",
+                Self::GlobalLock => "GlobalLock",
+                Self::DecodeText => "decode_utf16",
+                Self::WorkerCleanup => "clipboard cleanup",
             }
         }
-
         fn from_u8(value: u8) -> Self {
             match value {
                 0 => Self::WorkerAdmission,
                 1 => Self::WorkerSpawn,
-                2 => Self::MtaInitialize,
-                3 => Self::GetContent,
-                4 => Self::PrivateMarkerCheck,
-                5 => Self::TextFormat,
-                6 => Self::TextFormatCheck,
-                7 => Self::GetTextAsync,
-                8 => Self::AsyncStatus,
-                9 => Self::CompletionRegistration,
-                10 => Self::CompletionWait,
-                11 => Self::Completion,
-                12 => Self::ErrorCode,
-                13 => Self::GetResults,
-                14 => Self::Cancel,
-                15 => Self::WorkerCleanup,
-                _ => Self::MtaTeardown,
+                2 => Self::RegisterMarker,
+                3 => Self::OpenClipboard,
+                4 => Self::EnumerateFormats,
+                5 => Self::GetText,
+                6 => Self::GlobalSize,
+                7 => Self::GlobalLock,
+                8 => Self::DecodeText,
+                _ => Self::WorkerCleanup,
             }
         }
     }
 
-    const APARTMENT_UNKNOWN: u8 = 0;
-    const APARTMENT_MTA: u8 = 1;
-
     struct ReadDiagnostics {
         started: Instant,
         stage: AtomicU8,
-        apartment: AtomicU8,
         failure_event_recorded: AtomicBool,
         timeout_event_recorded: AtomicBool,
     }
-
     impl ReadDiagnostics {
         fn new(started: Instant) -> Self {
             Self {
                 started,
                 stage: AtomicU8::new(ReadStage::WorkerAdmission as u8),
-                apartment: AtomicU8::new(APARTMENT_UNKNOWN),
                 failure_event_recorded: AtomicBool::new(false),
                 timeout_event_recorded: AtomicBool::new(false),
             }
         }
-
         fn enter(&self, stage: ReadStage) {
             self.stage.store(stage as u8, Ordering::Release);
         }
-
         fn current_stage(&self) -> ReadStage {
             ReadStage::from_u8(self.stage.load(Ordering::Acquire))
         }
-
-        fn mark_mta(&self) {
-            self.apartment.store(APARTMENT_MTA, Ordering::Release);
-        }
-
-        fn apartment(&self) -> &'static str {
-            match self.apartment.load(Ordering::Acquire) {
-                APARTMENT_MTA => "MTA",
-                _ => "unknown",
-            }
-        }
-
         fn elapsed_ms(&self) -> u64 {
             self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
         }
-
         fn timeout(&self) {
             if !self.timeout_event_recorded.swap(true, Ordering::AcqRel) {
-                tracing::warn!(
-                    target: "multi_launcher::clipboard",
-                    outcome = "timeout",
-                    stage = self.current_stage().as_str(),
-                    elapsed_ms = self.elapsed_ms(),
-                    apartment = self.apartment(),
-                    "WinRT clipboard Modify read timed out"
-                );
+                tracing::warn!(target: "multi_launcher::clipboard", backend = "win32", outcome = "timeout", stage = self.current_stage().as_str(), elapsed_ms = self.elapsed_ms(), "Clipboard Modify read timed out");
             }
         }
-
-        fn hresult(&self, stage: ReadStage, hresult: u32) {
+        fn native_error(&self, stage: ReadStage, code: u32) {
             self.enter(stage);
             if !self.failure_event_recorded.swap(true, Ordering::AcqRel) {
-                tracing::warn!(
-                    target: "multi_launcher::clipboard",
-                    outcome = "hresult",
-                    stage = stage.as_str(),
-                    elapsed_ms = self.elapsed_ms(),
-                    apartment = self.apartment(),
-                    hresult,
-                    "WinRT clipboard Modify read failed"
-                );
+                tracing::warn!(target: "multi_launcher::clipboard", backend = "win32", outcome = "error", stage = stage.as_str(), elapsed_ms = self.elapsed_ms(), code, "Clipboard Modify read failed");
             }
         }
-
         fn issue(&self, outcome: &'static str, stage: ReadStage) {
             self.enter(stage);
             if !self.failure_event_recorded.swap(true, Ordering::AcqRel) {
-                tracing::warn!(
-                    target: "multi_launcher::clipboard",
-                    outcome,
-                    stage = stage.as_str(),
-                    elapsed_ms = self.elapsed_ms(),
-                    apartment = self.apartment(),
-                    "WinRT clipboard Modify read failed"
-                );
+                tracing::warn!(target: "multi_launcher::clipboard", backend = "win32", outcome, stage = stage.as_str(), elapsed_ms = self.elapsed_ms(), "Clipboard Modify read failed");
             }
         }
     }
@@ -397,14 +329,14 @@ mod platform {
                             result => result,
                         }
                     };
-                // The worker closure has returned only after native views and
-                // its apartment are torn down. Free capacity before publishing
+                // The worker closure returns after native resources are released.
+                // Free capacity before publishing
                 // so a successful recovery admits the next caller immediately.
                 drop(permit);
                 let _ = sender.try_send(result);
             });
         match spawned {
-            // Detach rather than joining: a stalled WinRT call must not extend the caller wait.
+            // Detach rather than joining: a stalled native call must not extend the caller wait.
             Ok(handle) => drop(handle),
             Err(_) => {
                 diagnostics.issue("worker_spawn_failed", ReadStage::WorkerSpawn);
@@ -483,61 +415,6 @@ mod platform {
     fn map_read_error(stage: &'static str, error: windows::core::Error) -> ClipboardError {
         map_read_hresult(stage, error.code().0 as u32)
     }
-    struct ModifyReadContext<'a> {
-        diagnostics: &'a ReadDiagnostics,
-        cancelled: &'a AtomicBool,
-        deadline: Instant,
-    }
-
-    impl ModifyReadContext<'_> {
-        fn enter(&self, stage: ReadStage) -> Result<(), ClipboardError> {
-            self.diagnostics.enter(stage);
-            self.check()
-        }
-
-        fn is_stopped(&self) -> bool {
-            self.cancelled.load(Ordering::Acquire) || Instant::now() >= self.deadline
-        }
-
-        fn check(&self) -> Result<(), ClipboardError> {
-            if self.is_stopped() {
-                self.diagnostics.timeout();
-                Err(ClipboardError::TimedOut)
-            } else {
-                Ok(())
-            }
-        }
-
-        fn remaining(&self) -> Duration {
-            self.deadline.saturating_duration_since(Instant::now())
-        }
-
-        fn call<T>(
-            &self,
-            stage: ReadStage,
-            call: impl FnOnce() -> windows::core::Result<T>,
-        ) -> Result<T, ClipboardError> {
-            self.enter(stage)?;
-            match call() {
-                Ok(value) => {
-                    self.check()?;
-                    Ok(value)
-                }
-                Err(error) => Err(self.map_hresult(stage, error.code().0 as u32)),
-            }
-        }
-
-        fn map_hresult(&self, stage: ReadStage, hresult: u32) -> ClipboardError {
-            if self.is_stopped() {
-                self.diagnostics.timeout();
-                ClipboardError::TimedOut
-            } else {
-                self.diagnostics.hresult(stage, hresult);
-                map_hresult(hresult)
-            }
-        }
-    }
-
     struct Apartment(PhantomData<Rc<()>>);
     impl Apartment {
         fn enter() -> Result<Self, ClipboardError> {
@@ -546,28 +423,6 @@ mod platform {
 
         fn enter_for_read() -> Result<Self, ClipboardError> {
             Self::enter_with(map_read_error)
-        }
-
-        fn enter_mta_for_modify(context: &ModifyReadContext<'_>) -> Result<Self, ClipboardError> {
-            context.enter(ReadStage::MtaInitialize)?;
-            // This runs only on a fresh worker. Never fall back to an STA that
-            // would need a message pump while the caller waits for completion.
-            match unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
-                Ok(()) => {
-                    let apartment = Self(PhantomData);
-                    context.diagnostics.mark_mta();
-                    if let Err(error) = context.check() {
-                        context.diagnostics.enter(ReadStage::MtaTeardown);
-                        drop(apartment);
-                        Err(error)
-                    } else {
-                        Ok(apartment)
-                    }
-                }
-                Err(error) => {
-                    Err(context.map_hresult(ReadStage::MtaInitialize, error.code().0 as u32))
-                }
-            }
         }
 
         fn enter_with(
@@ -633,32 +488,6 @@ mod platform {
         fn private(&self) -> Result<bool, ClipboardError>;
         fn has_text(&self) -> Result<bool, ClipboardError>;
         fn text(&self, timeout: Duration) -> Result<String, ClipboardError>;
-
-        fn private_for_modify(
-            &self,
-            context: &ModifyReadContext<'_>,
-        ) -> Result<bool, ClipboardError> {
-            context.enter(ReadStage::PrivateMarkerCheck)?;
-            self.private()
-        }
-
-        fn has_text_for_modify(
-            &self,
-            context: &ModifyReadContext<'_>,
-        ) -> Result<bool, ClipboardError> {
-            context.enter(ReadStage::TextFormatCheck)?;
-            self.has_text()
-        }
-
-        fn text_for_modify(
-            &self,
-            context: &ModifyReadContext<'_>,
-        ) -> Result<String, ClipboardError> {
-            context.enter(ReadStage::GetTextAsync)?;
-            let text = self.text(context.remaining())?;
-            context.check()?;
-            Ok(text)
-        }
     }
     impl View for DataPackageView {
         fn private(&self) -> Result<bool, ClipboardError> {
@@ -679,59 +508,10 @@ mod platform {
                 timeout,
             )
         }
-
-        fn private_for_modify(
-            &self,
-            context: &ModifyReadContext<'_>,
-        ) -> Result<bool, ClipboardError> {
-            context.call(ReadStage::PrivateMarkerCheck, || {
-                self.Contains(&HSTRING::from(PRIVATE_FORMAT))
-            })
-        }
-
-        fn has_text_for_modify(
-            &self,
-            context: &ModifyReadContext<'_>,
-        ) -> Result<bool, ClipboardError> {
-            let text_format = context.call(ReadStage::TextFormat, StandardDataFormats::Text)?;
-            context.call(ReadStage::TextFormatCheck, || self.Contains(&text_format))
-        }
-
-        fn text_for_modify(
-            &self,
-            context: &ModifyReadContext<'_>,
-        ) -> Result<String, ClipboardError> {
-            context.enter(ReadStage::GetTextAsync)?;
-            let operation = match self.GetTextAsync() {
-                Ok(operation) => operation,
-                Err(error) => {
-                    return Err(context.map_hresult(ReadStage::GetTextAsync, error.code().0 as u32));
-                }
-            };
-            let operation = WinRtTextOperation::new(operation);
-            if let Err(error) = context.check() {
-                cancel_operation(&operation, context.diagnostics);
-                context.diagnostics.enter(ReadStage::WorkerCleanup);
-                drop(operation);
-                return Err(error);
-            }
-            wait_text_for_modify(operation, context)
-        }
     }
 
     fn classify(view: &impl View, timeout: Duration) -> Result<ClipboardRead, ClipboardError> {
         classify_snapshot(|| view.private(), || view.has_text(), || view.text(timeout))
-    }
-
-    fn classify_for_modify(
-        view: &impl View,
-        context: &ModifyReadContext<'_>,
-    ) -> Result<ClipboardRead, ClipboardError> {
-        classify_snapshot(
-            || view.private_for_modify(context),
-            || view.has_text_for_modify(context),
-            || view.text_for_modify(context),
-        )
     }
 
     fn classify_snapshot(
@@ -746,231 +526,6 @@ mod platform {
             return Ok(ClipboardRead::NonText);
         }
         Ok(ClipboardRead::Ordinary(read_text()?))
-    }
-
-    enum CompletionSignal {
-        Status(AsyncStatus),
-        Disconnected,
-    }
-
-    fn signal_completion(sender: &SyncSender<AsyncStatus>, status: AsyncStatus) {
-        let _ = sender.try_send(status);
-    }
-
-    fn wait_for_completion(
-        receiver: &Receiver<AsyncStatus>,
-        context: &ModifyReadContext<'_>,
-    ) -> Result<CompletionSignal, ClipboardError> {
-        context.enter(ReadStage::CompletionWait)?;
-        match receiver.recv_timeout(context.remaining()) {
-            Ok(status) => Ok(CompletionSignal::Status(status)),
-            Err(RecvTimeoutError::Timeout) => {
-                context.diagnostics.timeout();
-                Err(ClipboardError::TimedOut)
-            }
-            Err(RecvTimeoutError::Disconnected) => Ok(CompletionSignal::Disconnected),
-        }
-    }
-
-    trait ModifyTextOperation {
-        fn status(&self, context: &ModifyReadContext<'_>) -> Result<AsyncStatus, ClipboardError>;
-        fn register_completed(
-            &mut self,
-            sender: SyncSender<AsyncStatus>,
-            context: &ModifyReadContext<'_>,
-        ) -> Result<(), ClipboardError>;
-        fn get_results(&self, context: &ModifyReadContext<'_>) -> Result<String, ClipboardError>;
-        fn error_code(&self, context: &ModifyReadContext<'_>) -> Result<u32, ClipboardError>;
-        fn cancel(&self, diagnostics: &ReadDiagnostics);
-    }
-
-    struct WinRtTextOperation {
-        operation: IAsyncOperation<HSTRING>,
-        _handler: Option<AsyncOperationCompletedHandler<HSTRING>>,
-    }
-
-    impl WinRtTextOperation {
-        fn new(operation: IAsyncOperation<HSTRING>) -> Self {
-            Self {
-                operation,
-                _handler: None,
-            }
-        }
-    }
-
-    impl ModifyTextOperation for WinRtTextOperation {
-        fn status(&self, context: &ModifyReadContext<'_>) -> Result<AsyncStatus, ClipboardError> {
-            context.call(ReadStage::AsyncStatus, || self.operation.Status())
-        }
-
-        fn register_completed(
-            &mut self,
-            sender: SyncSender<AsyncStatus>,
-            context: &ModifyReadContext<'_>,
-        ) -> Result<(), ClipboardError> {
-            let handler = AsyncOperationCompletedHandler::new(move |_, status| {
-                signal_completion(&sender, status);
-                Ok(())
-            });
-            context.call(ReadStage::CompletionRegistration, || {
-                self.operation.SetCompleted(&handler)
-            })?;
-            self._handler = Some(handler);
-            Ok(())
-        }
-
-        fn get_results(&self, context: &ModifyReadContext<'_>) -> Result<String, ClipboardError> {
-            context
-                .call(ReadStage::GetResults, || self.operation.GetResults())
-                .map(|text| text.to_string_lossy())
-        }
-
-        fn error_code(&self, context: &ModifyReadContext<'_>) -> Result<u32, ClipboardError> {
-            context
-                .call(ReadStage::ErrorCode, || self.operation.ErrorCode())
-                .map(|hresult| hresult.0 as u32)
-        }
-
-        fn cancel(&self, diagnostics: &ReadDiagnostics) {
-            diagnostics.enter(ReadStage::Cancel);
-            if let Err(error) = self.operation.Cancel() {
-                tracing::warn!(
-                    target: "multi_launcher::clipboard",
-                    outcome = "cancel_hresult",
-                    stage = ReadStage::Cancel.as_str(),
-                    elapsed_ms = diagnostics.elapsed_ms(),
-                    apartment = diagnostics.apartment(),
-                    hresult = error.code().0 as u32,
-                    "WinRT clipboard Modify read cancellation failed"
-                );
-            }
-        }
-    }
-
-    fn cancel_operation(operation: &impl ModifyTextOperation, diagnostics: &ReadDiagnostics) {
-        operation.cancel(diagnostics);
-    }
-
-    fn complete_text_operation(
-        operation: &impl ModifyTextOperation,
-        status: AsyncStatus,
-        context: &ModifyReadContext<'_>,
-    ) -> Result<String, ClipboardError> {
-        match status {
-            AsyncStatus::Completed => operation.get_results(context),
-            AsyncStatus::Started => {
-                context
-                    .diagnostics
-                    .issue("completion_not_terminal", ReadStage::Completion);
-                cancel_operation(operation, context.diagnostics);
-                Err(ClipboardError::Unavailable)
-            }
-            _ => {
-                let error_code = operation.error_code(context)?;
-                Err(context.map_hresult(ReadStage::Completion, error_code))
-            }
-        }
-    }
-
-    fn operation_status(
-        operation: &impl ModifyTextOperation,
-        context: &ModifyReadContext<'_>,
-    ) -> Result<AsyncStatus, ClipboardError> {
-        operation.status(context)
-    }
-
-    fn wait_text_for_modify(
-        mut operation: impl ModifyTextOperation,
-        context: &ModifyReadContext<'_>,
-    ) -> Result<String, ClipboardError> {
-        let result = (|| -> Result<String, ClipboardError> {
-            let status = match operation_status(&operation, context) {
-                Ok(status) => status,
-                Err(error) => {
-                    cancel_operation(&operation, context.diagnostics);
-                    return Err(error);
-                }
-            };
-            if status != AsyncStatus::Started {
-                return complete_text_operation(&operation, status, context);
-            }
-
-            let (sender, receiver) = mpsc::sync_channel(1);
-            if let Err(error) = operation.register_completed(sender, context) {
-                cancel_operation(&operation, context.diagnostics);
-                return Err(error);
-            }
-
-            // SetCompleted may race an operation that finished after the initial
-            // status check. Querying once after registration closes that race; the
-            // bounded channel also retains a callback delivered before this query.
-            let status = match operation_status(&operation, context) {
-                Ok(status) => status,
-                Err(error) => {
-                    cancel_operation(&operation, context.diagnostics);
-                    return Err(error);
-                }
-            };
-            if status != AsyncStatus::Started {
-                return complete_text_operation(&operation, status, context);
-            }
-
-            match wait_for_completion(&receiver, context) {
-                Ok(CompletionSignal::Status(status)) => {
-                    if let Err(error) = context.check() {
-                        cancel_operation(&operation, context.diagnostics);
-                        return Err(error);
-                    }
-                    let status = if status == AsyncStatus::Started {
-                        let status = match operation_status(&operation, context) {
-                            Ok(status) => status,
-                            Err(error) => {
-                                cancel_operation(&operation, context.diagnostics);
-                                return Err(error);
-                            }
-                        };
-                        if status == AsyncStatus::Started {
-                            context
-                                .diagnostics
-                                .issue("completion_not_terminal", ReadStage::Completion);
-                            cancel_operation(&operation, context.diagnostics);
-                            return Err(ClipboardError::Unavailable);
-                        }
-                        status
-                    } else {
-                        status
-                    };
-                    complete_text_operation(&operation, status, context)
-                }
-                Ok(CompletionSignal::Disconnected) => {
-                    let status = match operation_status(&operation, context) {
-                        Ok(status) => status,
-                        Err(error) => {
-                            cancel_operation(&operation, context.diagnostics);
-                            return Err(error);
-                        }
-                    };
-                    if status == AsyncStatus::Started {
-                        context
-                            .diagnostics
-                            .issue("completion_signal_lost", ReadStage::Completion);
-                        cancel_operation(&operation, context.diagnostics);
-                        Err(ClipboardError::Unavailable)
-                    } else {
-                        complete_text_operation(&operation, status, context)
-                    }
-                }
-                Err(error) => {
-                    if error == ClipboardError::TimedOut {
-                        cancel_operation(&operation, context.diagnostics);
-                    }
-                    Err(error)
-                }
-            }
-        })();
-        context.diagnostics.enter(ReadStage::WorkerCleanup);
-        drop(operation);
-        result
     }
 
     fn wait_text(
@@ -1015,159 +570,241 @@ mod platform {
         classify(&view, timeout)
     }
 
+    // Enumerating the complete format list distinguishes an absent marker from
+    // an inspection failure. The caller keeps the clipboard open throughout.
+    fn inspect_formats(
+        private_format: u32,
+        mut next: impl FnMut(u32) -> Result<Option<u32>, ClipboardError>,
+    ) -> Result<(bool, bool), ClipboardError> {
+        let mut current = 0;
+        let mut has_text = false;
+        while let Some(format) = next(current)? {
+            if format == private_format {
+                return Ok((true, has_text));
+            }
+            has_text |= format == 13; // CF_UNICODETEXT
+            current = format;
+        }
+        Ok((false, has_text))
+    }
+
+    fn decode_native_text(bytes: &[u8]) -> Result<String, ClipboardError> {
+        if bytes.len() % 2 != 0 {
+            return Err(ClipboardError::Unavailable);
+        }
+        let mut words = Vec::new();
+        for pair in bytes.chunks_exact(2) {
+            let word = u16::from_le_bytes([pair[0], pair[1]]);
+            if word == 0 {
+                return String::from_utf16(&words).map_err(|_| ClipboardError::Unavailable);
+            }
+            words.push(word);
+        }
+        Err(ClipboardError::Unavailable)
+    }
+
+    fn read_native(
+        diagnostics: &ReadDiagnostics,
+        cancelled: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<ClipboardRead, ClipboardError> {
+        use windows::Win32::{
+            Foundation::{ERROR_SUCCESS, GetLastError, HGLOBAL, SetLastError},
+            System::{
+                DataExchange::{
+                    CloseClipboard, EnumClipboardFormats, GetClipboardData, OpenClipboard,
+                    RegisterClipboardFormatW,
+                },
+                Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            },
+        };
+
+        struct OpenGuard;
+        impl Drop for OpenGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = CloseClipboard();
+                }
+            }
+        }
+        struct LockGuard(HGLOBAL);
+        impl Drop for LockGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = GlobalUnlock(self.0);
+                }
+            }
+        }
+        let check = |stage| {
+            diagnostics.enter(stage);
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                diagnostics.timeout();
+                Err(ClipboardError::TimedOut)
+            } else {
+                Ok(())
+            }
+        };
+        let failure = |stage, code| {
+            diagnostics.native_error(stage, code);
+            ClipboardError::Unavailable
+        };
+        check(ReadStage::RegisterMarker)?;
+        let marker: Vec<u16> = PRIVATE_FORMAT.encode_utf16().chain(Some(0)).collect();
+        let private_format =
+            unsafe { RegisterClipboardFormatW(windows::core::PCWSTR(marker.as_ptr())) };
+        if private_format == 0 {
+            return Err(failure(ReadStage::RegisterMarker, unsafe {
+                GetLastError().0
+            }));
+        }
+        check(ReadStage::OpenClipboard)?;
+        // A failed open commonly means another process has the clipboard open.
+        if let Err(error) = unsafe { OpenClipboard(None) } {
+            let code = error.code().0 as u32;
+            diagnostics.native_error(ReadStage::OpenClipboard, code);
+            return Err(
+                if code == 0x80070005 || code == 0x800700aa || code == 0x80004005 {
+                    ClipboardError::Busy
+                } else {
+                    ClipboardError::Unavailable
+                },
+            );
+        }
+        let _open = OpenGuard;
+        check(ReadStage::EnumerateFormats)?;
+        let (private, has_text) = inspect_formats(private_format, |current| {
+            check(ReadStage::EnumerateFormats)?;
+            unsafe { SetLastError(ERROR_SUCCESS) };
+            let format = unsafe { EnumClipboardFormats(current) };
+            if format != 0 {
+                return Ok(Some(format));
+            }
+            let error = unsafe { GetLastError() };
+            if error == ERROR_SUCCESS {
+                Ok(None)
+            } else {
+                Err(failure(ReadStage::EnumerateFormats, error.0))
+            }
+        })?;
+        if private {
+            return Ok(ClipboardRead::Private);
+        }
+        if !has_text {
+            return Ok(ClipboardRead::NonText);
+        }
+        check(ReadStage::GetText)?;
+        let handle = unsafe { GetClipboardData(13) }
+            .map_err(|error| failure(ReadStage::GetText, error.code().0 as u32))?;
+        let global = HGLOBAL(handle.0);
+        check(ReadStage::GlobalSize)?;
+        let size = unsafe { GlobalSize(global) };
+        if size == 0 || size > isize::MAX as usize || size % 2 != 0 {
+            diagnostics.issue("invalid_allocation_size", ReadStage::GlobalSize);
+            return Err(ClipboardError::Unavailable);
+        }
+        check(ReadStage::GlobalLock)?;
+        let pointer = unsafe { GlobalLock(global) }.cast::<u8>();
+        if pointer.is_null() {
+            return Err(failure(ReadStage::GlobalLock, unsafe { GetLastError().0 }));
+        }
+        let _lock = LockGuard(global);
+        check(ReadStage::DecodeText)?;
+        // The clipboard owns this allocation. The guards keep it locked and
+        // open until after the bounded copy and UTF-16 validation complete.
+        let bytes = unsafe { std::slice::from_raw_parts(pointer, size) };
+        let text = decode_native_text(bytes).map_err(|error| {
+            diagnostics.issue("malformed_text", ReadStage::DecodeText);
+            error
+        })?;
+        check(ReadStage::WorkerCleanup)?;
+        Ok(ClipboardRead::Ordinary(text))
+    }
+
     pub(super) fn read_for_modify(timeout: Duration) -> Result<ClipboardRead, ClipboardError> {
         run_bounded_worker(
             Arc::clone(&MODIFY_READ_WORKERS),
             timeout,
-            |diagnostics, cancelled, deadline| {
-                let context = ModifyReadContext {
-                    diagnostics: &diagnostics,
-                    cancelled: &cancelled,
-                    deadline,
-                };
-                let apartment = Apartment::enter_mta_for_modify(&context)?;
-                match context.call(ReadStage::GetContent, Clipboard::GetContent) {
-                    Ok(view) => {
-                        let result = classify_for_modify(&view, &context);
-                        diagnostics.enter(ReadStage::WorkerCleanup);
-                        drop(view);
-                        diagnostics.enter(ReadStage::MtaTeardown);
-                        drop(apartment);
-                        result
-                    }
-                    Err(error) => {
-                        diagnostics.enter(ReadStage::WorkerCleanup);
-                        diagnostics.enter(ReadStage::MtaTeardown);
-                        drop(apartment);
-                        Err(error)
-                    }
-                }
-            },
+            |diagnostics, cancelled, deadline| read_native(&diagnostics, &cancelled, deadline),
         )
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::sync::Mutex;
+        use std::sync::mpsc;
 
         const TEST_WAIT: Duration = Duration::from_millis(750);
-        const TEST_MTA_WAIT: Duration = Duration::from_secs(5);
 
-        fn context_for_test<'a>(
-            diagnostics: &'a ReadDiagnostics,
-            cancelled: &'a AtomicBool,
-        ) -> ModifyReadContext<'a> {
-            ModifyReadContext {
-                diagnostics,
-                cancelled,
-                deadline: Instant::now() + TEST_MTA_WAIT,
-            }
+        #[test]
+        fn native_format_inspection_fails_closed_and_recognizes_absence() {
+            let mut formats = [Some(13), Some(1234), None].into_iter();
+            assert_eq!(
+                inspect_formats(5678, |_| Ok(formats.next().unwrap())),
+                Ok((false, true))
+            );
+            let mut formats = [Some(13), Some(5678)].into_iter();
+            assert_eq!(
+                inspect_formats(5678, |_| Ok(formats.next().unwrap())),
+                Ok((true, true))
+            );
+            let mut count = 0;
+            assert_eq!(
+                inspect_formats(5678, |_| {
+                    count += 1;
+                    if count == 1 {
+                        Ok(Some(13))
+                    } else {
+                        Err(ClipboardError::Unavailable)
+                    }
+                }),
+                Err(ClipboardError::Unavailable)
+            );
         }
 
-        struct ControlledOperationState {
-            status: Mutex<AsyncStatus>,
-            completion: Mutex<Option<SyncSender<AsyncStatus>>>,
-            post_registration: Mutex<Option<mpsc::Sender<()>>>,
-            status_calls: AtomicUsize,
-            result_calls: AtomicUsize,
-            cancel_calls: AtomicUsize,
+        #[test]
+        fn native_text_decoding_checks_termination_and_unicode() {
+            assert_eq!(decode_native_text(&[0, 0]), Ok(String::new()));
+            let text = "café\r\n😀";
+            let bytes: Vec<u8> = text
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            assert_eq!(decode_native_text(&bytes), Ok(text.into()));
+            assert_eq!(
+                decode_native_text(&[65, 0]),
+                Err(ClipboardError::Unavailable)
+            );
+            assert_eq!(decode_native_text(&[65]), Err(ClipboardError::Unavailable));
+            assert_eq!(
+                decode_native_text(&[0, 0xd8, 0, 0]),
+                Err(ClipboardError::Unavailable)
+            );
         }
 
-        struct ControlledTextOperation {
-            state: Arc<ControlledOperationState>,
-            result: String,
-            error_code: u32,
+        // This test deliberately replaces the system clipboard and must be run
+        // alone in an interactive session with a foreground application.
+        #[test]
+        #[ignore = "uses the real system clipboard"]
+        fn native_reader_interoperates_with_protected_publisher() {
+            use crate::password_generator::{PasswordSettings, generate_password};
+            let mut clipboard = arboard::Clipboard::new().unwrap();
+            for text in ["ml modify café\r\n😀", ""] {
+                clipboard.set_text(text.to_owned()).unwrap();
+                assert_eq!(
+                    read_for_modify(TEST_WAIT),
+                    Ok(ClipboardRead::Ordinary(text.into()))
+                );
+            }
+            let secret = generate_password(&PasswordSettings::default(), 1).unwrap();
+            copy(&secret).unwrap();
+            assert_eq!(read_for_modify(TEST_WAIT), Ok(ClipboardRead::Private));
+            clipboard.set_text("ml modify recovery".to_owned()).unwrap();
+            assert_eq!(
+                read_for_modify(TEST_WAIT),
+                Ok(ClipboardRead::Ordinary("ml modify recovery".into()))
+            );
         }
-
-        impl ModifyTextOperation for ControlledTextOperation {
-            fn status(
-                &self,
-                context: &ModifyReadContext<'_>,
-            ) -> Result<AsyncStatus, ClipboardError> {
-                context.enter(ReadStage::AsyncStatus)?;
-                let status = *self.state.status.lock().unwrap();
-                let call = self.state.status_calls.fetch_add(1, Ordering::Relaxed);
-                context.check()?;
-                if call >= 2 {
-                    return Err(ClipboardError::Unavailable);
-                }
-                if call == 1
-                    && let Some(signal) = self.state.post_registration.lock().unwrap().take()
-                {
-                    let _ = signal.send(());
-                }
-                Ok(status)
-            }
-
-            fn register_completed(
-                &mut self,
-                sender: SyncSender<AsyncStatus>,
-                context: &ModifyReadContext<'_>,
-            ) -> Result<(), ClipboardError> {
-                context.enter(ReadStage::CompletionRegistration)?;
-                *self.state.completion.lock().unwrap() = Some(sender);
-                context.check()
-            }
-
-            fn get_results(
-                &self,
-                context: &ModifyReadContext<'_>,
-            ) -> Result<String, ClipboardError> {
-                context.enter(ReadStage::GetResults)?;
-                self.state.result_calls.fetch_add(1, Ordering::Relaxed);
-                context.check()?;
-                Ok(self.result.clone())
-            }
-
-            fn error_code(&self, context: &ModifyReadContext<'_>) -> Result<u32, ClipboardError> {
-                context.enter(ReadStage::ErrorCode)?;
-                context.check()?;
-                Ok(self.error_code)
-            }
-
-            fn cancel(&self, diagnostics: &ReadDiagnostics) {
-                diagnostics.enter(ReadStage::Cancel);
-                self.state.cancel_calls.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        fn start_controlled_wait(
-            timeout: Duration,
-        ) -> (
-            Arc<ControlledOperationState>,
-            mpsc::Receiver<()>,
-            thread::JoinHandle<Result<String, ClipboardError>>,
-        ) {
-            let started = Instant::now();
-            let deadline = started + timeout;
-            let diagnostics = Arc::new(ReadDiagnostics::new(started));
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let (post_registration_tx, post_registration_rx) = mpsc::channel();
-            let state = Arc::new(ControlledOperationState {
-                status: Mutex::new(AsyncStatus::Started),
-                completion: Mutex::new(None),
-                post_registration: Mutex::new(Some(post_registration_tx)),
-                status_calls: AtomicUsize::new(0),
-                result_calls: AtomicUsize::new(0),
-                cancel_calls: AtomicUsize::new(0),
-            });
-            let operation = ControlledTextOperation {
-                state: Arc::clone(&state),
-                result: "controlled text".to_owned(),
-                error_code: 0x80070005,
-            };
-            let handle = thread::spawn(move || {
-                let context = ModifyReadContext {
-                    diagnostics: &diagnostics,
-                    cancelled: &cancelled,
-                    deadline,
-                };
-                wait_text_for_modify(operation, &context)
-            });
-            (state, post_registration_rx, handle)
-        }
-
         #[test]
         fn clipboard_hresult_classifies_retryable_contention_separately() {
             for hresult in [
@@ -1179,97 +816,6 @@ mod platform {
                 assert_eq!(map_hresult(hresult), ClipboardError::Busy);
             }
             assert_eq!(map_hresult(0x80070005), ClipboardError::Unavailable);
-        }
-
-        #[test]
-        fn modify_read_deadline_is_distinct_from_hresult_failure() {
-            let start = Instant::now();
-            let diagnostics = ReadDiagnostics::new(start);
-            let not_cancelled = AtomicBool::new(false);
-            let hresult_context = ModifyReadContext {
-                diagnostics: &diagnostics,
-                cancelled: &not_cancelled,
-                deadline: start + TEST_WAIT,
-            };
-            assert_eq!(
-                hresult_context.map_hresult(ReadStage::GetContent, 0x80070005),
-                ClipboardError::Unavailable
-            );
-
-            let timeout_start = Instant::now();
-            let timeout_diagnostics = ReadDiagnostics::new(timeout_start);
-            let cancelled = AtomicBool::new(true);
-            let timeout_context = ModifyReadContext {
-                diagnostics: &timeout_diagnostics,
-                cancelled: &cancelled,
-                deadline: timeout_start + TEST_WAIT,
-            };
-            assert_eq!(
-                timeout_context.map_hresult(ReadStage::GetContent, 0x80070005),
-                ClipboardError::TimedOut
-            );
-        }
-
-        #[test]
-        fn completion_signal_is_one_shot_and_late_callback_does_not_block() {
-            let diagnostics = ReadDiagnostics::new(Instant::now());
-            let cancelled = AtomicBool::new(false);
-            let context = context_for_test(&diagnostics, &cancelled);
-            let (sender, receiver) = mpsc::sync_channel(1);
-            signal_completion(&sender, AsyncStatus::Completed);
-            signal_completion(&sender, AsyncStatus::Started);
-            assert!(matches!(
-                wait_for_completion(&receiver, &context),
-                Ok(CompletionSignal::Status(AsyncStatus::Completed))
-            ));
-
-            drop(receiver);
-            let (finished_tx, finished_rx) = mpsc::channel();
-            let late_callback = thread::spawn(move || {
-                signal_completion(&sender, AsyncStatus::Started);
-                let _ = finished_tx.send(());
-            });
-            finished_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("late completion callback should not block on a dropped receiver");
-            late_callback.join().unwrap();
-        }
-
-        #[test]
-        fn production_completion_sequence_reads_a_pending_operation_callback() {
-            let (state, post_registration, waiter) = start_controlled_wait(TEST_MTA_WAIT);
-            post_registration
-                .recv_timeout(Duration::from_secs(1))
-                .expect("production sequence should register before waiting");
-
-            *state.status.lock().unwrap() = AsyncStatus::Completed;
-            let completion = state
-                .completion
-                .lock()
-                .unwrap()
-                .as_ref()
-                .cloned()
-                .expect("production sequence should register a callback");
-            signal_completion(&completion, AsyncStatus::Completed);
-
-            assert_eq!(waiter.join().unwrap(), Ok("controlled text".into()));
-            assert_eq!(state.status_calls.load(Ordering::Relaxed), 2);
-            assert_eq!(state.result_calls.load(Ordering::Relaxed), 1);
-            assert_eq!(state.cancel_calls.load(Ordering::Relaxed), 0);
-        }
-
-        #[test]
-        fn production_completion_sequence_times_out_and_cancels_a_pending_operation() {
-            let (state, post_registration, waiter) =
-                start_controlled_wait(Duration::from_millis(150));
-            post_registration
-                .recv_timeout(Duration::from_secs(1))
-                .expect("production sequence should register before timing out");
-
-            assert_eq!(waiter.join().unwrap(), Err(ClipboardError::TimedOut));
-            assert_eq!(state.status_calls.load(Ordering::Relaxed), 2);
-            assert_eq!(state.result_calls.load(Ordering::Relaxed), 0);
-            assert_eq!(state.cancel_calls.load(Ordering::Relaxed), 1);
         }
 
         #[test]
@@ -1297,41 +843,6 @@ mod platform {
             );
         }
 
-        #[test]
-        fn modify_mta_reader_classifies_an_in_memory_package_without_system_clipboard() {
-            let result = run_bounded_worker(
-                Arc::new(ReadWorkerBudget::new(1)),
-                TEST_MTA_WAIT,
-                |diagnostics, cancelled, deadline| {
-                    let context = ModifyReadContext {
-                        diagnostics: &diagnostics,
-                        cancelled: &cancelled,
-                        deadline,
-                    };
-                    let _apartment = Apartment::enter_mta_for_modify(&context)?;
-                    let ordinary = DataPackage::new().map_err(map_error)?;
-                    ordinary
-                        .SetText(&HSTRING::from("fixture text"))
-                        .map_err(map_error)?;
-                    let view = ordinary.GetView().map_err(map_error)?;
-                    let fixture = classify_for_modify(&view, &context)?;
-
-                    let empty = DataPackage::new().map_err(map_error)?;
-                    empty.SetText(&HSTRING::from("")).map_err(map_error)?;
-                    let empty_view = empty.GetView().map_err(map_error)?;
-                    let empty = classify_for_modify(&empty_view, &context)?;
-                    Ok((fixture, empty))
-                },
-            );
-            assert_eq!(
-                result,
-                Ok((
-                    ClipboardRead::Ordinary("fixture text".into()),
-                    ClipboardRead::Ordinary(String::new()),
-                ))
-            );
-        }
-
         struct Fake {
             private: Result<bool, ClipboardError>,
             has_text: Result<bool, ClipboardError>,
@@ -1356,13 +867,7 @@ mod platform {
                 has_text: Ok(true),
                 fetched: std::cell::Cell::new(false),
             };
-            let diagnostics = ReadDiagnostics::new(Instant::now());
-            let cancelled = AtomicBool::new(false);
-            let context = context_for_test(&diagnostics, &cancelled);
-            assert_eq!(
-                classify_for_modify(&view, &context),
-                Ok(ClipboardRead::Private)
-            );
+            assert_eq!(classify(&view, TEST_WAIT), Ok(ClipboardRead::Private));
             assert!(!view.fetched.get());
 
             let non_text = Fake {
@@ -1370,10 +875,7 @@ mod platform {
                 has_text: Ok(false),
                 fetched: std::cell::Cell::new(false),
             };
-            assert_eq!(
-                classify_for_modify(&non_text, &context),
-                Ok(ClipboardRead::NonText)
-            );
+            assert_eq!(classify(&non_text, TEST_WAIT), Ok(ClipboardRead::NonText));
             assert!(!non_text.fetched.get());
 
             let unknown = Fake {
@@ -1382,7 +884,7 @@ mod platform {
                 fetched: std::cell::Cell::new(false),
             };
             assert_eq!(
-                classify_for_modify(&unknown, &context),
+                classify(&unknown, TEST_WAIT),
                 Err(ClipboardError::Unavailable)
             );
             assert!(!unknown.fetched.get());
@@ -1393,7 +895,7 @@ mod platform {
                 fetched: std::cell::Cell::new(false),
             };
             assert_eq!(
-                classify_for_modify(&text_check_failed, &context),
+                classify(&text_check_failed, TEST_WAIT),
                 Err(ClipboardError::Unavailable)
             );
             assert!(!text_check_failed.fetched.get());
