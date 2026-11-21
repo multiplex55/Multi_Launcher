@@ -1142,7 +1142,8 @@ impl ClipboardModifyCommandHost for LauncherApp {
     }
 
     fn undo_clipboard_modify(&mut self) -> Result<(), String> {
-        crate::clipboard_modify::runtime::undo().map_err(|error| error.to_string())?;
+        crate::clipboard_modify::runtime::undo_without_retry()
+            .map_err(|error| error.to_string())?;
         self.handle_clipboard_modify_gui_event(
             super::ClipboardModifyGuiEvent::ImmediateOperationComplete,
         );

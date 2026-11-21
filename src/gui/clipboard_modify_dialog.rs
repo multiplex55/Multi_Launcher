@@ -386,11 +386,10 @@ impl ClipboardModifyDialogState {
             effects.push(ClipboardModifyHostedEffect::Reload);
             return;
         }
-        match service.read_text_for_modify() {
+        match service.read_text_for_modify_once() {
             Ok(text) => self.replace_loaded_source(text),
             Err(ClipboardError::NonText) => {
-                self.source_error = Some("Clipboard does not contain text".into());
-                self.replace_loaded_source(String::new());
+                self.source_error = Some("Clipboard does not contain text".into())
             }
             Err(e) => self.source_error = Some(e.to_string()),
         }
@@ -3582,10 +3581,93 @@ mod tests {
     }
 
     #[test]
-    fn non_text_source_reports_error() {
-        let e = ClipboardError::NonText;
-        assert_eq!(e, ClipboardError::NonText);
+    fn non_text_reload_preserves_draft_baseline_and_preview() {
+        use crate::clipboard_modify::clipboard::fake::{FakeClipboardBackend, Op};
+
+        let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "loaded source",
+        )));
+        let mut state = ClipboardModifyDialogState::default();
+        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        state.source = "edited draft".into();
+        let baseline = state.baseline.clone();
+        let reset_source = state.reset_source.clone();
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        state.add_stage(OperationId::Uppercase, catalog);
+        state.preview.force_start_pending();
+        assert_eq!(state.preview.apply_text(), Some("EDITED DRAFT"));
+
+        clipboard
+            .backend()
+            .push(Op::Read(Err(ClipboardError::NonText)));
+        state.load_clipboard(&clipboard);
+
+        assert_eq!(state.source, "edited draft");
+        assert_eq!(state.baseline, baseline);
+        assert_eq!(state.reset_source, reset_source);
+        assert_eq!(state.preview.apply_text(), Some("EDITED DRAFT"));
+        assert!(state.can_apply());
+        assert_eq!(
+            state.source_error.as_deref(),
+            Some("Clipboard does not contain text")
+        );
+        assert!(clipboard.backend().writes().is_empty());
     }
+
+    #[test]
+    fn busy_open_and_reload_are_single_attempt_and_user_retry_can_recover() {
+        use crate::clipboard_modify::clipboard::fake::{FakeClipboardBackend, Op};
+
+        let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "loaded source",
+        )));
+        clipboard
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Busy("busy on open".into()))));
+        clipboard
+            .backend()
+            .push(Op::Read(Ok("opened after retry".into())));
+        let mut state = ClipboardModifyDialogState::default();
+        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        assert!(state.open);
+        assert!(state.source.is_empty());
+        assert!(
+            state
+                .source_error
+                .as_deref()
+                .is_some_and(|error| error.contains("busy on open"))
+        );
+
+        state.load_clipboard(&clipboard);
+        assert_eq!(state.source, "opened after retry");
+        assert!(state.source_error.is_none());
+
+        state.source = "edited draft".into();
+        let baseline = state.baseline.clone();
+        clipboard
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Busy("busy on reload".into()))));
+        clipboard
+            .backend()
+            .push(Op::Read(Ok("reloaded after retry".into())));
+
+        state.load_clipboard(&clipboard);
+        assert_eq!(state.source, "edited draft");
+        assert_eq!(state.baseline, baseline);
+        assert!(
+            state
+                .source_error
+                .as_deref()
+                .is_some_and(|error| error.contains("busy on reload"))
+        );
+        assert!(clipboard.backend().writes().is_empty());
+
+        state.load_clipboard(&clipboard);
+        assert_eq!(state.source, "reloaded after retry");
+        assert_eq!(state.baseline, "reloaded after retry");
+        assert!(state.source_error.is_none());
+    }
+
     #[test]
     fn large_input_blocks_preview_until_acknowledged() {
         let mut d = ClipboardModifyDialogState::default();
