@@ -11072,21 +11072,61 @@ mod tests {
 
     #[test]
     fn tracked_openable_panels_count_as_any_panel_open() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        struct RestoreCurrentDirectory(std::path::PathBuf);
+        impl Drop for RestoreCurrentDirectory {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        // `new_app` uses relative config paths, and this inventory includes
+        // Clipboard Modify. Isolate its files from the repository workspace.
+        let directory = tempfile::tempdir().unwrap();
+        let original_directory = std::env::current_dir().unwrap();
+        std::env::set_current_dir(directory.path()).unwrap();
+        let _restore_current_directory = RestoreCurrentDirectory(original_directory);
         let ctx = egui::Context::default();
         let openable_panels = LauncherApp::TRACKED_PANELS.iter().copied().filter(|panel| {
             !matches!(
                 panel,
                 Panel::NotePanel | Panel::ImagePanel | Panel::ScreenshotEditor | Panel::CropDialog
-            )
+            ) && (cfg!(windows)
+                || !matches!(
+                    *panel,
+                    Panel::FileOperationsCenterDialog | Panel::DownloadsTriageDialog
+                ))
         });
 
         for panel in openable_panels {
             let mut app = new_app(&ctx);
+            // Opening Clipboard Modify must use a deterministic backend rather
+            // than reading the host clipboard.
+            app.clipboard_modify_test_service = Some(std::sync::Arc::new(
+                crate::clipboard_modify::clipboard::ClipboardService::new(
+                    crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::with_text(
+                        "panel test fixture",
+                    ),
+                ),
+            ));
             if panel == Panel::VolumeDialog {
                 // An already-open synthetic snapshot keeps this fixture off audio hardware.
                 app.volume_dialog.open = true;
             }
-            app.ensure_open(panel);
+            match panel {
+                #[cfg(windows)]
+                Panel::DownloadsTriageDialog => {
+                    // Exercise the panel-owned state without starting a real Downloads scan.
+                    app.downloads_triage_dialog.ensure_open();
+                }
+                Panel::NotificationInboxDialog => app.notification_inbox_dialog.ensure_open(),
+                Panel::FileSearchPreviewDialog => {
+                    // A preview is a child of a selected search result; this inventory test
+                    // needs its open state, not a file read or preview worker.
+                    app.file_search_dialog.preview_dialog.open = true;
+                }
+                Panel::CalculationSensitivityDialog => app.calculation_sensitivity_dialog.open(),
+                _ => app.ensure_open(panel),
+            }
             assert!(
                 app.any_panel_open(),
                 "expected {panel:?} to count as an open panel"
