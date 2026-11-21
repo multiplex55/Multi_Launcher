@@ -5,6 +5,7 @@ experimental = ["wrapper-scripts"]
 
 [scripts.wrapper.windows-test-stack]
 command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/nextest-test-stack.ps1"]
+target-runner = "within-wrapper"
 
 [[profile.default.scripts]]
 filter = 'package(multi_launcher)'

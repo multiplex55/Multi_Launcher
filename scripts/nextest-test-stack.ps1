@@ -7,11 +7,18 @@ if ($args.Count -lt 1) {
 
 $minimumStack = 4 * 1024 * 1024
 $configuredStack = 0L
-# Preserve an explicit larger caller setting, but raise unset/invalid/smaller values.
-if (-not [long]::TryParse($env:RUST_MIN_STACK, [ref]$configuredStack) -or
-    $configuredStack -lt $minimumStack) {
-    $env:RUST_MIN_STACK = [string]$minimumStack
+# Parse with invariant integer rules, then canonicalize the string so whitespace
+# or the current locale cannot make Rust ignore a valid numeric value.
+$validStack = [long]::TryParse(
+    $env:RUST_MIN_STACK,
+    [System.Globalization.NumberStyles]::Integer,
+    [System.Globalization.CultureInfo]::InvariantCulture,
+    [ref]$configuredStack
+)
+if (-not $validStack -or $configuredStack -lt $minimumStack) {
+    $configuredStack = $minimumStack
 }
+$env:RUST_MIN_STACK = $configuredStack.ToString([System.Globalization.CultureInfo]::InvariantCulture)
 
 $testExecutable = $args[0]
 $testArguments = @()
