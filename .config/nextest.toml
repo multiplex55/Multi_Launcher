@@ -1,0 +1,12 @@
+# Windows app tests need a 4 MiB Rust test-worker stack. The wrapper is limited
+# to test executables for the app package; it does not affect launched apps.
+nextest-version = "0.9.98"
+experimental = ["wrapper-scripts"]
+
+[scripts.wrapper.windows-test-stack]
+command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/nextest-test-stack.ps1"]
+
+[[profile.default.scripts]]
+filter = 'package(multi_launcher)'
+platform = { host = 'cfg(target_os = "windows")' }
+run-wrapper = "windows-test-stack"

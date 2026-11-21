@@ -629,6 +629,9 @@ pub(super) mod tests {
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     pub(crate) fn new_app(ctx: &egui::Context) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -636,7 +639,7 @@ pub(super) mod tests {
             PluginManager::new(),
             "actions.json".into(),
             "settings.json".into(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -1565,8 +1568,28 @@ pub(super) mod tests {
     #[test]
     fn specialized_actions_ignore_query_override_before_dispatch() {
         let ctx = egui::Context::default();
+        let workspace = tempdir().unwrap();
+        let isolated_app = || {
+            let mut settings = Settings::default();
+            settings.hotkey = None;
+            settings.quit_hotkey = None;
+            settings.help_hotkey = None;
+            settings.paste_sequence.next_hotkey = None;
+            settings.paste_sequence.cancel_hotkey = None;
+            settings.enable_toasts = false;
+            settings.show_inline_errors = false;
+            settings.show_error_toasts = false;
+            settings.dashboard.enabled = false;
+            LauncherApp::new_isolated_for_test_at(
+                &ctx,
+                workspace.path(),
+                settings,
+                Some(std::collections::HashSet::new()),
+                Some(std::collections::HashMap::new()),
+            )
+        };
 
-        let mut file_search = new_app(&ctx);
+        let mut file_search = isolated_app();
         file_search.query = "file search query".into();
         file_search.clear_query_after_run = true;
         file_search.hide_after_run = true;
@@ -1595,7 +1618,7 @@ pub(super) mod tests {
             right: None,
         };
         let encoded = crate::diff::query::encode_payload(&payload).unwrap();
-        let mut diff = new_app(&ctx);
+        let mut diff = isolated_app();
         diff.query = "diff query".into();
         diff.clear_query_after_run = true;
         diff.hide_after_run = true;
@@ -1620,7 +1643,14 @@ pub(super) mod tests {
                 .contains_key(&format!("{}{encoded}", crate::diff::query::OPEN_PREFIX))
         );
 
-        let mut clipboard_modify = new_app(&ctx);
+        let mut clipboard_modify = isolated_app();
+        clipboard_modify.clipboard_modify_test_service = Some(Arc::new(
+            crate::clipboard_modify::clipboard::ClipboardService::new(
+                crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::with_text(
+                    "test fixture",
+                ),
+            ),
+        ));
         clipboard_modify.query = "clipboard query".into();
         clipboard_modify.activate_action(
             Action {

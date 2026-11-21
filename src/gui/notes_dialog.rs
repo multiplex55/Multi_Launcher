@@ -6229,6 +6229,8 @@ mod tests {
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),

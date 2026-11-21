@@ -44,8 +44,10 @@ impl Drop for ActivationTestGuard {
 fn new_app_with_settings(
     ctx: &egui::Context,
     actions: Vec<Action>,
-    settings: Settings,
+    mut settings: Settings,
 ) -> (LauncherApp, Arc<AtomicBool>) {
+    settings.paste_sequence.next_hotkey = None;
+    settings.paste_sequence.cancel_hotkey = None;
     let custom_len = actions.len();
     let visible = Arc::new(AtomicBool::new(true));
     let actions_arc = Arc::new(actions);
