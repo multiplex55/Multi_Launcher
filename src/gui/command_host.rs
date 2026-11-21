@@ -2,15 +2,15 @@ use crate::dashboard::DashboardRefreshRequest;
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
-    BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost,
-    Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost, DataCommandHost,
-    DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
-    HeadlessCommandHost, HistoryPolicy, JsonUtilityCommandHost, LauncherCommandHost,
-    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    PinboardCommandHost, QueryPolicy, RadialCommandHost, RecordingCommandHost, ResultsPolicy,
-    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDelay,
-    ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
-    VisibilityPolicy, XmlToolkitCommandHost,
+    BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost,
+    ClipboardModifyUndoSubmission, ColorPickCommandHost, Command, CommandError, CommandInvocation,
+    CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
+    FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
+    JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost,
+    NoteCommandHost, PendingQueryPolicy, PinboardCommandHost, QueryPolicy, RadialCommandHost,
+    RecordingCommandHost, ResultsPolicy, ScreenDrawCommandHost, ScreenshotCommandHost,
+    ScreenshotCommandResult, ScreenshotDelay, ScreenshotDestination, ScreenshotMarkup,
+    ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy, XmlToolkitCommandHost,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -1141,13 +1141,31 @@ impl ClipboardModifyCommandHost for LauncherApp {
         self.open_clipboard_modify_section(section);
     }
 
-    fn undo_clipboard_modify(&mut self) -> Result<(), String> {
-        crate::clipboard_modify::runtime::undo_without_retry()
-            .map_err(|error| error.to_string())?;
-        self.handle_clipboard_modify_gui_event(
-            super::ClipboardModifyGuiEvent::ImmediateOperationComplete,
-        );
-        Ok(())
+    fn undo_clipboard_modify(
+        &mut self,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+    ) -> Result<ClipboardModifyUndoSubmission, String> {
+        let root_policy = self.command_root_policy;
+        #[cfg(test)]
+        if let Some(service) = self.clipboard_modify_test_service.clone() {
+            self.clipboard_modify_dialog.start_undo(
+                &service,
+                &self.egui_ctx,
+                invocation.clone(),
+                captured_history_query,
+                root_policy,
+            )?;
+            return Ok(ClipboardModifyUndoSubmission::Queued);
+        }
+        self.clipboard_modify_dialog.start_undo(
+            &crate::clipboard_modify::runtime::clipboard_service(),
+            &self.egui_ctx,
+            invocation.clone(),
+            captured_history_query,
+            root_policy,
+        )?;
+        Ok(ClipboardModifyUndoSubmission::Queued)
     }
 
     fn start_clipboard_modify(
@@ -1156,14 +1174,19 @@ impl ClipboardModifyCommandHost for LauncherApp {
         mut metadata: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
     ) -> Result<(), String> {
         metadata.root_policy = self.command_root_policy;
-        self.clipboard_modify_immediate
+        let result = self
+            .clipboard_modify_immediate
             .start(
                 intent,
                 self.clipboard_modify_runtime.catalog_snapshot(),
                 metadata,
             )
             .map(|_| ())
-            .map_err(|error| error.message)
+            .map_err(|error| error.message);
+        if result.is_ok() {
+            self.clipboard_modify_dialog.external_mutation_started();
+        }
+        result
     }
 
     fn clipboard_modify_hide_launcher_after_apply(&self) -> bool {

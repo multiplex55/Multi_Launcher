@@ -3534,23 +3534,71 @@ impl LauncherApp {
             self.handle_clipboard_modify_gui_event(event);
             ctx.request_repaint();
         }
+        let currently_pinned = self
+            .pinned_panels
+            .contains(&super::Panel::ClipboardModifyDialog);
+        let mutation_completion = self
+            .clipboard_modify_dialog
+            .poll_mutation_completions(currently_pinned);
+        let mutation_finished = mutation_completion.is_some();
+        if let Some(completion) = mutation_completion {
+            match completion {
+                super::clipboard_modify_dialog::ClipboardModifyRuntimeCompletion::Dialog {
+                    closed,
+                } => {
+                    if closed {
+                        self.close_clipboard_modify_session();
+                    }
+                }
+                super::clipboard_modify_dialog::ClipboardModifyRuntimeCompletion::Undo(
+                    completion,
+                ) => match completion.result {
+                    Ok(()) => {
+                        self.handle_clipboard_modify_gui_event(
+                            super::ClipboardModifyGuiEvent::ImmediateOperationComplete,
+                        );
+                        let outcome = crate::commands::CommandOutcome {
+                            visibility: crate::commands::VisibilityPolicy::Hide,
+                            toasts: vec![crate::commands::ToastPolicy::Success(
+                                "Undid Clipboard Modify".into(),
+                            )],
+                            ..Default::default()
+                        };
+                        self.apply_command_outcome_with_root_policy(
+                            outcome,
+                            &completion.invocation,
+                            completion.captured_history_query.as_deref(),
+                            completion.root_policy,
+                        );
+                    }
+                    Err(error) => {
+                        <Self as crate::commands::ClipboardModifyCommandHost>::report_clipboard_modify_action_error(
+                            self,
+                            error.to_string(),
+                        );
+                    }
+                },
+            }
+        }
+        let had_immediate = self.clipboard_modify_immediate.has_pending();
+        self.drain_clipboard_modify_immediate();
+        let immediate_finished = had_immediate && !self.clipboard_modify_immediate.has_pending();
         let source_read_finished = self
             .clipboard_modify_dialog
             .poll_source_read_completions(self.clipboard_modify_runtime.catalog_snapshot());
-        if source_read_finished {
+        if mutation_finished || source_read_finished {
             ctx.request_repaint_of(self.clipboard_modify_host.owner_viewport());
         }
         let preview_finished = self.clipboard_modify_dialog.preview.tick();
         if preview_finished {
             ctx.request_repaint_of(self.clipboard_modify_host.owner_viewport());
         }
-        let had_immediate = self.clipboard_modify_immediate.has_pending();
-        self.drain_clipboard_modify_immediate();
-        if preview_finished || (had_immediate && !self.clipboard_modify_immediate.has_pending()) {
+        if preview_finished || immediate_finished || mutation_finished {
             ctx.request_repaint();
         }
         if self.clipboard_modify_dialog.preview.is_active()
             || self.clipboard_modify_dialog.has_source_read_work()
+            || self.clipboard_modify_dialog.has_mutation_work()
             || self.clipboard_modify_immediate.has_pending()
             || self
                 .clipboard_modify_watcher
@@ -59689,6 +59737,9 @@ mod tests {
         for pressed in [true, false] {
             detached(&mut app, tool_dialog_pointer_events(apply, pressed), false);
         }
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
         assert_eq!(clipboard.backend().writes(), ["CLIP Λ"]);
         assert!(!app.visible_flag.load(Ordering::Relaxed));
         let dock = clickable(app.clipboard_modify_host.test_button, "Dock");

@@ -490,9 +490,13 @@ mod tests {
         ) {
             self.clipboard_modify_calls += 1;
         }
-        fn undo_clipboard_modify(&mut self) -> Result<(), String> {
+        fn undo_clipboard_modify(
+            &mut self,
+            _: &crate::commands::CommandInvocation,
+            _: Option<&str>,
+        ) -> Result<crate::commands::ClipboardModifyUndoSubmission, String> {
             self.clipboard_modify_calls += 1;
-            Ok(())
+            Ok(crate::commands::ClipboardModifyUndoSubmission::Completed)
         }
         fn start_clipboard_modify(
             &mut self,

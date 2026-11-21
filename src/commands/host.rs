@@ -277,7 +277,11 @@ pub trait RecordingCommandHost {
 
 pub trait ClipboardModifyCommandHost {
     fn open_clipboard_modify(&mut self, section: ClipboardModifySectionPayload);
-    fn undo_clipboard_modify(&mut self) -> Result<(), String>;
+    fn undo_clipboard_modify(
+        &mut self,
+        invocation: &super::CommandInvocation,
+        captured_history_query: Option<&str>,
+    ) -> Result<ClipboardModifyUndoSubmission, String>;
     fn start_clipboard_modify(
         &mut self,
         intent: ClipboardModifyIntent,
@@ -285,6 +289,13 @@ pub trait ClipboardModifyCommandHost {
     ) -> Result<(), String>;
     fn clipboard_modify_hide_launcher_after_apply(&self) -> bool;
     fn report_clipboard_modify_action_error(&mut self, message: String);
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClipboardModifyUndoSubmission {
+    #[default]
+    Completed,
+    Queued,
 }
 
 pub trait DataCommandHost {
