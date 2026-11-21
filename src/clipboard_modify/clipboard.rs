@@ -1,5 +1,5 @@
 use crate::platform::protected_clipboard::{
-    ClipboardError as ProtectedClipboardError, ClipboardRead, read_clipboard,
+    ClipboardError as ProtectedClipboardError, ClipboardRead, read_clipboard_for_modify,
 };
 use std::sync::{Mutex, TryLockError};
 use std::thread::sleep;
@@ -17,6 +17,7 @@ pub const RETRY_TOTAL_DEADLINE: Duration = Duration::from_millis(750);
 pub enum ClipboardError {
     NonText,
     ProtectedItem,
+    TimedOut,
     InvalidContent(String),
     Transient(String),
     Busy(String),
@@ -55,13 +56,16 @@ impl ClipboardSummary {
 
 impl ClipboardError {
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Transient(_) | Self::Busy(_))
+        matches!(self, Self::TimedOut | Self::Transient(_) | Self::Busy(_))
     }
 }
 impl std::fmt::Display for ClipboardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if matches!(self, Self::ProtectedItem) {
             return f.write_str("This clipboard item was copied privately.");
+        }
+        if matches!(self, Self::TimedOut) {
+            return f.write_str("The clipboard did not respond in time.");
         }
         write!(f, "{:?}", self)
     }
@@ -82,7 +86,7 @@ pub trait ClipboardBackend: Send + Sync {
 pub struct ArboardClipboardBackend;
 impl ClipboardBackend for ArboardClipboardBackend {
     fn read_text(&self) -> Result<String, ClipboardError> {
-        map_protected_read(read_clipboard())
+        map_protected_read(read_clipboard_for_modify())
     }
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
         let mut cb = arboard::Clipboard::new().map_err(classify_arboard)?;
@@ -108,6 +112,7 @@ fn map_protected_read(
         Ok(ClipboardRead::Ordinary(text)) => Ok(text),
         Ok(ClipboardRead::NonText) => Err(ClipboardError::NonText),
         Ok(ClipboardRead::Private) => Err(ClipboardError::ProtectedItem),
+        Err(ProtectedClipboardError::TimedOut) => Err(ClipboardError::TimedOut),
         Err(error) if error.is_busy() => Err(ClipboardError::Busy(error.to_string())),
         Err(error) => Err(ClipboardError::Permanent(error.to_string())),
     }
@@ -449,6 +454,10 @@ mod tests {
             Ok("fixture".into())
         );
         assert_eq!(
+            map_protected_read(Ok(ClipboardRead::Ordinary(String::new()))),
+            Ok(String::new())
+        );
+        assert_eq!(
             map_protected_read(Ok(ClipboardRead::NonText)),
             Err(ClipboardError::NonText)
         );
@@ -463,11 +472,44 @@ mod tests {
             ))
         );
         assert_eq!(
+            map_protected_read(Err(ProtectedClipboardError::TimedOut)),
+            Err(ClipboardError::TimedOut)
+        );
+        assert!(ClipboardError::TimedOut.is_transient());
+        assert_eq!(
             map_protected_read(Err(ProtectedClipboardError::Unavailable)),
             Err(ClipboardError::Permanent(
                 ProtectedClipboardError::Unavailable.to_string()
             ))
         );
+    }
+
+    #[test]
+    fn timed_out_reads_retry_in_background_but_gui_attempts_once() {
+        let background = svc("source");
+        background
+            .backend()
+            .push(Op::Read(Err(ClipboardError::TimedOut)));
+        background
+            .backend()
+            .push(Op::Read(Ok("recovered source".into())));
+        assert_eq!(
+            background.read_text_for_modify(),
+            Ok("recovered source".into())
+        );
+
+        let interactive = svc("source");
+        interactive
+            .backend()
+            .push(Op::Read(Err(ClipboardError::TimedOut)));
+        interactive
+            .backend()
+            .push(Op::Read(Ok("queued retry".into())));
+        assert_eq!(
+            interactive.read_text_for_modify_once(),
+            Err(ClipboardError::TimedOut)
+        );
+        assert_eq!(interactive.backend().read_text(), Ok("queued retry".into()));
     }
 
     #[test]
@@ -504,6 +546,25 @@ mod tests {
         );
         assert!(service.backend().writes().is_empty());
         assert!(service.undo_record().is_none());
+    }
+
+    #[test]
+    fn timed_out_dialog_read_preserves_clipboard_and_existing_undo() {
+        let service = svc("original");
+        service.commit_output("modified".into(), "setup").unwrap();
+        let undo_before = service.undo_record();
+        let writes_before = service.backend().writes();
+        service
+            .backend()
+            .push(Op::Read(Err(ClipboardError::TimedOut)));
+
+        assert_eq!(
+            service.commit_dialog("modified", "draft", "new output", false, "dialog"),
+            Err(ClipboardError::TimedOut)
+        );
+        assert_eq!(service.backend().writes(), writes_before);
+        assert_eq!(service.backend().read_text().unwrap(), "modified");
+        assert_eq!(service.undo_record(), undo_before);
     }
 
     #[test]
@@ -764,6 +825,35 @@ mod tests {
         ));
         let writes = write_attempts.load(std::sync::atomic::Ordering::Relaxed);
         assert!((1..=RETRY_ATTEMPTS).contains(&writes));
+    }
+
+    #[test]
+    fn background_timeout_retries_remain_within_the_existing_attempt_budget() {
+        struct SustainedTimeoutBackend {
+            attempts: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl ClipboardBackend for SustainedTimeoutBackend {
+            fn read_text(&self) -> Result<String, ClipboardError> {
+                self.attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(ClipboardError::TimedOut)
+            }
+
+            fn write_text(&self, _: &str) -> Result<(), ClipboardError> {
+                Ok(())
+            }
+        }
+
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = ClipboardService::new(SustainedTimeoutBackend {
+            attempts: attempts.clone(),
+        });
+        assert_eq!(
+            service.read_text_for_modify(),
+            Err(ClipboardError::TimedOut)
+        );
+        let attempts = attempts.load(std::sync::atomic::Ordering::Relaxed);
+        assert!((1..=RETRY_ATTEMPTS).contains(&attempts));
     }
 
     #[test]
