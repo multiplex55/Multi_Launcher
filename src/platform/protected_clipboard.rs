@@ -122,22 +122,54 @@ mod platform {
         core::{HSTRING, IInspectable, Interface},
     };
     const PRIVATE_FORMAT: &str = "application/x-multi-launcher-private-text-v1";
-    fn map_error(error: windows::core::Error) -> ClipboardError {
-        match error.code().0 as u32 {
-            0x800401d0 | 0x80010001 | 0x800700aa => ClipboardError::Busy,
+    // COM asks clients to retry when its server is temporarily unable to handle a call.
+    const RPC_E_SERVERCALL_RETRYLATER_HRESULT: u32 = 0x8001010a;
+
+    fn map_hresult(hresult: u32) -> ClipboardError {
+        match hresult {
+            0x800401d0 | 0x80010001 | RPC_E_SERVERCALL_RETRYLATER_HRESULT | 0x800700aa => {
+                ClipboardError::Busy
+            }
             _ => ClipboardError::Unavailable,
         }
+    }
+    fn map_error(error: windows::core::Error) -> ClipboardError {
+        map_hresult(error.code().0 as u32)
+    }
+    fn map_read_hresult(stage: &'static str, hresult: u32) -> ClipboardError {
+        tracing::warn!(
+            target: "multi_launcher::clipboard",
+            operation = stage,
+            hresult = %format!("{hresult:#010x}"),
+            "Windows Runtime clipboard read failed"
+        );
+        map_hresult(hresult)
+    }
+    fn map_read_error(stage: &'static str, error: windows::core::Error) -> ClipboardError {
+        map_read_hresult(stage, error.code().0 as u32)
     }
     struct Apartment;
     impl Apartment {
         fn enter() -> Result<Self, ClipboardError> {
+            Self::enter_with(|_, error| map_error(error))
+        }
+
+        fn enter_for_read() -> Result<Self, ClipboardError> {
+            Self::enter_with(map_read_error)
+        }
+
+        fn enter_with(
+            map_error: impl Fn(&'static str, windows::core::Error) -> ClipboardError,
+        ) -> Result<Self, ClipboardError> {
             match unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
                 Ok(()) => Ok(Self),
                 Err(error) if error.code() == RPC_E_CHANGED_MODE => {
-                    unsafe { RoInitialize(RO_INIT_SINGLETHREADED) }.map_err(map_error)?;
+                    unsafe { RoInitialize(RO_INIT_SINGLETHREADED) }.map_err(|error| {
+                        map_error("RoInitialize(RO_INIT_SINGLETHREADED)", error)
+                    })?;
                     Ok(Self)
                 }
-                Err(error) => Err(map_error(error)),
+                Err(error) => Err(map_error("RoInitialize(RO_INIT_MULTITHREADED)", error)),
             }
         }
     }
@@ -193,14 +225,21 @@ mod platform {
     impl View for DataPackageView {
         fn private(&self) -> Result<bool, ClipboardError> {
             self.Contains(&HSTRING::from(PRIVATE_FORMAT))
-                .map_err(map_error)
+                .map_err(|error| map_read_error("DataPackageView.Contains(private-format)", error))
         }
         fn has_text(&self) -> Result<bool, ClipboardError> {
-            self.Contains(&StandardDataFormats::Text().map_err(map_error)?)
-                .map_err(map_error)
+            self.Contains(
+                &StandardDataFormats::Text()
+                    .map_err(|error| map_read_error("StandardDataFormats::Text", error))?,
+            )
+            .map_err(|error| map_read_error("DataPackageView.Contains(text-format)", error))
         }
         fn text(&self, timeout: Duration) -> Result<String, ClipboardError> {
-            wait_text(self.GetTextAsync().map_err(map_error)?, timeout)
+            wait_text(
+                self.GetTextAsync()
+                    .map_err(|error| map_read_error("DataPackageView.GetTextAsync", error))?,
+                timeout,
+            )
         }
     }
     fn classify(view: &impl View, timeout: Duration) -> Result<ClipboardRead, ClipboardError> {
@@ -218,12 +257,15 @@ mod platform {
     ) -> Result<String, ClipboardError> {
         let deadline = Instant::now() + timeout;
         loop {
-            match operation.Status().map_err(map_error)? {
+            match operation
+                .Status()
+                .map_err(|error| map_read_error("IAsyncOperation.Status", error))?
+            {
                 AsyncStatus::Completed => {
                     return operation
                         .GetResults()
                         .map(|s| s.to_string_lossy())
-                        .map_err(map_error);
+                        .map_err(|error| map_read_error("IAsyncOperation.GetResults", error));
                 }
                 AsyncStatus::Started if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(5))
@@ -232,13 +274,22 @@ mod platform {
                     let _ = operation.Cancel();
                     return Err(ClipboardError::TimedOut);
                 }
-                _ => return Err(ClipboardError::Unavailable),
+                _ => {
+                    let hresult = operation
+                        .ErrorCode()
+                        .map_err(|error| map_read_error("IAsyncOperation.ErrorCode", error))?;
+                    return Err(map_read_hresult(
+                        "IAsyncOperation completed with an error",
+                        hresult.0 as u32,
+                    ));
+                }
             }
         }
     }
     pub(super) fn read(timeout: Duration) -> Result<ClipboardRead, ClipboardError> {
-        let _apartment = Apartment::enter()?;
-        let view = Clipboard::GetContent().map_err(map_error)?;
+        let _apartment = Apartment::enter_for_read()?;
+        let view = Clipboard::GetContent()
+            .map_err(|error| map_read_error("Clipboard.GetContent", error))?;
         classify(&view, timeout)
     }
     #[cfg(test)]
@@ -246,6 +297,19 @@ mod platform {
         use super::*;
 
         const TEST_WAIT: Duration = Duration::from_millis(750);
+
+        #[test]
+        fn clipboard_hresult_classifies_retryable_contention_separately() {
+            for hresult in [
+                0x800401d0,
+                0x80010001,
+                RPC_E_SERVERCALL_RETRYLATER_HRESULT,
+                0x800700aa,
+            ] {
+                assert_eq!(map_hresult(hresult), ClipboardError::Busy);
+            }
+            assert_eq!(map_hresult(0x80070005), ClipboardError::Unavailable);
+        }
 
         #[test]
         fn protected_clipboard_package_contains_marker_and_disables_history() {

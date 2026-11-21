@@ -1,4 +1,6 @@
-use crate::platform::protected_clipboard::{ClipboardRead, read_clipboard};
+use crate::platform::protected_clipboard::{
+    ClipboardError as ProtectedClipboardError, ClipboardRead, read_clipboard,
+};
 use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -80,13 +82,7 @@ pub trait ClipboardBackend: Send + Sync {
 pub struct ArboardClipboardBackend;
 impl ClipboardBackend for ArboardClipboardBackend {
     fn read_text(&self) -> Result<String, ClipboardError> {
-        match read_clipboard() {
-            Ok(ClipboardRead::Ordinary(text)) => Ok(text),
-            Ok(ClipboardRead::NonText) => Err(ClipboardError::NonText),
-            Ok(ClipboardRead::Private) => Err(ClipboardError::ProtectedItem),
-            Err(error) if error.is_busy() => Err(ClipboardError::Busy(error.to_string())),
-            Err(error) => Err(ClipboardError::Permanent(error.to_string())),
-        }
+        map_protected_read(read_clipboard())
     }
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
         let mut cb = arboard::Clipboard::new().map_err(classify_arboard)?;
@@ -102,6 +98,18 @@ fn classify_arboard(e: arboard::Error) -> ClipboardError {
             ClipboardError::InvalidContent(s)
         }
         _ => ClipboardError::Permanent(s),
+    }
+}
+
+fn map_protected_read(
+    result: Result<ClipboardRead, ProtectedClipboardError>,
+) -> Result<String, ClipboardError> {
+    match result {
+        Ok(ClipboardRead::Ordinary(text)) => Ok(text),
+        Ok(ClipboardRead::NonText) => Err(ClipboardError::NonText),
+        Ok(ClipboardRead::Private) => Err(ClipboardError::ProtectedItem),
+        Err(error) if error.is_busy() => Err(ClipboardError::Busy(error.to_string())),
+        Err(error) => Err(ClipboardError::Permanent(error.to_string())),
     }
 }
 
@@ -235,7 +243,7 @@ impl<B: ClipboardBackend> ClipboardService<B> {
             .unwrap()
             .clone()
             .ok_or(ClipboardError::NoUndo)?;
-        let _diagnostic_current = self.read_retry().ok();
+        let _current = self.read_retry()?;
         self.write_retry(&rec.original_text)?;
         *self.undo.lock().unwrap() = None;
         Ok(rec)
@@ -382,6 +390,34 @@ mod tests {
     }
 
     #[test]
+    fn protected_read_classification_preserves_private_and_transient_states() {
+        assert_eq!(
+            map_protected_read(Ok(ClipboardRead::Ordinary("fixture".into()))),
+            Ok("fixture".into())
+        );
+        assert_eq!(
+            map_protected_read(Ok(ClipboardRead::NonText)),
+            Err(ClipboardError::NonText)
+        );
+        assert_eq!(
+            map_protected_read(Ok(ClipboardRead::Private)),
+            Err(ClipboardError::ProtectedItem)
+        );
+        assert_eq!(
+            map_protected_read(Err(ProtectedClipboardError::Busy)),
+            Err(ClipboardError::Busy(
+                ProtectedClipboardError::Busy.to_string()
+            ))
+        );
+        assert_eq!(
+            map_protected_read(Err(ProtectedClipboardError::Unavailable)),
+            Err(ClipboardError::Permanent(
+                ProtectedClipboardError::Unavailable.to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn no_op_writes_replace_undo() {
         let s = svc("same");
         let r = s.commit_output("same".into(), "noop").unwrap();
@@ -398,6 +434,23 @@ mod tests {
             .push(Op::Write(Err(ClipboardError::Permanent("no".into()))));
         assert!(s.commit_output("c".into(), "bad").is_err());
         assert_eq!(s.undo_record().unwrap().modified_text, "b");
+    }
+
+    #[test]
+    fn dialog_commit_read_failure_does_not_overwrite_clipboard() {
+        let service = svc("baseline");
+        service
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Permanent(
+                "read failed".into(),
+            ))));
+
+        assert_eq!(
+            service.commit_dialog("baseline", "draft", "output", false, "dialog"),
+            Err(ClipboardError::Permanent("read failed".into()))
+        );
+        assert!(service.backend().writes().is_empty());
+        assert!(service.undo_record().is_none());
     }
 
     #[test]
@@ -422,6 +475,25 @@ mod tests {
     }
 
     #[test]
+    fn failed_undo_read_does_not_overwrite_clipboard_or_consume_record() {
+        let s = svc("original");
+        s.commit_output("modified".into(), "op").unwrap();
+        let undo = s.undo_record().unwrap();
+        let writes_before = s.backend().writes();
+        s.backend().push(Op::Read(Err(ClipboardError::Permanent(
+            "read failed".into(),
+        ))));
+
+        assert_eq!(
+            s.undo(),
+            Err(ClipboardError::Permanent("read failed".into()))
+        );
+        assert_eq!(s.backend().writes(), writes_before);
+        assert_eq!(s.backend().read_text().unwrap(), "modified");
+        assert_eq!(s.undo_record(), Some(undo));
+    }
+
+    #[test]
     fn transient_read_and_write_failures_are_retried() {
         let b = FakeClipboardBackend::with_text("a");
         b.push(Op::Read(Err(ClipboardError::Busy("busy".into()))));
@@ -442,6 +514,8 @@ mod tests {
             s.commit_output("b".into(), "op"),
             Err(ClipboardError::Permanent(_))
         ));
+        assert!(s.backend().writes().is_empty());
+        assert_eq!(s.backend().read_text().unwrap(), "should-not-read");
     }
 
     #[test]

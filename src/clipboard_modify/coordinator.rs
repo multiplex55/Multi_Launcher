@@ -653,6 +653,35 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn immediate_read_failure_never_commits_or_offers_undo() {
+        let service = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "source",
+        )));
+        service
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Permanent(
+                "read failed".into(),
+            ))));
+        let mut coordinator = ImmediateExecutionCoordinator::new(service.clone());
+        let request = coordinator
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                meta("read failure"),
+            )
+            .unwrap();
+
+        let event = wait_one(&mut coordinator);
+
+        assert_eq!(event.request_id, request);
+        assert!(event.result.is_err());
+        assert!(!event.undo_available);
+        assert!(service.backend().writes().is_empty());
+        assert!(service.undo_record().is_none());
+    }
+
     #[test]
     fn immediate_cancel_pending_rejects_stale_completion() {
         let svc = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text("x")));

@@ -3555,6 +3555,32 @@ mod tests {
         d.replace_loaded_source(String::new());
         assert_eq!(d.baseline, "");
     }
+
+    #[test]
+    fn failed_clipboard_reload_preserves_source_without_writing() {
+        use crate::clipboard_modify::clipboard::fake::{FakeClipboardBackend, Op};
+
+        let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "loaded source",
+        )));
+        let mut state = ClipboardModifyDialogState::default();
+        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        state.source = "edited draft".into();
+        let baseline = state.baseline.clone();
+        clipboard
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Permanent(
+                "read failed".into(),
+            ))));
+
+        state.load_clipboard(&clipboard);
+
+        assert_eq!(state.source, "edited draft");
+        assert_eq!(state.baseline, baseline);
+        assert!(state.source_error.is_some());
+        assert!(clipboard.backend().writes().is_empty());
+    }
+
     #[test]
     fn non_text_source_reports_error() {
         let e = ClipboardError::NonText;
