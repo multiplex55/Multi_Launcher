@@ -126,6 +126,7 @@ enum ClipboardModifyHostedEffect {
     PreviewDirty,
     RequestPreview(ClipboardModifyIntent),
     CancelPreview,
+    LoadClipboard,
     Reload,
     SaveTemplates,
     SavePipelines,
@@ -383,15 +384,41 @@ impl ClipboardModifyDialogState {
     }
     pub fn load_clipboard<B: ClipboardBackend>(&mut self, service: &Arc<ClipboardService<B>>) {
         if let Some(effects) = &mut self.hosted_effects {
+            effects.push(ClipboardModifyHostedEffect::LoadClipboard);
+            return;
+        }
+        self.try_load_clipboard(service);
+    }
+    fn try_load_clipboard<B: ClipboardBackend>(
+        &mut self,
+        service: &Arc<ClipboardService<B>>,
+    ) -> bool {
+        match service.read_text_for_modify_once() {
+            Ok(text) => {
+                self.replace_loaded_source(text);
+                true
+            }
+            Err(ClipboardError::NonText) => {
+                self.source_error = Some("Clipboard does not contain text".into());
+                false
+            }
+            Err(e) => {
+                self.source_error = Some(e.to_string());
+                false
+            }
+        }
+    }
+    fn request_clipboard_reload<B: ClipboardBackend>(
+        &mut self,
+        service: &Arc<ClipboardService<B>>,
+        catalog: Arc<ClipboardModifierCatalog>,
+    ) {
+        if let Some(effects) = &mut self.hosted_effects {
             effects.push(ClipboardModifyHostedEffect::Reload);
             return;
         }
-        match service.read_text_for_modify_once() {
-            Ok(text) => self.replace_loaded_source(text),
-            Err(ClipboardError::NonText) => {
-                self.source_error = Some("Clipboard does not contain text".into())
-            }
-            Err(e) => self.source_error = Some(e.to_string()),
+        if self.try_load_clipboard(service) {
+            self.mark_dirty(catalog);
         }
     }
     pub fn replace_loaded_source(&mut self, text: String) {
@@ -713,6 +740,7 @@ impl ClipboardModifyDialogState {
                 ClipboardModifyHostedEffect::PreviewDirty
                     | ClipboardModifyHostedEffect::RequestPreview(_)
                     | ClipboardModifyHostedEffect::CancelPreview
+                    | ClipboardModifyHostedEffect::LoadClipboard
                     | ClipboardModifyHostedEffect::Reload
             )
         });
@@ -724,7 +752,14 @@ impl ClipboardModifyDialogState {
                     self.request_preview(intent, catalog.clone())
                 }
                 ClipboardModifyHostedEffect::CancelPreview => self.cancel_pipeline_preview(),
-                ClipboardModifyHostedEffect::Reload => self.load_clipboard(service),
+                ClipboardModifyHostedEffect::LoadClipboard => {
+                    self.try_load_clipboard(service);
+                }
+                ClipboardModifyHostedEffect::Reload => {
+                    if self.try_load_clipboard(service) {
+                        self.mark_dirty(catalog.clone());
+                    }
+                }
                 ClipboardModifyHostedEffect::SaveTemplates => {
                     if let Some(store) = store {
                         let _ = self.save_template_draft(&catalog, store);
@@ -776,6 +811,7 @@ impl ClipboardModifyDialogState {
                     };
                     match result {
                         Ok(_) => {
+                            self.source_error = None;
                             self.clear_overwrite_review();
                             if close && !actions.pinned {
                                 self.open = false;
@@ -1803,8 +1839,7 @@ impl ClipboardModifyDialogState {
                 "apply" => self.commit(service, false, false),
                 "apply_close" => self.commit(service, true, false),
                 "reload" if self.source == self.reset_source => {
-                    self.load_clipboard(service);
-                    self.mark_dirty(catalog);
+                    self.request_clipboard_reload(service, catalog);
                 }
                 _ => {}
             }
@@ -1839,8 +1874,7 @@ impl ClipboardModifyDialogState {
                 self.reset(catalog.clone())
             }
             if ui.button("Reload Clipboard").clicked() {
-                self.load_clipboard(service);
-                self.mark_dirty(catalog.clone())
+                self.request_clipboard_reload(service, catalog.clone())
             }
         });
 
@@ -2596,6 +2630,49 @@ mod tests {
         assert_eq!(clipboard.backend().writes(), ["alpha"]);
         assert!(state.open);
         assert_eq!(state.stages.len(), 2);
+    }
+
+    #[test]
+    fn hosted_apply_clears_previous_error_only_after_success() {
+        use crate::clipboard_modify::clipboard::fake::{FakeClipboardBackend, Op};
+
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "baseline",
+        )));
+        let mut state = ClipboardModifyDialogState::default();
+        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        state.add_stage(OperationId::Uppercase, catalog.clone());
+        state.preview.force_start_pending();
+        clipboard.backend().push(Op::Read(Err(ClipboardError::Busy(
+            "first attempt busy".into(),
+        ))));
+        state.hosted_effects = Some(Vec::new());
+        state.commit(&clipboard, false, false);
+        let actions = ClipboardModifyHostActions {
+            effects: state.hosted_effects.take().unwrap(),
+            session_epoch: state.host_session_epoch(),
+            ..Default::default()
+        };
+
+        assert!(!state.complete_host_actions(actions, &clipboard, catalog.clone(), None));
+        assert!(state.open);
+        let prior_error = ClipboardError::Busy("first attempt busy".into()).to_string();
+        assert_eq!(state.source_error.as_deref(), Some(prior_error.as_str()));
+        assert!(clipboard.backend().writes().is_empty());
+
+        state.hosted_effects = Some(Vec::new());
+        state.commit(&clipboard, false, false);
+        let actions = ClipboardModifyHostActions {
+            effects: state.hosted_effects.take().unwrap(),
+            session_epoch: state.host_session_epoch(),
+            ..Default::default()
+        };
+
+        assert!(!state.complete_host_actions(actions, &clipboard, catalog, None));
+        assert!(state.open, "Apply keeps the hosted dialog open");
+        assert!(state.source_error.is_none());
+        assert_eq!(clipboard.backend().writes(), ["BASELINE"]);
     }
 
     #[test]
@@ -3666,6 +3743,121 @@ mod tests {
         assert_eq!(state.source, "reloaded after retry");
         assert_eq!(state.baseline, "reloaded after retry");
         assert!(state.source_error.is_none());
+    }
+
+    #[test]
+    fn hosted_reload_failure_preserves_preview_and_review_until_success() {
+        use crate::clipboard_modify::clipboard::fake::{FakeClipboardBackend, Op};
+
+        let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "loaded source",
+        )));
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        let mut state = ClipboardModifyDialogState::default();
+        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        state.source = "edited draft".into();
+        state.add_stage(OperationId::Uppercase, catalog.clone());
+        state.preview.force_start_pending();
+        let preview_id = match state.preview.state() {
+            PreviewState::Completed { id, .. } => *id,
+            other => panic!("expected a completed preview, got {other:?}"),
+        };
+        assert_eq!(state.preview.apply_text(), Some("EDITED DRAFT"));
+
+        clipboard
+            .backend()
+            .push(Op::External("reviewed clipboard".into()));
+        state.hosted_effects = Some(Vec::new());
+        state.commit(&clipboard, false, false);
+        let actions = ClipboardModifyHostActions {
+            effects: state.hosted_effects.take().unwrap(),
+            session_epoch: state.host_session_epoch(),
+            ..Default::default()
+        };
+        assert!(!state.complete_host_actions(actions, &clipboard, catalog.clone(), None));
+        let reviewed = ClipboardSummary::new("reviewed clipboard");
+        assert_eq!(state.external_change, Some(reviewed.clone()));
+        assert_eq!(state.pending_action, Some(PendingDialogAction::Apply));
+        assert_eq!(state.overwrite_preview, Some(preview_id));
+        assert!(clipboard.backend().writes().is_empty());
+
+        let baseline = state.baseline.clone();
+        let reset_source = state.reset_source.clone();
+        clipboard
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Busy("reload busy".into()))));
+        state.hosted_effects = Some(Vec::new());
+        state.request_clipboard_reload(&clipboard, catalog.clone());
+        let actions = ClipboardModifyHostActions {
+            effects: state.hosted_effects.take().unwrap(),
+            session_epoch: state.host_session_epoch(),
+            ..Default::default()
+        };
+        assert_eq!(actions.effects.len(), 1);
+        assert!(!state.complete_host_actions(actions, &clipboard, catalog.clone(), None));
+
+        assert_eq!(state.source, "edited draft");
+        assert_eq!(state.baseline, baseline);
+        assert_eq!(state.reset_source, reset_source);
+        assert!(matches!(
+            state.preview.state(),
+            PreviewState::Completed { id, .. } if *id == preview_id
+        ));
+        assert_eq!(state.preview.apply_text(), Some("EDITED DRAFT"));
+        assert!(state.can_apply());
+        let expected_error = ClipboardError::Busy("reload busy".into()).to_string();
+        assert_eq!(state.source_error.as_deref(), Some(expected_error.as_str()));
+        assert_eq!(state.external_change, Some(reviewed.clone()));
+        assert_eq!(state.pending_action, Some(PendingDialogAction::Apply));
+        assert_eq!(state.overwrite_preview, Some(preview_id));
+        assert!(clipboard.backend().writes().is_empty());
+
+        clipboard
+            .backend()
+            .push(Op::External("newer clipboard".into()));
+        state.hosted_effects = Some(Vec::new());
+        state.queue_host_commit(
+            false,
+            ClipboardModifyCommitMode::ReviewedOverwrite(reviewed),
+        );
+        let actions = ClipboardModifyHostActions {
+            effects: state.hosted_effects.take().unwrap(),
+            session_epoch: state.host_session_epoch(),
+            ..Default::default()
+        };
+        assert!(!state.complete_host_actions(actions, &clipboard, catalog.clone(), None));
+        let newer = ClipboardSummary::new("newer clipboard");
+        assert_eq!(state.external_change, Some(newer));
+        assert_eq!(state.pending_action, Some(PendingDialogAction::Apply));
+        assert_eq!(state.overwrite_preview, Some(preview_id));
+        assert_eq!(state.source_error.as_deref(), Some(expected_error.as_str()));
+        assert!(clipboard.backend().writes().is_empty());
+
+        clipboard
+            .backend()
+            .push(Op::Read(Ok("reloaded source".into())));
+        state.hosted_effects = Some(Vec::new());
+        state.request_clipboard_reload(&clipboard, catalog.clone());
+        let actions = ClipboardModifyHostActions {
+            effects: state.hosted_effects.take().unwrap(),
+            session_epoch: state.host_session_epoch(),
+            ..Default::default()
+        };
+        assert!(!state.complete_host_actions(actions, &clipboard, catalog, None));
+
+        assert_eq!(state.source, "reloaded source");
+        assert_eq!(state.baseline, "reloaded source");
+        assert_eq!(state.reset_source, "reloaded source");
+        assert!(state.source_error.is_none());
+        assert!(state.external_change.is_none());
+        assert!(state.pending_action.is_none());
+        assert!(state.overwrite_preview.is_none());
+        assert!(matches!(
+            state.preview.state(),
+            PreviewState::PendingDebounce { .. }
+        ));
+        assert!(!state.can_apply());
+        assert!(clipboard.backend().writes().is_empty());
     }
 
     #[test]

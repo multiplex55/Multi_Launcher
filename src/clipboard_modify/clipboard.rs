@@ -1,7 +1,7 @@
 use crate::platform::protected_clipboard::{
     ClipboardError as ProtectedClipboardError, ClipboardRead, read_clipboard,
 };
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -192,6 +192,19 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         *self.undo.lock().unwrap() = Some(rec.clone());
         Ok(rec)
     }
+
+    /// GUI commits and Undo must not wait behind a worker's bounded retry loop.
+    /// Keep the existing panic-on-poison policy; only ordinary contention maps
+    /// to a retryable Busy result.
+    fn try_commit_lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, ClipboardError> {
+        match self.commit.try_lock() {
+            Err(TryLockError::WouldBlock) => Err(ClipboardError::Busy(
+                "Another clipboard operation is in progress".into(),
+            )),
+            result => Ok(result.unwrap()),
+        }
+    }
+
     pub fn commit_dialog(
         &self,
         baseline: &str,
@@ -221,7 +234,7 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         expected: Option<&ClipboardSummary>,
         label: &str,
     ) -> Result<UndoRecord, ClipboardError> {
-        let _g = self.commit.lock().unwrap();
+        let _g = self.try_commit_lock()?;
         let mut current = self.read_with_policy(RetryPolicy::SingleAttempt)?;
         if current.as_bytes() != baseline.as_bytes() && !confirmed {
             return Err(ClipboardError::ConfirmationRequired(ClipboardConflict {
@@ -258,7 +271,10 @@ impl<B: ClipboardBackend> ClipboardService<B> {
     }
 
     fn undo_with_policy(&self, policy: RetryPolicy) -> Result<UndoRecord, ClipboardError> {
-        let _g = self.commit.lock().unwrap();
+        let _g = match policy {
+            RetryPolicy::SingleAttempt => self.try_commit_lock()?,
+            RetryPolicy::Bounded => self.commit.lock().unwrap(),
+        };
         let rec = self
             .undo
             .lock()
@@ -551,6 +567,53 @@ mod tests {
             service.backend().read_text().unwrap(),
             "queued recheck retry"
         );
+    }
+
+    #[test]
+    fn immediate_commits_and_undo_return_busy_when_serialization_lock_is_held() {
+        let service = svc("baseline");
+        service.commit_output("modified".into(), "setup").unwrap();
+        let undo_before = service.undo_record();
+        let writes_before = service.backend().writes();
+        let lock_busy = ClipboardError::Busy("Another clipboard operation is in progress".into());
+
+        let backend_busy = ClipboardError::Busy("backend busy during dialog commit".into());
+        service.backend().push(Op::Read(Err(backend_busy.clone())));
+        let guard = service.commit.lock().unwrap();
+        assert_eq!(
+            service.commit_dialog("modified", "draft", "output", false, "dialog"),
+            Err(lock_busy.clone())
+        );
+        drop(guard);
+        assert_eq!(service.backend().read_text(), Err(backend_busy));
+        assert_eq!(service.backend().writes(), writes_before);
+        assert_eq!(service.undo_record(), undo_before);
+
+        let backend_busy = ClipboardError::Busy("backend busy during reviewed commit".into());
+        service.backend().push(Op::Read(Err(backend_busy.clone())));
+        let guard = service.commit.lock().unwrap();
+        assert_eq!(
+            service.commit_reviewed_dialog(
+                "modified",
+                "output",
+                &ClipboardSummary::new("modified"),
+                "reviewed dialog",
+            ),
+            Err(lock_busy.clone())
+        );
+        drop(guard);
+        assert_eq!(service.backend().read_text(), Err(backend_busy));
+        assert_eq!(service.backend().writes(), writes_before);
+        assert_eq!(service.undo_record(), undo_before);
+
+        let backend_busy = ClipboardError::Busy("backend busy during Undo".into());
+        service.backend().push(Op::Read(Err(backend_busy.clone())));
+        let guard = service.commit.lock().unwrap();
+        assert_eq!(service.undo_without_retry(), Err(lock_busy));
+        drop(guard);
+        assert_eq!(service.backend().read_text(), Err(backend_busy));
+        assert_eq!(service.backend().writes(), writes_before);
+        assert_eq!(service.undo_record(), undo_before);
     }
 
     #[test]
