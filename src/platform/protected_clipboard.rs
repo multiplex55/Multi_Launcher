@@ -788,6 +788,10 @@ mod platform {
         #[ignore = "uses the real system clipboard"]
         fn native_reader_interoperates_with_protected_publisher() {
             use crate::password_generator::{PasswordSettings, generate_password};
+            // The production publisher is normally called on the GUI STA.
+            // Balance this initialization after the clipboard operations finish.
+            unsafe { RoInitialize(RO_INIT_SINGLETHREADED) }.unwrap();
+            let _apartment = Apartment(PhantomData);
             let mut clipboard = arboard::Clipboard::new().unwrap();
             for text in ["ml modify café\r\n😀", ""] {
                 clipboard.set_text(text.to_owned()).unwrap();
@@ -797,7 +801,7 @@ mod platform {
                 );
             }
             let secret = generate_password(&PasswordSettings::default(), 1).unwrap();
-            copy(&secret).unwrap();
+            copy_secret(&secret).unwrap();
             assert_eq!(read_for_modify(TEST_WAIT), Ok(ClipboardRead::Private));
             clipboard.set_text("ml modify recovery".to_owned()).unwrap();
             assert_eq!(

@@ -362,17 +362,17 @@ Use this section or an already established task record; do not create a competin
 
 | Field | Execution value |
 | --- | --- |
-| Repository / Goal path | Pending |
-| Task branch / start HEAD | Pending |
-| Pre-existing user changes | Pending |
-| Observed failure stage/code | Not yet observed for this task |
-| Selected repair and evidence | Pending |
-| M1-A / M1-B checkpoints | Pending |
-| Targeted tests / review | Pending |
-| Native Windows verification | Pending; user fallback authorized |
-| Integration base / final tip | Pending |
-| Push state / PR URL / mergeability | Pending |
-| Final status / remaining checks | Pending |
+| Repository / Goal path | `multiplex55/Multi_Launcher`, `docs/plans/CODEX_GOAL_CLIPBOARD_MODIFY_FIX.md` |
+| Task branch / start HEAD | `fix/nextest-stack-overflows-and-clipboard` / `5cff552e32ab014f0aaf6104adadb0f0bb702afc`, tracking the same branch on `origin` |
+| Pre-existing user changes | Clean index and working tree at start |
+| Observed failure stage/code | A standalone MTA WinRT diagnostic accepted the ordinary text format, then its `IAsyncOperation::get` returned `0x8001010E` (`RPC_E_WRONG_THREAD`). The launcher uses a different completion wrapper, so this establishes a WinRT failure on the same read path without establishing its exact production call site. The publisher returned `0x800401F0` at `SetContentWithOptions` in MTA and succeeded on an STA thread. |
+| Selected repair and evidence | Commit `979b1125` moved Modify's ordinary reads from arboard to WinRT. Modify now enumerates formats and reads `CF_UNICODETEXT` under one Win32 clipboard-open scope. The private marker takes precedence over text, and a format inspection failure aborts the read. |
+| M1-A / M1-B checkpoints | `6f783805bad7e1cd848dce4a1bca796a1246e1fd`. Load, Reload, Apply, Copy Result, immediate transforms, reviewed overwrite, and Undo still use the existing service. Their guards required no separate code change. |
+| Targeted tests / review | Windows Nextest compiled the library and ran 229 selected tests in 19.379 seconds with `-p multi_launcher --lib -E 'test(clipboard_modify) \| test(protected_clipboard)'`. Independent source review found no correctness defects. The opt-in test was then adjusted to run the real publisher from a caller with an STA, matching the successful diagnostic. |
+| Native Windows verification | The live Nextest probe read the Unicode/CRLF and empty fixtures. A staged STA diagnostic published and flushed the existing WinRT package and verified that its registered marker was visible to Win32. The corrected publisher interoperability test and GUI smoke are pending. |
+| Integration base / final tip | Fetched `origin/master` at `209708b9f2fb37b4259f2d96d957e5ecb9eeb765`. Final tip and verification are recorded in the PR. |
+| Push state / PR URL / mergeability | M1-A pushed to the existing upstream. The final push and mergeability are checked at PR delivery. |
+| Final status / remaining checks | Final scoped verification and integration follow this checkpoint. |
 
 Record actual commit SHAs after the commit exists. Do not create a self-referential extra commit just to write that commit's own SHA into this file; the final response and PR can carry the final tip.
 
