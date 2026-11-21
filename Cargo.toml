@@ -258,6 +258,10 @@ qrcode = { version = "0.14.1", default-features = false }
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 resvg = { version = "=0.47.0", default-features = false, features = ["text", "system-fonts"] }
 
+[target.'cfg(windows)'.dependencies]
+# std mpsc has no stable absolute-deadline receive; preserve the read admission Instant.
+crossbeam-channel = "0.5.15"
+
 [features]
 unstable_grab = ["rdev/unstable_grab"]
 qa-framebuffer-capture = []

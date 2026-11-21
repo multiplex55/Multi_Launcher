@@ -373,7 +373,7 @@ mod platform {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_cancelled = Arc::clone(&cancelled);
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let (sender, receiver) = crossbeam_channel::bounded(1);
         diagnostics.enter(ReadStage::WorkerSpawn);
         let spawned = thread::Builder::new()
             .name(MODIFY_READ_WORKER_NAME.into())
@@ -416,19 +416,22 @@ mod platform {
     }
 
     fn receive_bounded_result<T>(
-        receiver: &Receiver<Result<T, ClipboardError>>,
+        receiver: &crossbeam_channel::Receiver<Result<T, ClipboardError>>,
         deadline: Instant,
         cancelled: &AtomicBool,
         diagnostics: &ReadDiagnostics,
     ) -> Result<T, ClipboardError> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(remaining) {
+        match receiver.recv_deadline(deadline) {
             Ok(result) => accept_worker_result(result, deadline, cancelled, diagnostics),
-            Err(RecvTimeoutError::Timeout) => expire_worker_wait(cancelled, diagnostics),
-            Err(RecvTimeoutError::Disconnected) if Instant::now() >= deadline => {
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 expire_worker_wait(cancelled, diagnostics)
             }
-            Err(RecvTimeoutError::Disconnected) => {
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+                if Instant::now() >= deadline =>
+            {
+                expire_worker_wait(cancelled, diagnostics)
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 diagnostics.issue("worker_exited_without_result", diagnostics.current_stage());
                 Err(ClipboardError::Unavailable)
             }
@@ -1086,6 +1089,9 @@ mod platform {
                 let status = *self.state.status.lock().unwrap();
                 let call = self.state.status_calls.fetch_add(1, Ordering::Relaxed);
                 context.check()?;
+                if call >= 2 {
+                    return Err(ClipboardError::Unavailable);
+                }
                 if call == 1
                     && let Some(signal) = self.state.post_registration.lock().unwrap().take()
                 {
@@ -1247,6 +1253,7 @@ mod platform {
             signal_completion(&completion, AsyncStatus::Completed);
 
             assert_eq!(waiter.join().unwrap(), Ok("controlled text".into()));
+            assert_eq!(state.status_calls.load(Ordering::Relaxed), 2);
             assert_eq!(state.result_calls.load(Ordering::Relaxed), 1);
             assert_eq!(state.cancel_calls.load(Ordering::Relaxed), 0);
         }
@@ -1260,6 +1267,7 @@ mod platform {
                 .expect("production sequence should register before timing out");
 
             assert_eq!(waiter.join().unwrap(), Err(ClipboardError::TimedOut));
+            assert_eq!(state.status_calls.load(Ordering::Relaxed), 2);
             assert_eq!(state.result_calls.load(Ordering::Relaxed), 0);
             assert_eq!(state.cancel_calls.load(Ordering::Relaxed), 1);
         }
@@ -1413,12 +1421,11 @@ mod platform {
             let deadline = Instant::now();
             let diagnostics = ReadDiagnostics::new(deadline);
             let cancelled = AtomicBool::new(false);
-            let (sender, receiver) = mpsc::sync_channel(1);
+            let (sender, receiver) = crossbeam_channel::bounded(1);
             sender.try_send(Ok("late result".to_owned())).unwrap();
-            let queued_result = receiver.try_recv().unwrap();
 
             assert_eq!(
-                accept_worker_result(queued_result, deadline, &cancelled, &diagnostics),
+                receive_bounded_result(&receiver, deadline, &cancelled, &diagnostics),
                 Err(ClipboardError::TimedOut)
             );
             assert!(cancelled.load(Ordering::Acquire));
