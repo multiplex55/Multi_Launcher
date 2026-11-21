@@ -11105,6 +11105,7 @@ mod tests {
                     ),
                 ),
             ));
+            app.test_sequence_context_capture_forbidden = true;
             if panel == Panel::VolumeDialog {
                 // An already-open synthetic snapshot keeps this fixture off audio hardware.
                 app.volume_dialog.open = true;
@@ -11120,6 +11121,14 @@ mod tests {
                     // A preview is a child of a selected search result; this inventory test
                     // needs its open state, not a file read or preview worker.
                     app.file_search_dialog.preview_dialog.open = true;
+                }
+                Panel::ClipboardDialog => {
+                    // The production opener loads process-relative clipboard history.
+                    app.clipboard_dialog.open = true;
+                }
+                Panel::PasteSequenceDialog => {
+                    // The production opener captures host clipboard text and reloads history.
+                    app.paste_sequence_dialog.open = true;
                 }
                 Panel::CalculationSensitivityDialog => app.calculation_sensitivity_dialog.open(),
                 _ => app.ensure_open(panel),
