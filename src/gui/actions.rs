@@ -632,7 +632,7 @@ pub(super) mod tests {
         let mut settings = Settings::default();
         settings.paste_sequence.next_hotkey = None;
         settings.paste_sequence.cancel_hotkey = None;
-        LauncherApp::new(
+        let mut app = LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
             0,
@@ -647,7 +647,16 @@ pub(super) mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
-        )
+        );
+        app.clipboard_modify_test_service = Some(Arc::new(
+            crate::clipboard_modify::clipboard::ClipboardService::new(
+                crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::with_text(
+                    "test clipboard source",
+                ),
+            ),
+        ));
+        app.clipboard_modify_dialog.control_source_reads_for_test();
+        app
     }
 
     #[test]

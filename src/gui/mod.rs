@@ -2460,12 +2460,14 @@ impl LauncherApp {
     fn load_clipboard_modify_section(&mut self, section: ClipboardModifyDialogSection) {
         #[cfg(test)]
         if let Some(service) = &self.clipboard_modify_test_service {
-            self.clipboard_modify_dialog.open_section(section, service);
+            self.clipboard_modify_dialog
+                .open_section(section, service, &self.egui_ctx);
             return;
         }
         self.clipboard_modify_dialog.open_section(
             section,
             &crate::clipboard_modify::runtime::clipboard_service(),
+            &self.egui_ctx,
         );
     }
 
@@ -11105,6 +11107,7 @@ mod tests {
                     ),
                 ),
             ));
+            app.clipboard_modify_dialog.control_source_reads_for_test();
             app.test_sequence_context_capture_forbidden = true;
             if panel == Panel::VolumeDialog {
                 // An already-open synthetic snapshot keeps this fixture off audio hardware.

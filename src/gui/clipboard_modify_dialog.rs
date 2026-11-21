@@ -16,7 +16,9 @@ use crate::gui::theme::widgets::{
 use eframe::egui;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, SyncSender};
 
 pub const LARGE_SOURCE_CONFIRM_BYTES: usize = 5 * 1024 * 1024;
 pub const CLIPBOARD_MODIFY_DEFAULT_WIDTH: f32 = 900.0;
@@ -126,8 +128,7 @@ enum ClipboardModifyHostedEffect {
     PreviewDirty,
     RequestPreview(ClipboardModifyIntent),
     CancelPreview,
-    LoadClipboard,
-    Reload,
+    Reload(ClipboardSourceReadIntent),
     SaveTemplates,
     SavePipelines,
     Commit {
@@ -139,6 +140,38 @@ enum ClipboardModifyHostedEffect {
     },
     Close,
     CopyText(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardSourceReadKind {
+    Load,
+    Reload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClipboardSourceReadIntent {
+    session_epoch: u64,
+    source_revision: u64,
+    kind: ClipboardSourceReadKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClipboardSourceReadRequest {
+    id: u64,
+    intent: ClipboardSourceReadIntent,
+}
+
+type ClipboardSourceReadFn =
+    Arc<dyn Fn() -> Result<String, ClipboardError> + Send + Sync + 'static>;
+
+struct QueuedClipboardSourceRead {
+    request: ClipboardSourceReadRequest,
+    read: ClipboardSourceReadFn,
+}
+
+struct ClipboardSourceReadCompletion {
+    request_id: u64,
+    result: Result<String, ClipboardError>,
 }
 #[derive(Default)]
 pub(super) struct ClipboardModifyHostActions {
@@ -167,7 +200,15 @@ impl ClipboardModifyHostActions {
 pub struct ClipboardModifyDialogState {
     pub open: bool,
     host_session_epoch: u64,
+    source_revision: u64,
     hosted_effects: Option<Vec<ClipboardModifyHostedEffect>>,
+    next_source_read_id: u64,
+    latest_source_read: Option<ClipboardSourceReadRequest>,
+    source_read_in_flight: Option<ClipboardSourceReadRequest>,
+    queued_source_read: Option<QueuedClipboardSourceRead>,
+    source_read_tx: SyncSender<ClipboardSourceReadCompletion>,
+    source_read_rx: Receiver<ClipboardSourceReadCompletion>,
+    repaint_context: Option<egui::Context>,
     pub section: ClipboardModifyDialogSection,
     pub source: String,
     pub baseline: String,
@@ -203,15 +244,20 @@ pub struct ClipboardModifyDialogState {
     #[cfg(test)]
     test_host_apply: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
+    test_source_reads_controlled: bool,
+    #[cfg(test)]
+    test_host_reload: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
     section_layout_observation: Option<SectionLayoutObservation>,
     #[cfg(test)]
     apply_footer_clip_rect: Option<egui::Rect>,
 }
 
-/// Rollback for editable state; the preview worker remains in its live owner.
+/// Rollback for editable state; preview and source-read workers remain live.
 #[derive(Clone)]
 pub(crate) struct ClipboardModifyInteractionCheckpoint {
     session_epoch: u64,
+    source_revision: u64,
     section: ClipboardModifyDialogSection,
     source: String,
     source_error: Option<String>,
@@ -242,6 +288,7 @@ impl ClipboardModifyInteractionCheckpoint {
     pub(crate) fn capture(state: &ClipboardModifyDialogState) -> Self {
         Self {
             session_epoch: state.host_session_epoch,
+            source_revision: state.source_revision,
             section: state.section.clone(),
             source: state.source.clone(),
             source_error: state.source_error.clone(),
@@ -273,6 +320,7 @@ impl ClipboardModifyInteractionCheckpoint {
         if state.host_session_epoch != self.session_epoch {
             return;
         }
+        state.source_revision = self.source_revision;
         state.section = self.section;
         state.source = self.source;
         state.source_error = self.source_error;
@@ -303,10 +351,19 @@ impl ClipboardModifyInteractionCheckpoint {
 
 impl Default for ClipboardModifyDialogState {
     fn default() -> Self {
+        let (source_read_tx, source_read_rx) = mpsc::sync_channel(1);
         Self {
             open: false,
             host_session_epoch: 0,
+            source_revision: 0,
             hosted_effects: None,
+            next_source_read_id: 1,
+            latest_source_read: None,
+            source_read_in_flight: None,
+            queued_source_read: None,
+            source_read_tx,
+            source_read_rx,
+            repaint_context: None,
             section: Default::default(),
             source: String::new(),
             baseline: String::new(),
@@ -342,6 +399,10 @@ impl Default for ClipboardModifyDialogState {
             #[cfg(test)]
             test_host_apply: None,
             #[cfg(test)]
+            test_source_reads_controlled: false,
+            #[cfg(test)]
+            test_host_reload: None,
+            #[cfg(test)]
             section_layout_observation: None,
             #[cfg(test)]
             apply_footer_clip_rect: None,
@@ -360,10 +421,16 @@ impl ClipboardModifyDialogState {
         (self.test_host_add_stage, self.test_host_apply)
     }
 
-    pub fn open_section<B: ClipboardBackend>(
+    #[cfg(test)]
+    pub(super) fn test_host_reload_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_host_reload
+    }
+
+    pub fn open_section<B: ClipboardBackend + 'static>(
         &mut self,
         section: ClipboardModifyDialogSection,
         service: &Arc<ClipboardService<B>>,
+        ctx: &egui::Context,
     ) {
         let was_open = self.open;
         if !was_open {
@@ -372,7 +439,7 @@ impl ClipboardModifyDialogState {
         self.open = true;
         self.section = section;
         if !was_open {
-            self.load_clipboard(service);
+            self.load_clipboard(service, ctx);
         }
     }
     pub fn open_section_without_loading_for_test(&mut self, section: ClipboardModifyDialogSection) {
@@ -382,46 +449,231 @@ impl ClipboardModifyDialogState {
         self.open = true;
         self.section = section;
     }
-    pub fn load_clipboard<B: ClipboardBackend>(&mut self, service: &Arc<ClipboardService<B>>) {
+    pub fn load_clipboard<B: ClipboardBackend + 'static>(
+        &mut self,
+        service: &Arc<ClipboardService<B>>,
+        ctx: &egui::Context,
+    ) {
+        self.remember_repaint_context(ctx);
+        let intent = self.source_read_intent(ClipboardSourceReadKind::Load);
+        self.submit_source_read_intent(service, Some(ctx), intent);
+    }
+    fn request_clipboard_reload<B: ClipboardBackend + 'static>(
+        &mut self,
+        service: &Arc<ClipboardService<B>>,
+        ctx: &egui::Context,
+    ) {
+        self.remember_repaint_context(ctx);
+        let intent = self.source_read_intent(ClipboardSourceReadKind::Reload);
         if let Some(effects) = &mut self.hosted_effects {
-            effects.push(ClipboardModifyHostedEffect::LoadClipboard);
+            effects.push(ClipboardModifyHostedEffect::Reload(intent));
             return;
         }
-        self.try_load_clipboard(service);
+        self.submit_source_read_intent(service, Some(ctx), intent);
     }
-    fn try_load_clipboard<B: ClipboardBackend>(
-        &mut self,
-        service: &Arc<ClipboardService<B>>,
-    ) -> bool {
-        match service.read_text_for_modify_once() {
-            Ok(text) => {
-                self.replace_loaded_source(text);
-                true
-            }
-            Err(ClipboardError::NonText) => {
-                self.source_error = Some("Clipboard does not contain text".into());
-                false
-            }
-            Err(e) => {
-                self.source_error = Some(e.to_string());
-                false
-            }
+
+    fn source_read_intent(&self, kind: ClipboardSourceReadKind) -> ClipboardSourceReadIntent {
+        ClipboardSourceReadIntent {
+            session_epoch: self.host_session_epoch,
+            source_revision: self.source_revision,
+            kind,
         }
     }
-    fn request_clipboard_reload<B: ClipboardBackend>(
+
+    fn remember_repaint_context(&mut self, ctx: &egui::Context) {
+        if ctx.viewport_id() == egui::ViewportId::ROOT || self.repaint_context.is_none() {
+            self.repaint_context = Some(ctx.clone());
+        }
+    }
+
+    fn source_read_intent_is_current(&self, intent: ClipboardSourceReadIntent) -> bool {
+        self.open
+            && self.host_session_epoch == intent.session_epoch
+            && self.source_revision == intent.source_revision
+    }
+
+    fn submit_source_read_intent<B: ClipboardBackend + 'static>(
         &mut self,
         service: &Arc<ClipboardService<B>>,
+        ctx: Option<&egui::Context>,
+        intent: ClipboardSourceReadIntent,
+    ) -> bool {
+        if let Some(ctx) = ctx {
+            self.remember_repaint_context(ctx);
+        }
+        if !self.source_read_intent_is_current(intent) {
+            return false;
+        }
+
+        let request = ClipboardSourceReadRequest {
+            id: self.next_source_read_id,
+            intent,
+        };
+        self.next_source_read_id = self.next_source_read_id.wrapping_add(1).max(1);
+        self.latest_source_read = Some(request);
+        let service = Arc::clone(service);
+        let read: ClipboardSourceReadFn = Arc::new(move || service.read_text_for_modify_once());
+        let queued = QueuedClipboardSourceRead { request, read };
+        if self.source_read_in_flight.is_some() {
+            // A single latest-intent slot coalesces repeated Reloads and
+            // close/reopen cycles without accumulating worker threads.
+            self.queued_source_read = Some(queued);
+        } else {
+            self.launch_source_read(queued);
+        }
+        if let Some(ctx) = &self.repaint_context {
+            ctx.request_repaint();
+        }
+        true
+    }
+
+    fn launch_source_read(&mut self, queued: QueuedClipboardSourceRead) {
+        let QueuedClipboardSourceRead { request, read } = queued;
+        self.source_read_in_flight = Some(request);
+        #[cfg(test)]
+        if self.test_source_reads_controlled {
+            return;
+        }
+
+        let tx = self.source_read_tx.clone();
+        let repaint = self.repaint_context.clone();
+        std::thread::spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| read())).unwrap_or_else(|_| {
+                Err(ClipboardError::Permanent(
+                    "Clipboard source read failed unexpectedly".into(),
+                ))
+            });
+            let _ = tx.send(ClipboardSourceReadCompletion {
+                request_id: request.id,
+                result,
+            });
+            if let Some(ctx) = repaint {
+                // Wake the root poller. It will repaint the currently selected
+                // owner viewport after consuming the completion.
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    pub(crate) fn source_read_pending(&self) -> bool {
+        self.open
+            && self
+                .latest_source_read
+                .is_some_and(|request| self.source_read_intent_is_current(request.intent))
+    }
+
+    pub(crate) fn has_source_read_work(&self) -> bool {
+        self.source_read_in_flight.is_some() || self.queued_source_read.is_some()
+    }
+
+    pub(crate) fn poll_source_read_completions(
+        &mut self,
+        catalog: Arc<ClipboardModifierCatalog>,
+    ) -> bool {
+        let mut received = false;
+        while let Ok(completion) = self.source_read_rx.try_recv() {
+            received = true;
+            self.apply_source_read_completion(completion, catalog.clone());
+        }
+        received
+    }
+
+    fn invalidate_source_read_requests(&mut self) {
+        self.latest_source_read = None;
+        self.queued_source_read = None;
+    }
+
+    fn advance_source_revision(&mut self) {
+        self.source_revision = self.source_revision.wrapping_add(1).max(1);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_source_reads_for_test(&mut self) {
+        self.test_source_reads_controlled = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_read_request_id_for_test(&self) -> Option<u64> {
+        self.latest_source_read.map(|request| request.id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_read_in_flight_id_for_test(&self) -> Option<u64> {
+        self.source_read_in_flight.map(|request| request.id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_source_read_id_for_test(&self) -> u64 {
+        self.next_source_read_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_source_read_completion_for_test(
+        &self,
+        request_id: u64,
+        result: Result<String, ClipboardError>,
+    ) {
+        self.source_read_tx
+            .send(ClipboardSourceReadCompletion { request_id, result })
+            .expect("source read test receiver remains alive");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_source_read_for_test(&mut self, catalog: Arc<ClipboardModifierCatalog>) {
+        while self.source_read_in_flight.is_some() && !self.test_source_reads_controlled {
+            let completion = match self.source_read_rx.recv() {
+                Ok(completion) => completion,
+                Err(_) => break,
+            };
+            self.apply_source_read_completion(completion, catalog.clone());
+        }
+    }
+
+    fn apply_source_read_completion(
+        &mut self,
+        completion: ClipboardSourceReadCompletion,
         catalog: Arc<ClipboardModifierCatalog>,
     ) {
-        if let Some(effects) = &mut self.hosted_effects {
-            effects.push(ClipboardModifyHostedEffect::Reload);
+        let Some(request) = self.source_read_in_flight else {
+            return;
+        };
+        if request.id != completion.request_id {
             return;
         }
-        if self.try_load_clipboard(service) {
-            self.mark_dirty(catalog);
+        self.source_read_in_flight = None;
+
+        if self.latest_source_read == Some(request) {
+            if self.source_read_intent_is_current(request.intent) {
+                self.latest_source_read = None;
+                match completion.result {
+                    Ok(text) => {
+                        self.replace_loaded_source(text);
+                        if request.intent.kind == ClipboardSourceReadKind::Reload {
+                            self.mark_dirty(catalog.clone());
+                        }
+                    }
+                    Err(ClipboardError::NonText) => {
+                        self.source_error = Some("Clipboard does not contain text".into());
+                    }
+                    Err(error) => self.source_error = Some(error.to_string()),
+                }
+            } else {
+                self.latest_source_read = None;
+            }
+        }
+        if let Some(queued) = self.queued_source_read.take() {
+            if self.latest_source_read == Some(queued.request)
+                && self.source_read_intent_is_current(queued.request.intent)
+            {
+                self.launch_source_read(queued);
+            } else if self.latest_source_read == Some(queued.request) {
+                self.latest_source_read = None;
+            }
         }
     }
     pub fn replace_loaded_source(&mut self, text: String) {
+        self.advance_source_revision();
+        self.invalidate_source_read_requests();
         self.clear_overwrite_review();
         self.baseline = text.clone();
         self.reset_source = text.clone();
@@ -438,6 +690,8 @@ impl ClipboardModifyDialogState {
             return;
         }
         let wrap = self.wrap_preview;
+        self.advance_source_revision();
+        self.invalidate_source_read_requests();
         self.preview.cancel_and_invalidate();
         self.source.clear();
         self.baseline.clear();
@@ -479,6 +733,13 @@ impl ClipboardModifyDialogState {
             catalog,
         );
     }
+    fn source_edited(
+        &mut self,
+        catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
+    ) {
+        self.advance_source_revision();
+        self.mark_dirty(catalog);
+    }
     pub fn requires_large_ack(&self) -> bool {
         self.source.len() > LARGE_SOURCE_CONFIRM_BYTES
             && !self
@@ -499,6 +760,7 @@ impl ClipboardModifyDialogState {
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
     ) {
         self.source = self.reset_source.clone();
+        self.advance_source_revision();
         self.stages.clear();
         self.mark_dirty(catalog);
     }
@@ -519,7 +781,7 @@ impl ClipboardModifyDialogState {
         });
         self.mark_dirty(catalog);
     }
-    pub fn ui<B: ClipboardBackend>(
+    pub fn ui<B: ClipboardBackend + 'static>(
         &mut self,
         ctx: &egui::Context,
         legacy_window_size: egui::Vec2,
@@ -552,7 +814,7 @@ impl ClipboardModifyDialogState {
             min_size,
             window,
             |ui| {
-                self.shortcuts(ui, service, catalog.clone());
+                self.shortcuts(ui, service);
                 let _footer_response =
                     self.render_section_contents(ui, service, catalog.clone(), store);
             },
@@ -566,7 +828,7 @@ impl ClipboardModifyDialogState {
         self.host_session_epoch
     }
 
-    pub(super) fn render_host<B: ClipboardBackend>(
+    pub(super) fn render_host<B: ClipboardBackend + 'static>(
         &mut self,
         ctx: &egui::Context,
         legacy_window_size: egui::Vec2,
@@ -579,6 +841,7 @@ impl ClipboardModifyDialogState {
         child_ui: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
     ) -> ClipboardModifyHostActions {
+        self.remember_repaint_context(ctx);
         let mut actions = ClipboardModifyHostActions {
             session_epoch: self.host_session_epoch,
             pinned,
@@ -592,6 +855,7 @@ impl ClipboardModifyDialogState {
         {
             self.test_host_add_stage = None;
             self.test_host_apply = None;
+            self.test_host_reload = None;
         }
         if owner_current && first {
             let popup_key = clipboard_modify_popup_key(ctx);
@@ -622,7 +886,7 @@ impl ClipboardModifyDialogState {
                     actions.host_request = Some(requested);
                 }
                 if allowed {
-                    self.shortcuts(ui, service, catalog.clone());
+                    self.shortcuts(ui, service);
                 }
                 self.render_section_contents(ui, service, catalog.clone(), store);
             });
@@ -722,7 +986,7 @@ impl ClipboardModifyDialogState {
         })
     }
 
-    pub(super) fn complete_host_actions<B: ClipboardBackend>(
+    pub(super) fn complete_host_actions<B: ClipboardBackend + 'static>(
         &mut self,
         actions: ClipboardModifyHostActions,
         service: &Arc<ClipboardService<B>>,
@@ -740,8 +1004,7 @@ impl ClipboardModifyDialogState {
                 ClipboardModifyHostedEffect::PreviewDirty
                     | ClipboardModifyHostedEffect::RequestPreview(_)
                     | ClipboardModifyHostedEffect::CancelPreview
-                    | ClipboardModifyHostedEffect::LoadClipboard
-                    | ClipboardModifyHostedEffect::Reload
+                    | ClipboardModifyHostedEffect::Reload(_)
             )
         });
         let mut attempted_commit = false;
@@ -752,13 +1015,9 @@ impl ClipboardModifyDialogState {
                     self.request_preview(intent, catalog.clone())
                 }
                 ClipboardModifyHostedEffect::CancelPreview => self.cancel_pipeline_preview(),
-                ClipboardModifyHostedEffect::LoadClipboard => {
-                    self.try_load_clipboard(service);
-                }
-                ClipboardModifyHostedEffect::Reload => {
-                    if self.try_load_clipboard(service) {
-                        self.mark_dirty(catalog.clone());
-                    }
+                ClipboardModifyHostedEffect::Reload(intent) => {
+                    let repaint_context = self.repaint_context.clone();
+                    self.submit_source_read_intent(service, repaint_context.as_ref(), intent);
                 }
                 ClipboardModifyHostedEffect::SaveTemplates => {
                     if let Some(store) = store {
@@ -884,7 +1143,7 @@ impl ClipboardModifyDialogState {
         response.inner
     }
 
-    fn render_section_body<B: ClipboardBackend>(
+    fn render_section_body<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         available_height: f32,
@@ -901,6 +1160,9 @@ impl ClipboardModifyDialogState {
             .max_height(available_height.max(0.0))
             .show(ui, |ui| {
                 ui.set_max_width(available_width.max(0.0));
+                if self.source_read_pending() {
+                    semantic_status(ui, StatusTone::Info, "Clipboard source pending", None);
+                }
                 match self.section {
                     ClipboardModifyDialogSection::Modify => {
                         self.modify_ui(ui, service, catalog.clone())
@@ -931,7 +1193,7 @@ impl ClipboardModifyDialogState {
         output.inner_rect
     }
 
-    fn render_section_footer<B: ClipboardBackend>(
+    fn render_section_footer<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         service: &Arc<ClipboardService<B>>,
@@ -997,7 +1259,7 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn render_section_contents<B: ClipboardBackend>(
+    fn render_section_contents<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         service: &Arc<ClipboardService<B>>,
@@ -1331,7 +1593,7 @@ impl ClipboardModifyDialogState {
             });
         }
     }
-    fn templates_ui<B: ClipboardBackend>(
+    fn templates_ui<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         _service: &Arc<ClipboardService<B>>,
@@ -1609,7 +1871,7 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn saved_pipelines_ui<B: ClipboardBackend>(
+    fn saved_pipelines_ui<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         service: &Arc<ClipboardService<B>>,
@@ -1813,11 +2075,10 @@ impl ClipboardModifyDialogState {
             readonly_multiline_preview(ui, egui::Id::new("cm_pipeline_editor_error"), e, true);
         }
     }
-    fn shortcuts<B: ClipboardBackend>(
+    fn shortcuts<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &egui::Ui,
         service: &Arc<ClipboardService<B>>,
-        catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
     ) {
         ui.input(|i| {
             if i.modifiers.command && i.key_pressed(egui::Key::Enter) {
@@ -1839,13 +2100,13 @@ impl ClipboardModifyDialogState {
                 "apply" => self.commit(service, false, false),
                 "apply_close" => self.commit(service, true, false),
                 "reload" if self.source == self.reset_source => {
-                    self.request_clipboard_reload(service, catalog);
+                    self.request_clipboard_reload(service, ui.ctx());
                 }
                 _ => {}
             }
         }
     }
-    fn modify_ui<B: ClipboardBackend>(
+    fn modify_ui<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         service: &Arc<ClipboardService<B>>,
@@ -1873,8 +2134,16 @@ impl ClipboardModifyDialogState {
             if ui.button("Reset").clicked() {
                 self.reset(catalog.clone())
             }
-            if ui.button("Reload Clipboard").clicked() {
-                self.request_clipboard_reload(service, catalog.clone())
+            let reload = ui.add_enabled(
+                !self.source_read_pending(),
+                egui::Button::new("Reload Clipboard"),
+            );
+            #[cfg(test)]
+            {
+                self.test_host_reload = Some((reload.rect, ui.clip_rect(), reload.enabled()));
+            }
+            if reload.clicked() {
+                self.request_clipboard_reload(service, ui.ctx())
             }
         });
 
@@ -1882,7 +2151,7 @@ impl ClipboardModifyDialogState {
         self.modify_body_ui(ui, service, catalog.clone());
     }
 
-    fn modify_body_ui<B: ClipboardBackend>(
+    fn modify_body_ui<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         service: &Arc<ClipboardService<B>>,
@@ -1903,7 +2172,7 @@ impl ClipboardModifyDialogState {
 
         compact_section_heading(ui, "Source", None);
         if editable_multiline_ten_rows(ui, egui::Id::new("cm_source"), &mut self.source).changed() {
-            self.mark_dirty(catalog.clone());
+            self.source_edited(catalog.clone());
         }
 
         ui.separator();
@@ -1992,7 +2261,7 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn external_change_warning_ui<B: ClipboardBackend>(
+    fn external_change_warning_ui<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         service: &Arc<ClipboardService<B>>,
@@ -2032,7 +2301,7 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn modify_footer_ui<B: ClipboardBackend>(
+    fn modify_footer_ui<B: ClipboardBackend + 'static>(
         &mut self,
         ui: &mut egui::Ui,
         service: &Arc<ClipboardService<B>>,
@@ -2132,7 +2401,7 @@ impl ClipboardModifyDialogState {
         self.overwrite_preview = None;
     }
 
-    pub fn commit<B: ClipboardBackend>(
+    pub fn commit<B: ClipboardBackend + 'static>(
         &mut self,
         service: &Arc<ClipboardService<B>>,
         close: bool,
@@ -2590,6 +2859,52 @@ pub fn fingerprint(text: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn controlled_open_with_source<B: ClipboardBackend + 'static>(
+        state: &mut ClipboardModifyDialogState,
+        service: &Arc<ClipboardService<B>>,
+        source: &str,
+    ) {
+        let ctx = egui::Context::default();
+        state.control_source_reads_for_test();
+        state.open_section(ClipboardModifyDialogSection::Modify, service, &ctx);
+        let request_id = state
+            .source_read_in_flight_id_for_test()
+            .expect("initial source read was submitted");
+        state.inject_source_read_completion_for_test(request_id, Ok(source.to_owned()));
+        assert!(state.poll_source_read_completions(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog()
+        )));
+    }
+
+    fn finish_controlled_source_read(
+        state: &mut ClipboardModifyDialogState,
+        result: Result<String, ClipboardError>,
+    ) {
+        let request_id = state
+            .source_read_in_flight_id_for_test()
+            .expect("source read is in flight");
+        state.inject_source_read_completion_for_test(request_id, result);
+        assert!(state.poll_source_read_completions(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog()
+        )));
+    }
+
+    fn request_load_for_test<B: ClipboardBackend + 'static>(
+        state: &mut ClipboardModifyDialogState,
+        service: &Arc<ClipboardService<B>>,
+    ) {
+        state.load_clipboard(service, &egui::Context::default());
+    }
+
+    fn request_reload_for_test<B: ClipboardBackend + 'static>(
+        state: &mut ClipboardModifyDialogState,
+        service: &Arc<ClipboardService<B>>,
+    ) {
+        state.request_clipboard_reload(service, &egui::Context::default());
+    }
+
     #[test]
     fn hosted_pipeline_edit_revokes_apply_and_pinned_apply_keeps_the_session() {
         use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
@@ -2599,7 +2914,7 @@ mod tests {
         )));
         let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
         let mut state = ClipboardModifyDialogState::default();
-        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        controlled_open_with_source(&mut state, &clipboard, "alpha");
         state.add_stage(OperationId::Uppercase, catalog.clone());
         state.preview.force_start_pending();
         assert_eq!(state.preview.apply_text(), Some("ALPHA"));
@@ -2641,7 +2956,7 @@ mod tests {
             "baseline",
         )));
         let mut state = ClipboardModifyDialogState::default();
-        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        controlled_open_with_source(&mut state, &clipboard, "baseline");
         state.add_stage(OperationId::Uppercase, catalog.clone());
         state.preview.force_start_pending();
         clipboard.backend().push(Op::Read(Err(ClipboardError::Busy(
@@ -2684,7 +2999,7 @@ mod tests {
         )));
         let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
         let mut state = ClipboardModifyDialogState::default();
-        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        controlled_open_with_source(&mut state, &clipboard, "alpha");
         state.add_stage(OperationId::Uppercase, catalog.clone());
         state.preview.force_start_pending();
         assert_eq!(state.preview.apply_text(), Some("ALPHA"));
@@ -2708,7 +3023,7 @@ mod tests {
         );
 
         state.source = "beta".into();
-        state.mark_dirty(catalog.clone());
+        state.source_edited(catalog.clone());
         state.preview.force_start_pending();
         assert_eq!(state.preview.apply_text(), Some("BETA"));
         state.complete_host_actions(stale, &clipboard, catalog.clone(), None);
@@ -3633,23 +3948,164 @@ mod tests {
     }
 
     #[test]
+    fn initial_source_read_runs_off_thread_and_repeated_open_is_first_open_only() {
+        use std::sync::mpsc;
+
+        struct GatedClipboardBackend {
+            entered: mpsc::SyncSender<std::thread::ThreadId>,
+            release: std::sync::Mutex<mpsc::Receiver<()>>,
+        }
+        impl ClipboardBackend for GatedClipboardBackend {
+            fn read_text(&self) -> Result<String, ClipboardError> {
+                let _ = self.entered.send(std::thread::current().id());
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .map_err(|_| ClipboardError::Permanent("test gate closed".into()))?;
+                Ok("background source".into())
+            }
+
+            fn write_text(&self, _text: &str) -> Result<(), ClipboardError> {
+                Ok(())
+            }
+        }
+
+        let (entered, entered_rx) = mpsc::sync_channel(1);
+        let (release, release_rx) = mpsc::sync_channel(1);
+        let service = Arc::new(ClipboardService::new(GatedClipboardBackend {
+            entered,
+            release: std::sync::Mutex::new(release_rx),
+        }));
+        let ctx = egui::Context::default();
+        let gui_thread = std::thread::current().id();
+        let mut state = ClipboardModifyDialogState::default();
+
+        state.open_section(ClipboardModifyDialogSection::Modify, &service, &ctx);
+        let source_worker = entered_rx
+            .recv()
+            .expect("source read started on its worker");
+        assert_ne!(source_worker, gui_thread);
+        assert!(state.source.is_empty());
+        assert!(state.source_read_pending());
+
+        state.open_section(ClipboardModifyDialogSection::Templates, &service, &ctx);
+        assert_eq!(state.section, ClipboardModifyDialogSection::Templates);
+        assert_eq!(state.source_read_request_id_for_test(), Some(1));
+        assert!(
+            entered_rx.try_recv().is_err(),
+            "reopen does not queue another read"
+        );
+
+        release.send(()).expect("release the test reader");
+        state.wait_for_source_read_for_test(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
+        assert_eq!(state.source, "background source");
+        assert_eq!(state.baseline, "background source");
+        assert!(!state.source_read_pending());
+    }
+
+    #[test]
+    fn superseded_source_read_success_and_failure_cannot_replace_current_state() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let service = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "unused backend value",
+        )));
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        let mut state = ClipboardModifyDialogState::default();
+        state.control_source_reads_for_test();
+        let ctx = egui::Context::default();
+        state.open_section(ClipboardModifyDialogSection::Modify, &service, &ctx);
+        let initial = state.source_read_in_flight_id_for_test().unwrap();
+        request_reload_for_test(&mut state, &service);
+        request_reload_for_test(&mut state, &service);
+        let latest = state.source_read_request_id_for_test().unwrap();
+        assert!(latest > initial);
+        assert!(state.source_read_pending());
+
+        state.inject_source_read_completion_for_test(initial, Ok("superseded text".into()));
+        state.poll_source_read_completions(catalog.clone());
+        assert!(state.source.is_empty());
+        assert!(state.baseline.is_empty());
+        assert_eq!(state.source_read_in_flight_id_for_test(), Some(latest));
+        assert!(state.source_read_pending());
+
+        state.source = "newer draft".into();
+        state.source_edited(catalog.clone());
+        state.source_error = Some("prior source status".into());
+        state.reset(catalog);
+        state.inject_source_read_completion_for_test(latest, Err(ClipboardError::TimedOut));
+        state.poll_source_read_completions(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
+
+        assert!(state.source.is_empty(), "Reset remains authoritative");
+        assert!(state.baseline.is_empty());
+        assert_eq!(state.source_error.as_deref(), Some("prior source status"));
+        assert!(!state.source_read_pending());
+        assert!(state.source_read_in_flight_id_for_test().is_none());
+    }
+
+    #[test]
+    fn close_and_reopen_retire_old_read_failures_before_accepting_new_source() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let service = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "unused backend value",
+        )));
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        let mut state = ClipboardModifyDialogState::default();
+        state.control_source_reads_for_test();
+        let ctx = egui::Context::default();
+        state.open_section(ClipboardModifyDialogSection::Modify, &service, &ctx);
+        let old_session = state.host_session_epoch();
+        let old_read = state.source_read_in_flight_id_for_test().unwrap();
+
+        state.open = false;
+        state.cleanup_after_close();
+        state.open_section(ClipboardModifyDialogSection::Modify, &service, &ctx);
+        let new_read = state.source_read_request_id_for_test().unwrap();
+        assert_ne!(state.host_session_epoch(), old_session);
+        assert!(new_read > old_read);
+
+        state.inject_source_read_completion_for_test(
+            old_read,
+            Err(ClipboardError::Permanent("stale failure".into())),
+        );
+        state.poll_source_read_completions(catalog.clone());
+        assert!(state.source_error.is_none());
+        assert!(state.source.is_empty());
+        assert_eq!(state.source_read_in_flight_id_for_test(), Some(new_read));
+
+        state.inject_source_read_completion_for_test(new_read, Ok("new session text".into()));
+        state.poll_source_read_completions(catalog);
+        assert_eq!(state.source, "new session text");
+        assert_eq!(state.baseline, "new session text");
+        assert!(state.source_error.is_none());
+    }
+
+    #[test]
     fn failed_clipboard_reload_preserves_source_without_writing() {
-        use crate::clipboard_modify::clipboard::fake::{FakeClipboardBackend, Op};
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
 
         let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
             "loaded source",
         )));
         let mut state = ClipboardModifyDialogState::default();
-        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        controlled_open_with_source(&mut state, &clipboard, "loaded source");
         state.source = "edited draft".into();
+        state.source_edited(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
         let baseline = state.baseline.clone();
-        clipboard
-            .backend()
-            .push(Op::Read(Err(ClipboardError::Permanent(
-                "read failed".into(),
-            ))));
 
-        state.load_clipboard(&clipboard);
+        request_load_for_test(&mut state, &clipboard);
+        finish_controlled_source_read(
+            &mut state,
+            Err(ClipboardError::Permanent("read failed".into())),
+        );
 
         assert_eq!(state.source, "edited draft");
         assert_eq!(state.baseline, baseline);
@@ -3659,35 +4115,98 @@ mod tests {
 
     #[test]
     fn non_text_reload_preserves_draft_baseline_and_preview() {
-        use crate::clipboard_modify::clipboard::fake::{FakeClipboardBackend, Op};
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
 
         let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
             "loaded source",
         )));
         let mut state = ClipboardModifyDialogState::default();
-        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        controlled_open_with_source(&mut state, &clipboard, "loaded source");
         state.source = "edited draft".into();
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        state.source_edited(catalog.clone());
         let baseline = state.baseline.clone();
         let reset_source = state.reset_source.clone();
-        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        state
+            .acknowledged_large_sources
+            .insert((fingerprint("edited draft"), "edited draft".len()));
         state.add_stage(OperationId::Uppercase, catalog);
         state.preview.force_start_pending();
         assert_eq!(state.preview.apply_text(), Some("EDITED DRAFT"));
+        let source_fingerprint = state.source_fingerprint;
+        let stage_id = state.stages[0].id;
 
-        clipboard
-            .backend()
-            .push(Op::Read(Err(ClipboardError::NonText)));
-        state.load_clipboard(&clipboard);
+        request_reload_for_test(&mut state, &clipboard);
+        finish_controlled_source_read(&mut state, Err(ClipboardError::NonText));
 
         assert_eq!(state.source, "edited draft");
         assert_eq!(state.baseline, baseline);
         assert_eq!(state.reset_source, reset_source);
+        assert_eq!(state.source_fingerprint, source_fingerprint);
+        assert_eq!(state.stages.len(), 1);
+        assert_eq!(state.stages[0].id, stage_id);
         assert_eq!(state.preview.apply_text(), Some("EDITED DRAFT"));
         assert!(state.can_apply());
         assert_eq!(
             state.source_error.as_deref(),
             Some("Clipboard does not contain text")
         );
+        assert!(
+            state
+                .acknowledged_large_sources
+                .contains(&(fingerprint("edited draft"), "edited draft".len()))
+        );
+        assert!(clipboard.backend().writes().is_empty());
+    }
+
+    #[test]
+    fn timed_out_reload_preserves_preview_and_explicit_retry_recovers() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "loaded source",
+        )));
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        let mut state = ClipboardModifyDialogState::default();
+        controlled_open_with_source(&mut state, &clipboard, "loaded source");
+        state.source = "edited draft".into();
+        state.source_edited(catalog.clone());
+        state.add_stage(OperationId::Uppercase, catalog.clone());
+        state.preview.force_start_pending();
+        let baseline = state.baseline.clone();
+        let reset_source = state.reset_source.clone();
+        let preview_id = match state.preview.state() {
+            PreviewState::Completed { id, .. } => *id,
+            other => panic!("expected a completed preview, got {other:?}"),
+        };
+        let preview = state.preview.apply_text().unwrap().to_owned();
+
+        request_reload_for_test(&mut state, &clipboard);
+        finish_controlled_source_read(&mut state, Err(ClipboardError::TimedOut));
+
+        assert_eq!(state.source, "edited draft");
+        assert_eq!(state.baseline, baseline);
+        assert_eq!(state.reset_source, reset_source);
+        assert_eq!(state.preview.apply_text(), Some(preview.as_str()));
+        assert!(matches!(
+            state.preview.state(),
+            PreviewState::Completed { id, .. } if *id == preview_id
+        ));
+        assert!(state.can_apply());
+        let expected_error = ClipboardError::TimedOut.to_string();
+        assert_eq!(state.source_error.as_deref(), Some(expected_error.as_str()));
+
+        request_reload_for_test(&mut state, &clipboard);
+        finish_controlled_source_read(&mut state, Ok("retried source".into()));
+        assert_eq!(state.source, "retried source");
+        assert_eq!(state.baseline, "retried source");
+        assert_eq!(state.reset_source, "retried source");
+        assert!(state.source_error.is_none());
+        assert!(!state.can_apply());
+        assert!(matches!(
+            state.preview.state(),
+            PreviewState::PendingDebounce { .. }
+        ));
         assert!(clipboard.backend().writes().is_empty());
     }
 
@@ -3705,7 +4224,12 @@ mod tests {
             .backend()
             .push(Op::Read(Ok("opened after retry".into())));
         let mut state = ClipboardModifyDialogState::default();
-        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        let ctx = egui::Context::default();
+        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard, &ctx);
+        assert!(state.source_read_pending());
+        state.wait_for_source_read_for_test(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
         assert!(state.open);
         assert!(state.source.is_empty());
         assert!(
@@ -3714,12 +4238,19 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("busy on open"))
         );
+        assert!(!state.source_read_pending());
 
-        state.load_clipboard(&clipboard);
+        state.load_clipboard(&clipboard, &ctx);
+        state.wait_for_source_read_for_test(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
         assert_eq!(state.source, "opened after retry");
         assert!(state.source_error.is_none());
 
         state.source = "edited draft".into();
+        state.source_edited(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
         let baseline = state.baseline.clone();
         clipboard
             .backend()
@@ -3728,7 +4259,10 @@ mod tests {
             .backend()
             .push(Op::Read(Ok("reloaded after retry".into())));
 
-        state.load_clipboard(&clipboard);
+        state.request_clipboard_reload(&clipboard, &ctx);
+        state.wait_for_source_read_for_test(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
         assert_eq!(state.source, "edited draft");
         assert_eq!(state.baseline, baseline);
         assert!(
@@ -3739,7 +4273,10 @@ mod tests {
         );
         assert!(clipboard.backend().writes().is_empty());
 
-        state.load_clipboard(&clipboard);
+        state.request_clipboard_reload(&clipboard, &ctx);
+        state.wait_for_source_read_for_test(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
         assert_eq!(state.source, "reloaded after retry");
         assert_eq!(state.baseline, "reloaded after retry");
         assert!(state.source_error.is_none());
@@ -3754,8 +4291,9 @@ mod tests {
         )));
         let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
         let mut state = ClipboardModifyDialogState::default();
-        state.open_section(ClipboardModifyDialogSection::Modify, &clipboard);
+        controlled_open_with_source(&mut state, &clipboard, "loaded source");
         state.source = "edited draft".into();
+        state.source_edited(catalog.clone());
         state.add_stage(OperationId::Uppercase, catalog.clone());
         state.preview.force_start_pending();
         let preview_id = match state.preview.state() {
@@ -3783,11 +4321,9 @@ mod tests {
 
         let baseline = state.baseline.clone();
         let reset_source = state.reset_source.clone();
-        clipboard
-            .backend()
-            .push(Op::Read(Err(ClipboardError::Busy("reload busy".into()))));
+        let ctx = egui::Context::default();
         state.hosted_effects = Some(Vec::new());
-        state.request_clipboard_reload(&clipboard, catalog.clone());
+        state.request_clipboard_reload(&clipboard, &ctx);
         let actions = ClipboardModifyHostActions {
             effects: state.hosted_effects.take().unwrap(),
             session_epoch: state.host_session_epoch(),
@@ -3795,6 +4331,12 @@ mod tests {
         };
         assert_eq!(actions.effects.len(), 1);
         assert!(!state.complete_host_actions(actions, &clipboard, catalog.clone(), None));
+        let request_id = state.source_read_in_flight_id_for_test().unwrap();
+        state.inject_source_read_completion_for_test(
+            request_id,
+            Err(ClipboardError::Busy("reload busy".into())),
+        );
+        state.poll_source_read_completions(catalog.clone());
 
         assert_eq!(state.source, "edited draft");
         assert_eq!(state.baseline, baseline);
@@ -3833,17 +4375,19 @@ mod tests {
         assert_eq!(state.source_error.as_deref(), Some(expected_error.as_str()));
         assert!(clipboard.backend().writes().is_empty());
 
-        clipboard
-            .backend()
-            .push(Op::Read(Ok("reloaded source".into())));
         state.hosted_effects = Some(Vec::new());
-        state.request_clipboard_reload(&clipboard, catalog.clone());
+        state.request_clipboard_reload(&clipboard, &ctx);
         let actions = ClipboardModifyHostActions {
             effects: state.hosted_effects.take().unwrap(),
             session_epoch: state.host_session_epoch(),
             ..Default::default()
         };
         assert!(!state.complete_host_actions(actions, &clipboard, catalog, None));
+        let request_id = state.source_read_in_flight_id_for_test().unwrap();
+        state.inject_source_read_completion_for_test(request_id, Ok("reloaded source".into()));
+        state.poll_source_read_completions(Arc::new(
+            crate::clipboard_modify::defaults::default_catalog(),
+        ));
 
         assert_eq!(state.source, "reloaded source");
         assert_eq!(state.baseline, "reloaded source");
