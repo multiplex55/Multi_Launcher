@@ -3237,6 +3237,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "criterion",
+ "crossbeam-channel",
  "dirs-next",
  "eframe",
  "egui-toast",

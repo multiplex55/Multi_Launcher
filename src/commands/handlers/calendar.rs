@@ -428,8 +428,12 @@ mod tests {
             _: crate::clipboard_modify::actions::ClipboardModifySectionPayload,
         ) {
         }
-        fn undo_clipboard_modify(&mut self) -> Result<(), String> {
-            Ok(())
+        fn undo_clipboard_modify(
+            &mut self,
+            _: &crate::commands::CommandInvocation,
+            _: Option<&str>,
+        ) -> Result<crate::commands::ClipboardModifyUndoSubmission, String> {
+            Ok(crate::commands::ClipboardModifyUndoSubmission::Completed)
         }
         fn start_clipboard_modify(
             &mut self,

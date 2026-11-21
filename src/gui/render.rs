@@ -3534,16 +3534,72 @@ impl LauncherApp {
             self.handle_clipboard_modify_gui_event(event);
             ctx.request_repaint();
         }
+        let currently_pinned = self
+            .pinned_panels
+            .contains(&super::Panel::ClipboardModifyDialog);
+        let mutation_completion = self
+            .clipboard_modify_dialog
+            .poll_mutation_completions(currently_pinned);
+        let mutation_finished = mutation_completion.is_some();
+        if let Some(completion) = mutation_completion {
+            match completion {
+                super::clipboard_modify_dialog::ClipboardModifyRuntimeCompletion::Dialog {
+                    closed,
+                } => {
+                    if closed {
+                        self.close_clipboard_modify_session();
+                    }
+                }
+                super::clipboard_modify_dialog::ClipboardModifyRuntimeCompletion::Undo(
+                    completion,
+                ) => match completion.result {
+                    Ok(()) => {
+                        self.handle_clipboard_modify_gui_event(
+                            super::ClipboardModifyGuiEvent::ImmediateOperationComplete,
+                        );
+                        let outcome = crate::commands::CommandOutcome {
+                            visibility: crate::commands::VisibilityPolicy::Hide,
+                            toasts: vec![crate::commands::ToastPolicy::Success(
+                                "Undid Clipboard Modify".into(),
+                            )],
+                            ..Default::default()
+                        };
+                        self.apply_command_outcome_with_root_policy_if_visibility_unchanged(
+                            outcome,
+                            &completion.invocation,
+                            completion.captured_history_query.as_deref(),
+                            completion.root_policy,
+                            completion.visibility_revision_at_invocation,
+                        );
+                    }
+                    Err(error) => {
+                        <Self as crate::commands::ClipboardModifyCommandHost>::report_clipboard_modify_action_error(
+                            self,
+                            error.to_string(),
+                        );
+                    }
+                },
+            }
+        }
+        let had_immediate = self.clipboard_modify_immediate.has_pending();
+        self.drain_clipboard_modify_immediate();
+        let immediate_finished = had_immediate && !self.clipboard_modify_immediate.has_pending();
+        let source_read_finished = self
+            .clipboard_modify_dialog
+            .poll_source_read_completions(self.clipboard_modify_runtime.catalog_snapshot());
+        if mutation_finished || source_read_finished {
+            ctx.request_repaint_of(self.clipboard_modify_host.owner_viewport());
+        }
         let preview_finished = self.clipboard_modify_dialog.preview.tick();
         if preview_finished {
             ctx.request_repaint_of(self.clipboard_modify_host.owner_viewport());
         }
-        let had_immediate = self.clipboard_modify_immediate.has_pending();
-        self.drain_clipboard_modify_immediate();
-        if preview_finished || (had_immediate && !self.clipboard_modify_immediate.has_pending()) {
+        if preview_finished || immediate_finished || mutation_finished {
             ctx.request_repaint();
         }
         if self.clipboard_modify_dialog.preview.is_active()
+            || self.clipboard_modify_dialog.has_source_read_work()
+            || self.clipboard_modify_dialog.has_mutation_work()
             || self.clipboard_modify_immediate.has_pending()
             || self
                 .clipboard_modify_watcher
@@ -19002,7 +19058,7 @@ mod tests {
         let mut settings = settings;
         settings.paste_sequence.next_hotkey = None;
         settings.paste_sequence.cancel_hotkey = None;
-        LauncherApp::new(
+        let mut app = LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
             0,
@@ -19017,7 +19073,16 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
-        )
+        );
+        app.clipboard_modify_test_service = Some(Arc::new(
+            crate::clipboard_modify::clipboard::ClipboardService::new(
+                crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::with_text(
+                    "test clipboard source",
+                ),
+            ),
+        ));
+        app.clipboard_modify_dialog.control_source_reads_for_test();
+        app
     }
 
     #[test]
@@ -59732,6 +59797,8 @@ mod tests {
         )));
         app.clipboard_modify_test_service = Some(clipboard.clone());
         app.open_clipboard_modify_dialog();
+        app.clipboard_modify_dialog
+            .wait_for_source_read_for_test(app.clipboard_modify_runtime.catalog_snapshot());
         app.clipboard_modify_dialog.preview = PreviewCoordinator::new(Duration::from_secs(3600));
 
         let root = |app: &mut LauncherApp, events| {
@@ -59804,6 +59871,10 @@ mod tests {
         let apply = clickable(app.clipboard_modify_dialog.test_host_buttons().1, "Apply");
         detached(&mut app, tool_dialog_pointer_events(apply, true), false);
         detached(&mut app, tool_dialog_pointer_events(apply, false), true);
+        assert!(
+            !app.clipboard_modify_dialog.has_pending_mutation(),
+            "a discarded Apply response must not admit a clipboard mutation"
+        );
         assert!(clipboard.backend().writes().is_empty());
         for _ in 0..2 {
             detached(&mut app, Vec::new(), false);
@@ -59812,6 +59883,9 @@ mod tests {
         for pressed in [true, false] {
             detached(&mut app, tool_dialog_pointer_events(apply, pressed), false);
         }
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
         assert_eq!(clipboard.backend().writes(), ["CLIP Λ"]);
         assert!(!app.visible_flag.load(Ordering::Relaxed));
         let dock = clickable(app.clipboard_modify_host.test_button, "Dock");
@@ -59833,6 +59907,137 @@ mod tests {
         assert!(!app.clipboard_modify_dialog.open);
         assert!(app.clipboard_modify_dialog.source.is_empty());
         assert_eq!(clipboard.backend().writes(), ["CLIP Λ"]);
+    }
+
+    #[test]
+    fn clipboard_modify_detached_reload_requires_a_retained_pass() {
+        use crate::clipboard_modify::{
+            clipboard::{ClipboardService, fake::FakeClipboardBackend},
+            coordinator::{PreviewCoordinator, PreviewState},
+        };
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "unused initial fake value",
+        )));
+        app.clipboard_modify_test_service = Some(clipboard);
+        app.clipboard_modify_dialog.control_source_reads_for_test();
+        app.open_clipboard_modify_dialog();
+        let initial_read = app
+            .clipboard_modify_dialog
+            .source_read_in_flight_id_for_test()
+            .expect("opening queues the source read");
+        app.clipboard_modify_dialog
+            .inject_source_read_completion_for_test(initial_read, Ok("clip λ".into()));
+        let catalog = app.clipboard_modify_runtime.catalog_snapshot();
+        assert!(
+            app.clipboard_modify_dialog
+                .poll_source_read_completions(catalog.clone())
+        );
+        app.clipboard_modify_dialog.preview = PreviewCoordinator::new(Duration::from_secs(3600));
+        app.clipboard_modify_dialog.preview.request(
+            "clip λ".into(),
+            crate::clipboard_modify::parser::ClipboardModifyIntent::Stages(vec![
+                crate::clipboard_modify::model::StageSpec {
+                    operation: crate::clipboard_modify::model::OperationId::Uppercase,
+                    arguments: Default::default(),
+                },
+            ]),
+            catalog,
+        );
+        app.clipboard_modify_dialog.preview.force_start_pending();
+        assert!(app.clipboard_modify_dialog.can_apply());
+
+        let root = |app: &mut LauncherApp, events, discard| {
+            run_tool_dialog_frame(&ctx, app, events, discard).drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            root(&mut app, Vec::new(), false);
+        }
+        let session = app.clipboard_modify_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.clipboard_modify_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(popout, pressed), false);
+        }
+        root(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport =
+            crate::gui::utility_window_host::ClipboardModifyWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let initial_next_id = app.clipboard_modify_dialog.next_source_read_id_for_test();
+        let (reload, clip, enabled) = app
+            .clipboard_modify_dialog
+            .test_host_reload_button()
+            .expect("Reload Clipboard");
+        assert!(enabled && clip.contains_rect(reload));
+        detached(&mut app, tool_dialog_pointer_events(reload, true), false);
+        detached(&mut app, tool_dialog_pointer_events(reload, false), true);
+        assert_eq!(
+            app.clipboard_modify_dialog.next_source_read_id_for_test(),
+            initial_next_id,
+            "discarded detached passes do not submit the read"
+        );
+        assert!(!app.clipboard_modify_dialog.source_read_pending());
+        assert_eq!(app.clipboard_modify_dialog.source, "clip λ");
+        assert!(app.clipboard_modify_dialog.can_apply());
+
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let (reload, clip, enabled) = app
+            .clipboard_modify_dialog
+            .test_host_reload_button()
+            .expect("retained Reload Clipboard");
+        assert!(enabled && clip.contains_rect(reload));
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(reload, pressed), false);
+        }
+        let reload_id = app
+            .clipboard_modify_dialog
+            .source_read_in_flight_id_for_test()
+            .expect("retained pass submits a source read");
+        assert_eq!(reload_id, initial_next_id);
+        assert!(app.clipboard_modify_dialog.source_read_pending());
+        assert_eq!(app.clipboard_modify_dialog.source, "clip λ");
+        assert_eq!(
+            app.clipboard_modify_dialog.preview.apply_text(),
+            Some("CLIP Λ")
+        );
+        assert!(app.clipboard_modify_dialog.can_apply());
+
+        app.clipboard_modify_dialog
+            .inject_source_read_completion_for_test(reload_id, Ok("reloaded clip".into()));
+        app.poll_clipboard_modify_runtime(&ctx);
+        assert_eq!(
+            app.clipboard_modify_host.owner_viewport(),
+            viewport,
+            "completion polling preserves the detached owner"
+        );
+        assert_eq!(app.clipboard_modify_dialog.source, "reloaded clip");
+        assert_eq!(app.clipboard_modify_dialog.baseline, "reloaded clip");
+        assert!(!app.clipboard_modify_dialog.can_apply());
+        assert!(matches!(
+            app.clipboard_modify_dialog.preview.state(),
+            PreviewState::PendingDebounce { .. }
+        ));
     }
 
     #[test]

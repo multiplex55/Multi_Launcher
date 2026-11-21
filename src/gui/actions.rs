@@ -199,6 +199,7 @@ impl LauncherApp {
         for (meta, ev) in self.clipboard_modify_immediate.drain_completions() {
             match ev.result {
                 Ok(()) => {
+                    self.clipboard_modify_dialog.external_mutation_finished();
                     typed_events.push(WatchEvent::ClipboardModify(
                         ClipboardModifyGuiEvent::ImmediateOperationComplete,
                     ));
@@ -233,6 +234,7 @@ impl LauncherApp {
                     }
                 }
                 Err(ref err) => {
+                    self.clipboard_modify_dialog.external_mutation_finished();
                     typed_events.push(WatchEvent::ClipboardModify(
                         ClipboardModifyGuiEvent::ImmediateOperationFailed,
                     ));
@@ -261,8 +263,8 @@ impl LauncherApp {
 
     pub(crate) fn handle_clipboard_modify_gui_event(&mut self, ev: ClipboardModifyGuiEvent) {
         match ev {
-            ClipboardModifyGuiEvent::ImmediateOperationComplete
-            | ClipboardModifyGuiEvent::ImmediateOperationFailed => {}
+            ClipboardModifyGuiEvent::ImmediateOperationComplete => {}
+            ClipboardModifyGuiEvent::ImmediateOperationFailed => {}
             ClipboardModifyGuiEvent::ConfigurationReloadSuccess => {
                 self.clipboard_modify_config_diagnostic = self
                     .clipboard_modify_runtime
@@ -629,14 +631,17 @@ pub(super) mod tests {
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     pub(crate) fn new_app(ctx: &egui::Context) -> LauncherApp {
-        LauncherApp::new(
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        let mut app = LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
             0,
             PluginManager::new(),
             "actions.json".into(),
             "settings.json".into(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -644,7 +649,16 @@ pub(super) mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
-        )
+        );
+        app.clipboard_modify_test_service = Some(Arc::new(
+            crate::clipboard_modify::clipboard::ClipboardService::new(
+                crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::with_text(
+                    "test clipboard source",
+                ),
+            ),
+        ));
+        app.clipboard_modify_dialog.control_source_reads_for_test();
+        app
     }
 
     #[test]
@@ -1565,8 +1579,28 @@ pub(super) mod tests {
     #[test]
     fn specialized_actions_ignore_query_override_before_dispatch() {
         let ctx = egui::Context::default();
+        let workspace = tempdir().unwrap();
+        let isolated_app = || {
+            let mut settings = Settings::default();
+            settings.hotkey = None;
+            settings.quit_hotkey = None;
+            settings.help_hotkey = None;
+            settings.paste_sequence.next_hotkey = None;
+            settings.paste_sequence.cancel_hotkey = None;
+            settings.enable_toasts = false;
+            settings.show_inline_errors = false;
+            settings.show_error_toasts = false;
+            settings.dashboard.enabled = false;
+            LauncherApp::new_isolated_for_test_at(
+                &ctx,
+                workspace.path(),
+                settings,
+                Some(std::collections::HashSet::new()),
+                Some(std::collections::HashMap::new()),
+            )
+        };
 
-        let mut file_search = new_app(&ctx);
+        let mut file_search = isolated_app();
         file_search.query = "file search query".into();
         file_search.clear_query_after_run = true;
         file_search.hide_after_run = true;
@@ -1595,7 +1629,7 @@ pub(super) mod tests {
             right: None,
         };
         let encoded = crate::diff::query::encode_payload(&payload).unwrap();
-        let mut diff = new_app(&ctx);
+        let mut diff = isolated_app();
         diff.query = "diff query".into();
         diff.clear_query_after_run = true;
         diff.hide_after_run = true;
@@ -1620,7 +1654,14 @@ pub(super) mod tests {
                 .contains_key(&format!("{}{encoded}", crate::diff::query::OPEN_PREFIX))
         );
 
-        let mut clipboard_modify = new_app(&ctx);
+        let mut clipboard_modify = isolated_app();
+        clipboard_modify.clipboard_modify_test_service = Some(Arc::new(
+            crate::clipboard_modify::clipboard::ClipboardService::new(
+                crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::with_text(
+                    "test fixture",
+                ),
+            ),
+        ));
         clipboard_modify.query = "clipboard query".into();
         clipboard_modify.activate_action(
             Action {
@@ -2175,6 +2216,256 @@ mod clipboard_modify_gui_action_tests {
             ));
             assert_eq!(app.clipboard_modify_dialog.section, dialog_section);
         }
+    }
+
+    #[test]
+    fn async_undo_applies_legacy_outcome_only_after_worker_success() {
+        use crate::clipboard_modify::clipboard::ClipboardBackend as _;
+        use crate::clipboard_modify::clipboard::fake::Op;
+
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.enable_toasts = true;
+        let service = app.clipboard_modify_test_service.clone().unwrap();
+        let undo_invocation = || crate::commands::CommandInvocation {
+            command: crate::commands::Command::ClipboardModify(
+                crate::commands::ClipboardModifyCommand::Undo { raw_argument: None },
+            ),
+            original_action: action("clipboard_modify:undo", None),
+            query_override: None,
+            source: ActivationSource::Gesture,
+        };
+
+        app.dispatch_command_invocation(undo_invocation());
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(
+            !app.test_toast_messages
+                .iter()
+                .any(|message| message == "Undid Clipboard Modify")
+        );
+        assert!(app.clipboard_modify_dialog.has_pending_mutation());
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("NoUndo"))
+        );
+        assert!(
+            !app.test_toast_messages
+                .iter()
+                .any(|message| message == "Undid Clipboard Modify")
+        );
+        assert!(service.undo_record().is_none());
+        assert!(service.backend().writes().is_empty());
+
+        service
+            .commit_output("modified".into(), "test seed")
+            .unwrap();
+        let prior_undo = service.undo_record().unwrap();
+        let original = prior_undo.original_text.clone();
+        let writes_before_undo = service.backend().writes();
+        app.test_toast_messages.clear();
+        app.error = None;
+        service.backend().push(Op::Read(Err(
+            crate::clipboard_modify::clipboard::ClipboardError::ProtectedItem,
+        )));
+        app.command_root_policy =
+            crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState;
+        app.dispatch_command_invocation(undo_invocation());
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("privately"))
+        );
+        assert_eq!(service.undo_record(), Some(prior_undo));
+        assert_eq!(service.backend().writes(), writes_before_undo);
+        assert!(
+            !app.test_toast_messages
+                .iter()
+                .any(|message| message == "Undid Clipboard Modify")
+        );
+
+        service.backend().push(Op::Read(Ok("modified".into())));
+        app.test_toast_messages.clear();
+        app.error = None;
+        app.command_root_policy =
+            crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState;
+        let visibility_revision_before_preserved_undo = app.visibility_revision.current();
+        app.dispatch_command_invocation(undo_invocation());
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(
+            app.visibility_revision.current(),
+            visibility_revision_before_preserved_undo
+        );
+        assert_eq!(app.test_toast_messages, ["Undid Clipboard Modify"]);
+        assert!(service.undo_record().is_none());
+        let mut expected_writes = writes_before_undo;
+        expected_writes.push(original.clone());
+        assert_eq!(service.backend().writes(), expected_writes);
+        assert_eq!(service.backend().read_text().unwrap(), original);
+    }
+
+    #[test]
+    fn delayed_legacy_undo_keeps_launcher_visible_after_new_panel_opens() {
+        use crate::clipboard_modify::clipboard::ClipboardBackend as _;
+
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.enable_toasts = true;
+        let service = app.clipboard_modify_test_service.clone().unwrap();
+        let original = service.backend().read_text().unwrap();
+        service
+            .commit_output("modified".into(), "test seed")
+            .unwrap();
+        app.clipboard_modify_dialog.control_source_reads_for_test();
+        app.test_toast_messages.clear();
+        let panels_before = app.launcher_interaction_snapshot();
+        let revision_before = app.visibility_revision.current();
+
+        let undo_invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::ClipboardModify(
+                crate::commands::ClipboardModifyCommand::Undo { raw_argument: None },
+            ),
+            original_action: action("clipboard_modify:undo", None),
+            query_override: None,
+            source: ActivationSource::Gesture,
+        };
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+        app.dispatch_command_invocation(undo_invocation);
+        assert!(app.clipboard_modify_dialog.has_pending_mutation());
+        assert_eq!(app.visibility_revision.current(), revision_before);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+
+        assert!(activate(
+            &mut app,
+            &action("clipboard_modify:open:help", None),
+            ActivationSource::Click
+        ));
+        assert!(app.clipboard_modify_dialog.open);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        let panels_after_open = app.launcher_interaction_snapshot();
+        assert_ne!(panels_after_open, panels_before);
+        let revision_after_panel = app.visibility_revision.current();
+        assert!(revision_after_panel > revision_before);
+
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
+
+        assert!(app.clipboard_modify_dialog.open);
+        assert!(
+            app.visible_flag.load(Ordering::SeqCst),
+            "a completion for the older Undo must not hide a panel opened afterward"
+        );
+        assert_eq!(app.visibility_revision.current(), revision_after_panel);
+        assert_eq!(app.launcher_interaction_snapshot(), panels_after_open);
+        assert_eq!(app.test_toast_messages, ["Undid Clipboard Modify"]);
+        assert_eq!(service.backend().read_text().unwrap(), original);
+        assert!(service.undo_record().is_none());
+    }
+
+    #[test]
+    fn delayed_legacy_undo_respects_newer_show_without_panel_change() {
+        use crate::clipboard_modify::clipboard::ClipboardBackend as _;
+
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.enable_toasts = true;
+        let service = app.clipboard_modify_test_service.clone().unwrap();
+        let original = service.backend().read_text().unwrap();
+        service
+            .commit_output("modified".into(), "test seed")
+            .unwrap();
+        app.test_toast_messages.clear();
+        let panels_before = app.launcher_interaction_snapshot();
+        let revision_before = app.visibility_revision.current();
+
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+        app.dispatch_command_invocation(crate::commands::CommandInvocation {
+            command: crate::commands::Command::ClipboardModify(
+                crate::commands::ClipboardModifyCommand::Undo { raw_argument: None },
+            ),
+            original_action: action("clipboard_modify:undo", None),
+            query_override: None,
+            source: ActivationSource::Gesture,
+        });
+        assert!(app.clipboard_modify_dialog.has_pending_mutation());
+        assert_eq!(app.visibility_revision.current(), revision_before);
+
+        // This accepted Show is intentionally repeated while the launcher is
+        // already visible and opens no panel; its newer revision still wins.
+        let show_revision = app.request_launcher_visibility(true);
+        assert!(show_revision > revision_before);
+        assert_eq!(app.launcher_interaction_snapshot(), panels_before);
+
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
+
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.visibility_revision.current(), show_revision);
+        assert_eq!(app.launcher_interaction_snapshot(), panels_before);
+        assert_eq!(app.test_toast_messages, ["Undid Clipboard Modify"]);
+        assert_eq!(service.backend().read_text().unwrap(), original);
+        assert!(service.undo_record().is_none());
+    }
+
+    #[test]
+    fn unchanged_legacy_undo_still_hides_launcher_after_success() {
+        use crate::clipboard_modify::clipboard::ClipboardBackend as _;
+
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.enable_toasts = true;
+        let service = app.clipboard_modify_test_service.clone().unwrap();
+        let original = service.backend().read_text().unwrap();
+        service
+            .commit_output("modified".into(), "test seed")
+            .unwrap();
+        app.test_toast_messages.clear();
+        let panels_before = app.launcher_interaction_snapshot();
+        let revision_before = app.visibility_revision.current();
+
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+        app.dispatch_command_invocation(crate::commands::CommandInvocation {
+            command: crate::commands::Command::ClipboardModify(
+                crate::commands::ClipboardModifyCommand::Undo { raw_argument: None },
+            ),
+            original_action: action("clipboard_modify:undo", None),
+            query_override: None,
+            source: ActivationSource::Gesture,
+        });
+        assert!(app.clipboard_modify_dialog.has_pending_mutation());
+        assert_eq!(app.visibility_revision.current(), revision_before);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
+
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.visibility_revision.current(), revision_before + 1);
+        assert_eq!(app.launcher_interaction_snapshot(), panels_before);
+        assert_eq!(app.test_toast_messages, ["Undid Clipboard Modify"]);
+        assert_eq!(service.backend().read_text().unwrap(), original);
+        assert!(service.undo_record().is_none());
     }
 
     #[test]

@@ -10886,7 +10886,7 @@ mod tests {
             ],
         );
         frame(&mut dialog, &ctx, egui::vec2(1280.0, 900.0), Vec::new());
-        dialog.examples_open = false;
+        dialog.retire_examples(&ctx);
         frame(&mut dialog, &ctx, initial_size, Vec::new());
 
         let state_before = (
@@ -10902,11 +10902,17 @@ mod tests {
             dialog.session.evaluation_count(),
             copy_all_session(&mut dialog.session),
         );
-        open_config_menu(&mut dialog, &ctx, initial_size, None);
-        let popout_button = dialog
-            .test_host_button_rect
-            .expect("the docked host offers Pop out");
-        click(&mut dialog, &ctx, initial_size, popout_button.center());
+        assert_eq!(
+            dialog.session.pending_transition(),
+            Some(PendingTransition::New)
+        );
+        // The inline pending-transition decision disables the config menu.
+        // Exercise the accepted host-effect boundary directly; the pending
+        // document decision remains owned by the session during migration.
+        let mut popout = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        popout.pass_accepted = true;
+        popout.host_request = Some(super::PadHost::Popout);
+        let _ = complete_host_effects(&mut dialog, &ctx, popout);
         assert_eq!(dialog.host_state.presentation(), super::PadHost::Popout);
         assert!(dialog.needs_root_ui_when_hidden());
 
@@ -10920,13 +10926,16 @@ mod tests {
         assert!(dialog.host_state.embedded_root_layer().is_some());
         assert!(!dialog.host_state.bootstrap_pending());
         assert!(dialog.needs_root_ui_when_hidden());
-        open_config_menu(&mut dialog, &ctx, initial_size, None);
-        let dock_button = dialog
-            .test_host_button_rect
-            .expect("the embedded popout offers Dock back");
         assert_eq!(
-            click(&mut dialog, &ctx, initial_size, dock_button.center()),
-            Some(CalculationPadDialogEffect::ShowRoot)
+            dialog.session.pending_transition(),
+            Some(PendingTransition::New)
+        );
+        let mut dock = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        dock.pass_accepted = true;
+        dock.host_request = Some(super::PadHost::Docked);
+        assert_eq!(
+            complete_host_effects(&mut dialog, &ctx, dock),
+            vec![CalculationPadDialogEffect::ShowRoot]
         );
         assert_eq!(dialog.host_state.presentation(), super::PadHost::Docked);
         assert!(!dialog.needs_root_ui_when_hidden());
@@ -10934,6 +10943,10 @@ mod tests {
         for _ in 0..2 {
             frame(&mut dialog, &ctx, initial_size, Vec::new());
         }
+        assert_eq!(
+            dialog.session.pending_transition(),
+            Some(PendingTransition::New)
+        );
         let state_after = (
             dialog.session.current_id(),
             dialog.session.current_name().map(str::to_owned),

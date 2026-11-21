@@ -2,15 +2,15 @@ use crate::dashboard::DashboardRefreshRequest;
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
-    BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost,
-    Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost, DataCommandHost,
-    DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
-    HeadlessCommandHost, HistoryPolicy, JsonUtilityCommandHost, LauncherCommandHost,
-    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    PinboardCommandHost, QueryPolicy, RadialCommandHost, RecordingCommandHost, ResultsPolicy,
-    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDelay,
-    ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
-    VisibilityPolicy, XmlToolkitCommandHost,
+    BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost,
+    ClipboardModifyUndoSubmission, ColorPickCommandHost, Command, CommandError, CommandInvocation,
+    CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
+    FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
+    JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost,
+    NoteCommandHost, PendingQueryPolicy, PinboardCommandHost, QueryPolicy, RadialCommandHost,
+    RecordingCommandHost, ResultsPolicy, ScreenDrawCommandHost, ScreenshotCommandHost,
+    ScreenshotCommandResult, ScreenshotDelay, ScreenshotDestination, ScreenshotMarkup,
+    ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy, XmlToolkitCommandHost,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -1141,12 +1141,34 @@ impl ClipboardModifyCommandHost for LauncherApp {
         self.open_clipboard_modify_section(section);
     }
 
-    fn undo_clipboard_modify(&mut self) -> Result<(), String> {
-        crate::clipboard_modify::runtime::undo().map_err(|error| error.to_string())?;
-        self.handle_clipboard_modify_gui_event(
-            super::ClipboardModifyGuiEvent::ImmediateOperationComplete,
-        );
-        Ok(())
+    fn undo_clipboard_modify(
+        &mut self,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+    ) -> Result<ClipboardModifyUndoSubmission, String> {
+        let root_policy = self.command_root_policy;
+        let visibility_revision_at_invocation = self.visibility_revision.current();
+        #[cfg(test)]
+        if let Some(service) = self.clipboard_modify_test_service.clone() {
+            self.clipboard_modify_dialog.start_undo(
+                &service,
+                &self.egui_ctx,
+                invocation.clone(),
+                captured_history_query,
+                root_policy,
+                visibility_revision_at_invocation,
+            )?;
+            return Ok(ClipboardModifyUndoSubmission::Queued);
+        }
+        self.clipboard_modify_dialog.start_undo(
+            &crate::clipboard_modify::runtime::clipboard_service(),
+            &self.egui_ctx,
+            invocation.clone(),
+            captured_history_query,
+            root_policy,
+            visibility_revision_at_invocation,
+        )?;
+        Ok(ClipboardModifyUndoSubmission::Queued)
     }
 
     fn start_clipboard_modify(
@@ -1155,14 +1177,19 @@ impl ClipboardModifyCommandHost for LauncherApp {
         mut metadata: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
     ) -> Result<(), String> {
         metadata.root_policy = self.command_root_policy;
-        self.clipboard_modify_immediate
+        let result = self
+            .clipboard_modify_immediate
             .start(
                 intent,
                 self.clipboard_modify_runtime.catalog_snapshot(),
                 metadata,
             )
             .map(|_| ())
-            .map_err(|error| error.message)
+            .map_err(|error| error.message);
+        if result.is_ok() {
+            self.clipboard_modify_dialog.external_mutation_started();
+        }
+        result
     }
 
     fn clipboard_modify_hide_launcher_after_apply(&self) -> bool {
@@ -2527,6 +2554,40 @@ impl LauncherApp {
         captured_history_query: Option<&str>,
         root_policy: crate::universal_actions::RootLauncherPolicy,
     ) {
+        self.apply_command_outcome_with_root_policy_guarded(
+            outcome,
+            invocation,
+            captured_history_query,
+            root_policy,
+            None,
+        );
+    }
+
+    pub(crate) fn apply_command_outcome_with_root_policy_if_visibility_unchanged(
+        &mut self,
+        outcome: CommandOutcome,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+        root_policy: crate::universal_actions::RootLauncherPolicy,
+        expected_visibility_revision: u64,
+    ) {
+        self.apply_command_outcome_with_root_policy_guarded(
+            outcome,
+            invocation,
+            captured_history_query,
+            root_policy,
+            Some(expected_visibility_revision),
+        );
+    }
+
+    fn apply_command_outcome_with_root_policy_guarded(
+        &mut self,
+        outcome: CommandOutcome,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+        root_policy: crate::universal_actions::RootLauncherPolicy,
+        expected_visibility_revision: Option<u64>,
+    ) {
         let outcome = normalize_outcome_for_root_policy(outcome, root_policy);
         let history_query = captured_history_query
             .map(str::to_owned)
@@ -2630,7 +2691,7 @@ impl LauncherApp {
         }
 
         if outcome.visibility != VisibilityPolicy::Keep || outcome.restore {
-            self.visibility_revision.request(|| {
+            let update_visibility = || {
                 let visible = match outcome.visibility {
                     VisibilityPolicy::Keep => self.visible_flag.load(Ordering::SeqCst),
                     VisibilityPolicy::Show => true,
@@ -2641,7 +2702,14 @@ impl LauncherApp {
                 if outcome.restore {
                     self.restore_flag.store(true, Ordering::SeqCst);
                 }
-            });
+            };
+            if let Some(expected_revision) = expected_visibility_revision {
+                let _ = self
+                    .visibility_revision
+                    .request_if_current(expected_revision, update_visibility);
+            } else {
+                self.visibility_revision.request(update_visibility);
+            }
         }
         if outcome.move_cursor_end {
             self.move_cursor_end = true;

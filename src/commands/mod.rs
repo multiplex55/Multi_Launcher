@@ -13,14 +13,14 @@ pub mod handlers;
 pub use bus::CommandBus;
 pub use error::CommandError;
 pub use host::{
-    BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost,
-    CommandHost, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
-    FileSearchCommandHost, HeadlessCommandHost, HotFolderCommandHost, JsonUtilityCommandHost,
-    LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    OcrCommandHost, PinboardCommandHost, RadialCommandHost, RecordingCommandHost,
-    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult,
-    SearchReplaceCommandHost, SnippetPromptIntent, TableUtilityCommandHost, TodoCommandHost,
-    XmlToolkitCommandHost,
+    BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost,
+    ClipboardModifyUndoSubmission, ColorPickCommandHost, CommandHost, CropCommandHost,
+    DataCommandHost, DialogCommandHost, DiffCommandHost, FileSearchCommandHost,
+    HeadlessCommandHost, HotFolderCommandHost, JsonUtilityCommandHost, LauncherCommandHost,
+    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, OcrCommandHost,
+    PinboardCommandHost, RadialCommandHost, RecordingCommandHost, ScreenDrawCommandHost,
+    ScreenshotCommandHost, ScreenshotCommandResult, SearchReplaceCommandHost, SnippetPromptIntent,
+    TableUtilityCommandHost, TodoCommandHost, XmlToolkitCommandHost,
 };
 pub use model::*;
 pub use outcome::*;

@@ -2,8 +2,8 @@ use crate::clipboard_modify::actions::ClipboardModifyActionPayload;
 use crate::clipboard_modify::coordinator::ImmediateRequestMetadata;
 use crate::clipboard_modify::parser::ClipboardModifyIntent;
 use crate::commands::{
-    ClipboardModifyCommand, ClipboardModifyCommandHost, CommandInvocation, CommandOutcome,
-    ToastPolicy, VisibilityPolicy,
+    ClipboardModifyCommand, ClipboardModifyCommandHost, ClipboardModifyUndoSubmission,
+    CommandInvocation, CommandOutcome, ToastPolicy, VisibilityPolicy,
 };
 
 pub(crate) fn handle_clipboard_modify<H>(
@@ -31,17 +31,20 @@ where
             host.open_clipboard_modify(*section);
             CommandOutcome::default()
         }
-        ClipboardModifyCommand::Undo { .. } => match host.undo_clipboard_modify() {
-            Ok(()) => CommandOutcome {
-                visibility: VisibilityPolicy::Hide,
-                toasts: vec![ToastPolicy::Success("Undid Clipboard Modify".into())],
-                ..CommandOutcome::default()
-            },
-            Err(error) => {
-                host.report_clipboard_modify_action_error(error);
-                CommandOutcome::default()
+        ClipboardModifyCommand::Undo { .. } => {
+            match host.undo_clipboard_modify(invocation, captured_history_query) {
+                Ok(ClipboardModifyUndoSubmission::Completed) => CommandOutcome {
+                    visibility: VisibilityPolicy::Hide,
+                    toasts: vec![ToastPolicy::Success("Undid Clipboard Modify".into())],
+                    ..CommandOutcome::default()
+                },
+                Ok(ClipboardModifyUndoSubmission::Queued) => CommandOutcome::default(),
+                Err(error) => {
+                    host.report_clipboard_modify_action_error(error);
+                    CommandOutcome::default()
+                }
             }
-        },
+        }
         ClipboardModifyCommand::Execute { payload, .. } => {
             let Some((intent, canonical_query, hide_launcher_on_success)) =
                 execution_request(host, payload.as_ref())
@@ -134,6 +137,7 @@ mod tests {
         started: Vec<(ClipboardModifyIntent, ImmediateRequestMetadata)>,
         error: Option<String>,
         undo_error: Option<String>,
+        undo_submission: ClipboardModifyUndoSubmission,
         start_error: Option<String>,
         hide_after_apply: bool,
     }
@@ -143,10 +147,14 @@ mod tests {
             self.opened = Some(section);
         }
 
-        fn undo_clipboard_modify(&mut self) -> Result<(), String> {
+        fn undo_clipboard_modify(
+            &mut self,
+            _: &CommandInvocation,
+            _: Option<&str>,
+        ) -> Result<ClipboardModifyUndoSubmission, String> {
             match self.undo_error.as_ref() {
                 Some(error) => Err(error.clone()),
-                None => Ok(()),
+                None => Ok(self.undo_submission),
             }
         }
 
@@ -312,6 +320,11 @@ mod tests {
         );
         assert_eq!(outcome.history, HistoryPolicy::Skip);
 
+        host.undo_submission = ClipboardModifyUndoSubmission::Queued;
+        let outcome = handle_clipboard_modify(&mut host, &command, &invocation);
+        assert_eq!(outcome, CommandOutcome::default());
+
+        host.undo_submission = ClipboardModifyUndoSubmission::Completed;
         host.undo_error = Some("nothing to undo".into());
         let outcome = handle_clipboard_modify(&mut host, &command, &invocation);
         assert_eq!(host.error.as_deref(), Some("nothing to undo"));

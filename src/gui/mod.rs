@@ -2460,12 +2460,14 @@ impl LauncherApp {
     fn load_clipboard_modify_section(&mut self, section: ClipboardModifyDialogSection) {
         #[cfg(test)]
         if let Some(service) = &self.clipboard_modify_test_service {
-            self.clipboard_modify_dialog.open_section(section, service);
+            self.clipboard_modify_dialog
+                .open_section(section, service, &self.egui_ctx);
             return;
         }
         self.clipboard_modify_dialog.open_section(
             section,
             &crate::clipboard_modify::runtime::clipboard_service(),
+            &self.egui_ctx,
         );
     }
 
@@ -11127,21 +11129,62 @@ mod tests {
             !matches!(
                 panel,
                 Panel::NotePanel | Panel::ImagePanel | Panel::ScreenshotEditor | Panel::CropDialog
-            )
+            ) && (cfg!(windows)
+                || !matches!(
+                    *panel,
+                    Panel::FileOperationsCenterDialog | Panel::DownloadsTriageDialog
+                ))
         });
 
         for panel in openable_panels {
-            let mut app = new_app(&ctx);
+            let directory = tempdir().unwrap();
+            let mut settings = Settings::default();
+            settings.paste_sequence.next_hotkey = None;
+            settings.paste_sequence.cancel_hotkey = None;
+            let mut app = LauncherApp::new_isolated_for_test_at(
+                &ctx,
+                directory.path(),
+                settings,
+                Some(std::collections::HashSet::new()),
+                Some(std::collections::HashMap::new()),
+            );
+            // Opening Clipboard Modify must use a deterministic backend rather
+            // than reading the host clipboard.
+            app.clipboard_modify_test_service = Some(std::sync::Arc::new(
+                crate::clipboard_modify::clipboard::ClipboardService::new(
+                    crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::with_text(
+                        "panel test fixture",
+                    ),
+                ),
+            ));
+            app.clipboard_modify_dialog.control_source_reads_for_test();
+            app.test_sequence_context_capture_forbidden = true;
             if panel == Panel::VolumeDialog {
                 // An already-open synthetic snapshot keeps this fixture off audio hardware.
                 app.volume_dialog.open = true;
             }
-            if panel == Panel::FileSearchPreviewDialog {
-                app.file_search_dialog.request_preview(&preview_path, None);
-                app.focus_panel(panel);
-                assert!(app.file_search_dialog.preview_dialog.open);
-            } else {
-                app.ensure_open(panel);
+            match panel {
+                #[cfg(windows)]
+                Panel::DownloadsTriageDialog => {
+                    // Exercise the panel-owned state without starting a real Downloads scan.
+                    app.downloads_triage_dialog.ensure_open();
+                }
+                Panel::NotificationInboxDialog => app.notification_inbox_dialog.ensure_open(),
+                Panel::FileSearchPreviewDialog => {
+                    app.file_search_dialog.request_preview(&preview_path, None);
+                    app.focus_panel(panel);
+                    assert!(app.file_search_dialog.preview_dialog.open);
+                }
+                Panel::ClipboardDialog => {
+                    // The production opener loads process-relative clipboard history.
+                    app.clipboard_dialog.open = true;
+                }
+                Panel::PasteSequenceDialog => {
+                    // The production opener captures host clipboard text and reloads history.
+                    app.paste_sequence_dialog.open = true;
+                }
+                Panel::CalculationSensitivityDialog => app.calculation_sensitivity_dialog.open(),
+                _ => app.ensure_open(panel),
             }
             assert!(
                 app.any_panel_open(),

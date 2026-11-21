@@ -197,3 +197,8 @@ pub fn undo() -> Result<(), ClipboardError> {
     clipboard_service().undo()?;
     Ok(())
 }
+
+pub(crate) fn undo_without_retry() -> Result<(), ClipboardError> {
+    clipboard_service().undo_without_retry()?;
+    Ok(())
+}

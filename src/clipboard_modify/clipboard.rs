@@ -1,5 +1,7 @@
-use crate::platform::protected_clipboard::{ClipboardRead, read_clipboard};
-use std::sync::Mutex;
+use crate::platform::protected_clipboard::{
+    ClipboardError as ProtectedClipboardError, ClipboardRead, read_clipboard_for_modify,
+};
+use std::sync::{Mutex, TryLockError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,7 @@ pub const RETRY_TOTAL_DEADLINE: Duration = Duration::from_millis(750);
 pub enum ClipboardError {
     NonText,
     ProtectedItem,
+    TimedOut,
     InvalidContent(String),
     Transient(String),
     Busy(String),
@@ -53,13 +56,16 @@ impl ClipboardSummary {
 
 impl ClipboardError {
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Transient(_) | Self::Busy(_))
+        matches!(self, Self::TimedOut | Self::Transient(_) | Self::Busy(_))
     }
 }
 impl std::fmt::Display for ClipboardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if matches!(self, Self::ProtectedItem) {
             return f.write_str("This clipboard item was copied privately.");
+        }
+        if matches!(self, Self::TimedOut) {
+            return f.write_str("The clipboard did not respond in time.");
         }
         write!(f, "{:?}", self)
     }
@@ -80,13 +86,7 @@ pub trait ClipboardBackend: Send + Sync {
 pub struct ArboardClipboardBackend;
 impl ClipboardBackend for ArboardClipboardBackend {
     fn read_text(&self) -> Result<String, ClipboardError> {
-        match read_clipboard() {
-            Ok(ClipboardRead::Ordinary(text)) => Ok(text),
-            Ok(ClipboardRead::NonText) => Err(ClipboardError::NonText),
-            Ok(ClipboardRead::Private) => Err(ClipboardError::ProtectedItem),
-            Err(error) if error.is_busy() => Err(ClipboardError::Busy(error.to_string())),
-            Err(error) => Err(ClipboardError::Permanent(error.to_string())),
-        }
+        map_protected_read(read_clipboard_for_modify())
     }
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
         let mut cb = arboard::Clipboard::new().map_err(classify_arboard)?;
@@ -105,11 +105,30 @@ fn classify_arboard(e: arboard::Error) -> ClipboardError {
     }
 }
 
+fn map_protected_read(
+    result: Result<ClipboardRead, ProtectedClipboardError>,
+) -> Result<String, ClipboardError> {
+    match result {
+        Ok(ClipboardRead::Ordinary(text)) => Ok(text),
+        Ok(ClipboardRead::NonText) => Err(ClipboardError::NonText),
+        Ok(ClipboardRead::Private) => Err(ClipboardError::ProtectedItem),
+        Err(ProtectedClipboardError::TimedOut) => Err(ClipboardError::TimedOut),
+        Err(error) if error.is_busy() => Err(ClipboardError::Busy(error.to_string())),
+        Err(error) => Err(ClipboardError::Permanent(error.to_string())),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndoRecord {
     pub original_text: String,
     pub modified_text: String,
     pub operation_label: String,
+}
+
+#[derive(Clone, Copy)]
+enum RetryPolicy {
+    SingleAttempt,
+    Bounded,
 }
 
 pub struct ClipboardService<B> {
@@ -130,7 +149,13 @@ impl<B: ClipboardBackend> ClipboardService<B> {
     }
 
     pub fn read_text_for_modify(&self) -> Result<String, ClipboardError> {
-        self.read_retry()
+        self.read_with_policy(RetryPolicy::Bounded)
+    }
+
+    /// Skip service-level backoff for GUI-owned reads so the next user action
+    /// can retry. The platform backend may still incur its own bounded wait.
+    pub(crate) fn read_text_for_modify_once(&self) -> Result<String, ClipboardError> {
+        self.read_with_policy(RetryPolicy::SingleAttempt)
     }
 
     #[cfg(test)]
@@ -172,6 +197,19 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         *self.undo.lock().unwrap() = Some(rec.clone());
         Ok(rec)
     }
+
+    /// GUI commits and Undo must not wait behind a worker's bounded retry loop.
+    /// Keep the existing panic-on-poison policy; only ordinary contention maps
+    /// to a retryable Busy result.
+    fn try_commit_lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, ClipboardError> {
+        match self.commit.try_lock() {
+            Err(TryLockError::WouldBlock) => Err(ClipboardError::Busy(
+                "Another clipboard operation is in progress".into(),
+            )),
+            result => Ok(result.unwrap()),
+        }
+    }
+
     pub fn commit_dialog(
         &self,
         baseline: &str,
@@ -201,8 +239,8 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         expected: Option<&ClipboardSummary>,
         label: &str,
     ) -> Result<UndoRecord, ClipboardError> {
-        let _g = self.commit.lock().unwrap();
-        let mut current = self.read_retry()?;
+        let _g = self.try_commit_lock()?;
+        let mut current = self.read_with_policy(RetryPolicy::SingleAttempt)?;
         if current.as_bytes() != baseline.as_bytes() && !confirmed {
             return Err(ClipboardError::ConfirmationRequired(ClipboardConflict {
                 baseline: ClipboardSummary::new(baseline),
@@ -210,7 +248,7 @@ impl<B: ClipboardBackend> ClipboardService<B> {
             }));
         }
         if confirmed {
-            current = self.read_retry()?;
+            current = self.read_with_policy(RetryPolicy::SingleAttempt)?;
         }
         if expected.is_some_and(|expected| *expected != ClipboardSummary::new(&current)) {
             return Err(ClipboardError::ConfirmationRequired(ClipboardConflict {
@@ -218,7 +256,7 @@ impl<B: ClipboardBackend> ClipboardService<B> {
                 current: ClipboardSummary::new(&current),
             }));
         }
-        self.write_retry(output)?;
+        self.write_with_policy(output, RetryPolicy::SingleAttempt)?;
         let rec = UndoRecord {
             original_text: current,
             modified_text: output.to_string(),
@@ -228,18 +266,46 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         Ok(rec)
     }
     pub fn undo(&self) -> Result<UndoRecord, ClipboardError> {
-        let _g = self.commit.lock().unwrap();
+        self.undo_with_policy(RetryPolicy::Bounded)
+    }
+
+    /// GUI Undo is one attempt; a Busy result leaves the record intact for an
+    /// explicit user retry instead of sleeping on the UI thread.
+    pub(crate) fn undo_without_retry(&self) -> Result<UndoRecord, ClipboardError> {
+        self.undo_with_policy(RetryPolicy::SingleAttempt)
+    }
+
+    fn undo_with_policy(&self, policy: RetryPolicy) -> Result<UndoRecord, ClipboardError> {
+        let _g = match policy {
+            RetryPolicy::SingleAttempt => self.try_commit_lock()?,
+            RetryPolicy::Bounded => self.commit.lock().unwrap(),
+        };
         let rec = self
             .undo
             .lock()
             .unwrap()
             .clone()
             .ok_or(ClipboardError::NoUndo)?;
-        let _diagnostic_current = self.read_retry().ok();
-        self.write_retry(&rec.original_text)?;
+        let _current = self.read_with_policy(policy)?;
+        self.write_with_policy(&rec.original_text, policy)?;
         *self.undo.lock().unwrap() = None;
         Ok(rec)
     }
+
+    fn read_with_policy(&self, policy: RetryPolicy) -> Result<String, ClipboardError> {
+        match policy {
+            RetryPolicy::SingleAttempt => self.backend.read_text(),
+            RetryPolicy::Bounded => self.read_retry(),
+        }
+    }
+
+    fn write_with_policy(&self, text: &str, policy: RetryPolicy) -> Result<(), ClipboardError> {
+        match policy {
+            RetryPolicy::SingleAttempt => self.backend.write_text(text),
+            RetryPolicy::Bounded => self.write_retry(text),
+        }
+    }
+
     fn read_retry(&self) -> Result<String, ClipboardError> {
         retry(|| self.backend.read_text())
     }
@@ -382,6 +448,71 @@ mod tests {
     }
 
     #[test]
+    fn protected_read_classification_preserves_private_and_transient_states() {
+        assert_eq!(
+            map_protected_read(Ok(ClipboardRead::Ordinary("fixture".into()))),
+            Ok("fixture".into())
+        );
+        assert_eq!(
+            map_protected_read(Ok(ClipboardRead::Ordinary(String::new()))),
+            Ok(String::new())
+        );
+        assert_eq!(
+            map_protected_read(Ok(ClipboardRead::NonText)),
+            Err(ClipboardError::NonText)
+        );
+        assert_eq!(
+            map_protected_read(Ok(ClipboardRead::Private)),
+            Err(ClipboardError::ProtectedItem)
+        );
+        assert_eq!(
+            map_protected_read(Err(ProtectedClipboardError::Busy)),
+            Err(ClipboardError::Busy(
+                ProtectedClipboardError::Busy.to_string()
+            ))
+        );
+        assert_eq!(
+            map_protected_read(Err(ProtectedClipboardError::TimedOut)),
+            Err(ClipboardError::TimedOut)
+        );
+        assert!(ClipboardError::TimedOut.is_transient());
+        assert_eq!(
+            map_protected_read(Err(ProtectedClipboardError::Unavailable)),
+            Err(ClipboardError::Permanent(
+                ProtectedClipboardError::Unavailable.to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn timed_out_reads_retry_in_background_but_gui_attempts_once() {
+        let background = svc("source");
+        background
+            .backend()
+            .push(Op::Read(Err(ClipboardError::TimedOut)));
+        background
+            .backend()
+            .push(Op::Read(Ok("recovered source".into())));
+        assert_eq!(
+            background.read_text_for_modify(),
+            Ok("recovered source".into())
+        );
+
+        let interactive = svc("source");
+        interactive
+            .backend()
+            .push(Op::Read(Err(ClipboardError::TimedOut)));
+        interactive
+            .backend()
+            .push(Op::Read(Ok("queued retry".into())));
+        assert_eq!(
+            interactive.read_text_for_modify_once(),
+            Err(ClipboardError::TimedOut)
+        );
+        assert_eq!(interactive.backend().read_text(), Ok("queued retry".into()));
+    }
+
+    #[test]
     fn no_op_writes_replace_undo() {
         let s = svc("same");
         let r = s.commit_output("same".into(), "noop").unwrap();
@@ -398,6 +529,152 @@ mod tests {
             .push(Op::Write(Err(ClipboardError::Permanent("no".into()))));
         assert!(s.commit_output("c".into(), "bad").is_err());
         assert_eq!(s.undo_record().unwrap().modified_text, "b");
+    }
+
+    #[test]
+    fn dialog_commit_read_failure_does_not_overwrite_clipboard() {
+        let service = svc("baseline");
+        service
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Permanent(
+                "read failed".into(),
+            ))));
+
+        assert_eq!(
+            service.commit_dialog("baseline", "draft", "output", false, "dialog"),
+            Err(ClipboardError::Permanent("read failed".into()))
+        );
+        assert!(service.backend().writes().is_empty());
+        assert!(service.undo_record().is_none());
+    }
+
+    #[test]
+    fn timed_out_dialog_read_preserves_clipboard_and_existing_undo() {
+        let service = svc("original");
+        service.commit_output("modified".into(), "setup").unwrap();
+        let undo_before = service.undo_record();
+        let writes_before = service.backend().writes();
+        service
+            .backend()
+            .push(Op::Read(Err(ClipboardError::TimedOut)));
+
+        assert_eq!(
+            service.commit_dialog("modified", "draft", "new output", false, "dialog"),
+            Err(ClipboardError::TimedOut)
+        );
+        assert_eq!(service.backend().writes(), writes_before);
+        assert_eq!(service.backend().read_text().unwrap(), "modified");
+        assert_eq!(service.undo_record(), undo_before);
+    }
+
+    #[test]
+    fn dialog_commit_does_not_retry_busy_read_or_write() {
+        let read_service = svc("baseline");
+        read_service
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Busy("read busy".into()))));
+        read_service
+            .backend()
+            .push(Op::Read(Ok("queued read retry".into())));
+        assert_eq!(
+            read_service.commit_dialog("baseline", "draft", "output", false, "dialog"),
+            Err(ClipboardError::Busy("read busy".into()))
+        );
+        assert!(read_service.backend().writes().is_empty());
+        assert_eq!(
+            read_service.backend().read_text().unwrap(),
+            "queued read retry"
+        );
+
+        let write_service = svc("baseline");
+        write_service
+            .backend()
+            .push(Op::Write(Err(ClipboardError::Busy("write busy".into()))));
+        write_service.backend().push(Op::Write(Ok(())));
+        assert_eq!(
+            write_service.commit_dialog("baseline", "draft", "output", false, "dialog"),
+            Err(ClipboardError::Busy("write busy".into()))
+        );
+        assert!(write_service.backend().writes().is_empty());
+        write_service
+            .backend()
+            .write_text("queued write retry")
+            .unwrap();
+        assert_eq!(write_service.backend().writes(), ["queued write retry"]);
+    }
+
+    #[test]
+    fn reviewed_dialog_recheck_does_not_retry_busy_read() {
+        let service = svc("baseline");
+        service.backend().push(Op::Read(Ok("baseline".into())));
+        service
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Busy("recheck busy".into()))));
+        service
+            .backend()
+            .push(Op::Read(Ok("queued recheck retry".into())));
+
+        assert_eq!(
+            service.commit_reviewed_dialog(
+                "baseline",
+                "output",
+                &ClipboardSummary::new("baseline"),
+                "dialog",
+            ),
+            Err(ClipboardError::Busy("recheck busy".into()))
+        );
+        assert!(service.backend().writes().is_empty());
+        assert_eq!(
+            service.backend().read_text().unwrap(),
+            "queued recheck retry"
+        );
+    }
+
+    #[test]
+    fn immediate_commits_and_undo_return_busy_when_serialization_lock_is_held() {
+        let service = svc("baseline");
+        service.commit_output("modified".into(), "setup").unwrap();
+        let undo_before = service.undo_record();
+        let writes_before = service.backend().writes();
+        let lock_busy = ClipboardError::Busy("Another clipboard operation is in progress".into());
+
+        let backend_busy = ClipboardError::Busy("backend busy during dialog commit".into());
+        service.backend().push(Op::Read(Err(backend_busy.clone())));
+        let guard = service.commit.lock().unwrap();
+        assert_eq!(
+            service.commit_dialog("modified", "draft", "output", false, "dialog"),
+            Err(lock_busy.clone())
+        );
+        drop(guard);
+        assert_eq!(service.backend().read_text(), Err(backend_busy));
+        assert_eq!(service.backend().writes(), writes_before);
+        assert_eq!(service.undo_record(), undo_before);
+
+        let backend_busy = ClipboardError::Busy("backend busy during reviewed commit".into());
+        service.backend().push(Op::Read(Err(backend_busy.clone())));
+        let guard = service.commit.lock().unwrap();
+        assert_eq!(
+            service.commit_reviewed_dialog(
+                "modified",
+                "output",
+                &ClipboardSummary::new("modified"),
+                "reviewed dialog",
+            ),
+            Err(lock_busy.clone())
+        );
+        drop(guard);
+        assert_eq!(service.backend().read_text(), Err(backend_busy));
+        assert_eq!(service.backend().writes(), writes_before);
+        assert_eq!(service.undo_record(), undo_before);
+
+        let backend_busy = ClipboardError::Busy("backend busy during Undo".into());
+        service.backend().push(Op::Read(Err(backend_busy.clone())));
+        let guard = service.commit.lock().unwrap();
+        assert_eq!(service.undo_without_retry(), Err(lock_busy));
+        drop(guard);
+        assert_eq!(service.backend().read_text(), Err(backend_busy));
+        assert_eq!(service.backend().writes(), writes_before);
+        assert_eq!(service.undo_record(), undo_before);
     }
 
     #[test]
@@ -422,6 +699,72 @@ mod tests {
     }
 
     #[test]
+    fn failed_undo_read_does_not_overwrite_clipboard_or_consume_record() {
+        let s = svc("original");
+        s.commit_output("modified".into(), "op").unwrap();
+        let undo = s.undo_record().unwrap();
+        let writes_before = s.backend().writes();
+        s.backend().push(Op::Read(Err(ClipboardError::Permanent(
+            "read failed".into(),
+        ))));
+
+        assert_eq!(
+            s.undo(),
+            Err(ClipboardError::Permanent("read failed".into()))
+        );
+        assert_eq!(s.backend().writes(), writes_before);
+        assert_eq!(s.backend().read_text().unwrap(), "modified");
+        assert_eq!(s.undo_record(), Some(undo));
+    }
+
+    #[test]
+    fn interactive_undo_does_not_retry_busy_read_or_write() {
+        let read_service = svc("original");
+        read_service.commit_output("modified".into(), "op").unwrap();
+        read_service
+            .backend()
+            .push(Op::Read(Err(ClipboardError::Busy("undo read busy".into()))));
+        read_service
+            .backend()
+            .push(Op::Read(Ok("queued undo read retry".into())));
+        assert_eq!(
+            read_service.undo_without_retry(),
+            Err(ClipboardError::Busy("undo read busy".into()))
+        );
+        assert_eq!(read_service.backend().writes(), ["modified"]);
+        assert!(read_service.undo_record().is_some());
+        assert_eq!(
+            read_service.backend().read_text().unwrap(),
+            "queued undo read retry"
+        );
+
+        let write_service = svc("original");
+        write_service
+            .commit_output("modified".into(), "op")
+            .unwrap();
+        write_service
+            .backend()
+            .push(Op::Write(Err(ClipboardError::Busy(
+                "undo write busy".into(),
+            ))));
+        write_service.backend().push(Op::Write(Ok(())));
+        assert_eq!(
+            write_service.undo_without_retry(),
+            Err(ClipboardError::Busy("undo write busy".into()))
+        );
+        assert_eq!(write_service.backend().writes(), ["modified"]);
+        assert!(write_service.undo_record().is_some());
+        write_service
+            .backend()
+            .write_text("queued undo write retry")
+            .unwrap();
+        assert_eq!(
+            write_service.backend().writes(),
+            ["modified", "queued undo write retry"]
+        );
+    }
+
+    #[test]
     fn transient_read_and_write_failures_are_retried() {
         let b = FakeClipboardBackend::with_text("a");
         b.push(Op::Read(Err(ClipboardError::Busy("busy".into()))));
@@ -430,6 +773,87 @@ mod tests {
         b.push(Op::Write(Ok(())));
         let s = ClipboardService::new(b);
         assert!(s.commit_output("b".into(), "op").is_ok());
+    }
+
+    #[test]
+    fn bounded_background_retry_terminates_under_sustained_busy() {
+        struct SustainedBusyBackend {
+            read_attempts: Arc<std::sync::atomic::AtomicUsize>,
+            write_attempts: Arc<std::sync::atomic::AtomicUsize>,
+            read_busy: bool,
+        }
+        impl ClipboardBackend for SustainedBusyBackend {
+            fn read_text(&self) -> Result<String, ClipboardError> {
+                self.read_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if self.read_busy {
+                    Err(ClipboardError::Busy("read busy".into()))
+                } else {
+                    Ok("source".into())
+                }
+            }
+
+            fn write_text(&self, _: &str) -> Result<(), ClipboardError> {
+                self.write_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(ClipboardError::Busy("write busy".into()))
+            }
+        }
+
+        let read_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let read_service = ClipboardService::new(SustainedBusyBackend {
+            read_attempts: read_attempts.clone(),
+            write_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            read_busy: true,
+        });
+        assert!(matches!(
+            read_service.read_text_for_modify(),
+            Err(ClipboardError::Busy(_))
+        ));
+        let reads = read_attempts.load(std::sync::atomic::Ordering::Relaxed);
+        assert!((1..=RETRY_ATTEMPTS).contains(&reads));
+
+        let write_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let write_service = ClipboardService::new(SustainedBusyBackend {
+            read_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            write_attempts: write_attempts.clone(),
+            read_busy: false,
+        });
+        assert!(matches!(
+            write_service.commit_output("output".into(), "op"),
+            Err(ClipboardError::Busy(_))
+        ));
+        let writes = write_attempts.load(std::sync::atomic::Ordering::Relaxed);
+        assert!((1..=RETRY_ATTEMPTS).contains(&writes));
+    }
+
+    #[test]
+    fn background_timeout_retries_remain_within_the_existing_attempt_budget() {
+        struct SustainedTimeoutBackend {
+            attempts: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl ClipboardBackend for SustainedTimeoutBackend {
+            fn read_text(&self) -> Result<String, ClipboardError> {
+                self.attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(ClipboardError::TimedOut)
+            }
+
+            fn write_text(&self, _: &str) -> Result<(), ClipboardError> {
+                Ok(())
+            }
+        }
+
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = ClipboardService::new(SustainedTimeoutBackend {
+            attempts: attempts.clone(),
+        });
+        assert_eq!(
+            service.read_text_for_modify(),
+            Err(ClipboardError::TimedOut)
+        );
+        let attempts = attempts.load(std::sync::atomic::Ordering::Relaxed);
+        assert!((1..=RETRY_ATTEMPTS).contains(&attempts));
     }
 
     #[test]
@@ -442,6 +866,8 @@ mod tests {
             s.commit_output("b".into(), "op"),
             Err(ClipboardError::Permanent(_))
         ));
+        assert!(s.backend().writes().is_empty());
+        assert_eq!(s.backend().read_text().unwrap(), "should-not-read");
     }
 
     #[test]
