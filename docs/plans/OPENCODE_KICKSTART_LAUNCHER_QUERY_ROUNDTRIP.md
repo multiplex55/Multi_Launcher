@@ -2,8 +2,8 @@
 
 **Suggested filename:** `OPENCODE_KICKSTART_LAUNCHER_QUERY_ROUNDTRIP.md`
 
-**Agent:** OpenCode Build  
-**Companion:** `OPENCODE_GOAL_LAUNCHER_QUERY_ROUNDTRIP.md`  
+**Agent:** OpenCode Build\
+**Companion:** `OPENCODE_GOAL_LAUNCHER_QUERY_ROUNDTRIP.md`\
 **Scope:** One focused regression fix
 
 ## Task

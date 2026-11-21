@@ -879,7 +879,7 @@ impl DuplicateFinderDialogState {
                     .show(ui, |ui| {
                         self.show_roots(ui, visible_owner, commit_enabled, scope, &mut order);
                         ui.separator();
-                        self.show_status(ui, &snapshot);
+                        self.show_status(ui, snapshot);
                         if let Some(message) = self.status.as_deref() {
                             ui.separator();
                             ui.label(message);
@@ -893,7 +893,7 @@ impl DuplicateFinderDialogState {
                         let results_max_height = body_max_height * 0.4;
                         self.show_results(
                             ui,
-                            &snapshot,
+                            snapshot,
                             visible_owner,
                             commit_enabled,
                             results_max_height,
@@ -996,10 +996,10 @@ impl DuplicateFinderDialogState {
         first: bool,
     ) {
         use super::utility_host::ViewportPassProvenance;
-        if let Some(old) = self.host_pending.take() {
-            if old.epoch == self.host_epoch {
-                self.root_editor = old.previous_editor;
-            }
+        if let Some(old) = self.host_pending.take()
+            && old.epoch == self.host_epoch
+        {
+            self.root_editor = old.previous_editor;
         }
         self.poll_host_background(ctx);
         self.clear_test_responses();
@@ -1057,10 +1057,10 @@ impl DuplicateFinderDialogState {
         use crate::gui::jump_mode::ui::{
             NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
         };
-        if let Some(old) = self.host_pending.take() {
-            if old.epoch == self.host_epoch {
-                self.root_editor = old.previous_editor;
-            }
+        if let Some(old) = self.host_pending.take()
+            && old.epoch == self.host_epoch
+        {
+            self.root_editor = old.previous_editor;
         }
         self.clear_test_responses();
         if !self.open {
@@ -1207,10 +1207,10 @@ impl DuplicateFinderDialogState {
             if self.host_focus {
                 ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
             }
-        } else if self.host_focus {
-            if let Some(layer) = self.root_layer() {
-                ctx.move_to_top(layer);
-            }
+        } else if self.host_focus
+            && let Some(layer) = self.root_layer()
+        {
+            ctx.move_to_top(layer);
         }
         self.host_focus = false;
         if frame.close {
@@ -1311,10 +1311,10 @@ impl DuplicateFinderDialogState {
                 }
                 #[cfg(all(windows, test))]
                 let _ = captured_hwnd;
-                if let Some(path) = selected {
-                    if let Err(error) = self.add_selected_root(path) {
-                        self.status = Some(error);
-                    }
+                if let Some(path) = selected
+                    && let Err(error) = self.add_selected_root(path)
+                {
+                    self.status = Some(error);
                 }
             }
             FinderIntent::AddRoot(path) => {

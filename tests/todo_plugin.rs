@@ -2,7 +2,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use eframe::egui;
 use multi_launcher::gui::{
-    LauncherApp, TodoDialog, TodoViewDialog, todo_view_layout_sizes, todo_view_window_constraints,
+    LauncherApp, TodoDialog,
 };
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
@@ -23,6 +23,9 @@ fn decode_payload<T: serde::de::DeserializeOwned>(encoded: &str) -> T {
 }
 
 fn new_app(ctx: &egui::Context) -> LauncherApp {
+    let mut settings = Settings::default();
+    settings.paste_sequence.next_hotkey = None;
+    settings.paste_sequence.cancel_hotkey = None;
     LauncherApp::new(
         ctx,
         Arc::new(Vec::new()),
@@ -30,7 +33,7 @@ fn new_app(ctx: &egui::Context) -> LauncherApp {
         PluginManager::new(),
         "actions.json".into(),
         "settings.json".into(),
-        Settings::default(),
+        settings,
         None,
         None,
         None,
@@ -484,34 +487,4 @@ fn dialog_scrolls_with_many_entries() {
         .memory(|m| m.area_rect(egui::Id::new(Some("Todos"))))
         .expect("window rect");
     assert!(rect.height() < 800.0);
-}
-
-#[test]
-fn todo_view_dialog_has_fixed_size() {
-    let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-    let ctx = egui::Context::default();
-    let mut app = new_app(&ctx);
-    let mut dlg = TodoViewDialog::default();
-    dlg.open();
-
-    let output = ctx.run_ui(
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1000.0, 2000.0),
-            )),
-            ..Default::default()
-        },
-        |ui| dlg.ui(ui.ctx(), &mut app),
-    );
-    output.drop_without_applying_deltas();
-
-    let (min_size, max_size) = todo_view_window_constraints();
-    let _rect = ctx
-        .memory(|m| m.area_rect(egui::Id::new(Some("View Todos"))))
-        .expect("window rect");
-    let (_window_size, _) = todo_view_layout_sizes();
-    assert_eq!(min_size, max_size);
 }

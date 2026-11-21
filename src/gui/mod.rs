@@ -10303,9 +10303,55 @@ mod tests {
         ));
         assert!(body_rendered && app_input_allowed);
 
-        assert!(app.close_front_dialog());
+        assert!(
+            !app.close_front_dialog(),
+            "the native Diagram Studio child is not root-presented"
+        );
         assert!(app.is_panel_open(Panel::DiagramStudioDialog));
         assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        let child_viewport = diagram_studio::viewport_id();
+        super::render::with_immediate_viewport_test_events_for(
+            child_viewport,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            || {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 760.0),
+                    )),
+                    ..Default::default()
+                };
+                let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+                output.drop_without_applying_deltas();
+            },
+        );
+        super::render::with_immediate_viewport_test_events_for(
+            child_viewport,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            || {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 760.0),
+                    )),
+                    ..Default::default()
+                };
+                let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+                output.drop_without_applying_deltas();
+            },
+        );
         for _ in 0..2 {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -10408,7 +10454,8 @@ mod tests {
         app.visible_flag.store(false, Ordering::SeqCst);
         app.focus_query = false;
         assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
-        assert!(!<LauncherApp as eframe::App>::needs_root_ui_when_hidden(
+        assert!(app.diagram_studio_dialog.needs_root_ui_when_hidden());
+        assert!(<LauncherApp as eframe::App>::needs_root_ui_when_hidden(
             &app
         ));
         let input = egui::RawInput {
@@ -11075,6 +11122,9 @@ mod tests {
     #[test]
     fn tracked_openable_panels_count_as_any_panel_open() {
         let ctx = egui::Context::default();
+        let preview_directory = tempdir().unwrap();
+        let preview_path = preview_directory.path().join("preview.txt");
+        std::fs::write(&preview_path, "preview contents").unwrap();
         let openable_panels = LauncherApp::TRACKED_PANELS.iter().copied().filter(|panel| {
             !matches!(
                 panel,
@@ -11121,9 +11171,9 @@ mod tests {
                 }
                 Panel::NotificationInboxDialog => app.notification_inbox_dialog.ensure_open(),
                 Panel::FileSearchPreviewDialog => {
-                    // A preview is a child of a selected search result; this inventory test
-                    // needs its open state, not a file read or preview worker.
-                    app.file_search_dialog.preview_dialog.open = true;
+                    app.file_search_dialog.request_preview(&preview_path, None);
+                    app.focus_panel(panel);
+                    assert!(app.file_search_dialog.preview_dialog.open);
                 }
                 Panel::ClipboardDialog => {
                     // The production opener loads process-relative clipboard history.

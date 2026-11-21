@@ -2710,14 +2710,24 @@ impl NotePanel {
             && !self.pending_close_after_save
             && !self.discard_unsaved_prompt
             && !self.overwrite_prompt
-            && receipt.is_current(
-                self.host_state.identity(),
-                &(
-                    self.prompt_identity,
-                    self.note.slug.clone(),
-                    self.note.path.clone(),
-                ),
-            )
+            && self.note_open_receipt_matches_session(receipt)
+    }
+
+    fn matches_note_open_receipt(&self, receipt: &NoteOpenReceipt) -> bool {
+        self.open
+            && !self.pending_close_after_save
+            && self.note_open_receipt_matches_session(receipt)
+    }
+
+    fn note_open_receipt_matches_session(&self, receipt: &NoteOpenReceipt) -> bool {
+        receipt.is_current(
+            self.host_state.identity(),
+            &(
+                self.prompt_identity,
+                self.note.slug.clone(),
+                self.note.path.clone(),
+            ),
+        )
     }
 
     pub(super) fn open_from_origin<S>(
@@ -3436,11 +3446,11 @@ impl NotePanel {
         {
             self.test_markdown_export_picker_calls =
                 self.test_markdown_export_picker_calls.saturating_add(1);
-            return self
+            self
                 .test_next_markdown_export_path
                 .take()
                 .unwrap_or(None)
-                .map(|path| ensure_extension(path, extension));
+                .map(|path| ensure_extension(path, extension))
         }
         #[cfg(not(test))]
         {
@@ -3465,7 +3475,7 @@ impl NotePanel {
                         self.note.slug.clone()
                     }
                 });
-            let Some(mut picker) = self.owned_file_dialog() else {
+            let Some(picker) = self.owned_file_dialog() else {
                 return None;
             };
             picker
@@ -3504,7 +3514,7 @@ impl NotePanel {
 
     #[cfg(not(test))]
     fn complete_attachment_picker(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        let Some(mut picker) = self.owned_file_dialog() else {
+        let Some(picker) = self.owned_file_dialog() else {
             if let Some((true, message)) = self.markdown_export_feedback.as_ref() {
                 app.report_error("ui operation", message.clone());
             }
@@ -3735,7 +3745,7 @@ impl NotePanel {
             .is_some_and(|origin| origin.identity == *identity)
     }
 
-    pub(crate) fn can_open_diagram_source_copy(
+    fn can_open_diagram_source_copy(
         &self,
         ctx: &egui::Context,
         origin: &NoteMermaidOrigin,
@@ -3749,6 +3759,20 @@ impl NotePanel {
             return Err("The originating Note changed before Diagram Studio could open.");
         }
         self.diagram_handoff_block_reason(ctx).map_or(Ok(()), Err)
+    }
+
+    /// Validates the retained owner receipt, then reports blockers for the
+    /// still-current Note through its diagram-specific policy.
+    pub(super) fn validate_diagram_source_copy(
+        &self,
+        ctx: &egui::Context,
+        receipt: &NoteOpenReceipt,
+        origin: &NoteMermaidOrigin,
+    ) -> Result<(), &'static str> {
+        if !self.matches_note_open_receipt(receipt) {
+            return Err("The originating Note is no longer open.");
+        }
+        self.can_open_diagram_source_copy(ctx, origin)
     }
 
     fn diagram_handoff_block_reason(&self, ctx: &egui::Context) -> Option<&'static str> {
@@ -4415,8 +4439,10 @@ impl NotePanel {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_custom_table_origin_insert_at(&self) -> Option<usize> {
-        self.table_form.as_ref().map(|form| form.basis.range.start)
+    pub(crate) fn test_custom_table_origin_range(&self) -> Option<std::ops::Range<usize>> {
+        self.table_form
+            .as_ref()
+            .map(|form| form.basis.range.clone())
     }
 
     #[cfg(test)]
@@ -6590,7 +6616,6 @@ impl NotePanel {
         if !open {
             if self.defer_host_actions {
                 self.pending_host_actions.close_requested = true;
-                open = true;
             } else {
                 self.request_close(app);
             }
@@ -15689,7 +15714,14 @@ mod tests {
         let mut app = new_app(&ctx);
         let mut target_note = empty_note("new note source");
         target_note.slug = "replace-target-note".into();
+        let mut source_note = empty_note("old note source");
+        source_note.slug = "replace-source-note".into();
+        let mut panel = NotePanel::from_note(source_note);
+        panel.view_mode = NoteViewMode::Edit;
+        panel.show_metadata = false;
+
         let mut target_panel = NotePanel::from_note(target_note.clone());
+        target_panel.prompt_identity = panel.prompt_identity;
         target_panel.view_mode = NoteViewMode::Edit;
         target_panel.show_metadata = false;
         for _ in 0..3 {
@@ -15707,11 +15739,6 @@ mod tests {
         target_state.store(&ctx, target_editor_id);
         drop(target_panel);
 
-        let mut source_note = empty_note("old note source");
-        source_note.slug = "replace-source-note".into();
-        let mut panel = NotePanel::from_note(source_note);
-        panel.view_mode = NoteViewMode::Edit;
-        panel.show_metadata = false;
         for _ in 0..3 {
             render_panel_once(&ctx, &mut panel, &mut app);
         }
@@ -15723,6 +15750,11 @@ mod tests {
         assert!(panel.retained_text_edit_history.is_none());
         assert_eq!(panel.note_content(), "new note source");
         render_panel_once(&ctx, &mut panel, &mut app);
+        assert_eq!(
+            panel.last_textedit_id,
+            Some(target_editor_id),
+            "replacement renders the seeded destination editor under the same panel owner"
+        );
 
         let fresh_state = egui::widgets::text_edit::TextEditState::load(&ctx, target_editor_id)
             .expect("the new note's actual TextEdit rendered its fresh state");
@@ -18394,6 +18426,16 @@ mod tests {
         root_events: Vec<egui::Event>,
         child_events: Vec<egui::Event>,
     ) -> NotePanelHostCompletion {
+        hosted_note_panel_frame_with_native_size(ctx, panel, app, root_events, child_events).0
+    }
+
+    fn hosted_note_panel_frame_with_native_size(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        root_events: Vec<egui::Event>,
+        child_events: Vec<egui::Event>,
+    ) -> (NotePanelHostCompletion, Option<egui::Vec2>) {
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -18420,7 +18462,13 @@ mod tests {
                 .drop_without_applying_deltas();
             });
         });
-        panel.on_host_frame_complete(ctx, app)
+        let native_inner_size = panel
+            .pending_host_frame
+            .as_ref()
+            .and_then(|frame| frame.native_viewport.as_ref())
+            .and_then(|viewport| viewport.inner_rect.map(|rect| rect.size()));
+        let completion = panel.on_host_frame_complete(ctx, app);
+        (completion, native_inner_size)
     }
 
     fn note_panel_pointer_events(rect: egui::Rect, pressed: bool) -> Vec<egui::Event> {
@@ -18903,21 +18951,36 @@ mod tests {
             ..Default::default()
         };
 
-        ctx.run_ui(raw_input(), |ctx| {
-            panel.ui(ctx, &mut app);
-        })
-        .drop_without_applying_deltas();
+        for _ in 0..3 {
+            ctx.run_ui(raw_input(), |ctx| {
+                panel.ui(ctx, &mut app);
+            })
+            .drop_without_applying_deltas();
+        }
         let original_rect = ctx
             .memory(|memory| memory.area_rect(window_id))
             .expect("note window rect should be remembered after rendering");
+        for _ in 0..2 {
+            ctx.run_ui(raw_input(), |ctx| {
+                panel.ui(ctx, &mut app);
+            })
+            .drop_without_applying_deltas();
+            assert_eq!(
+                ctx.memory(|memory| memory.area_rect(window_id)),
+                Some(original_rect),
+                "the initial note window geometry is settled before changing its title"
+            );
+        }
         panel.note.title = "Renamed From Markdown".into();
         panel.note.content = "# Renamed From Markdown\n\nBody".into();
         app.note_panel_default_size = (760.0, 560.0);
 
-        ctx.run_ui(raw_input(), |ctx| {
-            panel.ui(ctx, &mut app);
-        })
-        .drop_without_applying_deltas();
+        for _ in 0..3 {
+            ctx.run_ui(raw_input(), |ctx| {
+                panel.ui(ctx, &mut app);
+            })
+            .drop_without_applying_deltas();
+        }
         let renamed_rect = ctx
             .memory(|memory| memory.area_rect(window_id))
             .expect("note window rect should still be remembered after title changes");
@@ -19280,28 +19343,59 @@ mod tests {
     }
 
     #[test]
-    fn note_panel_default_size_is_only_runtime_window_default() {
-        let source = include_str!("note_panel.rs");
-        let tests_start = source
-            .find("mod tests")
-            .expect("note_panel.rs should contain test module");
-        let production_source = &source[..tests_start];
+    fn note_panel_default_size_is_preserved_during_docked_and_native_rendering() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = new_app_in_dir(&ctx, directory.path());
+        app.note_panel_default_size = (500.0, 360.0);
+        let small_size = app.note_panel_default_size;
+        let mut small_panel =
+            NotePanel::from_note(note_with_slug("Small default", "small-default"));
+        let small_window_id = egui::Id::new(("note_panel_window", small_panel.note.slug.clone()));
+        hosted_note_panel_frame(&ctx, &mut small_panel, &mut app, Vec::new(), Vec::new());
+        let small_rect = ctx
+            .memory(|memory| memory.area_rect(small_window_id))
+            .expect("the docked note window should render");
+        assert_eq!(app.note_panel_default_size, small_size);
 
+        app.note_panel_default_size = (760.0, 540.0);
+        let large_size = app.note_panel_default_size;
+        let mut large_panel =
+            NotePanel::from_note(note_with_slug("Large default", "large-default"));
+        let large_window_id = egui::Id::new(("note_panel_window", large_panel.note.slug.clone()));
+        hosted_note_panel_frame(&ctx, &mut large_panel, &mut app, Vec::new(), Vec::new());
+        let large_rect = ctx
+            .memory(|memory| memory.area_rect(large_window_id))
+            .expect("the second docked note window should render");
+        assert!(
+            (large_rect.width() - small_rect.width() - (large_size.0 - small_size.0)).abs()
+                <= 2.0,
+            "a new docked note window should use the configured width, small={small_rect:?}, large={large_rect:?}"
+        );
+        assert_eq!(app.note_panel_default_size, large_size);
+
+        app.note_panel_default_size = (640.0, 480.0);
+        let native_size = app.note_panel_default_size;
+        let mut native_panel =
+            NotePanel::from_note(note_with_slug("Native default", "native-default"));
+        native_panel.test_pop_out();
+        let (_, native_inner_size) = hosted_note_panel_frame_with_native_size(
+            &ctx,
+            &mut native_panel,
+            &mut app,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(
+            native_panel.test_host_identity().0,
+            "the note panel should render natively"
+        );
         assert_eq!(
-            production_source
-                .matches("app.note_panel_default_size")
-                .count(),
-            1,
-            "production note panel code should only read app.note_panel_default_size for Window::default_size"
+            native_inner_size,
+            Some(egui::vec2(native_size.0, native_size.1))
         );
-        assert!(
-            production_source.contains(".default_size(app.note_panel_default_size)"),
-            "production note panel code should pass app.note_panel_default_size to egui::Window::default_size"
-        );
-        assert!(
-            !production_source.contains("app.note_panel_default_size ="),
-            "ordinary note panel rendering must not write measured sizes back to app.note_panel_default_size"
-        );
+        assert_eq!(app.note_panel_default_size, native_size);
     }
 
     #[test]
@@ -20483,6 +20577,46 @@ More text.
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn link_new_creates_only_when_missing_and_inserts_exact_wiki_syntax() {
+        let temp = TempNotesDir::new();
+        crate::plugins::note::append_note("Existing Note", "body").unwrap();
+        temp.refresh_cache();
+
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("prefix suffix"));
+        panel.note.slug = "current".into();
+        let editor = egui::Id::new("note_content");
+
+        let before_count = crate::plugins::note::load_notes().unwrap().len();
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::NewNote,
+                &basis,
+                &form_test_draft("Existing Note", ""),
+            )
+            .unwrap();
+        assert_eq!(panel.note_content(), "prefix suffix[[Existing Note]]");
+        let after_existing_count = crate::plugins::note::load_notes().unwrap().len();
+        assert_eq!(after_existing_count, before_count);
+
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::NewNote,
+                &basis,
+                &form_test_draft("Fresh Note", ""),
+            )
+            .unwrap();
+        assert!(panel.note_content().contains("[[fresh-note]]"));
+        let final_notes = crate::plugins::note::load_notes().unwrap();
+        assert_eq!(final_notes.len(), before_count + 1);
+        assert!(final_notes.iter().any(|note| note.slug == "fresh-note"));
     }
 
     #[test]

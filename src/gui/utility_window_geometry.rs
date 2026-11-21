@@ -371,10 +371,10 @@ impl NativeGeometryObserver {
         state.attempts.remove(&identity);
         state.reported_failures.remove(&identity);
         if let Some(mut registration) = state.registrations.remove(&identity) {
-            if let Some(window) = registration.window {
-                if state.claimed_windows.get(&window) == Some(&identity) {
-                    state.claimed_windows.remove(&window);
-                }
+            if let Some(window) = registration.window
+                && state.claimed_windows.get(&window) == Some(&identity)
+            {
+                state.claimed_windows.remove(&window);
             }
             if let Some(binding) = registration.binding.take() {
                 native::detach(binding);
@@ -702,7 +702,7 @@ mod native {
             return Err("the native viewport process or root-owner identity changed".into());
         }
 
-        if unsafe { GetPropW(hwnd, BINDING_PROPERTY_NAME) }.0 != std::ptr::null_mut() {
+        if !unsafe { GetPropW(hwnd, BINDING_PROPERTY_NAME) }.0.is_null() {
             return Err("the native utility viewport already has an observer binding".into());
         }
 

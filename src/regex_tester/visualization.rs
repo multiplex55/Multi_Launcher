@@ -1102,7 +1102,9 @@ mod tests {
                 .is_some_and(|reference| tree.resolve(&reference).is_some())
         );
         assert!(tree.best_node_for_selection(1..2).is_some());
-        assert!(tree.best_node_for_selection(2..1).is_none());
+        assert!(
+            tree.best_node_for_selection(std::ops::Range { start: 2, end: 1 }).is_none()
+        );
         let quantified = match visualize("a+", &RegexFlags::default()) {
             RegexSyntaxVisualizationResult::Available(tree) => tree,
             RegexSyntaxVisualizationResult::Unavailable(reason) => {

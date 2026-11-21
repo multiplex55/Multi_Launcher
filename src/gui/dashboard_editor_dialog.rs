@@ -1017,7 +1017,7 @@ impl DashboardEditorDialog {
         native_ui_owner: bool,
         native_confirmation_owner: bool,
         first_ui_pass: bool,
-        mut body_ui: Option<&mut egui::Ui>,
+        body_ui: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
         host_request: &mut Option<UtilityPresentation>,
         host_control_allowed: bool,
@@ -1613,7 +1613,7 @@ impl DashboardEditorDialog {
                     },
                 );
         };
-        if let Some(ui) = body_ui.as_deref_mut() {
+        if let Some(ui) = body_ui {
             draw_body(ui);
         } else {
             let _ = egui::Window::new("Dashboard Editor")
@@ -2381,13 +2381,13 @@ impl DashboardEditorDialog {
         } else if let Some(requested) = frame.host_request
             && requested != self.host_state.presentation()
         {
-            if requested == UtilityPresentation::Docked {
-                if let Some(identity) = native_identity {
-                    crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
-                        ctx, identity,
-                    );
-                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
-                }
+            if requested == UtilityPresentation::Docked
+                && let Some(identity) = native_identity
+            {
+                crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                    ctx, identity,
+                );
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
             }
             if self.host_state.transition(requested) {
                 self.remember_host_presentation(ctx, requested);

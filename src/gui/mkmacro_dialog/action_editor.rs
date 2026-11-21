@@ -11391,9 +11391,13 @@ mod tests {
                 ..Default::default()
             };
             let region = if kind == SearchRegionKind::Window {
-                SearchRegion::Window { matcher: initial }
+                SearchRegion::Window {
+                    matcher: initial.clone(),
+                }
             } else {
-                SearchRegion::ClientArea { matcher: initial }
+                SearchRegion::ClientArea {
+                    matcher: initial.clone(),
+                }
             };
             let mut editor = test_editor();
             editor.begin_edit(&step(find_pixel_action(region)));
@@ -11404,7 +11408,7 @@ mod tests {
                     step_id: editor.editing_id,
                     path: MatcherPath::VisualRegion,
                 },
-                original: MkWindowMatcher::default(),
+                original: initial.clone(),
             };
             let replacement = MkWindowMatcher {
                 title: Some("picked".into()),

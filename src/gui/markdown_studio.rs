@@ -2363,11 +2363,11 @@ impl MarkdownStudioDialog {
         {
             let _ = save;
             self.test_picker_calls = self.test_picker_calls.saturating_add(1);
-            return self
+            self
                 .test_next_picker_result
                 .take()
                 .unwrap_or(None)
-                .map(|path| ensure_extension(path, "md"));
+                .map(|path| ensure_extension(path, "md"))
         }
         #[cfg(not(test))]
         {
@@ -2398,7 +2398,7 @@ impl MarkdownStudioDialog {
         #[cfg(test)]
         {
             self.test_picker_calls = self.test_picker_calls.saturating_add(1);
-            return self
+            self
                 .test_next_picker_result
                 .take()
                 .unwrap_or(None)
@@ -2410,7 +2410,7 @@ impl MarkdownStudioDialog {
                             MarkdownExportFormat::Html => "html",
                         },
                     )
-                });
+                })
         }
         #[cfg(not(test))]
         {

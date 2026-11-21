@@ -6757,19 +6757,24 @@ impl CalculationPadDialog {
                     _ => false,
                 })
             });
-        if authorized_pass && response.has_focus() && cursor_interaction
+        if authorized_pass
+            && response.has_focus()
+            && cursor_interaction
             && let Some(range) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
                 .and_then(|state| state.cursor.char_range())
         {
-                let to_byte = |index: usize| projection.byte_at_character(index)
-                    .and_then(|byte| projection.source_byte(byte));
-                if let (Some(a), Some(b)) = (
-                    to_byte(range.primary.index.into()),
-                    to_byte(range.secondary.index.into()),
-                ) {
-                    *inspector_caret = Some(a.min(b)..a.max(b));
-                    *editor_primary_caret = Some(a);
-                }
+            let to_byte = |index: usize| {
+                projection
+                    .byte_at_character(index)
+                    .and_then(|byte| projection.source_byte(byte))
+            };
+            if let (Some(a), Some(b)) = (
+                to_byte(range.primary.index.into()),
+                to_byte(range.secondary.index.into()),
+            ) {
+                *inspector_caret = Some(a.min(b)..a.max(b));
+                *editor_primary_caret = Some(a);
+            }
         }
         #[cfg(test)]
         {

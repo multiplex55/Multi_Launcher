@@ -43,6 +43,10 @@ impl SettingsUiActions {
     }
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Host actions keep their operation payloads inline for direct dispatch."
+)]
 #[derive(Clone)]
 enum SettingsHostAction {
     Save,
@@ -7870,7 +7874,7 @@ mod settings_shell_tests {
         );
         let reset_position = reset.rect().center();
         for pressed in [true, false] {
-            targets = settings_jump_frame(
+            let frame_targets = settings_jump_frame(
                 &ctx,
                 &mut app,
                 &mut jump,
@@ -7886,6 +7890,7 @@ mod settings_shell_tests {
                 None,
                 true,
             );
+            drop(std::mem::replace(&mut targets, frame_targets));
         }
 
         let pending = crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(&ctx)

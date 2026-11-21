@@ -354,7 +354,7 @@ mod tests {
                     generation: self.generation,
                     frame: RgbaFrame::new(
                         self.canvas,
-                        vec![80, 120, 160, 255].repeat(self.canvas.rgba_bytes() / 4),
+                        [80, 120, 160, 255].repeat(self.canvas.rgba_bytes() / 4),
                     )
                     .unwrap(),
                 }
@@ -394,7 +394,7 @@ mod tests {
         let close_observed = Arc::new(AtomicBool::new(false));
         let wake_close_observed = Arc::clone(&close_observed);
         let claim_thread = thread::current().id();
-        let wake_claim_thread = claim_thread.clone();
+        let wake_claim_thread = claim_thread;
         let session = Arc::new(RecordingSession::new(
             Arc::new(TestClock),
             Arc::new(TestBackend),

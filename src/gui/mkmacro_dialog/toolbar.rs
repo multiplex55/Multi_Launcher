@@ -592,15 +592,14 @@ pub(super) fn show_with_jump_mode(
                     if ui
                         .add_enabled(controls.pause, eframe::egui::Button::new("Pause Recording"))
                         .clicked()
+                        && let Some(target) = recorder_target(dialog)
                     {
-                        if let Some(target) = recorder_target(dialog) {
-                            request_recorder(
-                                dialog,
-                                super::RecorderCommand::Pause,
-                                target,
-                                recorder_state,
-                            );
-                        }
+                        request_recorder(
+                            dialog,
+                            super::RecorderCommand::Pause,
+                            target,
+                            recorder_state,
+                        );
                     }
                 }
                 RecorderRuntimeState::Paused
@@ -625,15 +624,14 @@ pub(super) fn show_with_jump_mode(
             if ui
                 .add_enabled(controls.marker, eframe::egui::Button::new("Marker"))
                 .clicked()
+                && let Some(target) = recorder_target(dialog)
             {
-                if let Some(target) = recorder_target(dialog) {
-                    request_recorder(
-                        dialog,
-                        super::RecorderCommand::Marker,
-                        target,
-                        recorder_state,
-                    );
-                }
+                request_recorder(
+                    dialog,
+                    super::RecorderCommand::Marker,
+                    target,
+                    recorder_state,
+                );
             }
             let annotation_button = ui
                 .add_enabled(controls.annotate || (dialog.annotation.open && matches!(recorder_state, RecorderRuntimeState::Recording | RecorderRuntimeState::Paused)), eframe::egui::Button::new("Annotate"))
@@ -650,15 +648,14 @@ pub(super) fn show_with_jump_mode(
             if ui
                 .add_enabled(controls.stop, eframe::egui::Button::new("Stop Recording"))
                 .clicked()
+                && let Some(target) = recorder_target(dialog)
             {
-                if let Some(target) = recorder_target(dialog) {
-                    request_recorder(
-                        dialog,
-                        super::RecorderCommand::StopForReview,
-                        target,
-                        recorder_state,
-                    );
-                }
+                request_recorder(
+                    dialog,
+                    super::RecorderCommand::StopForReview,
+                    target,
+                    recorder_state,
+                );
             }
         });
     }

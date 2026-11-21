@@ -1051,7 +1051,7 @@ mod tests {
         bytes.extend_from_slice(name);
         let payload_start = bytes.len();
         bytes.extend_from_slice(payload);
-        let payloads = vec![payload_start..bytes.len()];
+        let payloads = std::iter::once(payload_start..bytes.len()).collect::<Vec<_>>();
         let central_offset = bytes.len() as u64;
         let mut zip64_extra = Vec::new();
         put16(&mut zip64_extra, ZIP64_EXTRA_ID);

@@ -22,7 +22,6 @@ pub(crate) struct StreamLimits {
 pub(crate) struct StreamRecord {
     pub width: usize,
     pub start: TableLocation,
-    pub end_offset: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -388,7 +387,6 @@ where
                         record: usize::try_from(record_number).map_err(|_| identity_error())?,
                         field: 1,
                     },
-                    end_offset: offset,
                 };
                 summary = account_record(
                     summary,
@@ -443,7 +441,6 @@ where
                 record: usize::try_from(record_number).map_err(|_| identity_error())?,
                 field: 1,
             },
-            end_offset: offset,
         };
         summary = account_record(
             summary,
@@ -503,9 +500,7 @@ fn account_record(
         ));
     }
     if limits.strict_width {
-        if limits.has_header && summary.record_count == 0 {
-            *expected_width = Some(record.width);
-        } else if !limits.has_header && summary.record_count == 0 {
+        if summary.record_count == 0 {
             *expected_width = Some(record.width);
         } else if let Some(expected) = *expected_width
             && record.width != expected
@@ -605,6 +600,10 @@ fn consume_byte<R: BufRead>(
     Ok(byte)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The scanner step threads its explicit cursor and byte state."
+)]
 fn consume_line_ending<R: BufRead>(
     reader: &mut R,
     offset: &mut u64,

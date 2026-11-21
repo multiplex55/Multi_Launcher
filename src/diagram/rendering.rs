@@ -1806,13 +1806,17 @@ mod tests {
             let visible_pixels = output
                 .raster
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|pixel| pixel[3] > 0)
                 .count();
             let dark_pixels = output
                 .raster
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|pixel| pixel[3] > 0 && pixel[0] < 100 && pixel[1] < 100 && pixel[2] < 100)
                 .count();
             assert!(

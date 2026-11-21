@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn reconciliation_follows_unique_ids_and_renames_but_resets_reused_ids() {
-        let saved = vec![
+        let saved = [
             slot(Some("alpha"), "weather_site", 0),
             slot(Some("beta"), "quick_tools", 0),
         ];

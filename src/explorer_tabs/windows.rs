@@ -1280,13 +1280,12 @@ impl ShellState {
                 .call_native(|| unsafe { folder_view.GetFolder() })?
                 .map_err(|e| format!("Shell folder: {e}"))?;
             let current = self.current_folder_pidl(&persisted)?;
-            if let Some(expected) = &expected_pidl {
-                if !self
+            if let Some(expected) = &expected_pidl
+                && !self
                     .call_native(|| unsafe { ILIsEqual(current.as_ptr(), expected.as_ptr()) })?
                     .as_bool()
-                {
-                    return Err(FOLDER_NOT_READY.into());
-                }
+            {
+                return Err(FOLDER_NOT_READY.into());
             }
             let view_unknown: IUnknown = self
                 .call_native(|| view.cast())?

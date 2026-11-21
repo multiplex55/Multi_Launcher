@@ -2,7 +2,7 @@ name = "planner"
 description = "Architecture planner that produces explicit, implementer-ready milestone handoffs without doing implementation work."
 
 
-model = "gpt-6.1-sol"
+model = "gpt-6.2-sol"
 model_reasoning_effort = "high"
 #model = "gpt-6-astra"
 #model_reasoning_effort = "max"

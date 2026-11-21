@@ -2059,11 +2059,12 @@ mod tests {
 
         controller.set_click_enabled(true).unwrap();
         let (old_generation, old_sink) = observer.current().unwrap();
-        assert!(old_sink.try_send(click_event(
+        offer_click_press_until_accepted(
+            old_sink.as_ref(),
             old_generation,
             ClickButton::Left,
             PhysicalPoint::new(-300, 100),
-        )));
+        );
         receive_click(&controller);
         wait_for_click_status(
             &controller,
@@ -2122,10 +2123,7 @@ mod tests {
             })
         });
         assert_eq!(rendered_click[0].button, ClickButton::Right);
-        assert_eq!(
-            controller.effects_status().click(),
-            &super::ClickEffectStatus::Animating
-        );
+        wait_for_click_status(&controller, super::ClickEffectStatus::Animating);
         controller.shutdown().unwrap();
     }
 

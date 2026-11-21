@@ -634,6 +634,10 @@ struct MkMacroHostAction {
     action: MkMacroHostActionKind,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Host actions keep operation-specific data inline for dialog dispatch."
+)]
 #[derive(Clone)]
 enum MkMacroHostActionKind {
     Save,

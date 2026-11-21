@@ -7712,7 +7712,7 @@ impl LauncherApp {
             crate::gui::jump_mode::ui::NavigationOwner::Dialog {
                 kind: crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
                 instance,
-            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => {
+            } if clipboard_native_owner && !egui::Popup::is_any_open(ctx) => {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("clipboard-history", instance),
                     self.clipboard_dialog.jump_mode_target_generation(),
@@ -7725,7 +7725,7 @@ impl LauncherApp {
             crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval {
                 parent_instance,
                 confirmation_instance,
-            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => self
+            } if clipboard_native_owner && !egui::Popup::is_any_open(ctx) => self
                 .clipboard_dialog
                 .jump_mode_pending_removal_identity()
                 .filter(|(current_confirmation, _)| *current_confirmation == confirmation_instance)
@@ -15535,15 +15535,11 @@ impl LauncherApp {
                 super::note_panel::NotePanelEffect::OpenDiagram { source, origin } => {
                     let open_result = self
                         .note_panels
-                        .iter()
-                        .find(|panel| {
-                            panel.tracks_diagram_source_origin(&origin.identity)
-                                && origin
-                                    .host_origin
-                                    .as_ref()
-                                    .is_some_and(|receipt| panel.accepts_note_open(receipt))
+                        .get(panel_index)
+                        .zip(origin.host_origin.as_ref())
+                        .map(|(panel, receipt)| {
+                            panel.validate_diagram_source_copy(ctx, receipt, &origin)
                         })
-                        .map(|panel| panel.can_open_diagram_source_copy(ctx, &origin))
                         .unwrap_or(Err("The originating Note is no longer open."));
                     match open_result {
                         Err(error) => self.report_error("notes.mermaid", error),
@@ -15558,9 +15554,9 @@ impl LauncherApp {
                                     )
                                     .is_some()
                             {
-                                if let Some(panel) = self.note_panels.iter_mut().find(|panel| {
-                                    panel.tracks_diagram_source_origin(&origin.identity)
-                                }) {
+                                if let Some(panel) = self.note_panels.get_mut(panel_index)
+                                    && panel.tracks_diagram_source_origin(&origin.identity)
+                                {
                                     panel.track_diagram_source_origin(origin);
                                 }
                                 self.focus_panel(super::Panel::DiagramStudioDialog);
@@ -17667,22 +17663,15 @@ impl LauncherApp {
         };
         if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
             && self.markdown_studio_dialog.accepts_diagram_origin(&origin)
+            && let Some(receipt) = origin.host_origin.clone()
+            && self.diagram_studio_dialog.open_source_copy_from_origin(
+                ctx, source, &super::utility_host::ChildOpenOrigin::Parent(receipt),
+            ).is_some()
         {
-            if let Some(receipt) = origin.host_origin.clone()
-                && self
-                    .diagram_studio_dialog
-                    .open_source_copy_from_origin(
-                        ctx,
-                        source,
-                        &super::utility_host::ChildOpenOrigin::Parent(receipt),
-                    )
-                    .is_some()
-            {
-                self.markdown_studio_dialog
-                    .track_diagram_source_origin(origin);
-                self.focus_panel(super::Panel::DiagramStudioDialog);
-                ctx.request_repaint_of(egui::ViewportId::ROOT);
-            }
+            self.markdown_studio_dialog
+                .track_diagram_source_origin(origin);
+            self.focus_panel(super::Panel::DiagramStudioDialog);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         let note_aux_visibility = self.complete_note_auxiliaries(ctx);
         self.complete_markdown_diagram_handoff(ctx);
@@ -17930,7 +17919,7 @@ pub(super) fn with_immediate_viewport_test_events_for<R>(
     }
 
     let previous = IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS
-        .with(|current| std::mem::replace(&mut *current.borrow_mut(), Some((viewport_id, events))));
+        .with(|current| (*current.borrow_mut()).replace((viewport_id, events)));
     let guard = EventsGuard(previous);
     let output = run();
     drop(guard);
@@ -19306,7 +19295,6 @@ mod tests {
             "starting each surface must not rewrite or independently cache its preference"
         );
 
-        drop(app);
         let teardown = fixture.finish().expect("fixture cleanup succeeds");
         assert!(teardown.cwd_restored);
         assert!(teardown.root_removed);
@@ -19479,7 +19467,6 @@ mod tests {
                 .preferred(key),
             Some(persisted)
         );
-        drop(reopened);
         let teardown = fixture.finish().expect("fixture cleanup succeeds");
         assert!(teardown.cwd_restored);
         assert!(teardown.root_removed);
@@ -20573,6 +20560,7 @@ mod tests {
     struct EagerRootGridLayout {
         cells: Vec<egui::Rect>,
         cell_cursors: Vec<egui::Pos2>,
+        display_texts: Vec<String>,
         grid_bounds: egui::Rect,
         content_bounds: egui::Rect,
         nominal_width: f32,
@@ -20589,6 +20577,7 @@ mod tests {
             .max(0.0);
         let mut cells = Vec::with_capacity(actions.len());
         let mut cell_cursors = Vec::with_capacity(actions.len());
+        let mut display_texts = Vec::with_capacity(actions.len());
         let text_presentation = RootResultTextPresentation::new(ui);
         let margin = root_selectable_frame_margin(ui);
         let mut row_heights = vec![
@@ -20597,6 +20586,10 @@ mod tests {
         ];
         for (index, action) in actions.iter().enumerate() {
             let text = root_grid_result_text(ui, action, &text_presentation, nominal_width);
+            let egui::WidgetText::LayoutJob(job) = &text else {
+                panic!("root grid result text uses a layout job");
+            };
+            display_texts.push(job.text.clone());
             let size = text.measure_size_impl(
                 ui.ctx(),
                 ui.style(),
@@ -20631,6 +20624,7 @@ mod tests {
         EagerRootGridLayout {
             cells,
             cell_cursors,
+            display_texts,
             grid_bounds: grid.response.rect,
             content_bounds: ui.min_rect(),
             nominal_width,
@@ -26591,7 +26585,7 @@ mod tests {
             RootDialogEffect::CopyText {
                 owner: DialogCopyOwner::CalculationPad,
                 text,
-            } if text.contains("r1 = answer = 40 + 2 = 42")
+            } if text == "Source and results\nr1 = answer = 40 + 2 = 42\n\nResults only\nr1 = 42\n\nSource and results without row labels\nanswer = 40 + 2 = 42"
         ));
         let repeated = app.complete_retained_tool_dialogs(&ctx);
         app.dispatch_root_dialog_effects(&ctx, repeated);
@@ -33383,8 +33377,8 @@ mod tests {
         let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         app.set_jump_mode_enabled(false);
         prepare_tool_dialog_root(&ctx, &mut app);
-        app.recording_dialog.test_install_display();
         app.open_recording_setup();
+        app.recording_dialog.test_install_display();
         let root = egui::ViewportId::ROOT;
         click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
         assert!(app.recording_dialog.is_popped_out());
@@ -33415,8 +33409,8 @@ mod tests {
         let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         app.set_jump_mode_enabled(false);
         prepare_tool_dialog_root(&ctx, &mut app);
-        app.recording_dialog.test_install_display();
         app.open_recording_setup();
+        app.recording_dialog.test_install_display();
         let root = egui::ViewportId::ROOT;
         let native = super::super::recording_dialog::RecordingDialogState::viewport();
         click_recording_setup_control(&ctx, &mut app, root, "format");
@@ -33664,7 +33658,6 @@ mod tests {
             std::sync::Arc::new(RecordingFramesBackend),
             move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
         );
-        app.recording_dialog.test_install_display();
         let action = crate::plugins::recording::RecordingPlugin
             .search("record")
             .into_iter()
@@ -33675,6 +33668,7 @@ mod tests {
                 .unwrap();
         app.dispatch_command_invocation(invocation);
         assert!(app.recording_dialog.open);
+        app.recording_dialog.test_install_display();
         assert!(!app.recording_controller.has_active_job());
         let root = egui::ViewportId::ROOT;
         let destination = workspace.root().join("joined-recording.gif");
@@ -33853,8 +33847,8 @@ mod tests {
             std::sync::Arc::new(RecordingFixtureBackend),
             || {},
         );
-        app.recording_dialog.test_install_display();
         app.open_recording_setup();
+        app.recording_dialog.test_install_display();
         let root = egui::ViewportId::ROOT;
         let native = super::super::recording_dialog::RecordingDialogState::viewport();
         app.recording_dialog.queue_save_choice_for_test(None);
@@ -41857,10 +41851,28 @@ mod tests {
             );
         }
         if state.recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap {
-            assert!(cache.row_response_widths[0] > state.old_first_response_width);
-            assert_ne!(cache.row_widths[1], state.old_next_row_width);
-            assert_ne!(cache.row_x_offsets[1], state.old_next_row_x_offset);
-            assert_ne!(cache.row_x_offsets[2], state.old_second_downstream_x_offset);
+            let full_description = &state.expected_actions[0].desc;
+            let shown_description = presentation[0]
+                .split_once(" : ")
+                .expect("the first result displays its description")
+                .1;
+            assert_eq!(
+                shown_description,
+                compact_result_description(full_description),
+                "the visible description is clipped to the compact seven-word summary"
+            );
+            assert!(full_description.split_whitespace().count() > 7);
+            assert!(shown_description.contains("early-wide-segment/"));
+            assert_ne!(old_presentation[0], presentation[0]);
+            assert!(cache.row_response_widths[0] <= available_width);
+            assert_eq!(
+                cache.row_response_widths[0].to_bits(),
+                state.old_first_response_width.to_bits(),
+                "the longer source description stays inside the existing row width"
+            );
+            assert_eq!(cache.row_widths[1], state.old_next_row_width);
+            assert_eq!(cache.row_x_offsets[1], state.old_next_row_x_offset);
+            assert_eq!(cache.row_x_offsets[2], state.old_second_downstream_x_offset);
         }
         let viewport_id = track_c2d_viewport_signature(&state.app).0;
         let geometry_id = track_c2d_geometry_signature(cache);
@@ -44037,7 +44049,12 @@ mod tests {
                 .expect("grid ScrollArea exists");
             let mut scroll = egui::scroll_area::State::load(&ctx, scroll_id)
                 .expect("settled grid has ScrollArea state");
-            scroll.offset.y = row_top + row_height + 8.0;
+            // Preserve the eager geometry check while scrolling beyond the
+            // actual row overscan buffer before asserting the first row is
+            // absent from the painted set.
+            scroll.offset.y = row_top
+                + row_height
+                + (row_height + 6.0) * (ROOT_LIST_OVERSCAN_ROWS + 3) as f32;
             scroll.store(&ctx, scroll_id);
             run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new())
                 .drop_without_applying_deltas();
@@ -44424,10 +44441,17 @@ mod tests {
         assert_eq!(old_key.grid_nominal_width_bits, key.grid_nominal_width_bits);
         assert_eq!(old_key.grid_spacing_x_bits, key.grid_spacing_x_bits);
         assert_eq!(old_key.grid_spacing_y_bits, key.grid_spacing_y_bits);
+        let column_gap = if state.columns > 1 {
+            8.0_f32.min(
+                actual_available_width.max(0.0) / (state.columns - 1) as f32,
+            )
+        } else {
+            8.0
+        };
         let expected_nominal = ((actual_available_width
-            - (state.columns.saturating_sub(1) as f32 * 8.0))
+            - (state.columns.saturating_sub(1) as f32 * column_gap))
             / state.columns as f32)
-            .max(160.0);
+            .max(0.0);
         assert_eq!(key.grid_nominal_width_bits, expected_nominal.to_bits());
 
         let after = cache.test_observation();
@@ -44552,53 +44576,82 @@ mod tests {
             }
         }
 
+        if matches!(
+            state.recipe,
+            TrackC2EGridRecipe::SharedPrefixGrowth | TrackC2EGridRecipe::SharedPrefixShrink
+        ) {
+            let late = state
+                .late_column_zero
+                .expect("prefix fixture identifies its late column-zero stress cell");
+            let old_cell_width = state
+                .old_late_cell_width
+                .expect("settled source layout includes the stress cell");
+            assert_eq!(cache.grid_cell_widths[late], old_cell_width);
+            assert_eq!(cache.grid_cell_widths[late], cache.grid_nominal_width);
+            assert_eq!(cache.grid_column_widths, state.old_grid_column_widths);
+            assert_eq!(cache.grid_column_x_offsets, state.old_grid_column_x_offsets);
+        }
         if state.recipe == TrackC2EGridRecipe::SharedPrefixGrowth {
             let late = state
                 .late_column_zero
                 .expect("growth fixture identifies its late column-zero stress cell");
-            let old_cell_width = state
-                .old_late_cell_width
-                .expect("settled source layout includes the stress cell");
-            assert!(cache.grid_cell_widths[late] > old_cell_width);
-            assert!(cache.grid_column_widths[0] > state.old_grid_column_widths[0]);
-            assert!(cache.grid_column_x_offsets[1] > state.old_grid_column_x_offsets[1]);
-            assert!(cache.grid_column_x_offsets[2] > state.old_grid_column_x_offsets[2]);
-        }
-        if state.recipe == TrackC2EGridRecipe::SharedPrefixShrink {
-            let late = state
-                .late_column_zero
-                .expect("shrink fixture identifies its old late column-zero stress cell");
-            let old_cell_width = state
-                .old_late_cell_width
-                .expect("settled source layout includes the stress cell");
-            assert!(old_cell_width > cache.grid_cell_widths[late]);
-            assert!(state.old_grid_column_widths[0] > cache.grid_column_widths[0]);
-            assert!(cache.grid_column_x_offsets[1] < state.old_grid_column_x_offsets[1]);
-            assert!(cache.grid_column_x_offsets[2] < state.old_grid_column_x_offsets[2]);
+            let source_label = &state.expected_actions[late].label;
+            let displayed_title = state.eager.display_texts[late]
+                .lines()
+                .next()
+                .expect("the grid cell displays its title");
+            assert!(source_label.len() > 2_000);
+            assert!(displayed_title.ends_with('…'));
+            assert!(
+                !displayed_title.contains(&"W".repeat(128)),
+                "the long title is ellipsized before the grid cell boundary"
+            );
         }
         if state.recipe == TrackC2EGridRecipe::TallCellSpillCold {
-            let (logical_top, logical_height, visual_top, visual_bottom) = row_geometry[0];
+            let source_title = &state.expected_actions[0].label;
+            let displayed_text = &state.eager.display_texts[0];
+            let displayed_title = displayed_text
+                .lines()
+                .next()
+                .expect("the bounded result displays a title");
+            assert_eq!(source_title.lines().count(), 150);
+            assert_eq!(displayed_text.lines().count(), 2);
+            assert!(displayed_title.ends_with('…'));
+            assert!(displayed_title.len() < source_title.len());
+            let eager_first_cell_height = state.eager.cells[0].height();
+            let measured_first_cell_height = cache.grid_cell_heights[0];
+            assert!(
+                (measured_first_cell_height - eager_first_cell_height).abs() <= 1.0,
+                "the bounded two-line cell matches the independent eager height: measured={measured_first_cell_height}, eager={eager_first_cell_height}"
+            );
+            let button_line_height = state
+                .ctx
+                .fonts_mut(|fonts| fonts.row_height(&key.button_font))
+                + f32::from_bits(key.extra_text_line_spacing_bits);
+            let selectable_margin_y = f32::from_bits(key.selectable_margin_y_bits);
+            let two_line_height_bound = button_line_height * 2.0 + selectable_margin_y + 1.0;
+            assert!(measured_first_cell_height >= ROOT_GRID_MIN_HEIGHT);
+            assert!(
+                measured_first_cell_height <= two_line_height_bound,
+                "the retained title and description fit within two button lines plus frame margins: measured={measured_first_cell_height}, bound={two_line_height_bound}"
+            );
+
+            let (logical_top, logical_height, _, visual_bottom) = row_geometry[0];
             let logical_bottom = content_origin.y + logical_top + logical_height;
             assert!(logical_bottom <= viewport.min.y);
             assert!(
-                content_origin.y + visual_top < viewport.max.y
-                    && content_origin.y + visual_bottom > viewport.min.y
+                content_origin.y + visual_bottom <= viewport.min.y,
+                "the bounded title row is wholly above the viewport after scrolling"
             );
             assert!(
-                rows.iter().any(|(index, _)| *index < state.columns),
-                "the offscreen logical row's visual spill remains painted"
-            );
-            let logical_row_zero_visible =
-                content_origin.y + logical_top < viewport.max.y && logical_bottom > viewport.min.y;
-            assert!(
-                !logical_row_zero_visible,
-                "row zero's logical interval is outside the viewport despite its tall visual spill"
+                !rows.iter().any(|(index, _)| *index < state.columns),
+                "the scrolled-out first row has no painted cells"
             );
             assert!(
-                actual_indices
+                !actual_indices
                     .iter()
                     .any(|index| *index / state.columns == 0),
-                "spill painting keeps row zero's absolute cell indices in the exact viewport set"
+                "scrolled-out first-row cells are excluded from the exact viewport set"
             );
         }
 
@@ -57066,6 +57119,94 @@ mod tests {
         .drop_without_applying_deltas();
     }
 
+    fn start_actual_notes_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let target_snapshot = |app: &LauncherApp| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .map(|target| {
+                    (
+                        target.id().clone(),
+                        target.response_id(),
+                        target.metadata().label().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let owner_before = app.jump_mode_ui.frame_navigation_owner();
+        assert!(
+            matches!(owner_before, NavigationOwner::Notes { .. }),
+            "Quick Notes owns the leader input: {owner_before:?}"
+        );
+        let focused_id_before = ctx.memory(|memory| memory.focused());
+        let target_generation_before = app.notes_dialog.jump_mode_target_generation();
+        let targets_before = target_snapshot(app);
+
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let session_generation = app
+            .jump_mode_ui
+            .active_session_generation()
+            .expect("the Notes leader starts an owned hint session");
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), owner_before);
+        assert_eq!(
+            app.notes_dialog.jump_mode_target_generation(),
+            target_generation_before,
+            "the Notes target generation stays stable through the leader press"
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), focused_id_before);
+        assert_eq!(
+            target_snapshot(app),
+            targets_before,
+            "retained Notes target IDs stay stable through the leader press"
+        );
+
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![
+                    key_release(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.jump_mode_ui.active_session_generation(),
+            Some(session_generation),
+            "releasing the physical leader key preserves the Notes hint session"
+        );
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), owner_before);
+        assert_eq!(
+            app.notes_dialog.jump_mode_target_generation(),
+            target_generation_before
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), focused_id_before);
+        assert_eq!(
+            target_snapshot(app),
+            targets_before,
+            "retained Notes target IDs stay stable through the leader release"
+        );
+    }
+
     fn root_result_hint(app: &LauncherApp, index: usize) -> String {
         let target = crate::gui::jump_mode::TargetId::root_result(
             crate::gui::jump_mode::TargetGeneration(app.root_list_geometry.result_generation()),
@@ -59985,10 +60126,16 @@ mod tests {
             false,
         );
         detached(&mut app, vec![egui::Event::Copy], false);
-        assert_eq!(fake.writes(), [draft.clone()]);
+        assert_eq!(
+            fake.writes().as_slice(),
+            std::slice::from_ref(&draft)
+        );
         detached(&mut app, vec![egui::Event::Cut], true);
         assert_eq!(app.clipboard_dialog.test_text(), draft);
-        assert_eq!(fake.writes(), [draft.clone()]);
+        assert_eq!(
+            fake.writes().as_slice(),
+            std::slice::from_ref(&draft)
+        );
         for _ in 0..3 {
             detached(&mut app, Vec::new(), false);
         }
@@ -60030,7 +60177,10 @@ mod tests {
             .unwrap();
         detached(&mut app, tool_dialog_pointer_events(copy, true), false);
         detached(&mut app, tool_dialog_pointer_events(copy, false), true);
-        assert_eq!(fake.writes(), [draft.clone()]);
+        assert_eq!(
+            fake.writes().as_slice(),
+            std::slice::from_ref(&draft)
+        );
         for _ in 0..3 {
             detached(&mut app, Vec::new(), false);
         }
@@ -60639,7 +60789,11 @@ mod tests {
         prepare_actual_query_frame(&ctx, &mut app);
         prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
         let path = workspace.root().join("retained-result.txt");
-        seed_actual_file_search_filename_results(&mut app, SearchId(947), &[path.clone()]);
+        seed_actual_file_search_filename_results(
+            &mut app,
+            SearchId(947),
+            std::slice::from_ref(&path),
+        );
         for _ in 0..3 {
             app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
                 .0
@@ -61329,6 +61483,10 @@ mod tests {
         app.set_jump_mode_enabled(true);
         app.test_skip_history_persistence = true;
         prepare_actual_query_frame(&ctx, &mut app);
+        app.utility_dialog_size_manager.test_set_preferred_size(
+            crate::settings::UtilityToolKey::parse("clipboard-history").unwrap(),
+            crate::settings::PreferredWindowSize::new(480.0, 360.0).unwrap(),
+        );
         let private_entry = "private clipboard secret λ\nline two";
         prepare_actual_clipboard_history_dialog(&ctx, &mut app, &[private_entry, private_entry]);
         let original_bytes = std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap();
@@ -63764,13 +63922,20 @@ mod tests {
             .0
             .drop_without_applying_deltas();
         assert!(egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.file_search_dialog
+                .test_native_popup_control_rect(PopupControl::ExportAnchor),
+            Some(export_anchor),
+            "the open popup still belongs to the current Export anchor"
+        );
         assert!(
-            !app.file_search_native_ui_owner_current(&ctx, true),
-            "the existing Export popup uses its own action validation and is not a general native-owner grant"
+            app.file_search_native_ui_owner_current(&ctx, true),
+            "the exact current Export popup anchor owns its native action surface"
         );
         assert_eq!(
             app.jump_mode_ui.frame_navigation_owner(),
-            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            "an exact Export popup owner does not grant Jump Mode navigation to its parent"
         );
         assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
 
@@ -66848,6 +67013,10 @@ mod tests {
         }));
         crate::plugins::note::save_notes(&notes).expect("write notes in the isolated workspace");
         prepare_actual_query_frame(&ctx, &mut app);
+        app.utility_dialog_size_manager.test_set_preferred_size(
+            crate::settings::UtilityToolKey::parse("quick-notes").unwrap(),
+            crate::settings::PreferredWindowSize::new(520.0, 420.0).unwrap(),
+        );
         app.notes_dialog.open();
         for _ in 0..3 {
             run_dialog_frame(&ctx, &mut app);
@@ -66904,6 +67073,16 @@ mod tests {
         )
         .0
         .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
         assert!(
             app.note_panels.is_empty(),
             "feature-off Notes input retains its prior non-activating row behavior"
@@ -66913,7 +67092,7 @@ mod tests {
             run_dialog_frame(&ctx, &mut app);
         }
 
-        start_actual_root_jump_mode(&ctx, &mut app);
+        start_actual_notes_jump_mode(&ctx, &mut app);
         let mut reordered = notes.clone();
         reordered.swap(0, 1);
         crate::plugins::note::save_notes(&reordered)
@@ -66948,7 +67127,94 @@ mod tests {
             app.notes_dialog.jump_mode_target_generation(),
             "the visible target carries the current reordered population generation"
         );
-        start_actual_root_jump_mode(&ctx, &mut app);
+
+        for _ in 0..6 {
+            let rows = app.notes_dialog.test_note_open_controls().0;
+            let first_row = rows
+                .iter()
+                .find(|(slug, ..)| slug == "duplicate-first")
+                .expect("the reordered first note is rendered in the real scroll area");
+            let clip = first_row.2;
+            let second_row = rows
+                .iter()
+                .find(|(slug, ..)| slug == "duplicate-second");
+            let second_visible = second_row.is_some_and(|row| row.2.intersects(row.1));
+            let second_registered = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Shared title (duplicate-second)");
+            if clip.contains_rect(first_row.1) && !second_visible && !second_registered {
+                break;
+            }
+
+            let target_top = clip.top() + 6.0;
+            let wheel_delta = if first_row.1.top() >= target_top {
+                -(first_row.1.top() - target_top).max(32.0)
+            } else {
+                (target_top - first_row.1.top()).max(32.0)
+            };
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(clip.center()),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, wheel_delta),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            for _ in 0..2 {
+                run_dialog_frame(&ctx, &mut app);
+            }
+        }
+        let (first_row_after_scroll, second_row_after_scroll) = {
+            let rows = app.notes_dialog.test_note_open_controls().0;
+            let first = rows
+                .iter()
+                .find(|(slug, ..)| slug == "duplicate-first")
+                .expect("the exact first duplicate remains rendered after scrolling");
+            let second = rows
+                .iter()
+                .find(|(slug, ..)| slug == "duplicate-second")
+                .cloned();
+            (first.clone(), second)
+        };
+        assert!(
+            first_row_after_scroll.2.contains_rect(first_row_after_scroll.1),
+            "the selected first row is fully inside the real ScrollArea viewport: {first_row_after_scroll:?}"
+        );
+        assert!(
+            second_row_after_scroll
+                .as_ref()
+                .is_none_or(|row| !row.2.intersects(row.1)),
+            "the other duplicate is outside the real ScrollArea viewport: {second_row_after_scroll:?}"
+        );
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Shared title (duplicate-second)"),
+            "a scrolled offscreen duplicate has no retained target"
+        );
+        for _ in 0..2 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert!(matches!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+        ));
+        start_actual_notes_jump_mode(&ctx, &mut app);
         let reordered_note_hint = dialog_hint_for_label(&app, "Shared title (duplicate-first)");
         let target_before_hint = app
             .jump_mode_ui
@@ -68227,17 +68493,78 @@ mod tests {
         assert_eq!(app.selected, Some(0));
         assert!(app.jump_mode_ui.active_session().is_none());
         start_actual_root_jump_mode(&ctx, &mut app);
+
+        let before_height_resize_viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the root grid viewport is recorded before the height resize");
+        let before_height_resize_targets: std::collections::HashSet<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target.id().surface(),
+                    crate::gui::jump_mode::SurfaceId::LauncherResults
+                ) && matches!(
+                    target.id().semantic(),
+                    crate::gui::jump_mode::SemanticTargetId::RootResult(_)
+                )
+            })
+            .map(|target| target.id().clone())
+            .collect();
+        assert!(!before_height_resize_targets.is_empty());
         let mut population_change_input = actual_query_input(true);
         population_change_input.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::vec2(560.0, 650.0),
+            egui::vec2(900.0, 400.0),
         ));
         app.run_root_frame_for_test(&ctx, population_change_input, false)
             .0
             .drop_without_applying_deltas();
+        let after_height_resize_viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the resized root grid viewport is recorded");
+        assert!(
+            after_height_resize_viewport.height() < before_height_resize_viewport.height(),
+            "the height resize clips the result viewport from {}pt to {}pt",
+            before_height_resize_viewport.height(),
+            after_height_resize_viewport.height()
+        );
+        let after_height_resize_targets: std::collections::HashSet<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target.id().surface(),
+                    crate::gui::jump_mode::SurfaceId::LauncherResults
+                ) && matches!(
+                    target.id().semantic(),
+                    crate::gui::jump_mode::SemanticTargetId::RootResult(_)
+                )
+            })
+            .map(|target| target.id().clone())
+            .collect();
+        assert!(
+            !after_height_resize_targets.is_empty(),
+            "the shortened viewport still retains visible result targets"
+        );
+        assert_ne!(
+            after_height_resize_targets, before_height_resize_targets,
+            "the height resize changes the semantic result target population"
+        );
+        assert!(
+            before_height_resize_targets
+                .difference(&after_height_resize_targets)
+                .next()
+                .is_some(),
+            "the shorter viewport clips at least one previously visible result target"
+        );
         assert!(
             app.jump_mode_ui.active_session().is_none(),
-            "a narrower resize that changes the visible target population cancels the frozen session"
+            "a height resize that changes the visible target population cancels the frozen session"
         );
         assert_eq!(
             app.jump_mode_ui.last_outcome(),
@@ -74106,11 +74433,11 @@ mod tests {
         let (output, passes) =
             app.run_root_frame_for_test_with(&ctx, discarded_activation, true, |app, ui| {
                 app.render_root_ui(ui);
-                if discarded_origin.is_none() {
-                    if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
-                        discarded_origin = Some(origin);
-                        discarded_action = app.note_panels[0].test_mermaid_open_rect(0);
-                    }
+                if discarded_origin.is_none()
+                    && let Some(origin) = app.note_panels[0].test_pending_mermaid_origin()
+                {
+                    discarded_origin = Some(origin);
+                    discarded_action = app.note_panels[0].test_mermaid_open_rect(0);
                 }
             });
         output.drop_without_applying_deltas();
@@ -74157,11 +74484,11 @@ mod tests {
         let mut accepted_action = None;
         app.run_root_frame_for_test_with(&ctx, accepted_activation, false, |app, ui| {
             app.render_root_ui(ui);
-            if accepted_origin.is_none() {
-                if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
-                    accepted_origin = Some(origin);
-                    accepted_action = app.note_panels[0].test_mermaid_open_rect(0);
-                }
+            if accepted_origin.is_none()
+                && let Some(origin) = app.note_panels[0].test_pending_mermaid_origin()
+            {
+                accepted_origin = Some(origin);
+                accepted_action = app.note_panels[0].test_mermaid_open_rect(0);
             }
         })
         .0
@@ -74280,11 +74607,11 @@ mod tests {
             app.render_root_ui(ui);
             // Simulate a protected Note dialog becoming active after the card
             // staged its effect but before ROOT accepts and dispatches it.
-            if staged_origin.is_none() {
-                if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
-                    staged_origin = Some(origin);
-                    staged_action = app.note_panels[0].test_mermaid_open_rect(0);
-                }
+            if staged_origin.is_none()
+                && let Some(origin) = app.note_panels[0].test_pending_mermaid_origin()
+            {
+                staged_origin = Some(origin);
+                staged_action = app.note_panels[0].test_mermaid_open_rect(0);
             }
             app.note_panels[0].test_set_overwrite_prompt(true);
         });
@@ -74408,34 +74735,75 @@ mod tests {
         ];
         let (output, passes) = app.run_root_frame_for_test(&ctx, enter_press, true);
         output.drop_without_applying_deltas();
-        assert!(passes > 1, "egui redraws the discarded ROOT pass");
-        assert_eq!(app.note_panels[0].note_content(), "éclair");
+        assert!(passes > 1, "the action crossed a discarded ROOT pass");
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "éclair",
+            "a discarded ROOT pass rolls back the toolbar draft"
+        );
+        assert!(!app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (0, 0));
         let after_discard = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
-            .expect("current source editor state");
-        let selection = after_discard.cursor.char_range().unwrap().as_sorted_char_range();
+            .expect("the discarded action preserves the source editor state");
+        let cursor = after_discard.cursor.char_range().expect("source remains selected");
+        let selection = cursor.as_sorted_char_range();
         assert_eq!((selection.start.0, selection.end.0), (0, 6));
+        let current = (cursor, "éclair".to_owned());
+        assert!(after_discard.undoer().undo(&current).is_none_or(|(_, source)| source == "éclair"));
         run_tool_dialog_frame(
             &ctx,
             &mut app,
             vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
             false,
-        ).drop_without_applying_deltas();
-        let current = (after_discard.cursor.char_range().unwrap(), "éclair".to_owned());
-        assert!(after_discard.undoer().undo(&current).is_none_or(|(_, source)| source == "éclair"));
-        if !egui::Popup::is_id_open(&ctx, menu_id.with("popup")) {
-            ctx.memory_mut(|memory| memory.request_focus(menu_id));
-            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
-            run_note_panel_key(&ctx, &mut app, egui::Key::Space, egui::Modifiers::NONE);
-        }
-        for _ in 0..3 {
-            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
-        }
-        let (bold_id, _, _) = app.note_panels[0]
-            .test_markdown_tool_rect("Bold Selection")
-            .expect("the real menu offers a fresh activation");
-        ctx.memory_mut(|memory| memory.request_focus(bold_id));
+        )
+        .drop_without_applying_deltas();
+
+        // The discarded activation consumed the menu event. Re-establish the
+        // source selection and keyboard path before submitting a retained pass.
+        let mut retry_state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the retained editor remains available after the discarded pass");
+        retry_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new("éclair".chars().count()),
+            )));
+        retry_state.store(&ctx, editor_id);
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
         run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
-        run_note_panel_key(&ctx, &mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        ctx.memory_mut(|memory| memory.request_focus(menu_id));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        run_note_panel_key(&ctx, &mut app, egui::Key::Space, egui::Modifiers::NONE);
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (retry_bold_id, retry_bold_rect, retry_bold_clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Bold Selection")
+            .expect("the fresh keyboard opening exposes Bold again");
+        assert_eq!(retry_bold_id, bold_id);
+        assert!(retry_bold_clip.contains_rect(retry_bold_rect));
+        for _ in 0..16 {
+            if ctx.memory(|memory| memory.has_focus(retry_bold_id)) {
+                break;
+            }
+            run_note_panel_key(&ctx, &mut app, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(ctx.memory(|memory| memory.has_focus(retry_bold_id)));
+
+        let mut accepted_enter = actual_query_input(true);
+        accepted_enter.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        app.run_root_frame_for_test(&ctx, accepted_enter, false)
+            .0
+            .drop_without_applying_deltas();
 
         assert_eq!(
             app.note_panels[0].note_content(),
@@ -74443,6 +74811,7 @@ mod tests {
             "menu activation does not leak Space/Enter into the source editor"
         );
         assert!(app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (1, 0));
         assert!(
             ctx.memory(|memory| memory.has_focus(editor_id)),
             "toolbar focus is restored only after the accepted ROOT pass"
@@ -76671,6 +77040,8 @@ mod tests {
 
     #[test]
     fn studio_usability_custom_table_keeps_note_and_caret_owner_across_query_and_second_note() {
+        use super::super::note_form_dialog::FormKind;
+
         let query_id = egui::Id::new("query_input");
         let screen_size = egui::vec2(1600.0, 1200.0);
         let ctx = egui::Context::default();
@@ -76707,41 +77078,46 @@ mod tests {
         app.push_note_panel(note_b);
         launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
 
-        let editor_id = app.note_panels[0]
-            .test_editor_widget_id()
-            .expect("Note A renders its source editor");
         let insert_at = source
             .find("selected")
             .expect("the selected prose is present");
         let select_end = insert_at + "selected prose".len();
-        let mut editor_state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
-            .expect("Note A has current TextEdit state");
-        editor_state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::two(
-                egui::text::CCursor::new(source[..insert_at].chars().count()),
-                egui::text::CCursor::new(source[..select_end].chars().count()),
-            )));
-        editor_state.store(&ctx, editor_id);
-        app.note_panels[0].test_stage_form_open(
+        let query_rect_before_open = ctx
+            .read_response(query_id)
+            .expect("the real query response remains rendered")
+            .rect;
+        app.note_panels[0].test_form_selection(
             &ctx,
-            super::super::note_form_dialog::FormKind::Table,
+            source[..insert_at].chars().count(),
+            source[..select_end].chars().count(),
         );
+        app.note_panels[0].test_stage_form_open(&ctx, FormKind::Table);
         let output = ctx.run_ui(launcher_show_owner_input(true, screen_size), |_| {});
         app.complete_markdown_diagram_handoff(&ctx);
         output.drop_without_applying_deltas();
+        assert!(app.note_panels[0].test_form_session(FormKind::Table).is_some());
         assert_eq!(
-            app.note_panels[0].test_custom_table_origin_insert_at(),
-            Some(insert_at),
-            "the accepted form captures the original selection start"
+            app.note_panels[0].test_custom_table_origin_range(),
+            Some(insert_at..select_end),
+            "the accepted Note host captures the complete source selection"
         );
 
-        app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
-            .0
-            .drop_without_applying_deltas();
         let builder_layer = app.note_panels[0]
             .test_custom_table_builder_layer()
             .expect("the custom builder owns a distinct window layer");
+        launcher_show_owner_seed_window_position_at(
+            &ctx,
+            builder_layer,
+            "Custom table placement fixture",
+            screen_size,
+            egui::pos2(
+                40.0,
+                (query_rect_before_open.bottom() + 24.0).min(screen_size.y - 420.0),
+            ),
+        );
+        app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+            .0
+            .drop_without_applying_deltas();
         let ordinary = app
             .query_focus_ordinary_context()
             .expect("the two notes expose ordinary query ownership");
@@ -76750,11 +77126,11 @@ mod tests {
         let builder_rect = app.note_panels[0]
             .test_custom_table_builder_rect()
             .expect("the builder is rendered as a reachable nonmodal window");
-        let query_rect_before = ctx
+        let query_rect_after_open = ctx
             .read_response(query_id)
-            .expect("the real query response remains rendered")
+            .expect("the real query response remains rendered beside the builder")
             .rect;
-        assert!(!builder_rect.intersects(query_rect_before));
+        assert!(!builder_rect.intersects(query_rect_after_open));
 
         notes_query_mouse_prepare_interactive(&mut app, &ctx, screen_size, false);
         let query_rect = ctx
@@ -76777,41 +77153,92 @@ mod tests {
         let note_b_after_edit = app.note_panels[1].note_content().to_owned();
         assert!(note_b_after_edit.ends_with("untouched draft changed"));
 
-        let insert_button = app.note_panels[0]
-            .test_custom_table_builder_insert_rect()
-            .expect("Insert remains reachable while Note B owns focus");
+        let builder_window = app.note_panels[0]
+            .test_custom_table_builder_rect()
+            .expect("the real builder window remains open");
+        let builder_title = egui::pos2(builder_window.center().x, builder_window.top() + 10.0);
+        for pressed in [true, false] {
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![
+                    egui::Event::PointerMoved(builder_title),
+                    egui::Event::PointerButton {
+                        pos: builder_title,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        for _ in 0..2 {
+            notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+        }
+        assert_eq!(app.query, query_after_edit);
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert_eq!(app.note_panels[1].note_content(), note_b_after_edit);
+        assert_eq!(
+            app.note_panels[0].test_custom_table_origin_range(),
+            Some(insert_at..select_end),
+            "normal builder focus keeps the accepted source selection"
+        );
+
+        let (insert_button, insert_clip, insert_enabled) = app.note_panels[0]
+            .test_form_control(FormKind::Table, "submit")
+            .expect("the actual Insert button remains available after title focus");
+        assert!(
+            insert_enabled && insert_clip.contains_rect(insert_button),
+            "title focus admits the real Insert control: focused={:?}, builder={builder_window:?}, insert={insert_button:?}, clip={insert_clip:?}, enabled={insert_enabled}",
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx)
+        );
         let insert_pos = insert_button.center();
+        let insert_events = |pos: egui::Pos2, pressed: bool| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
         notes_query_mouse_run_frame(
             &mut app,
             &ctx,
             screen_size,
-            vec![
-                egui::Event::PointerMoved(insert_pos),
-                egui::Event::PointerButton {
-                    pos: insert_pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
+            insert_events(insert_pos, true),
         );
-        let mut release = launcher_show_owner_input(true, screen_size);
-        release.events = vec![egui::Event::PointerButton {
-            pos: insert_pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        }];
-        let (_, passes) = app.run_root_frame_for_test(&ctx, release, true);
+        let mut discarded_release = launcher_show_owner_input(true, screen_size);
+        discarded_release.events = insert_events(insert_pos, false);
+        let (output, passes) = app.run_root_frame_for_test(&ctx, discarded_release, true);
+        output.drop_without_applying_deltas();
         assert_eq!(
             passes, 2,
-            "egui redraws after the discarded pointer release"
+            "the rejected activation crosses a discarded ROOT pass"
         );
         assert_eq!(app.note_panels[0].note_content(), source);
-        let current_insert = app.note_panels[0]
-            .test_custom_table_builder_insert_rect()
-            .expect("the discarded release leaves the captured builder retryable");
-        notes_query_mouse_click(&mut app, &ctx, screen_size, current_insert);
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (0, 0));
+        assert!(app.note_panels[0].test_form_session(FormKind::Table).is_some());
+        assert_eq!(
+            app.note_panels[0].test_custom_table_origin_range(),
+            Some(insert_at..select_end),
+            "discarding the activation leaves the captured source selection intact"
+        );
+
+        let (insert_button, insert_clip, insert_enabled) = app.note_panels[0]
+            .test_form_control(FormKind::Table, "submit")
+            .expect("the rejected activation leaves the real Insert available for retry");
+        assert!(insert_enabled && insert_clip.contains_rect(insert_button));
+        let insert_pos = insert_button.center();
+        notes_query_mouse_run_frame(&mut app, &ctx, screen_size, insert_events(insert_pos, true));
+        let mut accepted_release = launcher_show_owner_input(true, screen_size);
+        accepted_release.events = insert_events(insert_pos, false);
+        let (output, passes) = app.run_root_frame_for_test(&ctx, accepted_release, false);
+        assert_eq!(passes, 1, "the retry is applied through one retained pass");
+        output.drop_without_applying_deltas();
 
         let updated = app.note_panels[0].note_content().to_owned();
         assert!(updated.starts_with("# Table A\n\nbefore \n\n"));
@@ -83107,21 +83534,72 @@ mod tests {
                 app.mouse_gesture_settings_dialog.test_settings()
             );
             assert!(app.mouse_gesture_settings_dialog.test_dirty());
-            app.mouse_gesture_settings_dialog.test_seed_picker();
             for _ in 0..3 {
                 run_dialog_frame(&ctx, &mut app);
             }
-            let mut input = actual_query_input(true);
-            input
-                .events
-                .push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
-            app.run_root_frame_for_test(&ctx, input, false)
-                .0
-                .drop_without_applying_deltas();
-            assert!(
-                app.mouse_gesture_settings_dialog.open
-                    && app.mouse_gesture_settings_dialog.window_picker_is_open()
+            let scroll = app
+                .mouse_gesture_settings_dialog
+                .test_scroll_area_id()
+                .expect("Gesture Settings scroll area was rendered");
+            let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll)
+                .unwrap_or_default();
+            scroll_state.offset.y = app
+                .mouse_gesture_settings_dialog
+                .test_scroll_max_offset_y();
+            scroll_state.store(&ctx, scroll);
+            run_dialog_frame(&ctx, &mut app);
+            super::super::mouse_gesture_settings_dialog::MouseGestureSettingsDialog::test_set_next_window_titles(
+                vec!["Fixture window".into()],
             );
+            let select = mouse_gesture_settings_target(&app, "Select window").clipped_rect();
+            for pressed in [true, false] {
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    tool_dialog_pointer_events(select, pressed),
+                    false,
+                )
+                .drop_without_applying_deltas();
+            }
+            assert!(app.mouse_gesture_settings_dialog.window_picker_is_open());
+            for _ in 0..3 {
+                run_dialog_frame(&ctx, &mut app);
+            }
+            assert!(app.gesture_window_picker_host.root_layer().is_some());
+            assert!(app
+                .mouse_gesture_settings_dialog
+                .test_picker_close_button()
+                .is_some());
+            let picker_owner = app.gesture_window_picker_host.owner_viewport();
+            let send_picker_key = |app: &mut LauncherApp, pressed| {
+                let events = vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }];
+                if picker_owner == egui::ViewportId::ROOT {
+                    run_tool_dialog_frame(&ctx, app, events, false)
+                        .drop_without_applying_deltas();
+                } else {
+                    super::with_immediate_viewport_test_events_for(
+                        picker_owner,
+                        events,
+                        || {
+                            app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                                .0
+                                .drop_without_applying_deltas();
+                        },
+                    );
+                }
+            };
+            send_picker_key(&mut app, true);
+            send_picker_key(&mut app, false);
+            assert!(app.mouse_gesture_settings_dialog.open);
+            assert!(!app.mouse_gesture_settings_dialog.window_picker_is_open());
+            assert_eq!(&gesture_settings, app.mouse_gesture_settings_dialog.test_settings());
+            assert!(app.mouse_gesture_settings_dialog.test_dirty());
             crate::plugins::mouse_gestures::apply_runtime_settings(previous_runtime);
         } else {
             assert!(app.mouse_settings_dialog.open);

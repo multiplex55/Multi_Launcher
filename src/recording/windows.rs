@@ -138,7 +138,7 @@ fn fit_rgba_frame(
     let mut output = canvas
         .allocate_rgba()
         .map_err(|error| format!("could not allocate recording canvas: {error}"))?;
-    for pixel in output.chunks_exact_mut(4) {
+    for pixel in output.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     let left = (canvas.width() - fitted.0) / 2;

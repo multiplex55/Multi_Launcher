@@ -283,10 +283,15 @@ mod tests {
         assert!(plugin.description().contains("live screen magnifier"));
         assert_eq!(results[0].label, "mouse settings");
         assert_eq!(results[0].action, "mouse:settings");
-        assert!(results[0].desc.contains("session-only"));
-        assert!(results[0].desc.contains("Mouse Settings"));
-        assert!(results[0].desc.contains("composited Windows"));
-        assert!(results[0].desc.contains("non-inverting outline"));
+        assert_eq!(results[0].desc, "Configure mouse tools and appearance");
+        for detail in [
+            "session-only",
+            "Mouse Settings",
+            "supported composited Windows content",
+            "non-inverting outline",
+        ] {
+            assert!(plugin.description().contains(detail), "{detail}");
+        }
         assert_eq!(results, plugin.commands());
         for required in [
             "mouse:coords:toggle",

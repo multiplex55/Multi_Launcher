@@ -1477,10 +1477,10 @@ impl ZipExtractorDialog {
             if self.host_focus {
                 ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
             }
-        } else if self.host_focus {
-            if let Some(layer) = self.root_layer() {
-                ctx.move_to_top(layer);
-            }
+        } else if self.host_focus
+            && let Some(layer) = self.root_layer()
+        {
+            ctx.move_to_top(layer);
         }
         self.host_focus = false;
         if frame.close || frame.actions.iter().any(|a| matches!(a, UiAction::Close)) {
@@ -3545,7 +3545,7 @@ mod tests {
         subtree
             .add(
                 crate::archive::SelectionTarget::FolderSubtree(directory),
-                &catalog.limits(),
+                catalog.limits(),
             )
             .unwrap();
         session.set_selection(subtree).unwrap();

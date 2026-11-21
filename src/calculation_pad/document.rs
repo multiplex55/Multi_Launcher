@@ -4403,7 +4403,7 @@ mod tests {
         let source = format!(
             "v = [{}]\n{}",
             vec!["1"; 1024].join(","),
-            vec!["v"; 30].join(" * ")
+            ["v"; 30].join(" * ")
         );
         let document = CalculationDocument::new(source);
         let evaluation = document.evaluate();
@@ -5396,12 +5396,9 @@ mod tests {
             DiagnosticKind::NestingTooDeep { .. }
         ));
 
-        let too_many_names = format!(
-            "{}",
-            std::iter::repeat_n("name", MAX_DEPENDENCIES_PER_LINE + 1)
-                .collect::<Vec<_>>()
-                .join(" + ")
-        );
+        let too_many_names = std::iter::repeat_n("name", MAX_DEPENDENCIES_PER_LINE + 1)
+            .collect::<Vec<_>>()
+            .join(" + ");
         let document = CalculationDocument::new(too_many_names);
         let evaluation = document.evaluate();
         assert!(matches!(

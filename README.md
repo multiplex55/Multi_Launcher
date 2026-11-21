@@ -1283,7 +1283,7 @@ Distribute above the canvas, with a resizable, independently scrolling right
 properties sidebar. **Show properties** and **Hide properties** reopen or
 collapse it. Native flowcharts accept `flowchart` or `graph`, the TD/TB/BT/LR/RL
 directions, semicolon-separated statements, supported arrow chains, and ordinary
-full-line `%%` comments. See the [Mermaid subset guide](docs/DIAGRAM_MERMAID_SUBSET.md)
+full-line `%%` comments. See the [Mermaid subset guide](docs/archive/DIAGRAM_MERMAID_SUBSET.md)
 for supported forms and source preservation.
 
 Connector **From** and **To** choices show the object's own text and ID. With

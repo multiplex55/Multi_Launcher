@@ -2640,9 +2640,8 @@ mod tests {
         );
         let mut permit = first.claim_finalization(first_generation).unwrap();
 
-        assert_eq!(
-            first.cancel().unwrap(),
-            false,
+        assert!(
+            !first.cancel().unwrap(),
             "claimed publication cannot cancel"
         );
         assert_eq!(

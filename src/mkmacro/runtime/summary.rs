@@ -568,9 +568,8 @@ impl SummaryAccumulator {
     ) {
         let occurrence = self.open.iter_mut().find_map(|slot| {
             slot.filter(|open| open.frame_id == context.frame_id && open.step_id == step_id)
-                .map(|open| {
+                .inspect(|_| {
                     *slot = None;
-                    open
                 })
         });
         let Some(occurrence) = occurrence else {

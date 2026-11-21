@@ -805,10 +805,10 @@ impl ImageCompareDialogState {
         first: bool,
     ) {
         use super::utility_host::ViewportPassProvenance;
-        if let Some(previous) = self.host_pending.take() {
-            if previous.epoch == self.host_epoch {
-                self.restore_camera(previous.camera);
-            }
+        if let Some(previous) = self.host_pending.take()
+            && previous.epoch == self.host_epoch
+        {
+            self.restore_camera(previous.camera);
         }
         self.poll_host_background(ctx);
         if !self.open {
@@ -883,10 +883,10 @@ impl ImageCompareDialogState {
         use crate::gui::jump_mode::ui::{
             NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
         };
-        if let Some(previous) = self.host_pending.take() {
-            if previous.epoch == self.host_epoch {
-                self.restore_camera(previous.camera);
-            }
+        if let Some(previous) = self.host_pending.take()
+            && previous.epoch == self.host_epoch
+        {
+            self.restore_camera(previous.camera);
         }
         if !self.open {
             return;
@@ -1162,10 +1162,10 @@ impl ImageCompareDialogState {
             if self.host_focus {
                 ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
             }
-        } else if self.host_focus {
-            if let Some(layer) = self.root_layer() {
-                ctx.move_to_top(layer);
-            }
+        } else if self.host_focus
+            && let Some(layer) = self.root_layer()
+        {
+            ctx.move_to_top(layer);
         }
         self.host_focus = false;
         if frame.close {

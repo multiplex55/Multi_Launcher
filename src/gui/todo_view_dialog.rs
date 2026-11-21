@@ -1476,6 +1476,35 @@ mod tests {
     }
 
     #[test]
+    fn todo_view_dialog_has_fixed_size() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, directory.path());
+        let mut dialog = TodoViewDialog::default();
+        dialog.open();
+
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 2000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| dialog.ui(ui.ctx(), &mut app),
+        );
+        output.drop_without_applying_deltas();
+
+        let (min_size, max_size) = todo_view_window_constraints();
+        let _rect = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new(Some("View Todos"))))
+            .expect("window rect");
+        let (_window_size, _) = todo_view_layout_sizes();
+        assert_eq!(min_size, max_size);
+    }
+
+    #[test]
     fn snippet_extraction_prefers_anchor_context() {
         let content = "alpha beta gamma important-anchor delta epsilon";
         let snippet = extract_anchor_snippet(content, Some("important-anchor"));
@@ -1573,7 +1602,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("todo.json");
         let original = todo_entry("go @note:dest#section", 1, &[]);
-        write_todos(&path, &[original.clone()]);
+        write_todos(&path, std::slice::from_ref(&original));
         let ctx = egui::Context::default();
         let mut dialog = TodoViewDialog::default();
         dialog.open_from(path.to_str().unwrap());
@@ -1749,7 +1778,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("todo.json");
         let first = todo_entry("first", 1, &[]);
-        write_todos(&path, &[first.clone()]);
+        write_todos(&path, std::slice::from_ref(&first));
         let ctx = egui::Context::default();
         let mut app = test_app(&ctx, directory.path());
         let mut dialog = TodoViewDialog::default();

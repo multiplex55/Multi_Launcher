@@ -488,6 +488,18 @@ impl UtilityDialogSizeManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_set_preferred_size(
+        &self,
+        key: UtilityToolKey,
+        size: crate::settings::PreferredWindowSize,
+    ) {
+        self.lock()
+            .sizes
+            .set(key, size)
+            .expect("test utility window size is valid");
+    }
+
+    #[cfg(test)]
     pub(crate) fn tracked_windows(&self) -> Vec<(Id, UtilityToolKey)> {
         self.lock()
             .instances
@@ -2086,8 +2098,8 @@ mod tests {
             );
             assert_eq!(instance.last_revision, Some(UtilitySizeRevision(2)));
         }
-        assert_eq!(
-            first_ack_restore, false,
+        assert!(
+            !first_ack_restore,
             "the next actual window frame must not schedule a size restore"
         );
 
@@ -2189,8 +2201,8 @@ mod tests {
             manager.snapshot().native_geometry(key),
             Some(latest_geometry)
         );
-        assert_eq!(
-            superseded_reset_restore, true,
+        assert!(
+            superseded_reset_restore,
             "a native-only acknowledgement must not retire an older explicit reset"
         );
         workers.join_all();

@@ -700,6 +700,10 @@ fn legacy_listener_triggers_with_sequences(
     watched
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Legacy listener setup keeps its trigger inputs explicit."
+)]
 fn legacy_listener_triggers_with_stop(
     shared_invocation: bool,
     launcher: &Arc<HotkeyTrigger>,
@@ -741,6 +745,10 @@ fn recording_stop_trigger(
         })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Settings routing forwards the legacy listener trigger set directly."
+)]
 fn legacy_listener_triggers_for_settings(
     settings: &Settings,
     shared_invocation: bool,
@@ -3380,6 +3388,10 @@ fn prepare_hotkey_runtime_message(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Hotkey preparation gathers independent runtime inputs at this bridge."
+)]
 fn prepare_hotkey_runtime_message_with_recording_stop_bridge(
     request: multi_launcher::hotkey::reconfiguration::HotkeyPreparationRequest,
     radial_document: &RadialDocument,

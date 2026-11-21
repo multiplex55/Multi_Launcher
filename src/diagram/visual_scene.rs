@@ -21,6 +21,7 @@ pub const MAX_VISUAL_DASH_SEGMENTS_PER_SCENE: usize = 32_768;
 pub const MAX_VISUAL_PROJECTION_COORDINATE_ABS: f64 = 1_000_000_000.0;
 pub const MAX_VISUAL_CONNECTOR_LABEL_LINES: usize = 8;
 pub const MAX_VISUAL_CONNECTOR_ROUTE_POINTS: usize = 128;
+const _: () = assert!(MAX_VISUAL_DASH_SEGMENTS_PER_ITEM > 0);
 const MAX_CONNECTOR_ROUTER_OBSTACLES: usize = 24;
 const MAX_CONNECTOR_ROUTER_GRID_NODES: usize = 4_096;
 const MAX_CONNECTOR_ROUTER_WORK_UNITS: usize = 2_000_000;
@@ -3795,7 +3796,6 @@ mod tests {
         assert!(projection.simplified_dash_paths > 0);
         assert!(projection.simplified_dash_paths <= 64);
         assert!(projection.items[1].dash_paths.is_none());
-        assert!(MAX_VISUAL_DASH_SEGMENTS_PER_ITEM > 0);
         assert!(MAX_VISUAL_PROJECTED_ITEMS >= projection.items.len());
 
         let mut huge = VisualDiagramDocument::new();

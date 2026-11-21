@@ -670,6 +670,10 @@ enum VisualAssetWorkKindTag {
     Export,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Worker results stay inline to preserve the existing channel message type."
+)]
 enum VisualAssetWorkResult {
     Import(Result<PreparedVisualAsset, String>),
     Hydrate(Vec<Result<DecodedVisualAsset, (VisualAssetId, String)>>),
@@ -731,6 +735,10 @@ enum DrawioWorkKind {
     Export,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Worker results stay inline to preserve the existing channel message type."
+)]
 enum DrawioWorkResult {
     Import(Result<DrawioImportResult, DrawioImportError>),
     Export(Result<DrawioExportResult, DrawioWireError>),
@@ -749,6 +757,10 @@ struct PendingDrawioWork {
     retired: bool,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Workflow review state stays in one enum for the modal lifecycle."
+)]
 enum DrawioWorkflowReview {
     Import {
         scope: DrawioWorkflowScope,
@@ -4815,7 +4827,7 @@ impl DiagramStudioDialog {
                 ));
                 return None;
             };
-            return Some(dialog.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)));
+            Some(dialog.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)))
         }
         #[cfg(not(windows))]
         Some(dialog)
@@ -5107,7 +5119,7 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
-            return self.test_next_file_picker_result.take().unwrap_or(None);
+            self.test_next_file_picker_result.take().unwrap_or(None)
         }
         #[cfg(not(test))]
         {
@@ -5129,7 +5141,7 @@ impl DiagramStudioDialog {
                 let _ = self.documents.replace_source(&source);
                 self.refresh_cache();
             }
-            return self.test_next_file_picker_result.take().unwrap_or(None);
+            self.test_next_file_picker_result.take().unwrap_or(None)
         }
         #[cfg(not(test))]
         {
@@ -5155,11 +5167,11 @@ impl DiagramStudioDialog {
                 let _ = self.documents.replace_source(&source);
                 self.refresh_cache();
             }
-            return self
+            self
                 .test_next_file_picker_result
                 .take()
                 .unwrap_or(None)
-                .map(ensure_drawio_extension);
+                .map(ensure_drawio_extension)
         }
         #[cfg(not(test))]
         {
@@ -5763,11 +5775,11 @@ impl DiagramStudioDialog {
                 let next = if self.owner_host.presentation() == UtilityPresentation::Docked { UtilityPresentation::Popout } else { UtilityPresentation::Docked };
                 self.owner_host.transition(next);
             }
-            return self
+            self
                 .test_next_file_picker_result
                 .take()
                 .unwrap_or(None)
-                .map(|path| ensure_export_extension(path, format));
+                .map(|path| ensure_export_extension(path, format))
         }
         #[cfg(not(test))]
         {
@@ -5849,7 +5861,7 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
-            return self
+            self
                 .test_next_file_picker_result
                 .take()
                 .unwrap_or(None)
@@ -5859,7 +5871,7 @@ impl DiagramStudioDialog {
                     } else {
                         path
                     }
-                });
+                })
         }
         #[cfg(not(test))]
         {
@@ -5900,11 +5912,11 @@ impl DiagramStudioDialog {
                 let _ = self.documents.replace_source(&source);
                 self.refresh_cache();
             }
-            return self
+            self
                 .test_next_file_picker_result
                 .take()
                 .unwrap_or(None)
-                .map(ensure_native_extension);
+                .map(ensure_native_extension)
         }
         #[cfg(not(test))]
         {
@@ -6071,7 +6083,7 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
-            return self.test_next_file_picker_result.take().unwrap_or(None);
+            self.test_next_file_picker_result.take().unwrap_or(None)
         }
         #[cfg(not(test))]
         {
@@ -10831,20 +10843,38 @@ impl DiagramStudioDialog {
                         self.test_action_rects.push(("visual_group_selection".into(), group.rect, ui.clip_rect()));
                     }
                     visual_target!(ui, group, "visual/group", "Group selection", Button);
-                    if group.clicked() && document_intent.is_none() {
-                        if let (Some(scene), Some(projection)) = (scene_snapshot.as_deref(), base_projection) {
-                            let group_selection = group_roots.iter().copied().collect();
-                            if let Some(bounds) = visual_canvas_selection_bounds(scene, projection, &group_selection, visual_painted_item_prefix(projection)) {
-                                staged_operations = Some((vec![VisualOperation::Group {
+                    if group.clicked()
+                        && document_intent.is_none()
+                        && let (Some(scene), Some(projection)) =
+                            (scene_snapshot.as_deref(), base_projection)
+                    {
+                        let group_selection = group_roots.iter().copied().collect();
+                        if let Some(bounds) = visual_canvas_selection_bounds(
+                            scene,
+                            projection,
+                            &group_selection,
+                            visual_painted_item_prefix(projection),
+                        ) {
+                            staged_operations = Some((
+                                vec![VisualOperation::Group {
                                     frame: VisualObjectDraft {
                                         layer_id: DEFAULT_LAYER_ID,
-                                        transform: VisualTransform { x: bounds.center().x, y: bounds.center().y, width: (bounds.max.x - bounds.min.x + 40.0).max(40.0), height: (bounds.max.y - bounds.min.y + 64.0).max(64.0), rotation_degrees: 0.0 },
+                                        transform: VisualTransform {
+                                            x: bounds.center().x,
+                                            y: bounds.center().y,
+                                            width: (bounds.max.x - bounds.min.x + 40.0).max(40.0),
+                                            height: (bounds.max.y - bounds.min.y + 64.0).max(64.0),
+                                            rotation_degrees: 0.0,
+                                        },
                                         style: visual_frame_style(),
-                                        kind: VisualObjectKind::Container { label: "Group".into() },
+                                        kind: VisualObjectKind::Container {
+                                            label: "Group".into(),
+                                        },
                                     },
                                     members: group_roots,
-                                }], None));
-                            }
+                                }],
+                                None,
+                            ));
                         }
                     }
                     let ungroup_id = scene_snapshot.as_ref().and_then(|scene| self.visual_selection.and_then(|id| scene.objects.iter().find(|object| object.id == id && matches!(object.kind, VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. })).map(|object| object.id)));
@@ -10852,8 +10882,11 @@ impl DiagramStudioDialog {
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_ungroup".into(), ungroup.rect, ui.clip_rect()));
                     visual_target!(ui, ungroup, "visual/ungroup", "Ungroup", Button);
-                    if ungroup.clicked() && document_intent.is_none() {
-                        if let Some(id) = ungroup_id { staged_operations = Some((vec![VisualOperation::Ungroup(id)], None)); }
+                    if ungroup.clicked()
+                        && document_intent.is_none()
+                        && let Some(id) = ungroup_id
+                    {
+                        staged_operations = Some((vec![VisualOperation::Ungroup(id)], None));
                     }
                     let add_horizontal_swimlane = ui.add_enabled(
                         structural_edits_allowed,
@@ -17921,6 +17954,7 @@ mod tests {
         assert_eq!(dialog.visual_selected_objects.len(), 2);
         assert_eq!(dialog.visual_selection, Some(child_id));
 
+        focus_visual_canvas(&mut dialog, &ctx);
         let before_discarded_release = dialog.documents.visual_scene().unwrap().clone();
         let discarded_revision = dialog.documents.visual_revision().unwrap();
         frame_with_child_events(
@@ -18807,7 +18841,23 @@ mod tests {
         let root_before = dialog.camera;
         let viewer_before = dialog.viewer_camera;
         let root_minimap = dialog.test_action_rect("visual_minimap").unwrap().0;
-        let root_click = root_minimap.left_top() + egui::vec2(8.0, 8.0);
+        let root_click = root_minimap.left_top() + egui::vec2(2.0, 2.0);
+        let projection = project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap();
+        let root_canvas = dialog.test_visual_canvas_rect.unwrap();
+        let root_layout = minimap_layout_for_camera(
+            &projection,
+            root_canvas.shrink(12.0),
+            root_canvas,
+            root_minimap,
+            dialog.camera,
+        )
+        .unwrap();
+        assert!(
+            !root_layout
+                .viewport
+                .contains_point(scene_point_from_screen(root_click)),
+            "the root minimap click must be outside its current viewport"
+        );
         for pressed in [true, false] {
             frame_with_child_events(
                 &mut dialog,
@@ -19029,7 +19079,7 @@ mod tests {
         assert_eq!(dialog.test_session().status().preview, PreviewState::Stale);
         assert!(dialog.test_session().preview_graph().is_some());
         assert!(dialog.test_session().current_graph().is_none());
-        assert!(dialog.test_viewer_generic_preview_drawn());
+        assert!(dialog.test_generic_preview_drawn());
         assert!(!dialog.test_native_inspector_visible());
         assert!(dialog.test_source_editor_enabled());
         assert_eq!(dialog.test_preview_status_text(), None);
@@ -19309,6 +19359,53 @@ mod tests {
             })
     }
 
+    fn menu_trigger_for_action(name: &str) -> Option<&'static str> {
+        if name.starts_with("document_") {
+            Some("menu_file")
+        } else if matches!(name, "visual_undo" | "visual_redo") {
+            Some("menu_edit")
+        } else if name.starts_with("view_") || name == "show_preview" {
+            Some("menu_view")
+        } else {
+            None
+        }
+    }
+
+    fn settle_menu_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
+        let mut previous = None;
+        for _ in 0..16 {
+            frame(dialog, ctx);
+            let menu_ready = dialog
+                .active_menu_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.sizing_pass && !scope.item_ids.is_empty());
+            let current = dialog.test_action_rect(name);
+            if menu_ready && current.is_some() && current == previous {
+                return;
+            }
+            previous = if menu_ready { current } else { None };
+        }
+        panic!(
+            "menu action {name} did not reach stable geometry: menu_scope={:?}, rect={:?}",
+            dialog.active_menu_scope,
+            dialog.test_action_rect(name)
+        );
+    }
+
+    fn prepare_menu_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
+        let Some(trigger) = menu_trigger_for_action(name) else {
+            return;
+        };
+        if !dialog
+            .test_action_rects
+            .iter()
+            .any(|(action, _, _)| action == name)
+        {
+            click_action(dialog, ctx, trigger);
+        }
+        settle_menu_action(dialog, ctx, name);
+    }
+
     fn reveal_control(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
         for _ in 0..20 {
             frame(dialog, ctx);
@@ -19409,22 +19506,7 @@ mod tests {
 
     fn click_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
         frame(dialog, ctx);
-        if name.starts_with("document_") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
-            click_action(dialog, ctx, "menu_file");
-        }
-        if matches!(name, "visual_undo" | "visual_redo") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
-            click_action(dialog, ctx, "menu_edit");
-            let mut previous = None;
-            for _ in 0..8 {
-                frame(dialog, ctx);
-                let current = dialog.test_action_rect(name);
-                if current.is_some() && current == previous { break; }
-                previous = current;
-            }
-        }
-        if (name.starts_with("view_") || name == "show_preview") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
-            click_action(dialog, ctx, "menu_view");
-        }
+        prepare_menu_action(dialog, ctx, name);
         let click = action_center(dialog, name);
         for pressed in [true, false] {
             frame_with_child_events(
@@ -19503,9 +19585,7 @@ mod tests {
         name: &str,
     ) {
         frame(dialog, ctx);
-        if name.starts_with("document_") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
-            click_action(dialog, ctx, "menu_file");
-        }
+        prepare_menu_action(dialog, ctx, name);
         let click = action_center(dialog, name);
         for pressed in [true, false] {
             if !pressed {
@@ -19596,16 +19676,13 @@ mod tests {
         trigger: &str,
         first_item: &str,
     ) {
-        let source = dialog.documents.session().map(|session| session.draft().to_owned());
-        let visual_revision = dialog.documents.visual_revision();
-        let render_document = dialog.render_document.clone();
-        let assert_document_unchanged = |dialog: &DiagramStudioDialog| {
-            assert_eq!(dialog.documents.session().map(DiagramSession::draft), source.as_deref());
-            assert_eq!(dialog.documents.visual_revision(), visual_revision);
-            assert_eq!(dialog.render_document, render_document);
-        };
+        let before = menu_document_state(dialog);
         focus_action_with_keyboard(dialog, ctx, trigger);
-        assert_document_unchanged(dialog);
+        assert_eq!(
+            menu_document_state(dialog),
+            before,
+            "focusing menu trigger changed document state"
+        );
         send_child_key(dialog, ctx, egui::Key::Space, egui::Modifiers::NONE);
         for _ in 0..4 {
             frame(dialog, ctx);
@@ -19613,9 +19690,35 @@ mod tests {
         for _ in 0..32 {
             if dialog.test_action_has_focus(first_item) { return; }
             send_child_key(dialog, ctx, egui::Key::Tab, egui::Modifiers::NONE);
-            assert_document_unchanged(dialog);
+            assert_eq!(
+                menu_document_state(dialog),
+                before,
+                "menu traversal changed document state; scope {:?}",
+                dialog.active_menu_scope
+            );
         }
         assert!(dialog.test_action_has_focus(first_item), "menu should focus {first_item}");
+    }
+
+    fn menu_document_state(
+        dialog: &DiagramStudioDialog,
+    ) -> (
+        RenderDocumentIdentity,
+        Option<crate::diagram::DiagramAuthoringKind>,
+        Option<(String, u64)>,
+        Option<VisualScene>,
+        Option<u64>,
+    ) {
+        (
+            dialog.render_document.clone(),
+            dialog.documents.authoring_kind(),
+            dialog
+                .documents
+                .session()
+                .map(|session| (session.draft().to_owned(), session.revision())),
+            dialog.documents.visual_scene().cloned(),
+            dialog.documents.visual_revision(),
+        )
     }
 
     #[test]
@@ -22760,7 +22863,15 @@ mod tests {
         let source = dialog.test_session().draft().to_owned();
         let output = crate::diagram::render_mermaid_preview(&source, RasterSize::new(400, 300).unwrap()).unwrap();
         for color in ["#123456", "#a10001", "#a20002", "#b10001", "#b20002"] { assert!(output.svg.contains(color), "{color}"); }
-        assert!(output.raster.rgba.chunks_exact(4).any(|pixel| pixel[..3] == [0x12, 0x34, 0x56]));
+        assert!(
+            output
+                .raster
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[..3] == [0x12, 0x34, 0x56])
+        );
         let rendered = DiagramRenderedImageSnapshot::capture(dialog.test_session().revision(), Arc::new(output));
         assert!(std::str::from_utf8(rendered.encode_svg(1.0).unwrap().bytes()).unwrap().contains("#123456"));
         let png = rendered.encode_png(1.0).unwrap();
@@ -24358,7 +24469,7 @@ mod tests {
             .and_then(|cache| cache.scene.as_ref())
             .expect("document B has a shared native scene");
         assert_eq!(scene.nodes[0].id.as_str(), "B");
-        assert_eq!(dialog.viewer_camera.fit_next, false);
+        assert!(!dialog.viewer_camera.fit_next);
         assert!(dialog.viewer_open);
         assert_eq!(
             dialog.test_session().draft(),
@@ -27483,7 +27594,11 @@ mod tests {
             opened.authoring_kind(),
             Some(crate::diagram::DiagramAuthoringKind::Visual)
         );
-        assert!(opened.visual_scene().unwrap().objects.len() >= 7);
+        assert_eq!(
+            opened.visual_scene().unwrap().objects.len(),
+            6,
+            "the visual copy contains its title, three nodes, and two connectors"
+        );
         assert_eq!(
             RecentDiagramIndex::load(&recents_path).unwrap().paths(),
             [destination]

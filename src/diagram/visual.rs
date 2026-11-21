@@ -33,6 +33,8 @@ pub const MIN_VISUAL_DIMENSION: f64 = 0.1;
 pub const TITLE_OBJECT_ID: VisualObjectId = VisualObjectId(1);
 pub const DEFAULT_LAYER_ID: VisualLayerId = VisualLayerId(1);
 
+const _: () = assert!(MAX_VISUAL_DOCUMENT_TITLE_BYTES < MAX_VISUAL_TEXT_BYTES);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct VisualObjectId(u64);
@@ -4409,6 +4411,5 @@ mod tests {
             ),
             Err(VisualDocumentError::SceneTooLarge { .. })
         ));
-        assert!(MAX_VISUAL_DOCUMENT_TITLE_BYTES < super::MAX_VISUAL_TEXT_BYTES);
     }
 }

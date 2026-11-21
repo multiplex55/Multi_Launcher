@@ -189,6 +189,10 @@ pub(super) enum ClipboardModifyHostCommand {
     Apply(ClipboardModifyHostActions),
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The host protocol carries dialog effects inline for direct dispatch."
+)]
 pub(super) enum ClipboardHostCommand {
     Closed,
     Apply(ClipboardDialogEffects),
@@ -2085,6 +2089,10 @@ impl HostedUtilityDialog for JsonUtilityDialogState {
 
 pub(super) type ProgrammerInspectorWindowHost =
     UtilityWindowHost<super::programmer_inspector_dialog::ProgrammerInspectorDialog>;
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The host protocol carries inspector actions inline for direct dispatch."
+)]
 pub(super) enum ProgrammerInspectorHostCommand {
     Closed,
     Apply(
@@ -2294,6 +2302,10 @@ impl HostedUtilityDialog for super::image_panel::ImagePanel {
 
 pub(super) type NoteTemplatesWindowHost =
     UtilityWindowHost<super::notes_dialog::TemplateManagerState>;
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The host protocol carries template actions inline for direct dispatch."
+)]
 pub(super) enum NoteTemplatesHostCommand {
     Closed,
     Apply(super::notes_dialog::TemplateHostActions),
@@ -2633,6 +2645,10 @@ impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
 
 pub(super) type FilePreviewWindowHost =
     UtilityWindowHost<super::file_search_preview_dialog::FileSearchPreviewDialogState>;
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The host protocol carries preview actions inline for direct dispatch."
+)]
 pub(super) enum FilePreviewHostCommand {
     Closed,
     Apply(super::file_search_preview_dialog::FileSearchPreviewHostActions),

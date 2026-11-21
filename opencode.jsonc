@@ -1,0 +1,5 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openai/gpt-6.2-sol",
+  "default_agent": "orchestrator"
+}

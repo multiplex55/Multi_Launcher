@@ -1097,31 +1097,23 @@ impl ProgrammerInspectorDialog {
                     }
                     let button = ui.button("Shift left");
                     inspector_target(scope, ui, &button, "shift-left", "Shift left", super::jump_mode::TargetKind::Button, &mut order);
-                    if button.clicked() {
-                        if model.shift_left(1).is_ok() {
-                            changed = true;
-                        }
+                    if button.clicked() && model.shift_left(1).is_ok() {
+                        changed = true;
                     }
                     let button = ui.button("Shift right");
                     inspector_target(scope, ui, &button, "shift-right", "Shift right", super::jump_mode::TargetKind::Button, &mut order);
-                    if button.clicked() {
-                        if model.shift_right(1).is_ok() {
-                            changed = true;
-                        }
+                    if button.clicked() && model.shift_right(1).is_ok() {
+                        changed = true;
                     }
                     let button = ui.button("Rotate left");
                     inspector_target(scope, ui, &button, "rotate-left", "Rotate left", super::jump_mode::TargetKind::Button, &mut order);
-                    if button.clicked() {
-                        if model.rotate_left(1).is_ok() {
-                            changed = true;
-                        }
+                    if button.clicked() && model.rotate_left(1).is_ok() {
+                        changed = true;
                     }
                     let button = ui.button("Rotate right");
                     inspector_target(scope, ui, &button, "rotate-right", "Rotate right", super::jump_mode::TargetKind::Button, &mut order);
-                    if button.clicked() {
-                        if model.rotate_right(1).is_ok() {
-                            changed = true;
-                        }
+                    if button.clicked() && model.rotate_right(1).is_ok() {
+                        changed = true;
                     }
                     ui.label(format!("Set bits: {}", model.popcount()));
                 });

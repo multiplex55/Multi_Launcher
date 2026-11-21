@@ -2,10 +2,10 @@
 
 **Suggested filename:** `OPENCODE_GOAL_LAUNCHER_QUERY_ROUNDTRIP.md`
 
-**Repository:** `multiplex55/Multi_Launcher`  
-**Reference commit:** `67587a6527d27bedf8fcded0f27f741a6a25f91f`  
-**Reference branch:** `fix/launcher-query-result-navigation`  
-**Priority:** High  
+**Repository:** `multiplex55/Multi_Launcher`\
+**Reference commit:** `67587a6527d27bedf8fcded0f27f741a6a25f91f`\
+**Reference branch:** `fix/launcher-query-result-navigation`\
+**Priority:** High\
 **Scope:** Main launcher query input and its search-result list/grid only
 
 ## 1. Objective

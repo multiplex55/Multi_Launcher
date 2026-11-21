@@ -2084,7 +2084,7 @@ mod tests {
 
         let (pixels, stride, flip_vertical) = if let Ok(two_d) = buffer.cast::<IMF2DBuffer>() {
             let length = unsafe { two_d.GetContiguousLength()? } as usize;
-            if length == 0 || length > max_length || length % rows != 0 {
+            if length == 0 || length > max_length || !length.is_multiple_of(rows) {
                 return Err("Media Foundation returned an invalid bounded NV12 extent".into());
             }
             let stride = length / rows;

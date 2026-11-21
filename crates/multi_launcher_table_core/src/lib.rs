@@ -50,6 +50,7 @@ pub const STRICT_CSV_MAX_MATERIALIZED_BYTES: usize = 64 * 1024 * 1024;
 pub const STRICT_CSV_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONFIGURABLE_PREVIEW_CHARS: usize = 512;
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+#[cfg(test)]
 const SCANNER_CANCELLATION_INTERVAL: usize = 4096;
 static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_VIEW_ID: AtomicU64 = AtomicU64::new(1);
@@ -1028,6 +1029,7 @@ fn scan_records(
     })
 }
 
+#[cfg(test)]
 fn scanner_cancellation_checkpoint(
     byte_offset: usize,
     next_checkpoint: &mut usize,

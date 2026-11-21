@@ -126,7 +126,7 @@ impl<W: Write> GifStream<W> {
         // GIF transparency is player-disposal dependent for full-canvas
         // updates. Flatten each source frame onto a fixed black matte so
         // earlier opaque pixels cannot leak through transparent capture.
-        for pixel in self.scratch.chunks_exact_mut(4) {
+        for pixel in self.scratch.as_chunks_mut::<4>().0 {
             let alpha = u16::from(pixel[3]);
             for channel in &mut pixel[..3] {
                 *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
@@ -562,7 +562,7 @@ mod tests {
                     generation: self.generation,
                     frame: RgbaFrame::new(
                         self.canvas,
-                        vec![220, 20, 30, 255].repeat(self.canvas.rgba_bytes() / 4),
+                        [220, 20, 30, 255].repeat(self.canvas.rgba_bytes() / 4),
                     )
                     .unwrap(),
                 }
@@ -786,8 +786,8 @@ mod tests {
     fn recording_gif_stream_flattens_transparency_on_a_stable_black_matte() {
         let canvas = canvas();
         let mut stream = GifStream::new(Vec::new(), canvas).unwrap();
-        let opaque = vec![200, 30, 40, 255].repeat(canvas.rgba_bytes() / 4);
-        let transparent = vec![0, 250, 0, 0].repeat(canvas.rgba_bytes() / 4);
+        let opaque = [200, 30, 40, 255].repeat(canvas.rgba_bytes() / 4);
+        let transparent = [0, 250, 0, 0].repeat(canvas.rgba_bytes() / 4);
         stream
             .write_frame_data(Duration::ZERO, canvas, &opaque)
             .unwrap();

@@ -358,6 +358,7 @@ pub(crate) enum ShapeBufferProvenance {
     /// `layout_section` uses only a new buffer or one returned by `clear`.
     LayoutOwnedClean,
     /// Callers without the layout lifecycle proof must bypass raw-result reuse.
+    #[cfg(all(test, feature = "default_fonts"))]
     Unknown,
 }
 
