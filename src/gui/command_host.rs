@@ -1147,7 +1147,7 @@ impl ClipboardModifyCommandHost for LauncherApp {
         captured_history_query: Option<&str>,
     ) -> Result<ClipboardModifyUndoSubmission, String> {
         let root_policy = self.command_root_policy;
-        let interaction_snapshot = self.launcher_interaction_snapshot();
+        let visibility_revision_at_invocation = self.visibility_revision.current();
         #[cfg(test)]
         if let Some(service) = self.clipboard_modify_test_service.clone() {
             self.clipboard_modify_dialog.start_undo(
@@ -1156,7 +1156,7 @@ impl ClipboardModifyCommandHost for LauncherApp {
                 invocation.clone(),
                 captured_history_query,
                 root_policy,
-                interaction_snapshot,
+                visibility_revision_at_invocation,
             )?;
             return Ok(ClipboardModifyUndoSubmission::Queued);
         }
@@ -1166,7 +1166,7 @@ impl ClipboardModifyCommandHost for LauncherApp {
             invocation.clone(),
             captured_history_query,
             root_policy,
-            interaction_snapshot,
+            visibility_revision_at_invocation,
         )?;
         Ok(ClipboardModifyUndoSubmission::Queued)
     }
@@ -2554,6 +2554,40 @@ impl LauncherApp {
         captured_history_query: Option<&str>,
         root_policy: crate::universal_actions::RootLauncherPolicy,
     ) {
+        self.apply_command_outcome_with_root_policy_guarded(
+            outcome,
+            invocation,
+            captured_history_query,
+            root_policy,
+            None,
+        );
+    }
+
+    pub(crate) fn apply_command_outcome_with_root_policy_if_visibility_unchanged(
+        &mut self,
+        outcome: CommandOutcome,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+        root_policy: crate::universal_actions::RootLauncherPolicy,
+        expected_visibility_revision: u64,
+    ) {
+        self.apply_command_outcome_with_root_policy_guarded(
+            outcome,
+            invocation,
+            captured_history_query,
+            root_policy,
+            Some(expected_visibility_revision),
+        );
+    }
+
+    fn apply_command_outcome_with_root_policy_guarded(
+        &mut self,
+        outcome: CommandOutcome,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+        root_policy: crate::universal_actions::RootLauncherPolicy,
+        expected_visibility_revision: Option<u64>,
+    ) {
         let outcome = normalize_outcome_for_root_policy(outcome, root_policy);
         let history_query = captured_history_query
             .map(str::to_owned)
@@ -2657,7 +2691,7 @@ impl LauncherApp {
         }
 
         if outcome.visibility != VisibilityPolicy::Keep || outcome.restore {
-            self.visibility_revision.request(|| {
+            let update_visibility = || {
                 let visible = match outcome.visibility {
                     VisibilityPolicy::Keep => self.visible_flag.load(Ordering::SeqCst),
                     VisibilityPolicy::Show => true,
@@ -2668,7 +2702,14 @@ impl LauncherApp {
                 if outcome.restore {
                     self.restore_flag.store(true, Ordering::SeqCst);
                 }
-            });
+            };
+            if let Some(expected_revision) = expected_visibility_revision {
+                let _ = self
+                    .visibility_revision
+                    .request_if_current(expected_revision, update_visibility);
+            } else {
+                self.visibility_revision.request(update_visibility);
+            }
         }
         if outcome.move_cursor_end {
             self.move_cursor_end = true;

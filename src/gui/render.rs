@@ -3564,20 +3564,13 @@ impl LauncherApp {
                             )],
                             ..Default::default()
                         };
-                        self.apply_command_outcome_with_root_policy(
+                        self.apply_command_outcome_with_root_policy_if_visibility_unchanged(
                             outcome,
                             &completion.invocation,
                             completion.captured_history_query.as_deref(),
                             completion.root_policy,
+                            completion.visibility_revision_at_invocation,
                         );
-                        if completion.root_policy
-                            == crate::universal_actions::RootLauncherPolicy::Legacy
-                        {
-                            // A delayed legacy Hide must not hide a root panel opened after Undo.
-                            self.restore_for_new_launcher_interaction(
-                                &completion.interaction_snapshot,
-                            );
-                        }
                     }
                     Err(error) => {
                         <Self as crate::commands::ClipboardModifyCommandHost>::report_clipboard_modify_action_error(
