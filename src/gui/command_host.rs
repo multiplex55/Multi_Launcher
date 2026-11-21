@@ -1147,6 +1147,7 @@ impl ClipboardModifyCommandHost for LauncherApp {
         captured_history_query: Option<&str>,
     ) -> Result<ClipboardModifyUndoSubmission, String> {
         let root_policy = self.command_root_policy;
+        let interaction_snapshot = self.launcher_interaction_snapshot();
         #[cfg(test)]
         if let Some(service) = self.clipboard_modify_test_service.clone() {
             self.clipboard_modify_dialog.start_undo(
@@ -1155,6 +1156,7 @@ impl ClipboardModifyCommandHost for LauncherApp {
                 invocation.clone(),
                 captured_history_query,
                 root_policy,
+                interaction_snapshot,
             )?;
             return Ok(ClipboardModifyUndoSubmission::Queued);
         }
@@ -1164,6 +1166,7 @@ impl ClipboardModifyCommandHost for LauncherApp {
             invocation.clone(),
             captured_history_query,
             root_policy,
+            interaction_snapshot,
         )?;
         Ok(ClipboardModifyUndoSubmission::Queued)
     }

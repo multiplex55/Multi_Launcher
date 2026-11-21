@@ -3570,6 +3570,14 @@ impl LauncherApp {
                             completion.captured_history_query.as_deref(),
                             completion.root_policy,
                         );
+                        if completion.root_policy
+                            == crate::universal_actions::RootLauncherPolicy::Legacy
+                        {
+                            // A delayed legacy Hide must not hide a root panel opened after Undo.
+                            self.restore_for_new_launcher_interaction(
+                                &completion.interaction_snapshot,
+                            );
+                        }
                     }
                     Err(error) => {
                         <Self as crate::commands::ClipboardModifyCommandHost>::report_clipboard_modify_action_error(
@@ -59729,6 +59737,10 @@ mod tests {
         let apply = clickable(app.clipboard_modify_dialog.test_host_buttons().1, "Apply");
         detached(&mut app, tool_dialog_pointer_events(apply, true), false);
         detached(&mut app, tool_dialog_pointer_events(apply, false), true);
+        assert!(
+            !app.clipboard_modify_dialog.has_pending_mutation(),
+            "a discarded Apply response must not admit a clipboard mutation"
+        );
         assert!(clipboard.backend().writes().is_empty());
         for _ in 0..2 {
             detached(&mut app, Vec::new(), false);

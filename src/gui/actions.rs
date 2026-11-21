@@ -2315,6 +2315,54 @@ mod clipboard_modify_gui_action_tests {
     }
 
     #[test]
+    fn delayed_legacy_undo_keeps_launcher_visible_after_new_panel_opens() {
+        use crate::clipboard_modify::clipboard::ClipboardBackend as _;
+
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        let service = app.clipboard_modify_test_service.clone().unwrap();
+        let original = service.backend().read_text().unwrap();
+        service
+            .commit_output("modified".into(), "test seed")
+            .unwrap();
+        app.clipboard_modify_dialog.control_source_reads_for_test();
+
+        let undo_invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::ClipboardModify(
+                crate::commands::ClipboardModifyCommand::Undo { raw_argument: None },
+            ),
+            original_action: action("clipboard_modify:undo", None),
+            query_override: None,
+            source: ActivationSource::Gesture,
+        };
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+        app.dispatch_command_invocation(undo_invocation);
+        assert!(app.clipboard_modify_dialog.has_pending_mutation());
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+
+        assert!(activate(
+            &mut app,
+            &action("clipboard_modify:open:help", None),
+            ActivationSource::Click
+        ));
+        assert!(app.clipboard_modify_dialog.open);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+
+        app.clipboard_modify_dialog
+            .wait_for_mutation_completion_for_test();
+        app.poll_clipboard_modify_runtime(&ctx);
+
+        assert!(app.clipboard_modify_dialog.open);
+        assert!(
+            app.visible_flag.load(Ordering::SeqCst),
+            "a completion for the older Undo must not hide a panel opened afterward"
+        );
+        assert_eq!(service.backend().read_text().unwrap(), original);
+        assert!(service.undo_record().is_none());
+    }
+
+    #[test]
     fn concurrent_activation_shows_already_running_and_leaves_launcher_visible() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
