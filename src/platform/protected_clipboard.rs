@@ -162,6 +162,8 @@ mod platform {
         ErrorCode,
         GetResults,
         Cancel,
+        WorkerCleanup,
+        MtaTeardown,
     }
 
     impl ReadStage {
@@ -182,6 +184,8 @@ mod platform {
                 Self::ErrorCode => "IAsyncOperation.ErrorCode",
                 Self::GetResults => "IAsyncOperation.GetResults",
                 Self::Cancel => "IAsyncOperation.Cancel",
+                Self::WorkerCleanup => "WinRT cleanup",
+                Self::MtaTeardown => "RoUninitialize",
             }
         }
 
@@ -201,7 +205,9 @@ mod platform {
                 11 => Self::Completion,
                 12 => Self::ErrorCode,
                 13 => Self::GetResults,
-                _ => Self::Cancel,
+                14 => Self::Cancel,
+                15 => Self::WorkerCleanup,
+                _ => Self::MtaTeardown,
             }
         }
     }
@@ -368,10 +374,11 @@ mod platform {
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_cancelled = Arc::clone(&cancelled);
         let (sender, receiver) = mpsc::sync_channel(1);
+        diagnostics.enter(ReadStage::WorkerSpawn);
         let spawned = thread::Builder::new()
             .name(MODIFY_READ_WORKER_NAME.into())
             .spawn(move || {
-                let _permit = permit;
+                let permit = permit;
                 let result = worker(
                     Arc::clone(&worker_diagnostics),
                     Arc::clone(&worker_cancelled),
@@ -390,6 +397,10 @@ mod platform {
                             result => result,
                         }
                     };
+                // The worker closure has returned only after native views and
+                // its apartment are torn down. Free capacity before publishing
+                // so a successful recovery admits the next caller immediately.
+                drop(permit);
                 let _ = sender.try_send(result);
             });
         match spawned {
@@ -401,19 +412,49 @@ mod platform {
             }
         }
 
+        receive_bounded_result(&receiver, deadline, &cancelled, &diagnostics)
+    }
+
+    fn receive_bounded_result<T>(
+        receiver: &Receiver<Result<T, ClipboardError>>,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+        diagnostics: &ReadDiagnostics,
+    ) -> Result<T, ClipboardError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match receiver.recv_timeout(remaining) {
-            Ok(result) => result,
-            Err(RecvTimeoutError::Timeout) => {
-                cancelled.store(true, Ordering::Release);
-                diagnostics.timeout();
-                Err(ClipboardError::TimedOut)
+            Ok(result) => accept_worker_result(result, deadline, cancelled, diagnostics),
+            Err(RecvTimeoutError::Timeout) => expire_worker_wait(cancelled, diagnostics),
+            Err(RecvTimeoutError::Disconnected) if Instant::now() >= deadline => {
+                expire_worker_wait(cancelled, diagnostics)
             }
             Err(RecvTimeoutError::Disconnected) => {
                 diagnostics.issue("worker_exited_without_result", diagnostics.current_stage());
                 Err(ClipboardError::Unavailable)
             }
         }
+    }
+
+    fn accept_worker_result<T>(
+        result: Result<T, ClipboardError>,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+        diagnostics: &ReadDiagnostics,
+    ) -> Result<T, ClipboardError> {
+        if Instant::now() < deadline {
+            result
+        } else {
+            expire_worker_wait(cancelled, diagnostics)
+        }
+    }
+
+    fn expire_worker_wait<T>(
+        cancelled: &AtomicBool,
+        diagnostics: &ReadDiagnostics,
+    ) -> Result<T, ClipboardError> {
+        cancelled.store(true, Ordering::Release);
+        diagnostics.timeout();
+        Err(ClipboardError::TimedOut)
     }
 
     fn map_hresult(hresult: u32) -> ClipboardError {
@@ -512,8 +553,13 @@ mod platform {
                 Ok(()) => {
                     let apartment = Self(PhantomData);
                     context.diagnostics.mark_mta();
-                    context.check()?;
-                    Ok(apartment)
+                    if let Err(error) = context.check() {
+                        context.diagnostics.enter(ReadStage::MtaTeardown);
+                        drop(apartment);
+                        Err(error)
+                    } else {
+                        Ok(apartment)
+                    }
                 }
                 Err(error) => {
                     Err(context.map_hresult(ReadStage::MtaInitialize, error.code().0 as u32))
@@ -659,8 +705,11 @@ mod platform {
                     return Err(context.map_hresult(ReadStage::GetTextAsync, error.code().0 as u32));
                 }
             };
+            let operation = WinRtTextOperation::new(operation);
             if let Err(error) = context.check() {
                 cancel_operation(&operation, context.diagnostics);
+                context.diagnostics.enter(ReadStage::WorkerCleanup);
+                drop(operation);
                 return Err(error);
             }
             wait_text_for_modify(operation, context)
@@ -720,30 +769,92 @@ mod platform {
         }
     }
 
-    fn cancel_operation(operation: &IAsyncOperation<HSTRING>, diagnostics: &ReadDiagnostics) {
-        diagnostics.enter(ReadStage::Cancel);
-        if let Err(error) = operation.Cancel() {
-            tracing::warn!(
-                target: "multi_launcher::clipboard",
-                outcome = "cancel_hresult",
-                stage = ReadStage::Cancel.as_str(),
-                elapsed_ms = diagnostics.elapsed_ms(),
-                apartment = diagnostics.apartment(),
-                hresult = error.code().0 as u32,
-                "WinRT clipboard Modify read cancellation failed"
-            );
+    trait ModifyTextOperation {
+        fn status(&self, context: &ModifyReadContext<'_>) -> Result<AsyncStatus, ClipboardError>;
+        fn register_completed(
+            &mut self,
+            sender: SyncSender<AsyncStatus>,
+            context: &ModifyReadContext<'_>,
+        ) -> Result<(), ClipboardError>;
+        fn get_results(&self, context: &ModifyReadContext<'_>) -> Result<String, ClipboardError>;
+        fn error_code(&self, context: &ModifyReadContext<'_>) -> Result<u32, ClipboardError>;
+        fn cancel(&self, diagnostics: &ReadDiagnostics);
+    }
+
+    struct WinRtTextOperation {
+        operation: IAsyncOperation<HSTRING>,
+        _handler: Option<AsyncOperationCompletedHandler<HSTRING>>,
+    }
+
+    impl WinRtTextOperation {
+        fn new(operation: IAsyncOperation<HSTRING>) -> Self {
+            Self {
+                operation,
+                _handler: None,
+            }
         }
     }
 
+    impl ModifyTextOperation for WinRtTextOperation {
+        fn status(&self, context: &ModifyReadContext<'_>) -> Result<AsyncStatus, ClipboardError> {
+            context.call(ReadStage::AsyncStatus, || self.operation.Status())
+        }
+
+        fn register_completed(
+            &mut self,
+            sender: SyncSender<AsyncStatus>,
+            context: &ModifyReadContext<'_>,
+        ) -> Result<(), ClipboardError> {
+            let handler = AsyncOperationCompletedHandler::new(move |_, status| {
+                signal_completion(&sender, status);
+                Ok(())
+            });
+            context.call(ReadStage::CompletionRegistration, || {
+                self.operation.SetCompleted(&handler)
+            })?;
+            self._handler = Some(handler);
+            Ok(())
+        }
+
+        fn get_results(&self, context: &ModifyReadContext<'_>) -> Result<String, ClipboardError> {
+            context
+                .call(ReadStage::GetResults, || self.operation.GetResults())
+                .map(|text| text.to_string_lossy())
+        }
+
+        fn error_code(&self, context: &ModifyReadContext<'_>) -> Result<u32, ClipboardError> {
+            context
+                .call(ReadStage::ErrorCode, || self.operation.ErrorCode())
+                .map(|hresult| hresult.0 as u32)
+        }
+
+        fn cancel(&self, diagnostics: &ReadDiagnostics) {
+            diagnostics.enter(ReadStage::Cancel);
+            if let Err(error) = self.operation.Cancel() {
+                tracing::warn!(
+                    target: "multi_launcher::clipboard",
+                    outcome = "cancel_hresult",
+                    stage = ReadStage::Cancel.as_str(),
+                    elapsed_ms = diagnostics.elapsed_ms(),
+                    apartment = diagnostics.apartment(),
+                    hresult = error.code().0 as u32,
+                    "WinRT clipboard Modify read cancellation failed"
+                );
+            }
+        }
+    }
+
+    fn cancel_operation(operation: &impl ModifyTextOperation, diagnostics: &ReadDiagnostics) {
+        operation.cancel(diagnostics);
+    }
+
     fn complete_text_operation(
-        operation: &IAsyncOperation<HSTRING>,
+        operation: &impl ModifyTextOperation,
         status: AsyncStatus,
         context: &ModifyReadContext<'_>,
     ) -> Result<String, ClipboardError> {
         match status {
-            AsyncStatus::Completed => context
-                .call(ReadStage::GetResults, || operation.GetResults())
-                .map(|text| text.to_string_lossy()),
+            AsyncStatus::Completed => operation.get_results(context),
             AsyncStatus::Started => {
                 context
                     .diagnostics
@@ -752,67 +863,83 @@ mod platform {
                 Err(ClipboardError::Unavailable)
             }
             _ => {
-                let error_code = context.call(ReadStage::ErrorCode, || operation.ErrorCode())?;
-                Err(context.map_hresult(ReadStage::Completion, error_code.0 as u32))
+                let error_code = operation.error_code(context)?;
+                Err(context.map_hresult(ReadStage::Completion, error_code))
             }
         }
     }
 
     fn operation_status(
-        operation: &IAsyncOperation<HSTRING>,
+        operation: &impl ModifyTextOperation,
         context: &ModifyReadContext<'_>,
     ) -> Result<AsyncStatus, ClipboardError> {
-        context.call(ReadStage::AsyncStatus, || operation.Status())
+        operation.status(context)
     }
 
     fn wait_text_for_modify(
-        operation: IAsyncOperation<HSTRING>,
+        mut operation: impl ModifyTextOperation,
         context: &ModifyReadContext<'_>,
     ) -> Result<String, ClipboardError> {
-        let status = match operation_status(&operation, context) {
-            Ok(status) => status,
-            Err(error) => {
-                cancel_operation(&operation, context.diagnostics);
-                return Err(error);
-            }
-        };
-        if status != AsyncStatus::Started {
-            return complete_text_operation(&operation, status, context);
-        }
-
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let handler = AsyncOperationCompletedHandler::new(move |_, status| {
-            signal_completion(&sender, status);
-            Ok(())
-        });
-        if let Err(error) = context.call(ReadStage::CompletionRegistration, || {
-            operation.SetCompleted(&handler)
-        }) {
-            cancel_operation(&operation, context.diagnostics);
-            return Err(error);
-        }
-
-        // SetCompleted may race an operation that finished after the initial
-        // status check. Querying once after registration closes that race; the
-        // bounded channel also retains a callback delivered before this query.
-        let status = match operation_status(&operation, context) {
-            Ok(status) => status,
-            Err(error) => {
-                cancel_operation(&operation, context.diagnostics);
-                return Err(error);
-            }
-        };
-        if status != AsyncStatus::Started {
-            return complete_text_operation(&operation, status, context);
-        }
-
-        match wait_for_completion(&receiver, context) {
-            Ok(CompletionSignal::Status(status)) => {
-                if let Err(error) = context.check() {
+        let result = (|| -> Result<String, ClipboardError> {
+            let status = match operation_status(&operation, context) {
+                Ok(status) => status,
+                Err(error) => {
                     cancel_operation(&operation, context.diagnostics);
                     return Err(error);
                 }
-                let status = if status == AsyncStatus::Started {
+            };
+            if status != AsyncStatus::Started {
+                return complete_text_operation(&operation, status, context);
+            }
+
+            let (sender, receiver) = mpsc::sync_channel(1);
+            if let Err(error) = operation.register_completed(sender, context) {
+                cancel_operation(&operation, context.diagnostics);
+                return Err(error);
+            }
+
+            // SetCompleted may race an operation that finished after the initial
+            // status check. Querying once after registration closes that race; the
+            // bounded channel also retains a callback delivered before this query.
+            let status = match operation_status(&operation, context) {
+                Ok(status) => status,
+                Err(error) => {
+                    cancel_operation(&operation, context.diagnostics);
+                    return Err(error);
+                }
+            };
+            if status != AsyncStatus::Started {
+                return complete_text_operation(&operation, status, context);
+            }
+
+            match wait_for_completion(&receiver, context) {
+                Ok(CompletionSignal::Status(status)) => {
+                    if let Err(error) = context.check() {
+                        cancel_operation(&operation, context.diagnostics);
+                        return Err(error);
+                    }
+                    let status = if status == AsyncStatus::Started {
+                        let status = match operation_status(&operation, context) {
+                            Ok(status) => status,
+                            Err(error) => {
+                                cancel_operation(&operation, context.diagnostics);
+                                return Err(error);
+                            }
+                        };
+                        if status == AsyncStatus::Started {
+                            context
+                                .diagnostics
+                                .issue("completion_not_terminal", ReadStage::Completion);
+                            cancel_operation(&operation, context.diagnostics);
+                            return Err(ClipboardError::Unavailable);
+                        }
+                        status
+                    } else {
+                        status
+                    };
+                    complete_text_operation(&operation, status, context)
+                }
+                Ok(CompletionSignal::Disconnected) => {
                     let status = match operation_status(&operation, context) {
                         Ok(status) => status,
                         Err(error) => {
@@ -823,41 +950,24 @@ mod platform {
                     if status == AsyncStatus::Started {
                         context
                             .diagnostics
-                            .issue("completion_not_terminal", ReadStage::Completion);
+                            .issue("completion_signal_lost", ReadStage::Completion);
                         cancel_operation(&operation, context.diagnostics);
-                        return Err(ClipboardError::Unavailable);
+                        Err(ClipboardError::Unavailable)
+                    } else {
+                        complete_text_operation(&operation, status, context)
                     }
-                    status
-                } else {
-                    status
-                };
-                complete_text_operation(&operation, status, context)
-            }
-            Ok(CompletionSignal::Disconnected) => {
-                let status = match operation_status(&operation, context) {
-                    Ok(status) => status,
-                    Err(error) => {
+                }
+                Err(error) => {
+                    if error == ClipboardError::TimedOut {
                         cancel_operation(&operation, context.diagnostics);
-                        return Err(error);
                     }
-                };
-                if status == AsyncStatus::Started {
-                    context
-                        .diagnostics
-                        .issue("completion_signal_lost", ReadStage::Completion);
-                    cancel_operation(&operation, context.diagnostics);
-                    Err(ClipboardError::Unavailable)
-                } else {
-                    complete_text_operation(&operation, status, context)
+                    Err(error)
                 }
             }
-            Err(error) => {
-                if error == ClipboardError::TimedOut {
-                    cancel_operation(&operation, context.diagnostics);
-                }
-                Err(error)
-            }
-        }
+        })();
+        context.diagnostics.enter(ReadStage::WorkerCleanup);
+        drop(operation);
+        result
     }
 
     fn wait_text(
@@ -912,9 +1022,23 @@ mod platform {
                     cancelled: &cancelled,
                     deadline,
                 };
-                let _apartment = Apartment::enter_mta_for_modify(&context)?;
-                let view = context.call(ReadStage::GetContent, Clipboard::GetContent)?;
-                classify_for_modify(&view, &context)
+                let apartment = Apartment::enter_mta_for_modify(&context)?;
+                match context.call(ReadStage::GetContent, Clipboard::GetContent) {
+                    Ok(view) => {
+                        let result = classify_for_modify(&view, &context);
+                        diagnostics.enter(ReadStage::WorkerCleanup);
+                        drop(view);
+                        diagnostics.enter(ReadStage::MtaTeardown);
+                        drop(apartment);
+                        result
+                    }
+                    Err(error) => {
+                        diagnostics.enter(ReadStage::WorkerCleanup);
+                        diagnostics.enter(ReadStage::MtaTeardown);
+                        drop(apartment);
+                        Err(error)
+                    }
+                }
             },
         )
     }
@@ -922,6 +1046,7 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::sync::Mutex;
 
         const TEST_WAIT: Duration = Duration::from_millis(750);
         const TEST_MTA_WAIT: Duration = Duration::from_secs(5);
@@ -935,6 +1060,106 @@ mod platform {
                 cancelled,
                 deadline: Instant::now() + TEST_MTA_WAIT,
             }
+        }
+
+        struct ControlledOperationState {
+            status: Mutex<AsyncStatus>,
+            completion: Mutex<Option<SyncSender<AsyncStatus>>>,
+            post_registration: Mutex<Option<mpsc::Sender<()>>>,
+            status_calls: AtomicUsize,
+            result_calls: AtomicUsize,
+            cancel_calls: AtomicUsize,
+        }
+
+        struct ControlledTextOperation {
+            state: Arc<ControlledOperationState>,
+            result: String,
+            error_code: u32,
+        }
+
+        impl ModifyTextOperation for ControlledTextOperation {
+            fn status(
+                &self,
+                context: &ModifyReadContext<'_>,
+            ) -> Result<AsyncStatus, ClipboardError> {
+                context.enter(ReadStage::AsyncStatus)?;
+                let status = *self.state.status.lock().unwrap();
+                let call = self.state.status_calls.fetch_add(1, Ordering::Relaxed);
+                context.check()?;
+                if call == 1
+                    && let Some(signal) = self.state.post_registration.lock().unwrap().take()
+                {
+                    let _ = signal.send(());
+                }
+                Ok(status)
+            }
+
+            fn register_completed(
+                &mut self,
+                sender: SyncSender<AsyncStatus>,
+                context: &ModifyReadContext<'_>,
+            ) -> Result<(), ClipboardError> {
+                context.enter(ReadStage::CompletionRegistration)?;
+                *self.state.completion.lock().unwrap() = Some(sender);
+                context.check()
+            }
+
+            fn get_results(
+                &self,
+                context: &ModifyReadContext<'_>,
+            ) -> Result<String, ClipboardError> {
+                context.enter(ReadStage::GetResults)?;
+                self.state.result_calls.fetch_add(1, Ordering::Relaxed);
+                context.check()?;
+                Ok(self.result.clone())
+            }
+
+            fn error_code(&self, context: &ModifyReadContext<'_>) -> Result<u32, ClipboardError> {
+                context.enter(ReadStage::ErrorCode)?;
+                context.check()?;
+                Ok(self.error_code)
+            }
+
+            fn cancel(&self, diagnostics: &ReadDiagnostics) {
+                diagnostics.enter(ReadStage::Cancel);
+                self.state.cancel_calls.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        fn start_controlled_wait(
+            timeout: Duration,
+        ) -> (
+            Arc<ControlledOperationState>,
+            mpsc::Receiver<()>,
+            thread::JoinHandle<Result<String, ClipboardError>>,
+        ) {
+            let started = Instant::now();
+            let deadline = started + timeout;
+            let diagnostics = Arc::new(ReadDiagnostics::new(started));
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let (post_registration_tx, post_registration_rx) = mpsc::channel();
+            let state = Arc::new(ControlledOperationState {
+                status: Mutex::new(AsyncStatus::Started),
+                completion: Mutex::new(None),
+                post_registration: Mutex::new(Some(post_registration_tx)),
+                status_calls: AtomicUsize::new(0),
+                result_calls: AtomicUsize::new(0),
+                cancel_calls: AtomicUsize::new(0),
+            });
+            let operation = ControlledTextOperation {
+                state: Arc::clone(&state),
+                result: "controlled text".to_owned(),
+                error_code: 0x80070005,
+            };
+            let handle = thread::spawn(move || {
+                let context = ModifyReadContext {
+                    diagnostics: &diagnostics,
+                    cancelled: &cancelled,
+                    deadline,
+                };
+                wait_text_for_modify(operation, &context)
+            });
+            (state, post_registration_rx, handle)
         }
 
         #[test]
@@ -1005,38 +1230,38 @@ mod platform {
         }
 
         #[test]
-        fn completion_signal_waits_for_asynchronous_delivery() {
-            let diagnostics = ReadDiagnostics::new(Instant::now());
-            let cancelled = AtomicBool::new(false);
-            let context = context_for_test(&diagnostics, &cancelled);
-            let (sender, receiver) = mpsc::sync_channel(1);
-            let callback = thread::spawn(move || {
-                signal_completion(&sender, AsyncStatus::Completed);
-            });
+        fn production_completion_sequence_reads_a_pending_operation_callback() {
+            let (state, post_registration, waiter) = start_controlled_wait(TEST_MTA_WAIT);
+            post_registration
+                .recv_timeout(Duration::from_secs(1))
+                .expect("production sequence should register before waiting");
 
-            assert!(matches!(
-                wait_for_completion(&receiver, &context),
-                Ok(CompletionSignal::Status(AsyncStatus::Completed))
-            ));
-            callback.join().unwrap();
+            *state.status.lock().unwrap() = AsyncStatus::Completed;
+            let completion = state
+                .completion
+                .lock()
+                .unwrap()
+                .as_ref()
+                .cloned()
+                .expect("production sequence should register a callback");
+            signal_completion(&completion, AsyncStatus::Completed);
+
+            assert_eq!(waiter.join().unwrap(), Ok("controlled text".into()));
+            assert_eq!(state.result_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(state.cancel_calls.load(Ordering::Relaxed), 0);
         }
 
         #[test]
-        fn completion_wait_reports_deadline_without_hresult() {
-            let start = Instant::now();
-            let diagnostics = ReadDiagnostics::new(start);
-            let cancelled = AtomicBool::new(false);
-            let context = ModifyReadContext {
-                diagnostics: &diagnostics,
-                cancelled: &cancelled,
-                deadline: start,
-            };
-            let (_sender, receiver) = mpsc::sync_channel(1);
+        fn production_completion_sequence_times_out_and_cancels_a_pending_operation() {
+            let (state, post_registration, waiter) =
+                start_controlled_wait(Duration::from_millis(150));
+            post_registration
+                .recv_timeout(Duration::from_secs(1))
+                .expect("production sequence should register before timing out");
 
-            assert!(matches!(
-                wait_for_completion(&receiver, &context),
-                Err(ClipboardError::TimedOut)
-            ));
+            assert_eq!(waiter.join().unwrap(), Err(ClipboardError::TimedOut));
+            assert_eq!(state.result_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(state.cancel_calls.load(Ordering::Relaxed), 1);
         }
 
         #[test]
@@ -1184,6 +1409,22 @@ mod platform {
         }
 
         #[test]
+        fn queued_worker_result_after_absolute_deadline_is_rejected() {
+            let deadline = Instant::now();
+            let diagnostics = ReadDiagnostics::new(deadline);
+            let cancelled = AtomicBool::new(false);
+            let (sender, receiver) = mpsc::sync_channel(1);
+            sender.try_send(Ok("late result".to_owned())).unwrap();
+            let queued_result = receiver.try_recv().unwrap();
+
+            assert_eq!(
+                accept_worker_result(queued_result, deadline, &cancelled, &diagnostics),
+                Err(ClipboardError::TimedOut)
+            );
+            assert!(cancelled.load(Ordering::Acquire));
+        }
+
+        #[test]
         fn bounded_worker_returns_success_and_late_output_is_discarded() {
             let budget = Arc::new(ReadWorkerBudget::new(MAX_MODIFY_READ_WORKERS));
             let success = run_bounded_worker(Arc::clone(&budget), TEST_WAIT, |_, _, _| {
@@ -1220,6 +1461,19 @@ mod platform {
                 Ok("fresh clipboard text".to_owned())
             });
             assert_eq!(recovered, Ok("fresh clipboard text".to_owned()));
+            assert_eq!(
+                budget.active(),
+                1,
+                "the stuck worker should be the only occupied slot after recovery"
+            );
+
+            // Do not wait between the successful recovery and this admission:
+            // its permit must be released before its result reaches the caller.
+            let immediate = run_bounded_worker(Arc::clone(&budget), TEST_WAIT, |_, _, _| {
+                Ok("immediate follow-up".to_owned())
+            });
+            assert_eq!(immediate, Ok("immediate follow-up".to_owned()));
+            assert_eq!(budget.active(), 1);
 
             release_tx.send(()).unwrap();
             exited_rx
