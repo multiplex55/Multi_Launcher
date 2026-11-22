@@ -1,0 +1,13 @@
+# Regex Tester
+
+G14 owns `regex-tester`. The plugin accepts exact bare `regex`, emits `regex:open` and opens `DialogCommand::RegexTester`. `RegexSession` and the existing engine/policy/persistence own evaluation. The retained dialog owns draft, selection, information section and presentation. Preset removal is a scoped inline child.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| REGEX-01 | Preserve exact pattern/flags/sample, Rust regex diagnostics and debounced current evaluation. Matches and selected capture distinguish empty and unmatched values, use exact UTF-8 spans and allow navigation without editing source. Keep bounded previews and full buffer identity. |
+| REGEX-02 | Explanation, syntax/constructors, reference and examples share supported engine semantics. A constructor uses the current selection and creates one undo edit. Example and history loading preserve authored cases and applicable buffers. |
+| REGEX-03 | History records accepted valid evaluation. Only explicit preset Load changes source. Save/Update retain cases and supported optional fields. Preset deletion needs exact object and current confirmation generation. Preserve invalid storage bytes and report unavailable writes. |
+| REGEX-04 | Substitution and Test Cases retain their own invalidation and current identities. Clipboard import/export, match/capture and selected text effects require explicit accepted actions and exact source/selection authority. Opening, rendering or inspection makes no clipboard request. |
+| REGEX-05 | Preserve remembered Dock/Pop Out, retained draft on reopen, worker result fencing, hidden-root polling and exact retained owner. Reject deferred actions after close, discarded pass or host retirement. |
+
+Select `regex_tester_open_is_exact_and_arguments_remain_metadata`, `regex_tester_panel_lifecycle_preserves_draft_and_deduplicates_stack`, `regex_tester_open_render_and_inspection_never_access_clipboard_implicitly`, `regex_tester_explicit_match_capture_copy_handles_unicode_empty_unmatched_and_failure`, `regex_tester_host_moves_retain_revision_and_copy_only_after_accepted_child_input`, `jump_mode_regex_native_viewport_edits_cases_navigates_and_cancels_preset_removal`, `regex_visualization_constructor_is_one_undoable_edit_and_respects_discarded_passes` and `substitution_replacement_edits_coalesce_without_rerunning_accepted_matching`. `G14-EGUI-STRUCTURED-TEXT` verifies Unicode evaluation, exact match navigation, persisted synthetic history and unsupported look-around feedback. Remaining sections, clipboard effects and GPUI remain pending.
