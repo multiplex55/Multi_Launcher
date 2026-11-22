@@ -110,4 +110,11 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [MkMacro Action Editor](gui/mkmacro-action-editor.md) | MK-EDIT-01–MK-EDIT-03 | G19 | Specified | Native Delay editor, Random range controls and Cancel observed. Apply, other variants, host and GPUI remain pending. |
 | [Macro Parameters](gui/mkmacro-parameter-prompt.md) | MK-PARAM-01–MK-PARAM-03 | G19 | Specified | Source required values, owned browse and exact invocation lease mapped. Native and GPUI remain pending. |
 | [MkMacro Window Picker](gui/mkmacro-window-picker.md) | MK-WINDOW-PICKER-01–MK-WINDOW-PICKER-03 | G19 | Specified | Source scope, candidate/criteria draft and one retained target effect mapped. Native and GPUI remain pending. |
+| [Import Macro Library](gui/mkmacro-package-import.md) | MK-IMPORT-01–MK-IMPORT-03 | G19 | Specified | Source preview, exact snapshot/publish and asset rollback mapped. Native and GPUI remain pending. |
+| [Export Macro Library](gui/mkmacro-package-export.md) | MK-EXPORT-01–MK-EXPORT-02 | G19 | Specified | Source root/closure, exact chooser and output ownership mapped. Native and GPUI remain pending. |
+| [Save Macro Template](gui/mkmacro-template-save.md) | MK-TEMPLATE-SAVE-01–MK-TEMPLATE-SAVE-02 | G19 | Specified | Source retained fields and independent catalog save mapped. Native and GPUI remain pending. |
+| [Macro Templates](gui/mkmacro-templates.md) | MK-TEMPLATES-01–MK-TEMPLATES-02 | G19 | Specified | Source template review and independent copy mapped. Native and GPUI remain pending. |
+| [Choose Launcher Action](gui/mkmacro-launcher-picker.md) | MK-LAUNCHER-PICKER-01–MK-LAUNCHER-PICKER-03 | G19 | Specified | Source exact authoring action, conversion decision and stale-owner guard mapped. Native and GPUI remain pending. |
+| [MkMacro Step Search](gui/mkmacro-step-search.md) | MK-STEP-SEARCH-01–MK-STEP-SEARCH-03 | G19 | Specified | Source selection, Find/Jump and exact replacement preview mapped. Native and GPUI remain pending. |
+| [MkMacro Help](gui/mkmacro-help.md) | MK-HELP-01–MK-HELP-02 | G19 | Specified | Source empty-library route, content and mounted help owner mapped. Native and GPUI remain pending. |
 | [Paste Sequences](gui/paste-sequences.md) | PASTE-SEQUENCE-01–PASTE-SEQUENCE-04 | G21 | Specified | Source editor, preflight, playback and retained host mapped. Native and GPUI remain pending. |
