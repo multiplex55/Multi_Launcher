@@ -37,6 +37,7 @@ pub(super) struct SettingsWindowHost {
     presentation_prepared: bool,
     instance: u64,
     pending: Option<SettingsHostFrame>,
+    accepted_pass: Option<SettingsOpenOrigin>,
     close_pending: Option<ViewportPassProvenance>,
     native_jump: JumpModeUi,
     native_jump_frame: Option<u64>,
@@ -46,6 +47,12 @@ pub(super) struct SettingsWindowHost {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SettingsOpenOrigin(pub(super) super::utility_host::AcceptedParentOpen<u64>);
+
+impl SettingsOpenOrigin {
+    pub(crate) fn has_same_owner(&self, other: &Self) -> bool {
+        self.0.has_same_owner(&other.0)
+    }
+}
 
 #[cfg(test)]
 impl SettingsOpenOrigin {
@@ -93,6 +100,18 @@ impl SettingsWindowHost {
         open && self.close_pending.is_none() && origin.0.is_current(self.state.identity(), &self.instance)
     }
 
+    pub(super) fn has_accepted_current_pass(
+        &self,
+        ctx: &egui::Context,
+        open: bool,
+        origin: &SettingsOpenOrigin,
+    ) -> bool {
+        self.accepts_origin(open, origin)
+            && self.accepted_pass.as_ref().is_some_and(|accepted| {
+                accepted.0.has_same_owner(&origin.0) && accepted.0.passes_retained(ctx)
+            })
+    }
+
     pub(super) fn is_popped_out(&self) -> bool {
         self.state.presentation() == UtilityPresentation::Popout
     }
@@ -137,6 +156,7 @@ impl SettingsWindowHost {
         self.state.retire_to_docked();
         self.presentation_prepared = false;
         self.pending = None;
+        self.accepted_pass = None;
         self.close_pending = None;
         self.native_jump.cancel_all();
         self.native_jump_frame = None;
@@ -200,6 +220,10 @@ impl SettingsWindowHost {
             embedded_focus: None,
         };
         let close_shortcut_allowed = !app.pinned_panels.contains(&Panel::Settings);
+        let restart_origin_current = editor
+            .restart_confirmation
+            .as_ref()
+            .is_none_or(|confirmation| self.accepts_origin(true, &confirmation.origin));
 
         if host.host == UtilityPresentation::Docked {
             frame.owner = Some(root);
@@ -221,6 +245,7 @@ impl SettingsWindowHost {
                 body_input,
                 body_input && root_owner,
                 false,
+                restart_origin_current && !frame.close,
             ));
         } else {
             let viewport_id = viewport(instance);
@@ -332,6 +357,7 @@ impl SettingsWindowHost {
                             input,
                             input && owner_input,
                             true,
+                            restart_origin_current && !frame.close && !frame.os_close,
                         ));
                     });
                     self.native_jump.finish_ui_pass();
@@ -381,6 +407,7 @@ impl SettingsWindowHost {
                         input,
                         input && root_owner,
                         true,
+                        restart_origin_current && !frame.close,
                     ));
                 }
             });
@@ -397,6 +424,7 @@ impl SettingsWindowHost {
     }
 
     pub(super) fn complete(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        self.accepted_pass = None;
         let Some(mut frame) = self.pending.take() else {
             return;
         };
@@ -440,6 +468,7 @@ impl SettingsWindowHost {
         } else {
             None
         };
+        self.accepted_pass = origin.clone();
         let mut editor = std::mem::take(&mut app.settings_editor);
         let show_root = editor.complete_host_actions_from_origin(ctx, app, actions, origin);
         app.settings_editor = editor;
@@ -447,6 +476,7 @@ impl SettingsWindowHost {
             app.request_launcher_visibility(true);
         }
         if !app.show_settings {
+            app.invalidate_settings_restart("Settings was closed");
             app.settings_editor.retire_all_settings_navigation();
             app.panel_states.settings = false;
             app.panel_stack.retain(|panel| *panel != Panel::Settings);
@@ -459,6 +489,7 @@ impl SettingsWindowHost {
                 UtilityPresentation::Docked
             };
             if next != self.state.presentation() {
+                app.invalidate_settings_restart("Settings was rehosted");
                 if !popout {
                     self.retire_native_viewport(ctx);
                 }

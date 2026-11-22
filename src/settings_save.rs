@@ -850,6 +850,34 @@ impl Default for SettingsSaveWorkerRegistry {
 }
 
 impl SettingsSaveWorkerRegistry {
+    pub fn reverse_restart_preflight(&self) -> Result<(), String> {
+        let state = self
+            .0
+            .lock()
+            .map_err(|_| "settings writer registry is unavailable".to_owned())?;
+        if !state.accepting {
+            return Err("settings writer admission is already closed".to_owned());
+        }
+        if state.utility_sizes_worker_active
+            || state.utility_presentations_worker_active
+            || !state.utility_sizes_pending.is_empty()
+            || !state.utility_sizes_failed.is_empty()
+            || !state.utility_presentations_pending.is_empty()
+            || !state.utility_presentations_failed.is_empty()
+        {
+            return Err("a Settings geometry or presentation write is pending or failed".to_owned());
+        }
+        if !state.shutdown_worker_panics.is_empty()
+            || !state.shutdown_close_preference_failures.is_empty()
+            || !state.shutdown_final_utility_size_enqueue_failures.is_empty()
+            || !state.utility_sizes_shutdown_failures.is_empty()
+            || !state.utility_presentations_shutdown_failures.is_empty()
+        {
+            return Err("a previous Settings writer failed and requires recovery".to_owned());
+        }
+        Ok(())
+    }
+
     pub(crate) fn queue_utility_presentation(
         &self,
         path: String,

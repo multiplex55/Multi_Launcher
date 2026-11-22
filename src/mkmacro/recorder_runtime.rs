@@ -80,6 +80,7 @@ impl RecorderClock for SystemRecorderClock {
 pub(crate) enum Operation {
     Playback,
     Recording,
+    FrontendRestart,
 }
 #[derive(Default)]
 pub struct SharedOperationGuard(Mutex<Option<Operation>>);
@@ -145,8 +146,13 @@ pub struct RecorderRuntime {
     guard: Arc<SharedOperationGuard>,
     state: Mutex<State>,
     snapshot: RwLock<Arc<RecorderSnapshot>>,
+    shutdown_receipt: super::checked_shutdown::CheckedShutdown,
 }
 impl RecorderRuntime {
+    pub(crate) fn uses_operation_guard(&self, expected: &Arc<SharedOperationGuard>) -> bool {
+        Arc::ptr_eq(&self.guard, expected)
+    }
+
     pub(crate) fn document_snapshot(&self) -> Option<Arc<super::MkMacroDocument>> {
         Some(self.store.snapshot())
     }
@@ -230,6 +236,7 @@ impl RecorderRuntime {
                 dropped_baseline: 0,
             }),
             snapshot: RwLock::new(Arc::new(RecorderSnapshot::default())),
+            shutdown_receipt: super::checked_shutdown::CheckedShutdown::default(),
         }
     }
     fn publish(&self, s: &State) {
@@ -547,6 +554,23 @@ impl RecorderRuntime {
         let mode = self.state.lock().unwrap().mode;
         self.shutdown_after_observing(mode);
     }
+
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        let (mode, review_pending) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "MkMacro recorder state is unavailable".to_owned())?;
+            state.shutting_down = true;
+            (state.mode, state.review_transfer_pending)
+        };
+        if mode != RecorderRuntimeState::Idle || review_pending {
+            return Err(format!(
+                "MkMacro recorder was not idle at shutdown (state: {mode:?}, review pending: {review_pending})"
+            ));
+        }
+        self.shutdown_services_if_ready_checked()
+    }
     fn shutdown_after_observing(&self, _observed_mode: RecorderRuntimeState) {
         let mode = {
             let mut state = self.state.lock().unwrap();
@@ -563,19 +587,53 @@ impl RecorderRuntime {
         self.shutdown_services_if_ready();
     }
     fn shutdown_services_if_ready(&self) {
-        let mut state = self.state.lock().unwrap();
-        if state.mode != RecorderRuntimeState::Idle
-            || state.review_transfer_pending
-            || state.services_shutdown
-            || !state.shutting_down
-        {
-            return;
+        if let Err(error) = self.shutdown_services_if_ready_checked() {
+            tracing::error!(%error, "MkMacro recorder services did not shut down cleanly");
         }
-        state.services_shutdown = true;
-        drop(state);
-        self.hooks.shutdown();
-        self.processor.shutdown();
-        self.guard.release(Operation::Recording);
+    }
+
+    fn shutdown_services_if_ready_checked(&self) -> Result<(), String> {
+        let ready = {
+            let state = self.state.lock().unwrap();
+            state.services_shutdown
+                || (state.mode == RecorderRuntimeState::Idle
+                    && !state.review_transfer_pending
+                    && state.shutting_down)
+        };
+        if !ready {
+            return Ok(());
+        }
+        self.shutdown_receipt.run(
+            "MkMacro recorder service shutdown panicked",
+            || {
+                {
+                    let mut state = self.state.lock().unwrap();
+                    if state.services_shutdown {
+                        return Ok(());
+                    }
+                    if state.mode != RecorderRuntimeState::Idle
+                        || state.review_transfer_pending
+                        || !state.shutting_down
+                    {
+                        return Ok(());
+                    }
+                    state.services_shutdown = true;
+                }
+                let mut failures = Vec::new();
+                if let Err(error) = self.hooks.shutdown_checked() {
+                    failures.push(error);
+                }
+                if let Err(error) = self.processor.shutdown_checked() {
+                    failures.push(error);
+                }
+                self.guard.release(Operation::Recording);
+                if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(failures.join("; "))
+                }
+            },
+        )
     }
 }
 impl Drop for RecorderRuntime {

@@ -3,6 +3,7 @@ pub mod asset_authoring;
 pub mod authoring_analysis;
 pub mod authoring_fields;
 pub mod call_graph;
+pub(crate) mod checked_shutdown;
 pub mod compiler;
 pub mod coordinates;
 pub mod direct_open;

@@ -187,6 +187,22 @@ impl SequencePlaybackController {
         self.status
     }
 
+    /// A terminal display status may be published before this owner releases
+    /// its session and final clipboard cleanup lease.
+    pub(crate) fn has_pending_cleanup(&self) -> bool {
+        self.prepared.is_some()
+            || self.session.is_some()
+            || matches!(
+                self.status,
+                SequencePlaybackStatus::Preparing
+                    | SequencePlaybackStatus::Ready
+                    | SequencePlaybackStatus::Running
+                    | SequencePlaybackStatus::AwaitAdvance
+                    | SequencePlaybackStatus::AwaitTarget
+                    | SequencePlaybackStatus::AwaitPaste
+            )
+    }
+
     pub(crate) fn prepared_preview(&self) -> Option<super::PreparedSequencePreview> {
         self.prepared.as_ref().map(PreparedSequenceRun::preview)
     }

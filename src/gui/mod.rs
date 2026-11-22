@@ -56,6 +56,7 @@ mod file_operations_center_runtime;
 pub(crate) mod hotfolder_dialog;
 pub(crate) mod hotfolder_dispatch;
 pub(crate) mod hotfolder_runtime;
+pub mod reverse_restart;
 mod hotkey_directory_dialog;
 #[cfg(windows)]
 mod native_keyboard;
@@ -1197,6 +1198,10 @@ pub struct LauncherApp {
     rx: EventReceiver,
     event_sink: EventSinkRegistration,
     event_tx: EventSender,
+    reverse_restart_protocol: Option<Arc<reverse_restart::ReverseRestartProtocol>>,
+    reverse_restart_wake: Option<Sender<()>>,
+    pending_reverse_restart: Option<PendingReverseRestart>,
+    pending_root_close_request: bool,
     /// Bounds deferred radial provider work to one in-flight invocation. A
     /// cancelled provider call keeps this slot until the call actually exits.
     pub(crate) radial_provider_search_capacity:
@@ -1581,6 +1586,14 @@ pub struct LauncherApp {
     pub file_search_root: Option<std::path::PathBuf>,
     pub file_search_text: String,
     pub file_search_active: bool,
+}
+
+#[derive(Clone)]
+struct PendingReverseRestart {
+    attempt: reverse_restart::RestartAttemptId,
+    generation: u64,
+    origin: settings_window_host::SettingsOpenOrigin,
+    _hotfolder_reservation: hotfolder_runtime::HotFolderRestartReservation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2657,13 +2670,21 @@ impl LauncherApp {
         self.batch_rename_dialog.end_session();
     }
 
-    pub(crate) fn shutdown_batch_rename_scanner(&mut self) {
+    pub(crate) fn shutdown_batch_rename_scanner_checked(&mut self) -> Result<(), String> {
         self.end_batch_rename_session();
         if let Some(coordinator) = self.batch_rename_coordinator.take() {
-            if let Err(error) = coordinator.shutdown() {
-                tracing::warn!(%error, "batch rename scanner did not shut down cleanly");
-            }
+            let result = coordinator
+                .shutdown()
+                .map_err(|error| format!("scanner worker retirement failed: {error}"));
             self.batch_rename_dialog.discard_finished_ticket();
+            result?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shutdown_batch_rename_scanner(&mut self) {
+        if let Err(error) = self.shutdown_batch_rename_scanner_checked() {
+            tracing::warn!(%error, "batch rename scanner did not shut down cleanly");
         }
     }
 
@@ -2914,29 +2935,41 @@ impl LauncherApp {
         );
     }
 
-    pub(crate) fn shutdown_search_replace_runtime(&mut self) {
+    pub(crate) fn shutdown_search_replace_runtime_checked(&mut self) -> Result<(), String> {
         self.end_search_replace_session();
+        let mut errors = Vec::new();
         if let Some(coordinator) = self.replace_search_coordinator.take()
             && let Err(error) = coordinator.shutdown()
         {
-            tracing::warn!(%error, "search and replace scanner did not shut down cleanly");
+            errors.push(format!("search worker retirement failed: {error}"));
         }
         if let Some(worker) = self.replace_preview_worker.take()
             && let Err(error) = worker.shutdown()
         {
-            tracing::warn!(%error, "replacement preview worker did not shut down cleanly");
+            errors.push(format!("preview worker retirement failed: {error}"));
         }
         if let Some(worker) = self.replace_executor_worker.take()
             && let Err(error) = worker.shutdown()
         {
-            tracing::warn!(%error, "guarded replace worker did not shut down cleanly");
+            errors.push(format!("replacement worker retirement failed: {error}"));
         }
         if let Some(loader) = self.search_replace_dialog.take_receipt_loader()
             && let Err(error) = loader.shutdown()
         {
-            tracing::warn!(%error, "replacement receipt reader did not shut down cleanly");
+            errors.push(format!("receipt reader retirement failed: {error}"));
         }
         self.replace_operation_pending = false;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    pub(crate) fn shutdown_search_replace_runtime(&mut self) {
+        if let Err(error) = self.shutdown_search_replace_runtime_checked() {
+            tracing::warn!(%error, "Search & Replace did not shut down cleanly");
+        }
     }
 
     pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self, ctx: &egui::Context) {
@@ -3970,14 +4003,7 @@ impl LauncherApp {
             .internal_services()
             .workspace_catalog
             .attach(&multi_manager.workspaces);
-        #[cfg(test)]
-        let plugin_editor = if plugins.is_inert_for_test() {
-            PluginEditor::new_with_manager_for_test(&settings, &plugins)
-        } else {
-            PluginEditor::new(&settings)
-        };
-        #[cfg(not(test))]
-        let plugin_editor = PluginEditor::new(&settings);
+        let plugin_editor = PluginEditor::new_with_manager(&settings, &plugins);
         let actions_by_id = ActionIdLookup::new(Arc::clone(&actions));
         #[cfg(test)]
         let dashboard_runtime = match init_policy {
@@ -4220,6 +4246,10 @@ impl LauncherApp {
             rx,
             event_sink,
             event_tx: tx,
+            reverse_restart_protocol: None,
+            reverse_restart_wake: None,
+            pending_reverse_restart: None,
+            pending_root_close_request: false,
             radial_provider_search_capacity: Default::default(),
             radial_suppressed_provider_query: None,
             radial_queryexec_depth: None,

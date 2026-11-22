@@ -244,6 +244,18 @@ impl ExplorerTabsDialog {
     pub fn has_pending_decision(&self) -> bool {
         self.replacement.is_some() || self.picker.is_some()
     }
+    pub(crate) fn restart_blocker(&self) -> Option<&'static str> {
+        if self.draft.dirty() {
+            return Some("Explorer Tabs has an unsaved list draft.");
+        }
+        if self.has_pending_decision() {
+            return Some("Explorer Tabs has a pending save, replacement, or picker decision.");
+        }
+        if self.job_active || self.pending_external.is_some() {
+            return Some("Explorer Tabs has an active or pending operation.");
+        }
+        None
+    }
     #[cfg(test)]
     pub fn test_control(&self, name: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
         self.test_controls.get(name).copied()

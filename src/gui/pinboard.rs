@@ -281,6 +281,13 @@ impl PinboardCaptureLifecycle {
         self.session.is_some() || self.board.active_capture().is_some()
     }
 
+    pub(super) fn frontend_restart_preflight(&self) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("Screenshot Pinboard still owns a capture. Finish or cancel it before restarting.".to_owned());
+        }
+        self.windows.frontend_restart_preflight(&self.board)
+    }
+
     pub(super) fn cancel(&mut self) {
         let Some(session) = self.session.as_mut() else {
             return;
@@ -1248,7 +1255,7 @@ impl LauncherApp {
         }
     }
 
-    pub(super) fn shutdown_pinboard_capture(&mut self) {
+    pub(super) fn shutdown_pinboard_capture(&mut self) -> Result<(), String> {
         let mut errors = Vec::new();
         if let Err(error) = self.pinboard_capture.shutdown(
             &self.visibility_revision,
@@ -1262,8 +1269,12 @@ impl LauncherApp {
         if let Err(error) = self.pinboard_capture.shutdown_pin_windows() {
             errors.push(error);
         }
-        if !errors.is_empty() {
-            self.report_error_message("pinboard.shutdown", errors.join("; "));
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let message = errors.join("; ");
+            self.report_error_message("pinboard.shutdown", message.clone());
+            Err(message)
         }
     }
 

@@ -1603,6 +1603,20 @@ impl TemplateManagerState {
 }
 
 impl NotesDialog {
+    pub(crate) fn restart_blocker(&self) -> Option<&'static str> {
+        if self.pending_effects.is_some() || self.retained_draft_checkpoint.is_some() {
+            return Some("Notes has a pending save or retained draft transition.");
+        }
+        if self.edit_idx.is_some_and(|index| {
+            self.entries
+                .get(index)
+                .is_none_or(|entry| entry.content != self.text)
+        }) {
+            return Some("Notes has an unsaved editor draft.");
+        }
+        None
+    }
+
     #[cfg(feature = "qa-framebuffer-capture")]
     pub(crate) fn qa_observation(&self) -> NotesDialogQaObservation {
         NotesDialogQaObservation {

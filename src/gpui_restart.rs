@@ -392,4 +392,5 @@ mod tests {
             assert_eq!(observed.3, [std::ffi::OsString::from(selector)]);
         }
     }
+
 }

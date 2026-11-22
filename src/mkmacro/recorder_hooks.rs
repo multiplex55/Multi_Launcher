@@ -180,6 +180,7 @@ pub struct HookService {
     dropped: Arc<std::sync::atomic::AtomicU64>,
     record_injected: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    shutdown_receipt: super::checked_shutdown::CheckedShutdown,
 }
 impl HookService {
     pub fn with_adapter<A: HookLoopAdapter>(adapter: A, capacity: usize) -> Self {
@@ -205,6 +206,7 @@ impl HookService {
             dropped,
             record_injected,
             thread: Mutex::new(Some(thread)),
+            shutdown_receipt: super::checked_shutdown::CheckedShutdown::default(),
         }
     }
     pub fn command(&self, command: HookCommand) -> bool {
@@ -247,10 +249,31 @@ impl HookService {
         self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn shutdown(&self) {
-        let _ = self.command(HookCommand::Shutdown);
-        if let Some(t) = self.thread.lock().unwrap().take() {
-            let _ = t.join();
+        if let Err(error) = self.shutdown_checked() {
+            tracing::error!(%error, "MkMacro recorder hook thread did not shut down cleanly");
         }
+    }
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        self.shutdown_receipt.run(
+            "MkMacro recorder hook shutdown panicked",
+            || {
+                let command_acknowledged = self.command(HookCommand::Shutdown);
+                let worker = self
+                    .thread
+                    .lock()
+                    .map_err(|_| "MkMacro recorder hook thread handle is unavailable".to_owned())?
+                    .take();
+                let worker_result = worker.map_or(Ok(()), |worker| {
+                    worker.join().map_err(|_| {
+                        "MkMacro recorder hook thread panicked during shutdown".to_owned()
+                    })
+                });
+                if !command_acknowledged {
+                    return Err("MkMacro recorder hook did not acknowledge shutdown".to_owned());
+                }
+                worker_result
+            },
+        )
     }
 }
 impl Drop for HookService {

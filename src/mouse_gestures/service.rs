@@ -268,6 +268,8 @@ pub struct MouseGestureService {
     right_click_backend: Arc<dyn RightClickBackend>,
     cursor_provider: Arc<dyn CursorPositionProvider>,
     worker: Option<WorkerHandle>,
+    frontend_restart_reserved: bool,
+    frontend_restart_retired: bool,
 }
 
 struct ClickObserverLease {
@@ -320,10 +322,15 @@ impl MouseGestureService {
             right_click_backend,
             cursor_provider,
             worker: None,
+            frontend_restart_reserved: false,
+            frontend_restart_retired: false,
         }
     }
 
     pub fn start(&mut self) {
+        if self.frontend_restart_reserved || self.frontend_restart_retired {
+            return;
+        }
         self.config.enabled = true;
         self.reconcile_running_state(false);
     }
@@ -334,6 +341,9 @@ impl MouseGestureService {
     }
 
     pub fn update_config(&mut self, config: MouseGestureConfig) {
+        if self.frontend_restart_reserved || self.frontend_restart_retired {
+            return;
+        }
         if self.config == config {
             return;
         }
@@ -347,6 +357,9 @@ impl MouseGestureService {
     }
 
     pub fn update_db(&mut self, db: Option<SharedGestureDb>) {
+        if self.frontend_restart_reserved || self.frontend_restart_retired {
+            return;
+        }
         self.db = db;
         // If the worker is already running, it captured the old Option<db> by value.
         // Restart so the worker sees the new DB.
@@ -387,6 +400,9 @@ impl MouseGestureService {
         target: ClickObservationTarget,
         retired: Arc<AtomicBool>,
     ) -> anyhow::Result<ClickObservationToken> {
+        if self.frontend_restart_reserved || self.frontend_restart_retired {
+            return Err(anyhow!("mouse gesture service is retiring for frontend restart"));
+        }
         if self
             .click_observer
             .as_ref()
@@ -418,6 +434,65 @@ impl MouseGestureService {
             retired,
         });
         Ok(token)
+    }
+
+    fn frontend_restart_blocker(&self) -> Option<&'static str> {
+        if self.frontend_restart_retired {
+            return Some("mouse gesture service is already retired");
+        }
+        if self.frontend_restart_reserved {
+            return Some("mouse gesture service is already reserved for restart");
+        }
+        if self.worker.is_some() {
+            return Some("mouse gesture hook worker is active");
+        }
+        if self.backend.is_installed() {
+            return Some("mouse gesture hook backend is still installed");
+        }
+        if self.click_observer.is_some() {
+            return Some("passive click observation is still leased");
+        }
+        None
+    }
+
+    fn reserve_frontend_restart(&mut self) -> Result<(), String> {
+        if let Some(reason) = self.frontend_restart_blocker() {
+            return Err(reason.to_owned());
+        }
+        self.frontend_restart_reserved = true;
+        Ok(())
+    }
+
+    fn shutdown_for_frontend_restart(&mut self) -> Result<(), String> {
+        if !self.frontend_restart_reserved {
+            return Err("mouse gesture service has no restart reservation".to_owned());
+        }
+        let mut failures = Vec::new();
+        self.config.enabled = false;
+        self.backend.set_enabled(false);
+        if self.click_observer.is_some() {
+            failures.push("passive click observation remained leased".to_owned());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.stop_tx.send(());
+            if worker.join.join().is_err() {
+                failures.push("mouse gesture hook worker panicked during shutdown".to_owned());
+            }
+        }
+        if self.backend.is_installed()
+            && let Err(error) = self.backend.uninstall()
+        {
+            failures.push(format!("mouse gesture hook uninstall failed: {error}"));
+        }
+        if self.backend.is_installed() {
+            failures.push("mouse gesture hook backend remained installed".to_owned());
+        }
+        self.frontend_restart_retired = failures.is_empty();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     fn release_click_observation(&mut self, token: ClickObservationToken) -> bool {
@@ -735,6 +810,55 @@ static SERVICE: OnceCell<Arc<Mutex<MouseGestureService>>> = OnceCell::new();
 
 fn global_service() -> &'static Arc<Mutex<MouseGestureService>> {
     SERVICE.get_or_init(|| Arc::new(Mutex::new(MouseGestureService::default())))
+}
+
+/// Reversible fence for the actual shared mouse hook. New gesture hook and
+/// passive click-observer admissions fail while it is held.
+pub struct FrontendRestartReservation {
+    service: Arc<Mutex<MouseGestureService>>,
+}
+
+impl FrontendRestartReservation {
+    pub fn is_current(&self) -> bool {
+        SERVICE
+            .get()
+            .is_some_and(|current| Arc::ptr_eq(current, &self.service))
+            && self.service.lock().is_ok_and(|service| {
+                service.frontend_restart_reserved && !service.frontend_restart_retired
+            })
+    }
+
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        if !SERVICE
+            .get()
+            .is_some_and(|current| Arc::ptr_eq(current, &self.service))
+        {
+            return Err("mouse gesture service owner changed before shutdown".to_owned());
+        }
+        self.service
+            .lock()
+            .map_err(|_| "mouse gesture service state is unavailable".to_owned())?
+            .shutdown_for_frontend_restart()
+    }
+}
+
+impl Drop for FrontendRestartReservation {
+    fn drop(&mut self) {
+        if let Ok(mut service) = self.service.lock()
+            && !service.frontend_restart_retired
+        {
+            service.frontend_restart_reserved = false;
+        }
+    }
+}
+
+pub fn reserve_frontend_restart() -> Result<FrontendRestartReservation, String> {
+    let service = Arc::clone(global_service());
+    service
+        .lock()
+        .map_err(|_| "mouse gesture service state is unavailable".to_owned())?
+        .reserve_frontend_restart()?;
+    Ok(FrontendRestartReservation { service })
 }
 
 /// Suppresses the process-wide mouse gesture runtime until the returned guard

@@ -80,6 +80,16 @@ impl HotkeyTrigger {
         self.recording_stop_generation.as_ref()?.lock().ok()?.take()
     }
 
+    /// Discard a hotkey admission observed while the main owner is fencing
+    /// frontend-restart transitions. The press can be made again after the
+    /// fence is released; it must not replay after Cancel or denial.
+    pub fn clear_pending(&self) {
+        if let Ok(mut open) = self.open.lock() {
+            *open = false;
+        }
+        self.clear_recording_stop_pending();
+    }
+
     fn clear_recording_stop_pending(&self) {
         if let Some(generation_slot) = self.recording_stop_generation.as_ref()
             && let Ok(mut generation) = generation_slot.lock()

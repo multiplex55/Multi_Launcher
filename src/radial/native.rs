@@ -435,6 +435,70 @@ impl NativeHost {
             }
         }
     }
+
+    /// Checked retirement used by frontend replacement. Failure leaves no
+    /// successful shutdown receipt, even when the worker has been handed to
+    /// the bounded process reaper.
+    pub fn shutdown_checked(&mut self) -> Result<(), String> {
+        if self.join.is_none() {
+            return if HostLifecycle::load(&self.lifecycle) == HostLifecycle::Stopped {
+                Ok(())
+            } else {
+                Err("radial native host has no join handle before retirement".to_owned())
+            };
+        }
+        let mut failures = Vec::new();
+        if HostLifecycle::load(&self.lifecycle) == HostLifecycle::Running {
+            self.lifecycle
+                .store(HostLifecycle::Stopping as u8, Ordering::Release);
+            if let Err(error) = self.enqueue(NativeCommand::Shutdown) {
+                failures.push(format!("could not send shutdown command: {error}"));
+            }
+        }
+        let mut stopped = self
+            .stopped
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_ok();
+        if !stopped {
+            self.wake.quit();
+            stopped = self
+                .stopped
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok();
+        }
+        let Some(join) = self.join.take() else {
+            return Err("radial native host join handle disappeared".to_owned());
+        };
+        if stopped || join.is_finished() {
+            if join.join().is_err() {
+                failures.push("radial native host thread panicked".to_owned());
+            }
+            self.reap_permit.take();
+        } else {
+            self.wake.quit();
+            let permit = self
+                .reap_permit
+                .take()
+                .ok_or_else(|| "radial native host reaper permit is unavailable".to_owned())?;
+            if let Err(error) = permit.reap(join) {
+                failures.push(format!("radial native host reaper failed: {error}"));
+            }
+            failures.push("radial native host did not stop before the shutdown deadline".into());
+        }
+        while let Some(event) = self.try_recv() {
+            if let NativeEvent::Failed { message, .. } = event {
+                failures.push(format!("radial native host reported a failure: {message}"));
+            }
+        }
+        if HostLifecycle::load(&self.lifecycle) != HostLifecycle::Stopped {
+            failures.push("radial native host did not publish its stopped state".to_owned());
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
 }
 impl Drop for NativeHost {
     fn drop(&mut self) {

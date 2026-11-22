@@ -119,6 +119,7 @@ pub struct RecorderProcessor {
     commands: mpsc::Sender<Command>,
     snapshot: Arc<RwLock<Arc<ProcessorSnapshot>>>,
     worker: std::sync::Mutex<Option<JoinHandle<()>>>,
+    shutdown_receipt: super::checked_shutdown::CheckedShutdown,
 }
 
 impl RecorderProcessor {
@@ -183,6 +184,7 @@ impl RecorderProcessor {
             commands,
             snapshot,
             worker: std::sync::Mutex::new(Some(worker)),
+            shutdown_receipt: super::checked_shutdown::CheckedShutdown::default(),
         }
     }
 
@@ -257,13 +259,36 @@ impl RecorderProcessor {
         self.snapshot.read().unwrap().clone()
     }
     pub fn shutdown(&self) {
-        let (reply, response) = mpsc::sync_channel(0);
-        if self.commands.send(Command::Shutdown { reply }).is_ok() {
-            let _ = response.recv();
+        if let Err(error) = self.shutdown_checked() {
+            tracing::error!(%error, "MkMacro recorder processor did not shut down cleanly");
         }
-        if let Some(worker) = self.worker.lock().unwrap().take() {
-            let _ = worker.join();
-        }
+    }
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        self.shutdown_receipt.run(
+            "MkMacro recorder processor shutdown panicked",
+            || {
+                let (reply, response) = mpsc::sync_channel(0);
+                let command_sent = self.commands.send(Command::Shutdown { reply }).is_ok();
+                let acknowledged = command_sent && response.recv().is_ok();
+                let worker = self
+                    .worker
+                    .lock()
+                    .map_err(|_| "MkMacro recorder processor handle is unavailable".to_owned())?
+                    .take();
+                let worker_result = worker.map_or(Ok(()), |worker| {
+                    worker.join().map_err(|_| {
+                        "MkMacro recorder processor panicked during shutdown".to_owned()
+                    })
+                });
+                if !command_sent {
+                    return Err("MkMacro recorder processor did not accept shutdown".to_owned());
+                }
+                if !acknowledged {
+                    return Err("MkMacro recorder processor did not acknowledge shutdown".to_owned());
+                }
+                worker_result
+            },
+        )
     }
     #[cfg(test)]
     pub(crate) fn panic_worker_for_test(&self) {

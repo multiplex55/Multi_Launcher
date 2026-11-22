@@ -89,6 +89,10 @@ trait PreviewHostPort: Send {
     fn send(&self, command: NativeCommand) -> Result<(), String>;
     fn try_recv(&self) -> Option<NativeEvent>;
     fn shutdown(&mut self);
+    fn shutdown_checked(&mut self) -> Result<(), String> {
+        self.shutdown();
+        Ok(())
+    }
 }
 
 impl PreviewHostPort for NativeHost {
@@ -102,6 +106,9 @@ impl PreviewHostPort for NativeHost {
 
     fn shutdown(&mut self) {
         NativeHost::shutdown(self)
+    }
+    fn shutdown_checked(&mut self) -> Result<(), String> {
+        NativeHost::shutdown_checked(self)
     }
 }
 
@@ -608,6 +615,20 @@ impl NativePreviewCoordinator {
             host.shutdown();
         }
         self.preparer.release();
+    }
+
+    pub fn shutdown_checked(&mut self) -> Result<(), String> {
+        let was_idle = self.active.is_none();
+        self.stop_active(CloseReason::Shutdown);
+        let host_result = self
+            .host
+            .take()
+            .map_or(Ok(()), |mut host| host.shutdown_checked());
+        self.preparer.release();
+        if !was_idle {
+            return Err("radial native preview remained active during frontend shutdown".to_owned());
+        }
+        host_result
     }
     pub fn invalidate_resources(&mut self) {
         // Release negative media/font entries without dismissing an active

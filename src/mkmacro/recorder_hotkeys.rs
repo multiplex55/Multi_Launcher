@@ -44,6 +44,7 @@ struct State {
 pub struct RecorderHotkeyService {
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    shutdown_receipt: super::checked_shutdown::CheckedShutdown,
 }
 impl RecorderHotkeyService {
     pub fn new(
@@ -83,6 +84,7 @@ impl RecorderHotkeyService {
         Self {
             stop,
             worker: Mutex::new(Some(worker)),
+            shutdown_receipt: super::checked_shutdown::CheckedShutdown::default(),
         }
     }
     pub fn system(store: Arc<MkMacroStore>) -> Self {
@@ -93,10 +95,30 @@ impl RecorderHotkeyService {
         )
     }
     pub fn shutdown(&self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(worker) = self.worker.lock().unwrap().take() {
-            let _ = worker.join();
+        if let Err(error) = self.shutdown_checked() {
+            tracing::error!(%error, "MkMacro recorder hotkey poller did not shut down cleanly");
         }
+    }
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        self.shutdown_receipt.run(
+            "MkMacro recorder hotkey poller shutdown panicked",
+            || {
+                self.stop.store(true, Ordering::SeqCst);
+                let worker = self
+                    .worker
+                    .lock()
+                    .map_err(|_| "MkMacro recorder hotkey worker handle is unavailable".to_owned())?
+                    .take();
+                if let Some(worker) = worker
+                    && worker.join().is_err()
+                {
+                    return Err(
+                        "MkMacro recorder hotkey poller panicked during shutdown".to_owned(),
+                    );
+                }
+                Ok(())
+            },
+        )
     }
 }
 impl Drop for RecorderHotkeyService {

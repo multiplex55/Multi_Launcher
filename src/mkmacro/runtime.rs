@@ -510,6 +510,7 @@ pub struct MacroRuntime {
     store: Arc<MkMacroStore>,
     generation: u64,
     available: AtomicBool,
+    shutdown_receipt: super::checked_shutdown::CheckedShutdown,
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
@@ -838,6 +839,7 @@ impl MacroRuntime {
             store,
             generation: RUNTIME_GENERATIONS.fetch_add(1, Ordering::Relaxed),
             available: AtomicBool::new(true),
+            shutdown_receipt: super::checked_shutdown::CheckedShutdown::default(),
             shared,
             worker: Mutex::new(Some(worker)),
             #[cfg(test)]
@@ -1352,28 +1354,53 @@ impl MacroRuntime {
         *slot = Some(Box::new(observer));
     }
     pub fn shutdown(&self) {
-        {
-            let admission = self.shared.admission.lock().unwrap();
-            self.available.store(false, Ordering::Release);
-            if let Some(gate) = admission
-                .as_ref()
-                .and_then(|active| active.owned_start_gate.as_ref())
-            {
-                gate.transition(OWNED_RUN_CANCELLED);
-            }
-            self.shared.control.stop();
-            let _ = self.tx.send(WorkerMessage {
-                command: RuntimeCommand::Shutdown,
-                program: None,
-                origin: RuntimeOrigin::Stored,
-                run_id: None,
-                owned_completion: None,
-                owned_start_gate: None,
-            });
+        if let Err(error) = self.shutdown_checked() {
+            tracing::error!(%error, "MkMacro runtime did not shut down cleanly");
         }
-        if let Some(h) = self.worker.lock().unwrap().take() {
-            let _ = h.join();
-        }
+    }
+
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        self.shutdown_receipt.run(
+            "MkMacro runtime shutdown panicked",
+            || {
+                let mut failures = Vec::new();
+                {
+                    let admission = self.shared.admission.lock().unwrap();
+                    self.available.store(false, Ordering::Release);
+                    if let Some(gate) = admission
+                        .as_ref()
+                        .and_then(|active| active.owned_start_gate.as_ref())
+                    {
+                        gate.transition(OWNED_RUN_CANCELLED);
+                    }
+                    self.shared.control.stop();
+                    if self
+                        .tx
+                        .send(WorkerMessage {
+                            command: RuntimeCommand::Shutdown,
+                            program: None,
+                            origin: RuntimeOrigin::Stored,
+                            run_id: None,
+                            owned_completion: None,
+                            owned_start_gate: None,
+                        })
+                        .is_err()
+                    {
+                        failures.push("MkMacro runtime worker did not accept shutdown".to_owned());
+                    }
+                }
+                if let Some(worker) = self.worker.lock().unwrap().take()
+                    && worker.join().is_err()
+                {
+                    failures.push("MkMacro runtime worker panicked during shutdown".to_owned());
+                }
+                if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(failures.join("; "))
+                }
+            },
+        )
     }
 }
 impl Drop for MacroRuntime {
@@ -2145,6 +2172,213 @@ static DOCUMENT_PUBLICATION_OBSERVER: Lazy<
 > = Lazy::new(|| RwLock::new(None));
 static RECORDER_HOTKEYS: Lazy<RwLock<Option<Arc<super::recorder_hotkeys::RecorderHotkeyService>>>> =
     Lazy::new(|| RwLock::new(None));
+
+/// A reversible reservation against the process-wide playback/recording
+/// admission guard. Dropping it restores ordinary MkMacro admission.
+pub struct FrontendRestartReservation {
+    runtime: Arc<MacroRuntime>,
+    recorder: Arc<RecorderRuntime>,
+}
+
+impl FrontendRestartReservation {
+    /// False when the process-wide MkMacro runtime was replaced or retired
+    /// after this reservation was accepted.
+    pub fn is_current(&self) -> bool {
+        self.runtime.available.load(Ordering::Acquire)
+            && RUNTIME
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.runtime))
+            && RECORDER
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.recorder))
+            && self
+                .recorder
+                .uses_operation_guard(&self.runtime.shared.operations)
+    }
+}
+
+impl Drop for FrontendRestartReservation {
+    fn drop(&mut self) {
+        self.runtime
+            .shared
+            .operations
+            .release(super::recorder_runtime::Operation::FrontendRestart);
+    }
+}
+
+/// Reserve the existing shared operation guard so playback and capture
+/// cannot start between idle verification and the GUI's final close check.
+pub fn reserve_frontend_restart() -> Result<FrontendRestartReservation, String> {
+    let runtime = RUNTIME
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or_else(|| "the MkMacro runtime is unavailable".to_owned())?;
+    let recorder = RECORDER
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or_else(|| "the MkMacro recorder owner is unavailable".to_owned())?;
+    if !recorder.uses_operation_guard(&runtime.shared.operations) {
+        return Err("the MkMacro runtime and recorder do not share one admission owner".to_owned());
+    }
+    if !runtime.available.load(Ordering::Acquire) {
+        return Err("the MkMacro runtime is retiring".to_owned());
+    }
+    if !runtime
+        .shared
+        .operations
+        .claim(super::recorder_runtime::Operation::FrontendRestart)
+    {
+        let reason = if runtime
+            .shared
+            .operations
+            .active(super::recorder_runtime::Operation::Recording)
+        {
+            "MkMacro recording is active"
+        } else if runtime
+            .shared
+            .operations
+            .active(super::recorder_runtime::Operation::Playback)
+        {
+            "MkMacro playback is active"
+        } else {
+            "another MkMacro operation is active"
+        };
+        return Err(reason.to_owned());
+    }
+    let reservation = FrontendRestartReservation { runtime, recorder };
+    if !reservation.is_current() {
+        drop(reservation);
+        return Err("the MkMacro runtime changed during restart admission".to_owned());
+    }
+    Ok(reservation)
+}
+
+/// Stop the hidden process-wide MkMacro pollers, coordinator, runtime worker,
+/// recorder processor and hook worker after the launcher has committed to a
+/// frontend restart. The held reservation is the same SharedOperationGuard
+/// that fenced playback and recording admission.
+pub fn shutdown_shared_for_frontend_restart(
+    reservation: &FrontendRestartReservation,
+) -> Result<(), String> {
+    if !reservation.is_current() {
+        return Err("the reserved MkMacro runtime owner changed before shutdown".to_owned());
+    }
+    if let Some(reason) = frontend_restart_review_blocker()? {
+        return Err(reason);
+    }
+    {
+        let runtime = RUNTIME
+            .read()
+            .map_err(|_| "MkMacro runtime owner is unavailable".to_owned())?;
+        if !runtime
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &reservation.runtime))
+        {
+            return Err("the reserved MkMacro runtime owner changed before shutdown".to_owned());
+        }
+        if RECORDER
+            .read()
+            .map_err(|_| "MkMacro recorder owner is unavailable".to_owned())?
+            .is_none()
+        {
+            return Err("the MkMacro recorder owner is unavailable".to_owned());
+        }
+    }
+
+    // Match the established replacement order: retire both input pollers
+    // before taking the recording stop coordinator or either worker owner.
+    let hotkeys = HOTKEYS
+        .write()
+        .map_err(|_| "MkMacro hotkey owner is unavailable".to_owned())?
+        .take();
+    let recorder_hotkeys = RECORDER_HOTKEYS
+        .write()
+        .map_err(|_| "MkMacro recorder hotkey owner is unavailable".to_owned())?
+        .take();
+    let mut failures = Vec::new();
+    if let Some(hotkeys) = hotkeys
+        && let Err(error) = hotkeys.shutdown_checked()
+    {
+        failures.push(error);
+    }
+    if let Some(recorder_hotkeys) = recorder_hotkeys
+        && let Err(error) = recorder_hotkeys.shutdown_checked()
+    {
+        failures.push(error);
+    }
+
+    // As in shared-store replacement, pollers stop before the stop
+    // coordinator is held. Keep that coordinator locked through exact paired
+    // owner validation and detachment so no Review can be queued in between.
+    let stop_pending = RECORD_STOP_COORDINATOR
+        .0
+        .lock()
+        .map_err(|_| "the recording stop coordinator is unavailable".to_owned())?;
+    if *stop_pending {
+        return Err("a recording is still stopping for review".to_owned());
+    }
+    if !PENDING_RECORDINGS
+        .lock()
+        .map_err(|_| "the recording review queue is unavailable".to_owned())?
+        .is_empty()
+    {
+        return Err("a recording review became queued during MkMacro shutdown".to_owned());
+    }
+    if RECORDING_STATUS
+        .read()
+        .map_err(|_| "the recording status owner is unavailable".to_owned())?
+        .as_deref()
+        .is_some_and(|status| status != "Select a macro before starting recording")
+    {
+        return Err("a recording finalization error remains unresolved".to_owned());
+    }
+    let mut runtime_slot = RUNTIME
+        .write()
+        .map_err(|_| "MkMacro runtime owner is unavailable".to_owned())?;
+    let mut recorder_slot = RECORDER
+        .write()
+        .map_err(|_| "MkMacro recorder owner is unavailable".to_owned())?;
+    if !runtime_slot
+        .as_ref()
+        .is_some_and(|owner| Arc::ptr_eq(owner, &reservation.runtime))
+        || !recorder_slot
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, &reservation.recorder))
+        || !reservation
+            .recorder
+            .uses_operation_guard(&reservation.runtime.shared.operations)
+    {
+        return Err("the reserved MkMacro runtime and recorder owners changed during shutdown".to_owned());
+    }
+    let runtime = runtime_slot
+        .take()
+        .ok_or_else(|| "the MkMacro runtime was not retired".to_owned())?;
+    let recorder = recorder_slot
+        .take()
+        .ok_or_else(|| "the MkMacro recorder was not retired".to_owned())?;
+    drop(recorder_slot);
+    drop(runtime_slot);
+    drop(stop_pending);
+
+    if let Err(error) = runtime.shutdown_checked() {
+        failures.push(error);
+    }
+    if let Err(error) = recorder.shutdown_checked() {
+        failures.push(error);
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
 #[derive(Clone)]
 struct RecordingArm {
     target: Option<RecordingTarget>,
@@ -2579,6 +2813,36 @@ pub fn request_record_stop_for_review() -> Result<bool> {
 }
 pub fn record_stop_pending() -> bool {
     *RECORD_STOP_COORDINATOR.0.lock().unwrap()
+}
+
+/// Read-only, fail-closed check for transient recording state that a frontend
+/// restart must not discard. Unlike `take_pending_recordings`, this leaves
+/// retained reviews with their GUI owner.
+pub fn frontend_restart_review_blocker() -> Result<Option<String>, String> {
+    let stop_pending = RECORD_STOP_COORDINATOR
+        .0
+        .lock()
+        .map_err(|_| "the recording stop coordinator is unavailable".to_owned())?;
+    if *stop_pending {
+        return Ok(Some("recording is still stopping for review".to_owned()));
+    }
+    drop(stop_pending);
+    if !PENDING_RECORDINGS
+        .lock()
+        .map_err(|_| "the recording review queue is unavailable".to_owned())?
+        .is_empty()
+    {
+        return Ok(Some("a recording review is still queued".to_owned()));
+    }
+    if RECORDING_STATUS
+        .read()
+        .map_err(|_| "the recording status owner is unavailable".to_owned())?
+        .as_deref()
+        .is_some_and(|status| status != "Select a macro before starting recording")
+    {
+        return Ok(Some("recording finalization has an unresolved error status".to_owned()));
+    }
+    Ok(None)
 }
 
 fn request_record_stop_for_review_on(
@@ -6399,6 +6663,9 @@ mod recording_controller_tests {
             recording_status().as_deref(),
             Some("Select a macro before starting recording")
         );
+        assert_eq!(frontend_restart_review_blocker().unwrap(), None);
+        let idle_reservation = reserve_frontend_restart().unwrap();
+        drop(idle_reservation);
 
         arm_recording(
             Some(RecordingTarget {
@@ -6462,6 +6729,21 @@ mod recording_controller_tests {
         assert_eq!(*unchanged, *store.snapshot());
         assert!(request_record_stop_for_review().is_err());
         assert!(take_pending_recordings().is_empty());
+
+        let current_recorder = RECORDER.read().unwrap().as_ref().unwrap().clone();
+        let mismatched_recorder = Arc::new(RecorderRuntime::with_guard(
+            store,
+            HookService::with_adapter(FakeHookLoop, 16),
+            Arc::new(SystemRecorderClock),
+            Arc::new(SharedOperationGuard::default()),
+        ));
+        *RECORDER.write().unwrap() = Some(mismatched_recorder.clone());
+        assert!(matches!(
+            reserve_frontend_restart(),
+            Err(mismatch) if mismatch.contains("do not share one admission owner")
+        ));
+        *RECORDER.write().unwrap() = Some(current_recorder);
+        drop(mismatched_recorder);
     }
 }
 

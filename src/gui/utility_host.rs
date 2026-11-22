@@ -114,6 +114,14 @@ impl<S: PartialEq> AcceptedParentOpen<S> {
     pub(super) fn is_current(&self, host: HostIdentity, session: &S) -> bool {
         self.host == host && &self.session == session
     }
+
+    pub(super) fn has_same_owner(&self, other: &AcceptedParentOpen<S>) -> bool {
+        self.host == other.host && self.session == other.session
+    }
+
+    pub(super) fn passes_retained(&self, ctx: &egui::Context) -> bool {
+        self.root.was_retained(ctx) && self.owner.was_retained(ctx)
+    }
 }
 
 /// The parent variant is only usable after its owner validates the receipt.

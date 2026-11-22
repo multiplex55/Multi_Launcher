@@ -3,6 +3,14 @@ use crate::plugin::PluginManager;
 use crate::settings::Settings;
 use eframe::egui;
 
+#[derive(Clone, Debug)]
+pub(crate) struct SettingsRestartConfirmation {
+    pub(crate) generation: u64,
+    pub(crate) origin: crate::gui::settings_window_host::SettingsOpenOrigin,
+    pub(crate) waiting_for_main: bool,
+    pub(crate) feedback: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SettingsNavigationStage {
     MainControl,
@@ -144,6 +152,8 @@ pub struct SettingsEditor {
     pub(crate) settings_search_query_response_id: Option<egui::Id>,
     pub(crate) settings_search_result_response_ids: Vec<egui::Id>,
     pub(crate) pending_settings_navigation: Option<PendingSettingsNavigation>,
+    pub(crate) restart_confirmation: Option<SettingsRestartConfirmation>,
+    pub(crate) next_restart_confirmation_generation: u64,
     pub(crate) settings_navigation_highlight: Option<SettingsNavigationHighlight>,
     #[cfg(feature = "qa-framebuffer-capture")]
     pub(crate) settings_navigation_qa_paint: Option<SettingsNavigationQaPaint>,

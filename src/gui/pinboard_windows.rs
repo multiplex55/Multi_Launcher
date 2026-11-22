@@ -1738,6 +1738,32 @@ impl PinWindowPresenter {
             })
     }
 
+    pub(crate) fn frontend_restart_preflight(&self, board: &Pinboard) -> Result<(), String> {
+        if self.capture_feedback.is_some() && !self.capture_feedback_closed.load(Ordering::Acquire)
+        {
+            return Err("Screenshot Pinboard has an open capture feedback window.".to_owned());
+        }
+        let registry = self
+            .registry
+            .lock()
+            .map_err(|_| "Screenshot Pinboard window owner is unavailable.".to_owned())?;
+        if registry.shutting_down {
+            return Err("Screenshot Pinboard is already shutting down.".to_owned());
+        }
+        if self.pending_parent_cleanup
+            || !board.is_empty()
+            || !registry.pins.is_empty()
+            || !registry.retired.is_empty()
+            || !registry.live_preparations.is_empty()
+            || registry.hide_identity.is_some()
+            || registry.restore_identity.is_some()
+        {
+            return Err("Screenshot Pinboard still owns a native pin or capture transition. Close it before restarting.".to_owned());
+        }
+        drop(registry);
+        self.actions.frontend_restart_preflight()
+    }
+
     pub(crate) fn needs_root_ui_when_hidden(&self, board: &Pinboard) -> bool {
         (self.capture_feedback.is_some() && !self.capture_feedback_closed.load(Ordering::Acquire))
             || self.registry.lock().is_ok_and(|registry| {
@@ -3837,6 +3863,26 @@ impl PinActionWorker {
             .is_ok_and(|state| state.admitted_jobs > 0)
     }
 
+    fn frontend_restart_preflight(&self) -> Result<(), String> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "Screenshot Pinboard action owner is unavailable.".to_owned())?;
+        if state.shutdown {
+            return Err("Screenshot Pinboard action owner is already shutting down.".to_owned());
+        }
+        if state.admitted_jobs != 0
+            || !state.queue.is_empty()
+            || state.active
+            || state.active_job.is_some()
+            || state.active_picker.is_some()
+        {
+            return Err("Screenshot Pinboard has an active or queued image action. Let it finish before restarting.".to_owned());
+        }
+        Ok(())
+    }
+
     fn shutdown_and_join(&mut self) -> Result<(), String> {
         let active_picker = {
             let mut state = self
@@ -5482,6 +5528,40 @@ pub(super) mod tests {
             )
             .unwrap();
         board.commit_capture(identity).unwrap()
+    }
+
+    #[test]
+    fn frontend_restart_preflight_rejects_pins_and_unpolled_image_actions() {
+        let mut presenter =
+            PinWindowPresenter::with_native_api(Arc::new(FakePinNativeApi::default()));
+        let mut board = Pinboard::default();
+        assert!(presenter.frontend_restart_preflight(&board).is_ok());
+
+        presenter
+            .actions
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .admitted_jobs = 1;
+        assert!(presenter
+            .frontend_restart_preflight(&board)
+            .unwrap_err()
+            .contains("active or queued image action"));
+        presenter
+            .actions
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .admitted_jobs = 0;
+
+        add_pin(&mut board, 31, ScreenRect::new(0, 0, 2, 2));
+        assert!(presenter
+            .frontend_restart_preflight(&board)
+            .unwrap_err()
+            .contains("native pin or capture transition"));
+        presenter.actions.shutdown_and_join().unwrap();
     }
 
     fn add_live_pin(
@@ -7174,7 +7254,7 @@ pub(super) mod tests {
             second_bounds
         );
         assert_eq!(app.root_window_bridge.identity(), root_identity);
-        app.shutdown_pinboard_capture();
+        assert!(app.shutdown_pinboard_capture().is_ok());
     }
 
     #[test]

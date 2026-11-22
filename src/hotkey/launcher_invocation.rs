@@ -1490,18 +1490,27 @@ impl LauncherInvocationService {
         result
     }
     pub fn stop(&mut self) {
+        if let Err(error) = self.stop_checked() {
+            eprintln!("launcher invocation cleanup degraded: {error}");
+        }
+    }
+
+    pub fn stop_checked(&mut self) -> Result<(), String> {
         crate::paste_sequence::admission::physical_paste_bridge().observer_live(false);
         #[cfg(all(windows, not(test)))]
         {
             if self.join.is_none() {
-                return;
+                return Ok(());
             }
+            let mut failures = Vec::new();
             if ServiceLifecycle::load(&self.lifecycle) == ServiceLifecycle::Running {
                 self.lifecycle.store(
                     ServiceLifecycle::Stopping as u8,
                     std::sync::atomic::Ordering::Release,
                 );
-                let _ = self.send_command_internal(ServiceCommand::Shutdown);
+                if let Err(error) = self.send_command_internal(ServiceCommand::Shutdown) {
+                    failures.push(format!("shutdown command failed: {error}"));
+                }
             }
             let stopped = self
                 .stopped
@@ -1509,7 +1518,9 @@ impl LauncherInvocationService {
                 .is_ok();
             if let Some(j) = self.join.take() {
                 if stopped || j.is_finished() {
-                    let _ = j.join();
+                    if j.join().is_err() {
+                        failures.push("launcher invocation worker panicked".to_owned());
+                    }
                     self.reap_permit.take();
                 } else {
                     if let Err(error) = self
@@ -1518,10 +1529,20 @@ impl LauncherInvocationService {
                         .expect("live invocation service owns a reaper permit")
                         .reap(j)
                     {
-                        eprintln!("launcher invocation cleanup degraded: {error}");
+                        failures.push(format!("launcher invocation reaper failed: {error}"));
                     }
+                    failures.push("launcher invocation worker missed its shutdown deadline".into());
                 }
             }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(failures.join("; "))
+            }
+        }
+        #[cfg(any(not(windows), test))]
+        {
+            Ok(())
         }
     }
 }

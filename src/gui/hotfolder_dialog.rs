@@ -2647,6 +2647,6 @@ mod m10e_editor_fixtures {
             std::thread::sleep(Duration::from_millis(10));
         }
         driver.shutdown_and_reap();
-        driver.join_reaper();
+        let _ = driver.join_reaper();
     }
 }

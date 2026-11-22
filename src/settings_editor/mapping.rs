@@ -72,6 +72,8 @@ impl SettingsEditor {
             settings_search_query_response_id: None,
             settings_search_result_response_ids: Vec::new(),
             pending_settings_navigation: None,
+            restart_confirmation: None,
+            next_restart_confirmation_generation: 0,
             settings_navigation_highlight: None,
             #[cfg(feature = "qa-framebuffer-capture")]
             settings_navigation_qa_paint: None,
@@ -460,6 +462,37 @@ impl SettingsEditor {
             radial_submenu_migration: current.radial_submenu_migration.clone(),
         })
     }
+
+    pub(crate) fn reverse_restart_preflight(&self) -> Result<(), String> {
+        let mut candidate = self.clone();
+        candidate
+            .validate_before_save()
+            .map_err(|error| format!("{error}. Correct or cancel the Settings draft before restarting."))?;
+        candidate.sync_from_plugin_settings();
+        let current = candidate
+            .to_settings(&self.baseline_settings)
+            .map_err(|error| format!("Settings could not be validated: {error}"))?;
+
+        // Constructing the baseline through the same editor projection keeps
+        // synthesized defaults (such as Screenshot plugin settings) from
+        // creating a false dirty result.
+        let mut baseline_editor = Self::new_with_plugins(&self.baseline_settings);
+        baseline_editor.sync_from_plugin_settings();
+        let baseline = baseline_editor
+            .to_settings(&self.baseline_settings)
+            .map_err(|error| format!("Saved Settings could not be projected: {error}"))?;
+        let current = serde_json::to_value(current)
+            .map_err(|error| format!("Settings projection failed: {error}"))?;
+        let baseline = serde_json::to_value(baseline)
+            .map_err(|error| format!("Saved Settings projection failed: {error}"))?;
+        if current != baseline {
+            return Err(
+                "Settings has unsaved changes. Save or Cancel the draft before restarting."
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -510,6 +543,23 @@ mod tests {
         editor.calculation_pad_remember_source = false;
         let saved = editor.to_settings(&settings).expect("valid settings draft");
         assert!(!saved.calculation_pad_remember_source);
+    }
+
+    #[test]
+    fn reverse_restart_checks_equivalent_clean_projection_and_preserves_dirty_draft() {
+        let baseline = Settings::default();
+        let mut editor = SettingsEditor::new_with_plugins(&baseline);
+
+        assert!(editor.reverse_restart_preflight().is_ok());
+
+        editor.hotkey = "F3".to_owned();
+        editor.hotkey_valid = true;
+        editor.last_valid_hotkey = "F3".to_owned();
+        assert!(editor
+            .reverse_restart_preflight()
+            .unwrap_err()
+            .contains("unsaved changes"));
+        assert_eq!(editor.hotkey, "F3");
     }
 
     #[test]

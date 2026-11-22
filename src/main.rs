@@ -792,6 +792,33 @@ fn take_paste_sequence_trigger_actions(
         .collect()
 }
 
+fn clear_main_hotkey_admissions(
+    trigger: &HotkeyTrigger,
+    quit_trigger: Option<&Arc<HotkeyTrigger>>,
+    help_trigger: Option<&HotkeyTrigger>,
+    screen_draw_trigger: Option<&HotkeyTrigger>,
+    emergency_trigger: Option<&HotkeyTrigger>,
+    paste_sequence_triggers: &[PasteSequenceHotkeyTrigger],
+    listener_triggers: &[Arc<HotkeyTrigger>],
+    deferred_paste_sequence_actions: &mut VecDeque<PasteSequenceHotkeyAction>,
+) {
+    for trigger in std::iter::once(trigger)
+        .chain(help_trigger)
+        .chain(screen_draw_trigger)
+        .chain(emergency_trigger)
+    {
+        trigger.clear_pending();
+    }
+    for trigger in listener_triggers {
+        if quit_trigger.is_some_and(|quit| Arc::ptr_eq(quit, trigger)) {
+            continue;
+        }
+        trigger.clear_pending();
+    }
+    drop(take_paste_sequence_trigger_actions(paste_sequence_triggers));
+    deferred_paste_sequence_actions.clear();
+}
+
 fn take_recording_stop_generation(triggers: &[Arc<HotkeyTrigger>]) -> Option<u64> {
     triggers
         .iter()
@@ -4407,11 +4434,19 @@ impl<T: Send + 'static> GuiWorker<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum GuiWorkerOutcome {
     Returned,
     EguiError(String),
     ThreadPanicked,
+}
+
+struct ReverseRestartAdmission {
+    attempt: multi_launcher::gui::reverse_restart::RestartAttemptId,
+    macro_reservation: multi_launcher::mkmacro::runtime::FrontendRestartReservation,
+    mouse_gesture_reservation:
+        multi_launcher::plugins::mouse_gestures::FrontendRestartReservation,
+    context: gpui_restart::RestartContext,
 }
 
 fn classify_gui_worker_join(joined: thread::Result<Result<(), String>>) -> GuiWorkerOutcome {
@@ -4422,8 +4457,8 @@ fn classify_gui_worker_join(joined: thread::Result<Result<(), String>>) -> GuiWo
     }
 }
 
-fn report_gui_worker_outcome(joined: thread::Result<Result<(), String>>) {
-    match classify_gui_worker_join(joined) {
+fn report_classified_gui_worker_outcome(outcome: GuiWorkerOutcome) {
+    match outcome {
         GuiWorkerOutcome::Returned => {}
         GuiWorkerOutcome::EguiError(error) => {
             tracing::error!(%error, "egui frontend returned with an error");
@@ -4432,6 +4467,44 @@ fn report_gui_worker_outcome(joined: thread::Result<Result<(), String>>) {
             tracing::error!("egui frontend worker panicked");
         }
     }
+}
+
+fn finish_ordinary_egui_exit(
+    gui_worker: GuiWorker<Result<(), String>>,
+    root_window_context: &Arc<Mutex<Option<RootViewportCtx>>>,
+    request_root_close: bool,
+    hotkey_runtime_receiver: &mut Option<multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationReceiver>,
+    invocation_service: &mut Option<LauncherInvocationService>,
+    radial_controller: &mut RadialController,
+    native_preview: &mut multi_launcher::radial::authoring::native_preview::NativePreviewCoordinator,
+    radial_resources: &mut RadialRuntimeResources,
+    listener: &mut HotkeyListener,
+    settings_save_workers: &multi_launcher::gui::SettingsSaveWorkerRegistry,
+) -> GuiWorkerOutcome {
+    drop(hotkey_runtime_receiver.take());
+    if let Some(service) = invocation_service.as_ref() {
+        let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
+    }
+    radial_controller.shutdown();
+    native_preview.cancel_all();
+    radial_resources.shutdown(radial_controller);
+    if let Some(service) = invocation_service.as_mut() {
+        service.stop();
+    }
+    listener.stop();
+    if request_root_close
+        && let Ok(guard) = root_window_context.lock()
+        && let Some(context) = guard.as_ref()
+    {
+        context.send_viewport_cmd(egui::ViewportCommand::Close);
+        context.request_repaint();
+    }
+    let outcome = classify_gui_worker_join(gui_worker.join());
+    // The GUI on_exit callback may enqueue its final size write before this
+    // closes admission and joins the settings writers.
+    settings_save_workers.join_all();
+    report_classified_gui_worker_outcome(outcome.clone());
+    outcome
 }
 
 struct GuiStartupServices {
@@ -4444,6 +4517,7 @@ struct GuiStartupServices {
     visibility_revision: VisibilityRevision,
     paste_sequence_document_revision: Arc<AtomicU64>,
     event_tx: Sender<()>,
+    reverse_restart_protocol: Arc<multi_launcher::gui::reverse_restart::ReverseRestartProtocol>,
     settings_save_workers: multi_launcher::gui::SettingsSaveWorkerRegistry,
     target_repair_radial: Arc<RadialStore>,
     target_repair_root: PathBuf,
@@ -4482,6 +4556,7 @@ fn spawn_gui(
         visibility_revision,
         paste_sequence_document_revision,
         event_tx,
+        reverse_restart_protocol,
         settings_save_workers,
         target_repair_radial,
         target_repair_root,
@@ -4544,6 +4619,8 @@ fn spawn_gui(
     let settings_save_workers_for_window = settings_save_workers;
     let target_repair_radial_for_window = Arc::clone(&target_repair_radial);
     let target_repair_root_for_window = target_repair_root.clone();
+    let reverse_restart_protocol_for_window = Arc::clone(&reverse_restart_protocol);
+    let reverse_restart_main_wake = event_tx.clone();
     let paste_sequence_document_revision_for_window = Arc::clone(&paste_sequence_document_revision);
     let hotkey_directory_main_wake = event_tx.clone();
     #[cfg(feature = "qa-framebuffer-capture")]
@@ -4596,6 +4673,10 @@ fn spawn_gui(
                     flag_clone,
                     restore_clone,
                     help_clone,
+                );
+                app.install_reverse_restart_services(
+                    reverse_restart_protocol_for_window,
+                    reverse_restart_main_wake,
                 );
                 app.initialize_target_repair_service(
                     target_repair_root_for_window,
@@ -4769,6 +4850,9 @@ fn main() -> anyhow::Result<()> {
     let paste_sequence_document_revision =
         Arc::new(AtomicU64::new(initial_sequence_document_revision));
     let (event_tx, event_rx) = channel::<()>();
+    let reverse_restart_protocol = Arc::new(
+        multi_launcher::gui::reverse_restart::ReverseRestartProtocol::default(),
+    );
     let mut hotkey_runtime_receiver =
         Some(multi_launcher::hotkey::reconfiguration::install_main_runtime(event_tx.clone())?);
     install_exclusive_wake(event_tx.clone());
@@ -4984,7 +5068,7 @@ fn main() -> anyhow::Result<()> {
             event_tx.clone(),
             app_data_root.path().to_path_buf(),
         );
-    let gallery_service = match multi_launcher::radial::gallery::GalleryPreparationService::new(
+    let mut gallery_service = match multi_launcher::radial::gallery::GalleryPreparationService::new(
         app_data_root.path().to_path_buf(),
         authoring_endpoint.gallery_reply_sink(),
     ) {
@@ -5115,6 +5199,7 @@ fn main() -> anyhow::Result<()> {
         visibility_revision: visibility_revision.clone(),
         paste_sequence_document_revision: Arc::clone(&paste_sequence_document_revision),
         event_tx: event_tx.clone(),
+        reverse_restart_protocol: Arc::clone(&reverse_restart_protocol),
         settings_save_workers: settings_save_workers.clone(),
         target_repair_radial: Arc::clone(&radial_store),
         target_repair_root: app_data_root.path().to_path_buf(),
@@ -5166,33 +5251,414 @@ fn main() -> anyhow::Result<()> {
         },
     );
 
-    loop {
-        let shutdown = match gui_worker.wait_for_event(&event_rx) {
-            GuiWorkerEvent::Wake => false,
-            GuiWorkerEvent::Completed => true,
+    let mut reverse_restart_admission: Option<ReverseRestartAdmission> = None;
+    let mut reverse_restart_plan: Option<gpui_restart::RestartPlan> = None;
+    let mut reverse_restart_error: Option<String> = None;
+    let loop_result: anyhow::Result<()> = loop {
+        let (shutdown, worker_completed) = match gui_worker.wait_for_event(&event_rx) {
+            GuiWorkerEvent::Wake => (false, false),
+            GuiWorkerEvent::Completed => (true, true),
             GuiWorkerEvent::ChannelClosed(err) => {
                 tracing::error!(?err, "event channel closed; shutting down launcher loop");
-                true
+                (true, false)
             }
         };
         if shutdown {
+            let state = reverse_restart_protocol.state();
+            let committed_restart = reverse_restart_admission
+                .as_ref()
+                .is_some_and(|admission| {
+                    reverse_restart_protocol.committed_attempt() == Some(admission.attempt)
+                });
+            if !committed_restart {
+                finish_ordinary_egui_exit(
+                    gui_worker,
+                    &ctx,
+                    false,
+                    &mut hotkey_runtime_receiver,
+                    &mut invocation_service,
+                    &mut radial_controller,
+                    &mut native_preview,
+                    &mut radial_resources,
+                    &mut listener,
+                    &settings_save_workers,
+                );
+                break Ok(());
+            }
+
+            let mut shutdown_failures = Vec::new();
+            let (
+                attempt,
+                receipt,
+                context,
+                macro_reservation_current,
+                mouse_gesture_reservation_current,
+            ) = {
+                let admission = reverse_restart_admission
+                    .as_ref()
+                    .expect("committed restart state has a main admission");
+                let receipt = match &state {
+                    multi_launcher::gui::reverse_restart::ReverseRestartState::AppExitReceived {
+                        attempt,
+                        receipt,
+                    } if *attempt == admission.attempt => Some(receipt.clone()),
+                    _ => None,
+                };
+                (
+                    admission.attempt,
+                    receipt,
+                    admission.context.clone(),
+                    admission.macro_reservation.is_current(),
+                    admission.mouse_gesture_reservation.is_current(),
+                )
+            };
+            if !worker_completed {
+                shutdown_failures.push(
+                    "the egui worker ended without publishing its completion signal".to_owned(),
+                );
+            }
+            if let Some(receipt) = receipt {
+                shutdown_failures.extend(receipt.failures.iter().cloned());
+                if receipt.attempt != Some(attempt) {
+                    shutdown_failures.push(
+                        "the egui exit receipt did not match the committed restart attempt"
+                            .to_owned(),
+                    );
+                }
+            } else {
+                shutdown_failures.push(
+                    "the committed restart did not receive the matching egui on_exit receipt"
+                        .to_owned(),
+                );
+            }
+            if !macro_reservation_current {
+                shutdown_failures.push(
+                    "the reserved MkMacro runtime owner changed before shutdown".to_owned(),
+                );
+            }
+            if !mouse_gesture_reservation_current {
+                shutdown_failures.push(
+                    "the reserved Mouse Gestures owner changed before shutdown".to_owned(),
+                );
+            }
             drop(hotkey_runtime_receiver.take());
-            if let Some(service) = invocation_service.as_ref() {
-                let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
+            if let Some(mut service) = invocation_service.take() {
+                if let Err(error) = service.stop_checked() {
+                    shutdown_failures.push(format!(
+                        "launcher invocation service did not retire cleanly: {error}"
+                    ));
+                }
             }
-            radial_controller.shutdown();
-            native_preview.cancel_all();
+            if let Err(error) = radial_controller.shutdown_checked() {
+                shutdown_failures.push(format!("radial runtime did not retire cleanly: {error}"));
+            }
+            if let Err(error) = native_preview.shutdown_checked() {
+                shutdown_failures.push(format!("radial preview did not retire cleanly: {error}"));
+            }
+            if let Some(service) = gallery_service.as_mut()
+                && let Err(error) = service.shutdown_for_frontend_restart()
+            {
+                shutdown_failures.push(format!("radial Gallery did not retire cleanly: {error}"));
+            }
             radial_resources.shutdown(&mut radial_controller);
-            if let Some(service) = invocation_service.as_mut() {
-                service.stop();
+            if let Err(error) = listener.stop_checked() {
+                shutdown_failures.push(format!("legacy hotkey listener did not retire cleanly: {error}"));
             }
-            listener.stop();
-            let gui_worker_join = gui_worker.join();
-            // Let LauncherApp::on_exit queue its final utility-size write
-            // before join_all closes worker admission.
-            settings_save_workers.join_all();
-            report_gui_worker_outcome(gui_worker_join);
+            if mouse_gesture_reservation_current
+                && let Some(admission) = reverse_restart_admission.as_ref()
+                && let Err(error) = admission.mouse_gesture_reservation.shutdown_checked()
+            {
+                shutdown_failures.push(format!("Mouse Gestures owners did not retire cleanly: {error}"));
+            }
+            if macro_reservation_current
+                && let Some(admission) = reverse_restart_admission.as_ref()
+                && let Err(error) = multi_launcher::mkmacro::runtime::shutdown_shared_for_frontend_restart(
+                    &admission.macro_reservation,
+                )
+            {
+                shutdown_failures.push(format!("MkMacro owners did not retire cleanly: {error}"));
+            }
+
+            let gui_worker_outcome = classify_gui_worker_join(gui_worker.join());
+            let gui_worker_returned = gui_worker_outcome == GuiWorkerOutcome::Returned;
+            report_classified_gui_worker_outcome(gui_worker_outcome);
+            if !gui_worker_returned {
+                shutdown_failures.push("the egui worker did not return successfully".to_owned());
+            }
+            let settings_receipt = settings_save_workers.join_all_checked();
+            if let Err(error) = settings_receipt.ensure_clean() {
+                shutdown_failures.push(format!("final Settings writes did not drain cleanly: {error}"));
+            }
+
+            let admission = reverse_restart_admission.take();
+            drop(admission);
+            if shutdown_failures.is_empty() && worker_completed && gui_worker_returned {
+                reverse_restart_plan = Some(context.into_plan(gpui_restart::Frontend::Gpui));
+            } else {
+                let gpui_plan = context.clone().into_plan(gpui_restart::Frontend::Gpui);
+                let egui_plan = context.into_plan(gpui_restart::Frontend::Egui);
+                let details = shutdown_failures.join("\n");
+                let message = format!(
+                    "The switch to GPUI could not complete safely. {details}\n\nTo reopen this profile in egui, run:\n{}",
+                    egui_plan.manual_command()
+                );
+                tracing::error!(
+                    target = gpui_plan.target.display_name(),
+                    %details,
+                    "reverse frontend restart was refused after shutdown"
+                );
+                gpui_frontend::show_startup_error(&message);
+                reverse_restart_error = Some(message);
+            }
             break Ok(());
+        }
+
+        use multi_launcher::gui::reverse_restart::ReverseRestartState;
+        match reverse_restart_protocol.state() {
+            ReverseRestartState::Requested(attempt) => {
+                if quit_trigger.as_ref().is_some_and(|trigger| trigger.take()) {
+                    if reverse_restart_protocol.observe_ordinary_close() {
+                        reverse_restart_admission.take();
+                        finish_ordinary_egui_exit(
+                            gui_worker,
+                            &ctx,
+                            true,
+                            &mut hotkey_runtime_receiver,
+                            &mut invocation_service,
+                            &mut radial_controller,
+                            &mut native_preview,
+                            &mut radial_resources,
+                            &mut listener,
+                            &settings_save_workers,
+                        );
+                        break Ok(());
+                    }
+                    continue;
+                }
+                let blocker = if pending_launcher_route.is_some() {
+                    Some("a launcher route change is still being applied".to_owned())
+                } else if !prepared_hotkey_routes.is_empty() {
+                    Some("a hotkey route proposal is still prepared".to_owned())
+                } else if !deferred_service_notices.is_empty()
+                    || !deferred_paste_sequence_actions.is_empty()
+                    || !external_radial_invocations.is_empty()
+                {
+                    Some("a launcher or radial action is still queued".to_owned())
+                } else if invocation_service.is_some() {
+                    Some("the launcher invocation service is active".to_owned())
+                } else if radial_resources.active
+                    || authoring_editor_session.is_some()
+                    || gallery_editor_session.is_some()
+                    || authoring_preview_document.is_some()
+                    || !radial_controller.frontend_restart_idle()
+                    || native_preview.active_lease().is_some()
+                {
+                    Some("a radial runtime or authoring owner is still active".to_owned())
+                } else {
+                    match multi_launcher::mkmacro::runtime::frontend_restart_review_blocker() {
+                        Ok(Some(reason)) => Some(reason),
+                        Ok(None) => None,
+                        Err(error) => Some(error),
+                    }
+                };
+                if let Some(reason) = blocker {
+                    reverse_restart_protocol.deny(attempt, reason);
+                    if let Ok(guard) = ctx.lock()
+                        && let Some(context) = guard.as_ref()
+                    {
+                        context.request_repaint();
+                    }
+                    let _ = event_tx.send(());
+                    continue;
+                }
+                let macro_reservation = match multi_launcher::mkmacro::runtime::reserve_frontend_restart() {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        reverse_restart_protocol.deny(attempt, error);
+                        if let Ok(guard) = ctx.lock()
+                            && let Some(context) = guard.as_ref()
+                        {
+                            context.request_repaint();
+                        }
+                        let _ = event_tx.send(());
+                        continue;
+                    }
+                };
+                let mouse_gesture_reservation = match
+                    multi_launcher::plugins::mouse_gestures::reserve_frontend_restart()
+                {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        drop(macro_reservation);
+                        reverse_restart_protocol.deny(attempt, error);
+                        if let Ok(guard) = ctx.lock()
+                            && let Some(context) = guard.as_ref()
+                        {
+                            context.request_repaint();
+                        }
+                        let _ = event_tx.send(());
+                        continue;
+                    }
+                };
+                if !macro_reservation.is_current() || !mouse_gesture_reservation.is_current() {
+                    drop(macro_reservation);
+                    drop(mouse_gesture_reservation);
+                    reverse_restart_protocol.deny(
+                        attempt,
+                        "a process input owner changed during restart admission",
+                    );
+                    if let Ok(guard) = ctx.lock()
+                        && let Some(context) = guard.as_ref()
+                    {
+                        context.request_repaint();
+                    }
+                    let _ = event_tx.send(());
+                    continue;
+                }
+                let context = match gpui_restart::RestartContext::capture() {
+                    Ok(context) => context,
+                    Err(error) => {
+                        drop(macro_reservation);
+                        drop(mouse_gesture_reservation);
+                        reverse_restart_protocol.deny(
+                            attempt,
+                            format!("could not capture the application restart path: {error}"),
+                        );
+                        if let Ok(guard) = ctx.lock()
+                            && let Some(context) = guard.as_ref()
+                        {
+                            context.request_repaint();
+                        }
+                        let _ = event_tx.send(());
+                        continue;
+                    }
+                };
+                if reverse_restart_protocol.acknowledge(attempt) {
+                    reverse_restart_admission = Some(ReverseRestartAdmission {
+                        attempt,
+                        macro_reservation,
+                        mouse_gesture_reservation,
+                        context,
+                    });
+                } else {
+                    drop(macro_reservation);
+                }
+                if let Ok(guard) = ctx.lock()
+                    && let Some(context) = guard.as_ref()
+                {
+                    context.request_repaint();
+                }
+                let _ = event_tx.send(());
+                continue;
+            }
+            ReverseRestartState::Acknowledged(attempt) => {
+                let current = reverse_restart_admission.as_ref().is_some_and(|admission| {
+                    admission.attempt == attempt && admission.macro_reservation.is_current()
+                });
+                if !current {
+                    let denied = reverse_restart_protocol.deny(
+                        attempt,
+                        "the reserved main owner changed during restart confirmation",
+                    );
+                    let committed_during_check =
+                        reverse_restart_protocol.committed_attempt() == Some(attempt);
+                    if denied || !committed_during_check {
+                        reverse_restart_admission.take();
+                    }
+                    if let Ok(guard) = ctx.lock()
+                        && let Some(context) = guard.as_ref()
+                    {
+                        context.request_repaint();
+                    }
+                    let _ = event_tx.send(());
+                    continue;
+                }
+                if quit_trigger.as_ref().is_some_and(|trigger| trigger.take()) {
+                    if reverse_restart_protocol.observe_ordinary_close() {
+                        reverse_restart_admission.take();
+                        finish_ordinary_egui_exit(
+                            gui_worker,
+                            &ctx,
+                            true,
+                            &mut hotkey_runtime_receiver,
+                            &mut invocation_service,
+                            &mut radial_controller,
+                            &mut native_preview,
+                            &mut radial_resources,
+                            &mut listener,
+                            &settings_save_workers,
+                        );
+                        break Ok(());
+                    }
+                    clear_main_hotkey_admissions(
+                        trigger.as_ref(),
+                        quit_trigger.as_ref(),
+                        help_trigger.as_deref(),
+                        screen_draw_trigger.as_deref(),
+                        emergency_trigger.as_deref(),
+                        &paste_sequence_triggers,
+                        listener.triggers(),
+                        &mut deferred_paste_sequence_actions,
+                    );
+                    continue;
+                }
+                clear_main_hotkey_admissions(
+                    trigger.as_ref(),
+                    quit_trigger.as_ref(),
+                    help_trigger.as_deref(),
+                    screen_draw_trigger.as_deref(),
+                    emergency_trigger.as_deref(),
+                    &paste_sequence_triggers,
+                    listener.triggers(),
+                    &mut deferred_paste_sequence_actions,
+                );
+                continue;
+            }
+            ReverseRestartState::Committed(_)
+            | ReverseRestartState::RootCloseAccepted(_)
+            | ReverseRestartState::AppExitReceived { .. } => {
+                clear_main_hotkey_admissions(
+                    trigger.as_ref(),
+                    quit_trigger.as_ref(),
+                    help_trigger.as_deref(),
+                    screen_draw_trigger.as_deref(),
+                    emergency_trigger.as_deref(),
+                    &paste_sequence_triggers,
+                    listener.triggers(),
+                    &mut deferred_paste_sequence_actions,
+                );
+                continue;
+            }
+            ReverseRestartState::Denied { .. }
+            | ReverseRestartState::Cancelled(_) => {
+                if reverse_restart_admission.take().is_some() {
+                    clear_main_hotkey_admissions(
+                        trigger.as_ref(),
+                        quit_trigger.as_ref(),
+                        help_trigger.as_deref(),
+                        screen_draw_trigger.as_deref(),
+                        emergency_trigger.as_deref(),
+                        &paste_sequence_triggers,
+                        listener.triggers(),
+                        &mut deferred_paste_sequence_actions,
+                    );
+                }
+            }
+            ReverseRestartState::OrdinaryClose | ReverseRestartState::OrdinaryExit(_) => {
+                if reverse_restart_admission.take().is_some() {
+                    clear_main_hotkey_admissions(
+                        trigger.as_ref(),
+                        quit_trigger.as_ref(),
+                        help_trigger.as_deref(),
+                        screen_draw_trigger.as_deref(),
+                        emergency_trigger.as_deref(),
+                        &paste_sequence_triggers,
+                        listener.triggers(),
+                        &mut deferred_paste_sequence_actions,
+                    );
+                }
+            }
+            ReverseRestartState::Idle => {}
         }
 
         let radial_changes = if settings_hotkey_route_is_pending(&pending_launcher_route) {
@@ -6785,28 +7251,20 @@ fn main() -> anyhow::Result<()> {
             && let Some(qt) = &quit_trigger
             && qt.take()
         {
-            if let Some(service) = invocation_service.as_ref() {
-                let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
-            }
-            radial_controller.shutdown();
-            native_preview.cancel_all();
-            radial_resources.shutdown(&mut radial_controller);
-            if let Some(service) = invocation_service.as_mut() {
-                service.stop();
-            }
-            listener.stop();
-            drop(hotkey_runtime_receiver.take());
-            if let Ok(guard) = ctx.lock()
-                && let Some(c) = &*guard
-            {
-                c.send_viewport_cmd(egui::ViewportCommand::Close);
-                c.request_repaint();
-            }
-            let gui_worker_join = gui_worker.join();
-            // Let LauncherApp::on_exit queue its final utility-size write
-            // before join_all closes worker admission.
-            settings_save_workers.join_all();
-            report_gui_worker_outcome(gui_worker_join);
+            reverse_restart_protocol.observe_ordinary_close();
+            reverse_restart_admission.take();
+            finish_ordinary_egui_exit(
+                gui_worker,
+                &ctx,
+                true,
+                &mut hotkey_runtime_receiver,
+                &mut invocation_service,
+                &mut radial_controller,
+                &mut native_preview,
+                &mut radial_resources,
+                &mut listener,
+                &settings_save_workers,
+            );
             break Ok(());
         }
 
@@ -7357,7 +7815,36 @@ fn main() -> anyhow::Result<()> {
                 tracing::error!("visibility handler panicked; continuing event loop");
             }
         }
+    };
+    loop_result?;
+    if let Some(plan) = reverse_restart_plan {
+        drop(_logging_guard);
+        let (plan, spawn_result) =
+            gpui_restart::after_guard_release(plan, _single_instance_guard, |plan| {
+                std::process::Command::new(&plan.executable)
+                    .args(plan.selector_args())
+                    .current_dir(&plan.working_directory)
+                    .spawn()
+            });
+        if let Err(error) = spawn_result {
+            let egui_recovery = gpui_restart::RestartPlan {
+                executable: plan.executable.clone(),
+                working_directory: plan.working_directory.clone(),
+                target: gpui_restart::Frontend::Egui,
+            };
+            let message = format!(
+                "Could not start the {} frontend automatically: {error}\n\nTo reopen this profile in egui, run:\n{}",
+                plan.target.display_name(),
+                egui_recovery.manual_command()
+            );
+            gpui_frontend::show_startup_error(&message);
+            return Err(anyhow::anyhow!(message));
+        }
     }
+    if let Some(error) = reverse_restart_error {
+        return Err(anyhow::anyhow!(error));
+    }
+    Ok(())
 }
 
 fn hold_acceptance_prepare_request(

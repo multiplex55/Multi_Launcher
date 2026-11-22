@@ -231,6 +231,10 @@ trait HostPort: Send {
     fn send(&self, command: NativeCommand) -> Result<(), String>;
     fn try_recv(&self) -> Option<NativeEvent>;
     fn shutdown(&mut self);
+    fn shutdown_checked(&mut self) -> Result<(), String> {
+        self.shutdown();
+        Ok(())
+    }
 }
 impl HostPort for NativeHost {
     fn send(&self, command: NativeCommand) -> Result<(), String> {
@@ -241,6 +245,9 @@ impl HostPort for NativeHost {
     }
     fn shutdown(&mut self) {
         NativeHost::shutdown(self)
+    }
+    fn shutdown_checked(&mut self) -> Result<(), String> {
+        NativeHost::shutdown_checked(self)
     }
 }
 type HostFactory = Arc<dyn Fn() -> Result<Box<dyn HostPort>, String> + Send + Sync>;
@@ -569,6 +576,24 @@ impl RadialController {
         })
     }
 
+    /// True only when no accepted or unresolved runtime session remains.
+    /// An idle native host may still exist and is retired through the checked
+    /// shutdown seam once route admission is fenced.
+    pub fn frontend_restart_idle(&self) -> bool {
+        self.pending.is_none()
+            && self.active.is_none()
+            && self.handoff.is_none()
+            && self.deferred_resolution.is_none()
+            && self.queued_item_activation.is_none()
+            && self.release_aliases.is_empty()
+            && self.release_waits.is_empty()
+            && self.terminal_events.is_empty()
+            && self
+                .preparation
+                .as_ref()
+                .is_none_or(|bridge| bridge.waiting.is_none())
+    }
+
     pub fn prepare_authoring_asset(
         &mut self,
         reference: &super::model::MediaReference,
@@ -622,6 +647,30 @@ impl RadialController {
     }
     pub fn shutdown(&mut self) {
         self.stop_for_lifecycle(CloseReason::Shutdown);
+    }
+
+    pub fn shutdown_checked(&mut self) -> Result<(), String> {
+        let was_idle = self.frontend_restart_idle();
+        self.handoff = None;
+        self.cancel_handoff_deadline();
+        if let Some(bridge) = &mut self.preparation {
+            bridge.waiting = None;
+        }
+        self.close(CloseReason::Shutdown, None);
+        let host_result = self
+            .host
+            .take()
+            .map_or(Ok(()), |mut host| host.shutdown_checked());
+        self.pending = None;
+        self.active = None;
+        self.queued_item_activation = None;
+        self.release_aliases.clear();
+        self.release_waits.clear();
+        self.deadline_scheduler = None;
+        if !was_idle {
+            return Err("radial runtime work remained active during frontend shutdown".to_owned());
+        }
+        host_result
     }
     fn stop_for_lifecycle(&mut self, reason: CloseReason) {
         self.handoff = None;

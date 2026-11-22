@@ -57,8 +57,7 @@ impl PluginEditor {
         Self::with_available(settings, info)
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_with_manager_for_test(settings: &Settings, manager: &PluginManager) -> Self {
+    pub(crate) fn new_with_manager(settings: &Settings, manager: &PluginManager) -> Self {
         Self::with_available(settings, manager.plugin_infos())
     }
 

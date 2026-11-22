@@ -666,6 +666,10 @@ impl PluginManager {
         self.services.window_catalog.has_worker_for_test()
     }
 
+    pub(crate) fn shutdown_window_catalog_for_frontend_restart(&self) -> Result<(), String> {
+        self.services.window_catalog.shutdown_checked()
+    }
+
     /// Register a real built-in provider in an inert test manager while
     /// preserving the Builtin catalog origin and its normal settings path.
     #[cfg(test)]

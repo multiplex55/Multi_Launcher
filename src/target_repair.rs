@@ -124,6 +124,15 @@ impl UsageHandoff {
             .is_some()
     }
 
+    fn try_has_pending(&self) -> Result<bool, String> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| "target repair usage handoff is unavailable".to_owned())?
+            .pending
+            .is_some())
+    }
+
     fn pending_blocks_path(&self, path: &Path) -> bool {
         let state = self
             .state
@@ -2607,6 +2616,42 @@ impl TargetRepairClient {
         }
         self.lifecycle.acknowledge_completions(completions.len());
         completions
+    }
+
+    pub(crate) fn frontend_restart_preflight(&self) -> Result<(), String> {
+        let state = self
+            .lifecycle
+            .state
+            .lock()
+            .map_err(|_| "target repair lifecycle is unavailable".to_owned())?;
+        if state.closed || state.admitted != 0 || state.pending_completions != 0 {
+            return Err("Target Repair has queued, active, or unconsumed completion work".to_owned());
+        }
+        drop(state);
+        if self.usage_handoff.try_has_pending()? {
+            return Err("Target Repair is still reconciling its usage handoff".to_owned());
+        }
+        if self.request_tx.is_none() || self.worker.is_none() || self.reaper_permit.is_none() {
+            return Err("Target Repair is unavailable or already retiring".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Close an exactly idle owner and join its worker synchronously. This is
+    /// used only after explicit restart commitment; ordinary exit keeps the
+    /// existing bounded nonblocking reaper path.
+    pub(crate) fn shutdown_for_frontend_restart(&mut self) -> Result<(), String> {
+        self.frontend_restart_preflight()?;
+        self.lifecycle.close_admission();
+        self.request_tx.take();
+        self.lifecycle.wait_until_idle();
+        let worker = self
+            .worker
+            .take()
+            .ok_or_else(|| "target repair worker was already retired".to_owned())?;
+        let join_result = worker.join();
+        self.reaper_permit.take();
+        join_result.map_err(|_| "target repair worker panicked during shutdown".to_owned())
     }
 
     pub(crate) fn apply_usage_handoff(

@@ -468,7 +468,7 @@ impl ReplacementPreviewWorker {
         lock.lock().ok()?.result.take()
     }
 
-    fn is_busy(&self) -> bool {
+    pub(crate) fn is_busy(&self) -> bool {
         self.shared
             .0
             .lock()
@@ -873,6 +873,23 @@ impl Default for SearchReplaceDialogState {
 }
 
 impl SearchReplaceDialogState {
+    pub(crate) fn restart_blocker(&self) -> Option<&'static str> {
+        if self.search_ticket.is_some() || self.preview_pending || self.preview_dirty {
+            return Some("Search & Replace has an active or unresolved search preview.");
+        }
+        if self.candidate.is_some()
+            || self.pending_confirmed_request.is_some()
+            || self.apply_confirmation_open
+            || self.apply_confirmation_pending
+            || self.apply_review.is_some()
+            || self.recovery_review.is_some()
+            || self.receipt_load_pending
+        {
+            return Some("Search & Replace has a pending apply or recovery decision.");
+        }
+        None
+    }
+
     pub(crate) fn open(&mut self) {
         if !self.open {
             self.native_popup_anchors.clear();

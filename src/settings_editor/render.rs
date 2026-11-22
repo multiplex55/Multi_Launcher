@@ -62,6 +62,9 @@ enum SettingsHostAction {
     ClipboardModify(ClipboardModifySettingsCommand),
     ResetUtilitySize(UtilityToolKey),
     RetryUtilitySize,
+    OpenGpuiRestartConfirmation,
+    ConfirmGpuiRestart(u64),
+    CancelGpuiRestart(u64),
 }
 
 #[derive(Clone, Copy)]
@@ -1308,10 +1311,12 @@ impl SettingsEditor {
         match action {
             SettingsHostAction::Save => self.save_settings(ctx, app),
             SettingsHostAction::Cancel => {
+                self.cancel_gpui_restart_confirmation(app, "Settings edits were discarded");
                 *self = Self::new_with_plugins(&self.baseline_settings);
                 app.show_settings = false;
             }
             SettingsHostAction::Close => {
+                self.cancel_gpui_restart_confirmation(app, "Settings was closed");
                 self.clear_closed_settings_navigation();
                 app.show_settings = false;
             }
@@ -1418,8 +1423,71 @@ impl SettingsEditor {
                     );
                 }
             }
+            SettingsHostAction::OpenGpuiRestartConfirmation => {
+                let Some(source) = source else {
+                    return false;
+                };
+                let Some(generation) = self.next_restart_confirmation_generation.checked_add(1)
+                else {
+                    return false;
+                };
+                self.next_restart_confirmation_generation = generation;
+                self.restart_confirmation = Some(
+                    super::state::SettingsRestartConfirmation {
+                        generation,
+                        origin: source.clone(),
+                        waiting_for_main: false,
+                        feedback: None,
+                    },
+                );
+            }
+            SettingsHostAction::ConfirmGpuiRestart(generation) => {
+                let Some(source) = source else {
+                    return false;
+                };
+                let valid_confirmation = self.restart_confirmation.as_ref().is_some_and(|confirmation| {
+                    confirmation.generation == generation
+                        && confirmation.origin.has_same_owner(source)
+                });
+                if !valid_confirmation {
+                    return false;
+                }
+                let result = self
+                    .reverse_restart_preflight()
+                    .and_then(|()| app.request_reverse_restart(ctx, generation, source.clone()));
+                let Some(confirmation) = self.restart_confirmation.as_mut().filter(|confirmation| {
+                    confirmation.generation == generation
+                }) else {
+                    return false;
+                };
+                match result {
+                    Ok(()) => {
+                        confirmation.waiting_for_main = true;
+                        confirmation.feedback = None;
+                    }
+                    Err(reason) => {
+                        confirmation.feedback = Some(reason);
+                        confirmation.waiting_for_main = false;
+                    }
+                }
+            }
+            SettingsHostAction::CancelGpuiRestart(generation) => {
+                if self
+                    .restart_confirmation
+                    .as_ref()
+                    .is_some_and(|confirmation| confirmation.generation == generation)
+                {
+                    self.cancel_gpui_restart_confirmation(app, "GPUI restart was cancelled");
+                }
+            }
         }
         false
+    }
+
+    fn cancel_gpui_restart_confirmation(&mut self, app: &mut LauncherApp, reason: &str) {
+        if let Some(confirmation) = self.restart_confirmation.take() {
+            app.cancel_reverse_restart(confirmation.generation, reason);
+        }
     }
 
     pub(crate) fn complete_host_actions(
@@ -1448,6 +1516,9 @@ impl SettingsEditor {
                         | SettingsHostAction::HotkeyDirectory
                         | SettingsHostAction::DashboardEditor
                         | SettingsHostAction::MouseGestureSettings
+                        | SettingsHostAction::OpenGpuiRestartConfirmation
+                        | SettingsHostAction::ConfirmGpuiRestart(_)
+                        | SettingsHostAction::CancelGpuiRestart(_)
                         | SettingsHostAction::ClipboardModify(
                             ClipboardModifySettingsCommand::OpenDialog
                         )
@@ -1909,6 +1980,7 @@ impl SettingsEditor {
             true,
             None,
             None,
+            true,
         );
     }
 
@@ -1924,9 +1996,13 @@ impl SettingsEditor {
         body_input_allowed: bool,
         owner_input_allowed: bool,
         is_popout: bool,
+        restart_origin_current: bool,
     ) -> SettingsUiActions {
         self.hosted_actions = Some(SettingsUiActions {
-            accept_actions: first_ui_pass && owner_input_allowed,
+            // The Settings-owned restart modal remains interactive while the
+            // underlying editor is intentionally blocked by its modal layer.
+            accept_actions: first_ui_pass
+                && (owner_input_allowed || self.restart_confirmation.is_some()),
             ..SettingsUiActions::default()
         });
         self.ui_inner(
@@ -1940,6 +2016,7 @@ impl SettingsEditor {
             body_input_allowed,
             Some(owner_input_allowed),
             Some(is_popout),
+            restart_origin_current,
         );
         self.hosted_actions.take().unwrap_or_default()
     }
@@ -1956,6 +2033,7 @@ impl SettingsEditor {
         body_input_allowed: bool,
         host_owner_allowed: Option<bool>,
         host_presentation: Option<bool>,
+        restart_origin_current: bool,
     ) {
         let now = ctx.input(|input| input.time);
         self.expire_settings_navigation_highlight(now);
@@ -2282,6 +2360,14 @@ impl SettingsEditor {
                         if jump_targets.clicked(&save) {
                             self.settings_action(ctx, app, SettingsHostAction::Save);
                         }
+                        let restart = ui.button("Restart in GPUI…");
+                        if restart.clicked() {
+                            self.settings_action(
+                                ctx,
+                                app,
+                                SettingsHostAction::OpenGpuiRestartConfirmation,
+                            );
+                        }
                         let cancel_button = ui.add_enabled(!pending, egui::Button::new("Cancel"));
                         #[cfg(test)]
                         if let Some(actions) = &mut self.hosted_actions {
@@ -2362,6 +2448,12 @@ impl SettingsEditor {
                 },
             );
         }
+        self.show_gpui_restart_confirmation(
+            ctx,
+            app,
+            first_ui_pass,
+            restart_origin_current,
+        );
         #[cfg(test)]
         let navigation_outcome = jump_targets
             .navigation_observer
@@ -2515,6 +2607,75 @@ impl SettingsEditor {
             self.settings_action(ctx, app, SettingsHostAction::Cancel);
         } else if !open {
             self.settings_action(ctx, app, SettingsHostAction::Close);
+        }
+    }
+
+    fn show_gpui_restart_confirmation(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        first_ui_pass: bool,
+        restart_origin_current: bool,
+    ) {
+        let Some(confirmation) = self.restart_confirmation.clone() else {
+            return;
+        };
+        if !restart_origin_current {
+            self.cancel_gpui_restart_confirmation(app, "The Settings window changed");
+            return;
+        }
+
+        let mut choice = None;
+        let response = egui::Modal::new(egui::Id::new((
+            "settings_gpui_restart_confirmation",
+            confirmation.generation,
+        )))
+        .show(ctx, |ui| {
+            ui.set_min_width(360.0);
+            ui.heading("Restart in GPUI?");
+            ui.label("Settings must be saved and all owned work must be idle before the frontend can switch.");
+            if confirmation.waiting_for_main {
+                ui.label("Checking the launcher and reserving its input routes…");
+            }
+            if let Some(feedback) = confirmation.feedback.as_deref() {
+                ui.colored_label(egui::Color32::LIGHT_RED, feedback);
+            }
+            ui.horizontal(|ui| {
+                if !confirmation.waiting_for_main
+                    && ui.button("Restart in GPUI").clicked()
+                {
+                    choice = Some(true);
+                }
+                let cancel = if confirmation.waiting_for_main {
+                    "Cancel restart"
+                } else {
+                    "Cancel"
+                };
+                if ui.button(cancel).clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if !first_ui_pass || ctx.will_discard() {
+            return;
+        }
+        match choice {
+            Some(true) => self.settings_action(
+                ctx,
+                app,
+                SettingsHostAction::ConfirmGpuiRestart(confirmation.generation),
+            ),
+            Some(false) => self.settings_action(
+                ctx,
+                app,
+                SettingsHostAction::CancelGpuiRestart(confirmation.generation),
+            ),
+            None if response.should_close() => self.settings_action(
+                ctx,
+                app,
+                SettingsHostAction::CancelGpuiRestart(confirmation.generation),
+            ),
+            None => {}
         }
     }
 
@@ -5356,6 +5517,7 @@ mod settings_shell_tests {
                 true,
                 true,
                 false,
+                true,
             ));
             app.settings_editor = editor;
         });

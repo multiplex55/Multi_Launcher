@@ -17261,8 +17261,329 @@ impl LauncherApp {
         })
     }
 
+    pub fn install_reverse_restart_services(
+        &mut self,
+        protocol: std::sync::Arc<super::reverse_restart::ReverseRestartProtocol>,
+        wake: std::sync::mpsc::Sender<()>,
+    ) {
+        self.reverse_restart_protocol = Some(protocol);
+        self.reverse_restart_wake = Some(wake);
+    }
+
+    pub(crate) fn request_reverse_restart(
+        &mut self,
+        ctx: &egui::Context,
+        generation: u64,
+        origin: super::settings_window_host::SettingsOpenOrigin,
+    ) -> Result<(), String> {
+        if self.pending_reverse_restart.is_some() {
+            return Err("a GPUI restart check is already in progress".to_owned());
+        }
+        if !self.show_settings {
+            return Err("Settings is no longer open".to_owned());
+        }
+        self.reverse_restart_preflight(None)?;
+        let hotfolder_reservation = self.hotfolder_runtime.reserve_frontend_restart()?;
+        let protocol = self
+            .reverse_restart_protocol
+            .as_ref()
+            .ok_or_else(|| "GPUI restart services are unavailable".to_owned())?;
+        let attempt = protocol.begin()?;
+        self.pending_reverse_restart = Some(super::PendingReverseRestart {
+            attempt,
+            generation,
+            origin,
+            _hotfolder_reservation: hotfolder_reservation,
+        });
+        let Some(wake) = self.reverse_restart_wake.as_ref() else {
+            protocol.cancel(attempt);
+            self.pending_reverse_restart = None;
+            return Err("the launcher restart wake is unavailable".to_owned());
+        };
+        if wake.send(()).is_err() {
+            protocol.cancel(attempt);
+            self.pending_reverse_restart = None;
+            return Err("the launcher main loop is no longer available".to_owned());
+        }
+        ctx.request_repaint();
+        Ok(())
+    }
+
+    pub(crate) fn cancel_reverse_restart(&mut self, generation: u64, reason: &str) {
+        let Some(pending) = self
+            .pending_reverse_restart
+            .as_ref()
+            .filter(|pending| pending.generation == generation)
+            .cloned()
+        else {
+            return;
+        };
+        self.pending_reverse_restart = None;
+        if let Some(protocol) = &self.reverse_restart_protocol {
+            protocol.cancel(pending.attempt);
+        }
+        tracing::debug!(%reason, attempt = pending.attempt.get(), "cancelled reverse frontend restart");
+        if let Some(wake) = &self.reverse_restart_wake {
+            let _ = wake.send(());
+        }
+    }
+
+    pub(crate) fn invalidate_settings_restart(&mut self, reason: &str) {
+        if let Some(pending) = self.pending_reverse_restart.clone() {
+            self.cancel_reverse_restart(pending.generation, reason);
+        }
+    }
+
+    fn reverse_restart_is_committed(&self) -> bool {
+        self.reverse_restart_protocol
+            .as_ref()
+            .is_some_and(|protocol| protocol.committed_attempt().is_some())
+    }
+
+    fn reverse_restart_preflight(
+        &self,
+        editor: Option<&crate::settings_editor::SettingsEditor>,
+    ) -> Result<(), String> {
+        if let Some(editor) = editor {
+            editor.reverse_restart_preflight()?;
+        }
+        if self.settings_save_pending() {
+            return Err("Settings persistence is still pending. Wait for it to finish before restarting.".to_owned());
+        }
+        self.settings_save_workers.reverse_restart_preflight()?;
+        if self.pending_calculation_pad_recovery_preference.is_some()
+            || self.pending_programmer_inspector_preference.is_some()
+            || self.pending_calculation_pad_display_preference.is_some()
+            || self.calculation_pad_display_unacknowledged
+        {
+            return Err("A calculation or programmer preference write is still pending.".to_owned());
+        }
+        if self.file_search_dialog.ui_preferences_dirty {
+            return Err("File Search has unsaved display preferences. Save or cancel them before restarting.".to_owned());
+        }
+        if self.notes_dialog.restart_blocker().is_some() {
+            return Err("Notes has an unsaved draft or pending transition. Save, discard, or cancel it before restarting.".to_owned());
+        }
+        if self.note_panels.iter().any(|panel| panel.has_unsaved_changes()) {
+            return Err("A note window has unsaved changes. Save or cancel the note before restarting.".to_owned());
+        }
+        if self.markdown_studio_dialog.restart_blocker().is_some() {
+            return Err("Markdown Studio has an unsaved document or pending transition. Resolve it before restarting.".to_owned());
+        }
+        if self.explorer_tabs_dialog.restart_blocker().is_some() {
+            return Err("Explorer Tabs has an unsaved list or pending operation. Resolve it before restarting.".to_owned());
+        }
+        if !self.recording_controller.shutdown_ready()
+            || self.recording_dialog.target_refresh_pending_for_shutdown()
+        {
+            return Err("Recording capture or a pending recording review must be resolved before restarting.".to_owned());
+        }
+        if let Some(reason) = crate::mkmacro::runtime::frontend_restart_review_blocker()? {
+            return Err(format!("Recording cannot restart yet: {reason}."));
+        }
+        if self.mkmacro_dialog.dirty || self.mkmacro_dialog.recording_review.is_some() {
+            return Err("MkMacro has an unsaved macro draft or queued recording review.".to_owned());
+        }
+        if self.hash_generator_dialog.has_job() {
+            return Err("Hash Generator still owns a calculation. Wait for it to finish before restarting.".to_owned());
+        }
+        self.reverse_restart_capture_preflight()?;
+        self.indexing.frontend_restart_preflight()?;
+        self.target_repair_client
+            .as_ref()
+            .ok_or_else(|| "Target Repair owner state is unavailable; restart is blocked.".to_owned())?
+            .frontend_restart_preflight()?;
+        if self.sequence_playback.has_pending_cleanup() {
+            return Err("Paste Sequences still owns playback cleanup. Wait for it to finish before restarting.".to_owned());
+        }
+        self.pinboard_capture.frontend_restart_preflight()?;
+        let timers = crate::plugins::timer::ACTIVE_TIMERS
+            .lock()
+            .map_err(|_| "The Timer owner is unavailable; restart is blocked.".to_owned())?;
+        if !timers.is_empty() {
+            return Err("A running or paused Timer must be stopped before restarting.".to_owned());
+        }
+        drop(timers);
+        let stopwatches = crate::plugins::stopwatch::STOPWATCHES
+            .lock()
+            .map_err(|_| "The Stopwatch owner is unavailable; restart is blocked.".to_owned())?;
+        if !stopwatches.is_empty() {
+            return Err("A running or paused Stopwatch must be stopped before restarting.".to_owned());
+        }
+        #[cfg(windows)]
+        {
+            let transfers = self.transfer_jobs.snapshot();
+            if transfers.active.is_some() || !transfers.queued.is_empty() {
+                return Err("A file transfer is active or queued. Let it finish or cancel it before restarting.".to_owned());
+            }
+            if self.archive_session.has_active_worker()
+                || self.zip_creation_session.has_active_worker()
+            {
+                return Err("A ZIP worker is still active. Wait for it to finish before restarting.".to_owned());
+            }
+        }
+        if self.batch_rename_coordinator.is_some()
+            && (self.batch_rename_dialog.has_pending_scan()
+                || self.batch_rename_runtime_snapshot().operation_active)
+        {
+            return Err("Batch Rename is still scanning or applying changes.".to_owned());
+        }
+        if self.search_replace_dialog.restart_blocker().is_some()
+            || self.replace_operation_pending
+            || self.replace_preview_worker.as_ref().is_some_and(|worker| worker.is_busy())
+            || self.replace_executor_worker.as_ref().is_some_and(|worker| {
+                let snapshot = worker.snapshot();
+                snapshot.active || snapshot.result.is_some() || snapshot.shutdown_requested || snapshot.worker_exited
+            })
+        {
+            return Err("Search & Replace still has active work.".to_owned());
+        }
+        let hotfolder = self.hotfolder_runtime.checked_snapshot()?;
+        if hotfolder.plugin_enabled
+            || hotfolder.running
+            || hotfolder.paused
+            || hotfolder.execution_progress.operation_id.is_some()
+        {
+            return Err("Hot Folder is enabled or executing. Stop it before restarting.".to_owned());
+        }
+        Ok(())
+    }
+
+    fn reverse_restart_capture_preflight(&self) -> Result<(), String> {
+        if self.screenshot_capture.is_busy()
+            || self.screenshot_countdown.is_busy()
+            || self.pending_screenshot_completion.is_some()
+            || self.screenshot_capture_parking.is_some()
+        {
+            return Err(
+                "A screenshot is still capturing, completing, or restoring the launcher. Let it finish or cancel it before restarting."
+                    .to_owned(),
+            );
+        }
+        if self.coordinate_tool.capture_pending() || self.coordinate_capture_parking.is_some() {
+            return Err(
+                "Coordinate picking is still active or restoring the launcher. Finish or cancel it before restarting."
+                    .to_owned(),
+            );
+        }
+        if self.color_pick_capture_busy() {
+            return Err(
+                "The screen color picker is still active. Finish or cancel it before restarting."
+                    .to_owned(),
+            );
+        }
+        if self.ocr_capture_busy() {
+            return Err(
+                "Screen Region OCR is still active. Finish or cancel it before restarting."
+                    .to_owned(),
+            );
+        }
+        if self.crop_screenshot_operation.is_some() {
+            return Err(
+                "Screenshot cropping is still active. Finish or cancel it before restarting."
+                    .to_owned(),
+            );
+        }
+        if self.screen_draw_region_operation.is_some()
+            || self.screen_draw_launcher_parking.is_some()
+            || self.screen_draw_controller.toolbar_open()
+            || self.screen_draw_controller.export_in_flight()
+            || !matches!(
+                self.screen_draw_controller.state(),
+                crate::screen_draw::ScreenDrawState::NoSession
+            )
+        {
+            return Err(
+                "Screen Draw still owns a session, export, or native window. Close it and finish any export before restarting."
+                    .to_owned(),
+            );
+        }
+        if self
+            .mkmacro_dialog
+            .action_editor
+            .visual_capture
+            .as_ref()
+            .is_some_and(|capture| capture.active())
+            || self
+                .mkmacro_dialog
+                .action_editor
+                .visual_overlay
+                .operation_id()
+                .is_some()
+        {
+            return Err(
+                "MkMacro still owns a visual selection. Finish or cancel it before restarting."
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    fn complete_reverse_restart_after_frame(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_reverse_restart.clone() else {
+            return;
+        };
+        let Some(protocol) = self.reverse_restart_protocol.as_ref().cloned() else {
+            return;
+        };
+        match protocol.state() {
+            super::reverse_restart::ReverseRestartState::Denied { attempt, reason }
+                if attempt == pending.attempt =>
+            {
+                if let Some(confirmation) = self.settings_editor.restart_confirmation.as_mut()
+                    && confirmation.generation == pending.generation
+                {
+                    confirmation.feedback = Some(reason);
+                    confirmation.waiting_for_main = false;
+                }
+                self.pending_reverse_restart = None;
+                return;
+            }
+            super::reverse_restart::ReverseRestartState::Cancelled(attempt)
+                if attempt == pending.attempt =>
+            {
+                self.pending_reverse_restart = None;
+                return;
+            }
+            super::reverse_restart::ReverseRestartState::Acknowledged(attempt)
+                if attempt == pending.attempt =>
+            {
+                if !self.settings_window_host.has_accepted_current_pass(
+                    ctx,
+                    self.show_settings,
+                    &pending.origin,
+                ) {
+                    protocol.deny(
+                        attempt,
+                        "The retained Settings host changed before restart commitment. Reopen Settings and try again.",
+                    );
+                    if let Some(wake) = &self.reverse_restart_wake {
+                        let _ = wake.send(());
+                    }
+                    ctx.request_repaint();
+                    return;
+                }
+                if let Err(reason) = self.reverse_restart_preflight(Some(&self.settings_editor)) {
+                    protocol.deny(attempt, reason);
+                    if let Some(wake) = &self.reverse_restart_wake {
+                        let _ = wake.send(());
+                    }
+                    ctx.request_repaint();
+                    return;
+                }
+                if protocol.commit(attempt) {
+                    // eframe applies this viewport command after the current
+                    // FullOutput. RootCloseAccepted is recorded only when the
+                    // matching root Close reaches the exit guard unvetoed.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn guard_overlay_app_exit(&mut self, ctx: &egui::Context) {
-        let requested = ctx.input(|input| input.viewport().close_requested());
+        let requested = std::mem::take(&mut self.pending_root_close_request);
         if requested && !self.sequence_exit_requested {
             self.sequence_exit_requested = true;
             crate::paste_sequence::admission::physical_paste_bridge()
@@ -17274,6 +17595,16 @@ impl LauncherApp {
             let ready = overlay.unwrap_or(true)
                 && self.recording_controller.shutdown_ready()
                 && !self.recording_dialog.target_refresh_pending_for_shutdown();
+            if ready && requested {
+                if let Some(protocol) = self.reverse_restart_protocol.as_ref()
+                    && matches!(
+                        protocol.state(),
+                        super::reverse_restart::ReverseRestartState::Committed(_)
+                    )
+                {
+                    let _ = protocol.accept_root_close();
+                }
+            }
             ctx.send_viewport_cmd(if ready {
                 egui::ViewportCommand::Close
             } else {
@@ -17287,11 +17618,39 @@ impl LauncherApp {
             self.recording_controller.request_shutdown();
         }
     }
+
+    fn observe_restart_close_request(&mut self) {
+        self.pending_root_close_request = true;
+        let Some(protocol) = self.reverse_restart_protocol.as_ref() else {
+            return;
+        };
+        if !matches!(
+            protocol.state(),
+            super::reverse_restart::ReverseRestartState::Committed(_)
+        ) {
+            protocol.observe_ordinary_close();
+        }
+    }
 }
 
 impl eframe::App for LauncherApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.reverse_restart_is_committed() && fence_committed_child_input(raw_input) {
+            return;
+        }
+        if is_root_close_request(
+            raw_input.viewport_id,
+            raw_input.viewport().close_requested(),
+        ) {
+            self.observe_restart_close_request();
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.guard_overlay_app_exit(ctx);
+        if self.reverse_restart_is_committed() {
+            return;
+        }
         self.wake_inbox_calendar_if_changed();
         self.refresh_inbox_windows_access(ctx);
         self.begin_root_frame_logic(ctx, frame);
@@ -17299,6 +17658,9 @@ impl eframe::App for LauncherApp {
 
     fn logic_only(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.guard_overlay_app_exit(ctx);
+        if self.reverse_restart_is_committed() {
+            return;
+        }
         self.wake_inbox_calendar_if_changed();
         self.refresh_inbox_windows_access(ctx);
         self.run_hidden_logic_tick(ctx, frame);
@@ -17309,7 +17671,8 @@ impl eframe::App for LauncherApp {
     }
 
     fn needs_root_ui_when_hidden(&self) -> bool {
-        self.needs_viewport_bootstrap()
+        self.reverse_restart_is_committed()
+            || self.needs_viewport_bootstrap()
             || self.pin_windows_need_hidden_root_ui()
             || self.screenshot_countdown.is_busy()
             || self.notes_dialog.needs_root_ui_when_hidden()
@@ -17371,10 +17734,15 @@ impl eframe::App for LauncherApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.render_root_ui(ui);
+        if !self.reverse_restart_is_committed() {
+            self.render_root_ui(ui);
+        }
     }
 
     fn on_ui_frame_complete(&mut self, _ctx: &egui::Context) {
+        if self.reverse_restart_is_committed() {
+            return;
+        }
         if self.diagram_studio_dialog.on_ui_frame_complete(_ctx) {
             self.panel_states.diagram_studio_dialog = false;
             self.panel_stack
@@ -17443,9 +17811,22 @@ impl eframe::App for LauncherApp {
         self.complete_query_jump_pointer_transfer(_ctx);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
+        self.complete_reverse_restart_after_frame(_ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let restart_attempt = self.reverse_restart_protocol.as_ref().and_then(|protocol| {
+            match protocol.state() {
+                super::reverse_restart::ReverseRestartState::RootCloseAccepted(attempt) => {
+                    Some(attempt)
+                }
+                _ => {
+                    protocol.observe_ordinary_close();
+                    None
+                }
+            }
+        });
+        let mut shutdown_failures = Vec::new();
         self.recording_controller.request_shutdown();
         self.recording_dialog.retire_recording_outline();
         crate::paste_sequence::admission::physical_paste_bridge()
@@ -17453,8 +17834,28 @@ impl eframe::App for LauncherApp {
         self.notification_windows_consent.stop();
         self.hotfolder_action_adapter.set_active(false);
         self.hotfolder_action_pump.set_active(false);
-        self.hotfolder_runtime.shutdown_and_reap();
-        self.hotfolder_runtime.join_reaper();
+        if restart_attempt.is_some() {
+            if let Err(error) = self
+                .hotfolder_runtime
+                .shutdown_for_frontend_restart()
+            {
+                shutdown_failures.push(format!("Hot Folder: {error}"));
+                self.hotfolder_runtime.shutdown_and_reap();
+                if let Err(error) = self.hotfolder_runtime.join_reaper() {
+                    shutdown_failures.push(format!("Hot Folder reaper: {error}"));
+                }
+            }
+        } else {
+            self.hotfolder_runtime.shutdown_and_reap();
+            if let Err(error) = self.hotfolder_runtime.join_reaper() {
+                tracing::error!(%error, "Hot Folder worker did not shut down cleanly");
+            }
+        }
+        if restart_attempt.is_some()
+            && let Err(error) = self.plugins.shutdown_window_catalog_for_frontend_restart()
+        {
+            shutdown_failures.push(format!("Window Catalog: {error}"));
+        }
         self.xml_toolkit_dialog.shutdown();
         #[cfg(windows)]
         self.archive_session.shutdown();
@@ -17468,20 +17869,30 @@ impl eframe::App for LauncherApp {
         self.folder_size_dialog.shutdown();
         self.file_lock_dialog.shutdown();
         if let Err(failure) = self.brightness_dialog.shutdown() {
-            self.report_error_message(
-                "brightness.shutdown",
-                format!(
+            let message = format!(
                     "Final monitor cleanup failed: {:?} during {:?} (native_code={:?}, cleanup={:?}).",
                     failure.kind,
                     failure.operation,
                     failure.native_code,
                     failure.process_cleanup
-                ),
-            );
+                );
+            if restart_attempt.is_some() {
+                shutdown_failures.push(format!("Brightness: {message}"));
+            }
+            self.report_error_message("brightness.shutdown", message);
         }
         self.hash_generator_dialog.shutdown();
-        self.shutdown_batch_rename_scanner();
-        self.shutdown_search_replace_runtime();
+        if restart_attempt.is_some() {
+            if let Err(error) = self.shutdown_batch_rename_scanner_checked() {
+                shutdown_failures.push(format!("Batch Rename: {error}"));
+            }
+            if let Err(error) = self.shutdown_search_replace_runtime_checked() {
+                shutdown_failures.push(format!("Search & Replace: {error}"));
+            }
+        } else {
+            self.shutdown_batch_rename_scanner();
+            self.shutdown_search_replace_runtime();
+        }
         self.sequence_playback.cancel(std::time::Instant::now());
         self.screenshot_countdown.shutdown();
         if let Some(mut parking) = self.screenshot_capture_parking.take() {
@@ -17489,13 +17900,23 @@ impl eframe::App for LauncherApp {
         }
         self.screenshot_capture.shutdown();
         if let Err(error) = self.shutdown_indexing() {
+            if restart_attempt.is_some() {
+                shutdown_failures.push(format!("Indexing: {error}"));
+            }
             self.report_error_message("index.shutdown", error.to_string());
         }
         if let Err(error) = self.coordinate_tool.shutdown() {
+            if restart_attempt.is_some() {
+                shutdown_failures.push(format!("Coordinate Tool: {error}"));
+            }
             self.report_error("coordinate_tool.shutdown", error);
         }
         self.shutdown_coordinate_pick();
-        self.shutdown_pinboard_capture();
+        if let Err(error) = self.shutdown_pinboard_capture()
+            && restart_attempt.is_some()
+        {
+            shutdown_failures.push(format!("Pinboard: {error}"));
+        }
         self.shutdown_color_pick();
         self.shutdown_ocr_selection();
         self.root_window_bridge.clear();
@@ -17516,15 +17937,24 @@ impl eframe::App for LauncherApp {
         self.multi_manager.shutdown();
         let multi_manager_save_on_exit = self.multi_manager_save_on_exit();
         if multi_manager_save_on_exit && let Err(err) = self.multi_manager.save() {
+            if restart_attempt.is_some() {
+                shutdown_failures.push(format!("Multi Manager save: {err}"));
+            }
             self.report_error("multi_manager.save_on_exit", err);
         }
         if let Err(err) = self.multi_manager.flush_bindings_if_dirty() {
+            if restart_attempt.is_some() {
+                shutdown_failures.push(format!("Multi Manager bindings: {err}"));
+            }
             self.report_error("multi_manager.bindings.save_on_exit", err);
         }
         self.unregister_all_hotkeys();
         self.request_launcher_visibility(false);
         self.last_visible = false;
         if let Err(error) = self.calculation_pad_dialog.shutdown_recovery() {
+            if restart_attempt.is_some() {
+                shutdown_failures.push(format!("Calculation Pad recovery: {error}"));
+            }
             self.report_error_message("calculation_pad.recovery.shutdown", error.to_string());
         }
         self.utility_dialog_size_manager
@@ -17533,22 +17963,68 @@ impl eframe::App for LauncherApp {
             .shutdown_native_geometry_observers();
         self.prepare_settings_save_shutdown();
         if let Some(mut client) = self.target_repair_client.take() {
-            client.shutdown();
+            if restart_attempt.is_some()
+                && let Err(error) = client.shutdown_for_frontend_restart()
+            {
+                shutdown_failures.push(format!("Target Repair: {error}"));
+                client.shutdown();
+            } else if restart_attempt.is_none() {
+                client.shutdown();
+            }
             let save_result = client.save_usage_on_exit(
                 USAGE_FILE,
                 &mut self.usage,
                 &self.target_repair_deferred_usage,
             );
             if let Err(error) = save_result {
+                if restart_attempt.is_some() {
+                    shutdown_failures.push(format!("Target Repair usage save: {error}"));
+                }
                 self.report_error("usage.save_on_exit", error);
             }
         } else if let Err(error) = usage::save_usage(USAGE_FILE, &self.usage) {
+            if restart_attempt.is_some() {
+                shutdown_failures.push(format!("Usage save: {error}"));
+            }
             self.report_error("usage.save_on_exit", error);
         }
         if let Some(inbox) = &mut self.notification_inbox {
-            inbox.shutdown();
+            if let Err(error) = inbox.shutdown_checked() {
+                if restart_attempt.is_some() {
+                    shutdown_failures.push(format!("Notification Inbox: {error}"));
+                } else {
+                    tracing::error!(%error, "Notification Inbox worker did not shut down cleanly");
+                }
+            }
+        }
+        if let Some(protocol) = &self.reverse_restart_protocol {
+            protocol.record_gui_exit(super::reverse_restart::GuiExitReceipt {
+                attempt: restart_attempt,
+                failures: shutdown_failures,
+            });
         }
     }
+}
+
+fn is_root_close_request(viewport_id: egui::ViewportId, close_requested: bool) -> bool {
+    viewport_id == egui::ViewportId::ROOT && close_requested
+}
+
+/// Deferred eframe child callbacks run directly without `LauncherApp::logic`
+/// or `ui`. Once the root committed an exit, discard child input while leaving
+/// viewport lifecycle events intact so native Close can still retire windows.
+fn fence_committed_child_input(raw_input: &mut egui::RawInput) -> bool {
+    if raw_input.viewport_id == egui::ViewportId::ROOT {
+        return false;
+    }
+    raw_input.events.clear();
+    raw_input.hovered_files.clear();
+    raw_input.dropped_files.clear();
+    raw_input.focused = false;
+    if let Some(viewport) = raw_input.viewports.get_mut(&raw_input.viewport_id) {
+        viewport.focused = Some(false);
+    }
+    true
 }
 
 #[cfg(test)]
@@ -18585,6 +19061,63 @@ impl LauncherApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_viewport_close_does_not_invalidate_root_restart_attempt() {
+        let protocol = super::super::reverse_restart::ReverseRestartProtocol::default();
+        let attempt = protocol.begin().unwrap();
+        let child = egui::ViewportId::from_hash_of("restart-child-close");
+        if is_root_close_request(child, true) {
+            protocol.observe_ordinary_close();
+        }
+        assert_eq!(
+            protocol.state(),
+            super::super::reverse_restart::ReverseRestartState::Requested(attempt)
+        );
+    }
+
+    #[test]
+    fn committed_child_input_is_fenced_without_dropping_native_close() {
+        let child = egui::ViewportId::from_hash_of("restart-child-input");
+        let mut input = egui::RawInput {
+            viewport_id: child,
+            events: vec![egui::Event::Text("copy".to_owned())],
+            ..Default::default()
+        };
+        input.viewports.insert(
+            child,
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                focused: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert!(fence_committed_child_input(&mut input));
+        assert!(input.events.is_empty());
+        assert!(!input.focused);
+        assert!(input.viewport().close_requested());
+        assert_eq!(input.viewport().focused, Some(false));
+
+        let mut root = egui::RawInput {
+            events: vec![egui::Event::Text("root".to_owned())],
+            ..Default::default()
+        };
+        assert!(!fence_committed_child_input(&mut root));
+        assert_eq!(root.events, vec![egui::Event::Text("root".to_owned())]);
+    }
+
+    #[test]
+    fn reverse_restart_capture_preflight_refuses_a_live_screen_draw_session() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        assert!(app.reverse_restart_capture_preflight().is_ok());
+        app.screen_draw_controller.request_start().unwrap();
+        let error = app.reverse_restart_capture_preflight().unwrap_err();
+        assert!(error.contains("Screen Draw"));
+    }
 
     struct ExitCaptureBackend {
         drop_gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,

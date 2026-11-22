@@ -597,6 +597,7 @@ pub struct MkMacroHotkeyService {
     store: Arc<MkMacroStore>,
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    shutdown_receipt: super::checked_shutdown::CheckedShutdown,
     state: Arc<Mutex<PollState>>,
     key_state_backend: Arc<dyn KeyStateBackend>,
     active_window_backend: Arc<dyn ActiveWindowBackend>,
@@ -714,6 +715,7 @@ impl MkMacroHotkeyService {
             store,
             stop,
             worker: Mutex::new(Some(worker)),
+            shutdown_receipt: super::checked_shutdown::CheckedShutdown::default(),
             state,
             key_state_backend,
             active_window_backend,
@@ -746,10 +748,29 @@ impl MkMacroHotkeyService {
     }
 
     pub fn shutdown(&self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(h) = self.worker.lock().unwrap().take() {
-            let _ = h.join();
+        if let Err(error) = self.shutdown_checked() {
+            tracing::error!(%error, "MkMacro hotkey poller did not shut down cleanly");
         }
+    }
+
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        self.shutdown_receipt.run(
+            "MkMacro hotkey poller shutdown panicked",
+            || {
+                self.stop.store(true, Ordering::SeqCst);
+                let worker = self
+                    .worker
+                    .lock()
+                    .map_err(|_| "MkMacro hotkey worker handle is unavailable".to_owned())?
+                    .take();
+                if let Some(worker) = worker
+                    && worker.join().is_err()
+                {
+                    return Err("MkMacro hotkey poller panicked during shutdown".to_owned());
+                }
+                Ok(())
+            },
+        )
     }
 }
 

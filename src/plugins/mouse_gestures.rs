@@ -559,6 +559,44 @@ pub fn sync_enabled_plugins(enabled_plugins: Option<&HashSet<String>>) {
     with_service(|svc| svc.set_plugin_enabled(enabled));
 }
 
+pub struct FrontendRestartReservation {
+    service: crate::mouse_gestures::service::FrontendRestartReservation,
+}
+
+impl FrontendRestartReservation {
+    pub fn is_current(&self) -> bool {
+        self.service.is_current()
+            && SERVICE
+                .get()
+                .is_none_or(|runtime| runtime.lock().is_ok())
+    }
+
+    /// Drop the JSON watcher only after the committed transition, outside the
+    /// MouseGestureRuntime mutex, then require the native hook to retire.
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        if let Some(runtime) = SERVICE.get() {
+            let mut runtime = runtime
+                .lock()
+                .map_err(|_| "Mouse Gestures runtime state is unavailable".to_owned())?;
+            let watcher = runtime.watcher.take();
+            drop(runtime);
+            drop(watcher);
+        }
+        self.service.shutdown_checked()
+    }
+}
+
+pub fn reserve_frontend_restart() -> Result<FrontendRestartReservation, String> {
+    if let Some(runtime) = SERVICE.get() {
+        let _runtime = runtime
+            .lock()
+            .map_err(|_| "Mouse Gestures runtime state is unavailable".to_owned())?;
+    }
+    Ok(FrontendRestartReservation {
+        service: crate::mouse_gestures::service::reserve_frontend_restart()?,
+    })
+}
+
 #[derive(Default)]
 pub struct MouseGesturesPlugin {
     settings: MouseGestureSettings,

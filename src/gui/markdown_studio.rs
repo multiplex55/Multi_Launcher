@@ -236,6 +236,15 @@ impl MarkdownStudioDialog {
     pub(super) fn has_pending_decision(&self) -> bool {
         self.document.pending_transition().is_some()
     }
+    pub(crate) fn restart_blocker(&self) -> Option<&'static str> {
+        if self.document.pending_transition().is_some() {
+            return Some("Markdown Studio has a pending document transition.");
+        }
+        if self.document.is_dirty() {
+            return Some("Markdown Studio has an unsaved document.");
+        }
+        None
+    }
     pub(super) fn jump_generation(&self) -> super::jump_mode::TargetGeneration {
         super::jump_mode::TargetGeneration(
             egui::Id::new((

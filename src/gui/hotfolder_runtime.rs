@@ -161,7 +161,37 @@ struct DriverRequest {
     restore_admission_on_error: bool,
     operation: DriverOperation,
     inputs: Option<HotFolderCapabilityInputs>,
+    _control_permit: DriverRequestPermit,
 }
+
+#[derive(Default)]
+struct DriverControlAdmissionState {
+    restart_reserved: bool,
+    pending_requests: usize,
+}
+
+struct DriverRequestPermit(Arc<Mutex<DriverControlAdmissionState>>);
+
+impl Drop for DriverRequestPermit {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.pending_requests = state.pending_requests.saturating_sub(1);
+        }
+    }
+}
+
+struct HotFolderRestartReservationInner(Arc<Mutex<DriverControlAdmissionState>>);
+
+impl Drop for HotFolderRestartReservationInner {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.restart_reserved = false;
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct HotFolderRestartReservation(Arc<HotFolderRestartReservationInner>);
 
 /// A persistent bounded control surface. Closing the dialog does not stop or
 /// recreate this driver.
@@ -171,9 +201,11 @@ pub(crate) struct HotFolderRuntimeDriver {
     next_request_id: AtomicU64,
     execution_control: HotFolderExecutionControl,
     shutdown_requested: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-    reaper: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<Result<(), String>>>,
+    reaper: Option<JoinHandle<Result<(), String>>>,
+    reaper_completed: Option<Result<(), String>>,
     repair_store: crate::hotfolder::HotFolderRulesStore,
+    control_admission: Arc<Mutex<DriverControlAdmissionState>>,
 }
 
 impl HotFolderRuntimeDriver {
@@ -193,7 +225,9 @@ impl HotFolderRuntimeDriver {
             shutdown_requested: Arc::new(AtomicBool::new(true)),
             worker: None,
             reaper: None,
+            reaper_completed: None,
             repair_store,
+            control_admission: Arc::new(Mutex::new(DriverControlAdmissionState::default())),
         }
     }
 
@@ -251,7 +285,9 @@ impl HotFolderRuntimeDriver {
             shutdown_requested,
             worker: Some(worker),
             reaper: None,
+            reaper_completed: None,
             repair_store,
+            control_admission: Arc::new(Mutex::new(DriverControlAdmissionState::default())),
         }
     }
 
@@ -273,6 +309,63 @@ impl HotFolderRuntimeDriver {
         snapshot.admission_blocked = self.execution_control.admission_blocked();
         snapshot.execution_progress = self.execution_control.progress_snapshot();
         snapshot
+    }
+
+    pub(crate) fn checked_snapshot(&self) -> Result<HotFolderDriverSnapshot, String> {
+        let mut snapshot = self
+            .snapshot
+            .read()
+            .map_err(|_| "Hot Folder owner state is unavailable".to_owned())?
+            .clone();
+        snapshot.admission_blocked = self.execution_control.admission_blocked();
+        snapshot.execution_progress = self.execution_control.progress_snapshot();
+        Ok(snapshot)
+    }
+
+    pub(crate) fn reserve_frontend_restart(
+        &self,
+    ) -> Result<HotFolderRestartReservation, String> {
+        let mut admission = self
+            .control_admission
+            .lock()
+            .map_err(|_| "Hot Folder control admission is unavailable".to_owned())?;
+        if admission.restart_reserved {
+            return Err("Hot Folder control admission is already reserved".to_owned());
+        }
+        if admission.pending_requests != 0 {
+            return Err("Hot Folder has a queued control request awaiting acknowledgement".to_owned());
+        }
+        admission.restart_reserved = true;
+        let reservation = HotFolderRestartReservation(Arc::new(
+            HotFolderRestartReservationInner(Arc::clone(&self.control_admission)),
+        ));
+        drop(admission);
+        let snapshot = self
+            .snapshot
+            .read()
+            .map_err(|_| "Hot Folder owner state is unavailable".to_owned())?;
+        if snapshot.plugin_enabled
+            || snapshot.running
+            || snapshot.paused
+            || snapshot.execution_progress.operation_id.is_some()
+            || snapshot.runtime.as_ref().is_some_and(|runtime| {
+                runtime.active_roots != 0
+                    || runtime.active_rules != 0
+                    || runtime.pending_files != 0
+                    || runtime.ready_candidates != 0
+                    || runtime.lease_active
+            })
+            || snapshot.execution.as_ref().is_some_and(|execution| {
+                execution.active
+                    || execution.paused
+                    || execution.recovery_required != 0
+                    || execution.journal_error.is_some()
+            })
+        {
+            drop(reservation);
+            return Err("Hot Folder has active or recovering work; stop it before restarting".to_owned());
+        }
+        Ok(reservation)
     }
 
     pub(crate) fn ensure_loaded(&self) -> Result<u64, &'static str> {
@@ -402,11 +495,13 @@ impl HotFolderRuntimeDriver {
         operation: DriverOperation,
         inputs: Option<HotFolderCapabilityInputs>,
     ) -> Result<u64, &'static str> {
+        let permit = self.reserve_control_request()?;
         self.submit_with_gate(
             operation,
             inputs,
             self.execution_control.gate_snapshot(),
             false,
+            permit,
         )
     }
 
@@ -416,13 +511,30 @@ impl HotFolderRuntimeDriver {
         inputs: Option<HotFolderCapabilityInputs>,
         restore_on_failure: bool,
     ) -> Result<u64, &'static str> {
+        let permit = self.reserve_control_request()?;
         let (gate_generation, was_open) = self.execution_control.block_admission_for_request();
         self.submit_with_gate(
             operation,
             inputs,
             gate_generation,
             restore_on_failure && was_open,
+            permit,
         )
+    }
+
+    fn reserve_control_request(&self) -> Result<DriverRequestPermit, &'static str> {
+        let mut admission = self
+            .control_admission
+            .lock()
+            .map_err(|_| "Hot Folder control admission is unavailable")?;
+        if admission.restart_reserved {
+            return Err("Hot Folder control admission is reserved for frontend restart");
+        }
+        admission.pending_requests = admission
+            .pending_requests
+            .checked_add(1)
+            .ok_or("Hot Folder control request count is exhausted")?;
+        Ok(DriverRequestPermit(Arc::clone(&self.control_admission)))
     }
 
     fn submit_with_gate(
@@ -431,21 +543,30 @@ impl HotFolderRuntimeDriver {
         inputs: Option<HotFolderCapabilityInputs>,
         gate_generation: u64,
         restore_admission_on_error: bool,
+        permit: DriverRequestPermit,
     ) -> Result<u64, &'static str> {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        if request_id == 0 {
-            if restore_admission_on_error {
-                self.execution_control
-                    .allow_admission_if_unchanged(gate_generation);
+        let request_id = match self.next_request_id.try_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| current.checked_add(1),
+        ) {
+            Ok(request_id) if request_id != 0 => request_id,
+            _ => {
+                drop(permit);
+                if restore_admission_on_error {
+                    self.execution_control
+                        .allow_admission_if_unchanged(gate_generation);
+                }
+                return Err("Hot Folder request ID space is exhausted");
             }
-            return Err("Hot Folder request ID space is exhausted");
-        }
+        };
         match self.sender.try_send(DriverRequest {
             request_id,
             gate_generation,
             restore_admission_on_error,
             operation,
             inputs,
+            _control_permit: permit,
         }) {
             Ok(()) => Ok(request_id),
             Err(TrySendError::Full(_)) => {
@@ -481,9 +602,7 @@ impl HotFolderRuntimeDriver {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .take();
-                    if let Some(worker) = worker {
-                        let _ = worker.join();
-                    }
+                    worker.map(join_hotfolder_worker).unwrap_or(Ok(()))
                 }) {
                 Ok(reaper) => self.reaper = Some(reaper),
                 Err(error) => {
@@ -496,28 +615,77 @@ impl HotFolderRuntimeDriver {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .take();
-                    if let Some(worker) = worker {
-                        let _ = worker.join();
-                    }
+                    self.reaper_completed = Some(
+                        worker.map(join_hotfolder_worker).unwrap_or(Ok(())),
+                    );
                 }
             }
         }
     }
 
-    pub(crate) fn join_reaper(&mut self) {
-        if let Some(reaper) = self.reaper.take()
-            && reaper.join().is_err()
-        {
-            tracing::warn!("Hot Folder worker reaper panicked");
+    pub(crate) fn shutdown_for_frontend_restart(&mut self) -> Result<(), String> {
+        let admission = self
+            .control_admission
+            .lock()
+            .map_err(|_| "Hot Folder control admission is unavailable".to_owned())?;
+        if !admission.restart_reserved || admission.pending_requests != 0 {
+            return Err("Hot Folder restart reservation was lost or work remains queued".to_owned());
         }
+        drop(admission);
+        let snapshot = self.checked_snapshot()?;
+        if snapshot.plugin_enabled
+            || snapshot.running
+            || snapshot.paused
+            || snapshot.execution_progress.operation_id.is_some()
+            || snapshot.runtime.as_ref().is_some_and(|runtime| {
+                runtime.active_roots != 0
+                    || runtime.active_rules != 0
+                    || runtime.pending_files != 0
+                    || runtime.ready_candidates != 0
+                    || runtime.lease_active
+            })
+            || snapshot.execution.as_ref().is_some_and(|execution| {
+                execution.active
+                    || execution.paused
+                    || execution.recovery_required != 0
+                    || execution.journal_error.is_some()
+            })
+        {
+            return Err("Hot Folder became active before shutdown".to_owned());
+        }
+        if self.reaper.is_some() || self.reaper_completed.is_some() {
+            return Err("Hot Folder worker is already being reaped".to_owned());
+        }
+        let worker = self
+            .worker
+            .take()
+            .ok_or_else(|| "Hot Folder worker is unavailable".to_owned())?;
+        self.execution_control.block_admission();
+        self.shutdown_requested.store(true, Ordering::Release);
+        join_hotfolder_worker(worker)
+    }
+
+    pub(crate) fn join_reaper(&mut self) -> Result<(), String> {
+        if let Some(reaper) = self.reaper.take() {
+            return reaper
+                .join()
+                .map_err(|_| "Hot Folder worker reaper panicked".to_owned())?;
+        }
+        self.reaper_completed.take().unwrap_or(Ok(()))
     }
 }
 
 impl Drop for HotFolderRuntimeDriver {
     fn drop(&mut self) {
         self.shutdown_and_reap();
-        self.join_reaper();
+        let _ = self.join_reaper();
     }
+}
+
+fn join_hotfolder_worker(worker: JoinHandle<Result<(), String>>) -> Result<(), String> {
+    worker
+        .join()
+        .map_err(|_| "Hot Folder worker panicked during shutdown".to_owned())?
 }
 
 #[cfg(feature = "perf-harness")]
@@ -645,7 +813,7 @@ impl HotFolderIdleFixture {
 
     pub fn shutdown(&mut self) {
         self.driver.shutdown_and_reap();
-        self.driver.join_reaper();
+        let _ = self.driver.join_reaper();
     }
 }
 
@@ -787,7 +955,7 @@ fn driver_main(
     published: Arc<RwLock<HotFolderDriverSnapshot>>,
     activity_center: Option<crate::activity::ActivityCenter>,
     inbox: Option<crate::notifications::InboxPublisher>,
-) {
+) -> Result<(), String> {
     let mut store_loaded = false;
     let mut inputs = HotFolderCapabilityInputs::empty();
     let mut watcher: Option<HotFolderWatchService> = None;
@@ -908,7 +1076,7 @@ fn driver_main(
         );
     }
     control.block_admission();
-    stop_services(&mut watcher, &mut engine);
+    let shutdown = stop_services(&mut watcher, &mut engine);
     publish_driver_snapshot(
         &published,
         false,
@@ -921,6 +1089,7 @@ fn driver_main(
         &acknowledgements,
         &pending_enables,
     );
+    shutdown
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1360,15 +1529,18 @@ fn reconcile_after_edit(
 fn stop_services(
     watcher: &mut Option<HotFolderWatchService>,
     engine: &mut Option<HotFolderExecutionEngine>,
-) {
+) -> Result<(), String> {
     if let Some(engine) = engine.as_ref() {
         engine.shutdown();
     }
-    if let Some(watcher) = watcher.as_mut() {
-        let _ = watcher.shutdown();
-    }
+    let watcher_shutdown = watcher
+        .as_mut()
+        .map(HotFolderWatchService::shutdown)
+        .transpose()
+        .map_err(|error| format!("Hot Folder watcher shutdown failed: {error:?}"));
     *watcher = None;
     *engine = None;
+    watcher_shutdown.map(|_| ())
 }
 
 fn publish_driver_snapshot(
@@ -2028,8 +2200,29 @@ mod m10e_driver_lifecycle_fixtures {
         assert!(!refused.store.as_ref().unwrap().rules[0].enabled);
 
         driver.shutdown_and_reap();
-        driver.join_reaper();
+        driver.join_reaper().unwrap();
         assert!(!driver.has_workers_for_test());
+    }
+
+    #[test]
+    fn frontend_restart_reservation_fences_control_and_joins_idle_driver() {
+        let temporary = tempfile::tempdir().expect("create isolated runtime fixture");
+        let data_root = AppDataRoot::from_path(temporary.path().join("app_data"));
+        let adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter> =
+            Arc::new(RejectAllExternalActions);
+        let mut driver = HotFolderRuntimeDriver::new(data_root, adapter);
+
+        let reservation = driver
+            .reserve_frontend_restart()
+            .expect("idle driver admits restart reservation");
+        assert!(driver.ensure_loaded().is_err());
+        driver
+            .shutdown_for_frontend_restart()
+            .expect("checked path joins the always-started idle driver");
+        drop(reservation);
+        driver.join_reaper().expect("no detached reaper remains");
+        assert!(driver.worker.is_none());
+        assert!(driver.reaper.is_none());
     }
 
     #[cfg(windows)]
@@ -2484,7 +2677,7 @@ mod m10e_driver_lifecycle_fixtures {
         assert_eq!(retired_reply.status, HotFolderTerminalStatus::Failure);
 
         driver.shutdown_and_reap();
-        driver.join_reaper();
+        driver.join_reaper().unwrap();
         assert!(driver.worker.is_none());
         assert!(
             driver.reaper.is_none(),
@@ -2756,7 +2949,7 @@ mod m10e_driver_lifecycle_fixtures {
         );
 
         driver.shutdown_and_reap();
-        driver.join_reaper();
+        driver.join_reaper().unwrap();
         assert!(driver.worker.is_none());
         assert!(
             driver.reaper.is_none(),
@@ -2832,7 +3025,7 @@ mod m10e_driver_lifecycle_fixtures {
         );
 
         restarted.shutdown_and_reap();
-        restarted.join_reaper();
+        restarted.join_reaper().unwrap();
         assert!(restarted.worker.is_none());
         assert!(
             restarted.reaper.is_none(),

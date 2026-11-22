@@ -1,6 +1,6 @@
 # Main Settings
 
-G06 owns `settings-main`. `settings` is its canonical utility presentation and geometry key. The native egui toolbar and Settings search exposure are recorded in `G06-EGUI-SETTINGS-NAVIGATION`. See the [validation log](../VALIDATION_LOG.md).
+G06 owns `settings-main`. `settings` is its canonical utility presentation and geometry key. The native egui toolbar and Settings search exposure are recorded in `G06-EGUI-SETTINGS-NAVIGATION`. `G03-C2B-REVERSE-SETTINGS-WINDOWS` verifies the idle restart footer, dirty draft denial, confirmation Cancel and one same-profile GPUI child. [Validation log](../VALIDATION_LOG.md)
 
 ## Routes and ownership
 

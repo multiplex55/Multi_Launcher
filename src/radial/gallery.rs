@@ -205,6 +205,8 @@ pub struct GalleryPreparationService {
     tx: std::sync::mpsc::SyncSender<GalleryWork>,
     resource_epoch: Arc<std::sync::atomic::AtomicU64>,
     stopping: Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    shutdown_complete: bool,
 }
 impl GalleryPreparationService {
     pub fn new(
@@ -236,7 +238,7 @@ impl GalleryPreparationService {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let epoch = Arc::clone(&resource_epoch);
         let stop = Arc::clone(&stopping);
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("radial-gallery".into())
             .spawn(move || {
                 let mut applied = 0;
@@ -286,6 +288,8 @@ impl GalleryPreparationService {
             tx,
             resource_epoch,
             stopping,
+            worker: Some(worker),
+            shutdown_complete: false,
         })
     }
     pub fn try_prepare(&self, request: GalleryRequest) -> Result<(), String> {
@@ -299,6 +303,26 @@ impl GalleryPreparationService {
         // A queued request also notices the epoch; invalidation never waits for
         // a decoder or occupies an unbounded control queue.
         let _ = self.tx.try_send(GalleryWork::Invalidate);
+    }
+
+    /// Retire the real preparation worker at the committed frontend boundary.
+    /// Normal Drop stays nonblocking for ordinary application close.
+    pub fn shutdown_for_frontend_restart(&mut self) -> Result<(), String> {
+        if self.shutdown_complete {
+            return Ok(());
+        }
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.tx.try_send(GalleryWork::Invalidate);
+        let worker = self
+            .worker
+            .take()
+            .ok_or_else(|| "radial Gallery worker is unavailable".to_owned())?;
+        worker
+            .join()
+            .map_err(|_| "radial Gallery worker panicked during shutdown".to_owned())?;
+        self.shutdown_complete = true;
+        Ok(())
     }
 }
 impl Drop for GalleryPreparationService {

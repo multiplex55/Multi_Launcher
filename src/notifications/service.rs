@@ -235,7 +235,7 @@ impl InboxService {
         }
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    pub(crate) fn shutdown_checked(&mut self) -> Result<(), String> {
         {
             let _admission = self
                 .shared
@@ -246,7 +246,16 @@ impl InboxService {
             let _ = self.shared.sender.try_send(Message::Wake);
         }
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            worker
+                .join()
+                .map_err(|_| "Notification Inbox worker panicked during shutdown".to_owned())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        if let Err(error) = self.shutdown_checked() {
+            tracing::error!(%error, "Notification Inbox worker did not shut down cleanly");
         }
     }
 }

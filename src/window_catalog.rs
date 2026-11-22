@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const REFRESH_TTL: Duration = Duration::from_secs(2);
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const UPDATE_SOURCE: &str = "windows";
 static PRODUCTION_ENUMERATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -125,6 +126,7 @@ struct CatalogState {
     in_flight_ticket: Option<u64>,
     shutting_down: bool,
     terminal: bool,
+    worker_retired: bool,
     generation: u64,
     desktop_ids: Arc<HashMap<usize, Option<crate::virtual_desktop::VirtualDesktopId>>>,
     desktop_ids_ready: bool,
@@ -147,6 +149,68 @@ impl WindowCatalog {
         Arc::new(Self::start(ProductionWindowProvider, updates))
     }
 
+    /// Stop catalog refresh admission and join the real worker. The regular
+    /// Drop path remains nonblocking; committed frontend replacement consumes
+    /// this checked shutdown before the old process releases its instance guard.
+    pub(crate) fn shutdown_checked(&self) -> Result<(), String> {
+        {
+            let _publication = self
+                .publication
+                .lock()
+                .map_err(|_| "Window Catalog publication state is unavailable".to_owned())?;
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Window Catalog state is unavailable".to_owned())?;
+            state.shutting_down = true;
+            if let Some(ticket) = state.in_flight_ticket.take() {
+                self.updates.cancel_ticket(UPDATE_SOURCE, ticket);
+            }
+        }
+        let _ = self.wake.try_send(());
+        let mut worker = self
+            .worker
+            .lock()
+            .map_err(|_| "Window Catalog worker state is unavailable".to_owned())?;
+        if worker.is_none() {
+            let state = self.state.lock().map_err(|_| {
+                "Window Catalog state is unavailable".to_owned()
+            })?;
+            return if state.shutting_down && state.worker_retired {
+                Ok(())
+            } else {
+                Err("Window Catalog worker is unavailable before shutdown completed".to_owned())
+            };
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Window Catalog state is unavailable".to_owned())?;
+        let (state, wait) = self
+            .changed
+            .wait_timeout_while(state, WORKER_SHUTDOWN_TIMEOUT, |state| {
+                !state.worker_retired
+            })
+            .map_err(|_| "Window Catalog state is unavailable".to_owned())?;
+        if !state.worker_retired {
+            return Err(if wait.timed_out() {
+                "Window Catalog worker did not retire before the shutdown deadline".to_owned()
+            } else {
+                "Window Catalog worker did not retire".to_owned()
+            });
+        }
+        drop(state);
+        let Some(join) = worker.take() else {
+            return Err("Window Catalog worker disappeared during checked shutdown".to_owned());
+        };
+        // Keep the worker slot locked through join so a concurrent checked
+        // caller cannot mistake an in-progress join for a retired worker.
+        join
+            .join()
+            .map_err(|_| "Window Catalog worker panicked during shutdown".to_owned())?;
+        Ok(())
+    }
+
     pub(crate) fn start(provider: impl WindowProvider, updates: Arc<PluginSearchUpdates>) -> Self {
         Self::start_with_descriptor(provider, updates, describe_window)
     }
@@ -163,6 +227,7 @@ impl WindowCatalog {
             in_flight_ticket: None,
             shutting_down: false,
             terminal: false,
+            worker_retired: false,
             generation: 0,
             desktop_ids: Arc::new(HashMap::new()),
             desktop_ids_ready: false,
@@ -264,6 +329,7 @@ impl WindowCatalog {
                 in_flight_ticket: None,
                 shutting_down: false,
                 terminal: true,
+                worker_retired: true,
                 generation: 0,
                 desktop_ids: Arc::new(desktop_ids),
                 desktop_ids_ready,
@@ -294,7 +360,8 @@ impl WindowCatalog {
         let Ok(mut state) = self.state.lock() else {
             return Arc::new(Vec::new());
         };
-        if !state.terminal
+        if !state.shutting_down
+            && !state.terminal
             && !state
                 .fresh_until
                 .is_some_and(|deadline| Instant::now() < deadline)
@@ -342,7 +409,7 @@ impl WindowCatalog {
     /// Explicitly request a fresh publication, used by bounded background discovery.
     pub fn request_refresh(&self) {
         if let Ok(mut state) = self.state.lock() {
-            if state.terminal {
+        if state.shutting_down || state.terminal {
                 return;
             }
             if state.in_flight {
@@ -362,7 +429,7 @@ impl WindowCatalog {
             .state
             .lock()
             .map_err(|_| "window catalog lock poisoned")?;
-        if state.terminal {
+        if state.shutting_down || state.terminal {
             return Err("window catalog worker is unavailable");
         }
         let target_generation = if state.in_flight {
@@ -378,10 +445,10 @@ impl WindowCatalog {
         let (state, wait) = self
             .changed
             .wait_timeout_while(state, timeout, |state| {
-                !state.terminal && state.generation < target_generation
+                !state.shutting_down && !state.terminal && state.generation < target_generation
             })
             .map_err(|_| "window catalog lock poisoned")?;
-        if state.terminal {
+        if state.shutting_down || state.terminal {
             return Err("window catalog worker is unavailable");
         }
         if wait.timed_out() && state.generation < target_generation {
@@ -402,7 +469,7 @@ impl WindowCatalog {
         let stale = !state
             .fresh_until
             .is_some_and(|deadline| Instant::now() < deadline);
-        if !state.terminal && (stale || !state.desktop_ids_ready) {
+        if !state.shutting_down && !state.terminal && (stale || !state.desktop_ids_ready) {
             state.enrichment_requested = true;
             if stale {
                 state.fresh_until = None;
@@ -420,6 +487,9 @@ impl WindowCatalog {
     }
 
     fn schedule(&self, state: &mut CatalogState) {
+        if state.shutting_down || state.terminal {
+            return;
+        }
         let ticket = self.updates.schedule_or_join(UPDATE_SOURCE);
         record_search_refresh_ticket(UPDATE_SOURCE, ticket.id);
         if ticket.start {
@@ -586,6 +656,7 @@ fn terminate_worker(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.in_flight = false;
         state.terminal = true;
+        state.worker_retired = true;
         state.in_flight_ticket.take()
     };
     if let Some(ticket) = ticket {
@@ -868,6 +939,60 @@ mod tests {
     }
 
     #[test]
+    fn checked_shutdown_joins_worker_and_fences_all_refresh_entrypoints() {
+        let updates = Arc::new(PluginSearchUpdates::default());
+        let catalog = Arc::new(WindowCatalog::start(PanicProvider, updates));
+
+        catalog.shutdown_checked().unwrap();
+        catalog.shutdown_checked().unwrap();
+
+        assert!(catalog
+            .state
+            .lock()
+            .unwrap()
+            .shutting_down);
+        assert!(catalog.state.lock().unwrap().terminal);
+        assert!(catalog.worker.lock().unwrap().is_none());
+        let generation = catalog.generation();
+        catalog.request_refresh();
+        let _ = catalog.snapshot_and_refresh();
+        let _ = catalog.snapshot_with_desktops_and_refresh();
+        assert!(catalog.refresh_and_wait(Duration::from_millis(1)).is_err());
+        assert_eq!(catalog.generation(), generation);
+        let state = catalog.state.lock().unwrap();
+        assert!(!state.in_flight);
+        assert!(!state.refresh_after_flight);
+        assert!(!state.enrichment_requested);
+    }
+
+    #[test]
+    fn checked_shutdown_refuses_blocked_provider_without_detaching_handle() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (finished_tx, finished_rx) = channel();
+        let catalog = Arc::new(WindowCatalog::start(
+            DropControlledProvider {
+                started: started_tx,
+                release: release_rx,
+                finished: finished_tx,
+            },
+            Arc::new(PluginSearchUpdates::default()),
+        ));
+        catalog.request_refresh();
+        started_rx.recv().unwrap();
+
+        let error = catalog.shutdown_checked().unwrap_err();
+        assert!(error.contains("shutdown deadline"));
+        assert!(catalog.worker.lock().unwrap().is_some());
+        assert!(!catalog.state.lock().unwrap().worker_retired);
+
+        release_tx.send(Vec::new()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        catalog.shutdown_checked().unwrap();
+        assert!(catalog.worker.lock().unwrap().is_none());
+    }
+
+    #[test]
     fn drop_while_blocked_resolves_ticket_and_suppresses_stale_publication() {
         let (started_tx, started_rx) = channel();
         let (release_tx, release_rx) = channel();
@@ -942,6 +1067,7 @@ mod tests {
                 in_flight_ticket: None,
                 shutting_down: false,
                 terminal: false,
+                worker_retired: true,
                 generation: 0,
                 desktop_ids: Arc::new(HashMap::new()),
                 desktop_ids_ready: false,

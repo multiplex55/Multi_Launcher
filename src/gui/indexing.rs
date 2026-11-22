@@ -43,6 +43,16 @@ impl IndexingOwner {
         self.diagnostic.as_deref()
     }
 
+    pub(super) fn frontend_restart_preflight(&self) -> Result<(), String> {
+        if self.closed {
+            return Err("The action indexer is already shutting down.".to_owned());
+        }
+        if self.coordinator.is_some() {
+            return Err("The action indexer still owns a worker without a checked retirement receipt. Wait for it to retire before restarting.".to_owned());
+        }
+        Ok(())
+    }
+
     fn attach(
         &mut self,
         coordinator: IndexCoordinator,
