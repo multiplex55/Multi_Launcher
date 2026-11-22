@@ -15,7 +15,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Pending execution |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | G03-C1 confirmed GPUI-to-egui restart. G03-B duplicate selector feedback is verified. G01 global invocation, foreground restoration and additional passive overlay checks remain pending. |
+| Current next action | G04 Hash hosting and common presentation ownership. G03-B duplicate feedback and G03-C1 confirmed GPUI-to-egui restart are verified. The reverse switch, G01 global invocation, foreground restoration and additional passive overlay checks remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 

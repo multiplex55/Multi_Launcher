@@ -105,3 +105,11 @@ Both explicit selectors now produce an actionable native error when another inst
 Continue G03-C1 with a confirmed GPUI-to-egui restart. The existing Hash, utility and root drafts, pending effects and owned-service teardown are in scope for that source slice. Leave the reverse switch to its actual egui editors and job owners. See [Frontend selection and restart](FRONTEND_SELECTION.md).
 
 The verified G03-B checkpoint is `804aa8750`, pushed to `origin/feat/gpui-ui-parity` with a clean checkout before G03-C1. The sole implementer owns C1 source and Cargo. The parent owns the ledger, Windows smoke and Git. The scratch fixture has no running process and holds the `G03-B-INSTANCE-WINDOWS` artifact. Replace it with the exact linked C1 build before exercising Cancel, Escape and confirmed restart.
+
+## G03-C1 — Confirmed GPUI-to-egui restart verified
+
+The C1 source started at `021681d80`. It captures the executable and original directory, asks for explicit discard confirmation, checks Hash job retirement and pending native effects, and requires checked service and window retirement before returning a one-shot plan. The review confirmed immediate editor mutation fencing and the canonical guard release before child launch. See the [lifecycle review](reviews/G03-C1-lifecycle.md).
+
+The first full Windows scenario aborted in AccessKit 0.34.0 on a retired HWND. The isolated provider correction is `f9850dd78`, pushed to the same upstream. The patched `4E4F1E4A…` build passed the entire three-window cancellation and restart scenario with the active HUD and reacquisition of the original root. The final build and scoped tests passed. See `G03-C1-INITIAL-WINDOWS`, `G03-C1-UIA-RETIRED-HWND`, `G03-C1-MULTIWINDOW-RESTART` and `G03-C1-FINAL-SOURCE`. No owned fixture process is running. Scratch settings were restored and the trace files remain available.
+
+Continue independently eligible G04 hosting. Establish the shared presentation and save-acknowledgement owner before mounting the Hash tool into docked and popped-out Kit hosts. The new GPUI writer must participate in checked shutdown. G03 still owns the egui-to-GPUI direction and persistence closure.

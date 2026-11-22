@@ -11,11 +11,13 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context as FutureContext, Poll, Waker},
+    time::Duration,
 };
 
 use gpui_kit::base::Disableable;
 use gpui_kit::component::input::InputEvent;
 use gpui_kit::component::{
+    WindowExt as _,
     button::Button,
     input::{Input, InputState},
     label::Label,
@@ -25,6 +27,9 @@ use gpui_kit::*;
 #[cfg(windows)]
 use std::ffi::c_void;
 
+use crate::gpui_restart::{
+    EffectPermit, HashWork, RestartAdmission, RestartBlocker, RestartContext, RestartPlan,
+};
 use multi_launcher::commands::HashGeneratorCommand;
 use multi_launcher::commands::handlers::handle_hash_generator;
 use multi_launcher::coordinate_tool::{
@@ -39,7 +44,8 @@ gpui_kit::actions!([
     ToggleSecondaryWindow,
     ToggleCoordinateHudProbe,
     OpenHashGenerator,
-    CalculateHash
+    CalculateHash,
+    RestartWithEgui
 ]);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -183,6 +189,9 @@ fn toggle_coordinate_hud_probe(
 }
 
 struct RootWindow {
+    root_window: Option<AnyWindowHandle>,
+    listener_slot: Arc<Mutex<Option<HotkeyListener>>>,
+    root_visibility: RootVisibility,
     query: Entity<InputState>,
     native_window: Option<NativeWindow>,
     focus_handle: FocusHandle,
@@ -200,6 +209,13 @@ struct RootWindow {
     coordinate_hud_probe_closing: Arc<AtomicBool>,
     coordinate_hud_probe_pending: bool,
     coordinate_hud_probe_status: String,
+    coordinate_shutdown_complete: Arc<AtomicBool>,
+    restart_context: Option<RestartContext>,
+    restart_admission: Arc<RestartAdmission>,
+    restart_retiring: Arc<AtomicBool>,
+    restart_status: Option<String>,
+    restart_exit: Rc<RefCell<Option<(RestartContext, Vec<NativeWindow>)>>>,
+    restart_failure: Rc<RefCell<Option<String>>>,
 }
 
 enum HashWindowState {
@@ -325,10 +341,510 @@ fn update_kit_window_content<T: 'static, C: AppContext, R>(
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RestartDrafts {
+    search: String,
+    utility: Option<String>,
+    hash: String,
+    hash_window_open: bool,
+}
+
+struct RestartSnapshot {
+    drafts: RestartDrafts,
+    hash_work: HashWork,
+    child_windows: Vec<AnyWindowHandle>,
+    native_windows: Vec<NativeWindow>,
+}
+
+struct AcceptedRestart {
+    context: RestartContext,
+    root_window: AnyWindowHandle,
+    child_windows: Vec<AnyWindowHandle>,
+    native_windows: Vec<NativeWindow>,
+    listener_slot: Arc<Mutex<Option<HotkeyListener>>>,
+    coordinate_controller: Arc<Mutex<CoordinateToolController>>,
+    coordinate_shutdown_complete: Arc<AtomicBool>,
+    restart_retiring: Arc<AtomicBool>,
+    restart_exit: Rc<RefCell<Option<(RestartContext, Vec<NativeWindow>)>>>,
+    restart_failure: Rc<RefCell<Option<String>>>,
+}
+
+async fn wait_for_native_retirement(cx: &mut AsyncApp, windows: &[NativeWindow]) -> bool {
+    for _ in 0..100 {
+        if windows
+            .iter()
+            .all(|window| !native_window_is_valid(*window))
+        {
+            return true;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    }
+    windows
+        .iter()
+        .all(|window| !native_window_is_valid(*window))
+}
+
+fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
+    let mut names = Vec::new();
+    if !drafts.search.is_empty() {
+        names.push("Search query");
+    }
+    if drafts.utility.as_ref().is_some_and(|text| !text.is_empty()) {
+        names.push("retained utility editor");
+    }
+    if !drafts.hash.is_empty() {
+        names.push("Hash Generator input");
+    }
+    if names.is_empty() {
+        return "Restart Multi Launcher in the egui fallback? The GPUI windows will close."
+            .to_owned();
+    }
+    format!(
+        "Restart Multi Launcher in the egui fallback? This will discard the current {} and close the GPUI windows.",
+        names.join(", ")
+    )
+}
+
+fn restart_blocker_message(blocker: RestartBlocker) -> String {
+    match blocker {
+        RestartBlocker::HashWork(HashWork::Active) => {
+            "Hash Generator is still calculating. Cancel it or wait for it to finish, then retry the egui restart.".to_owned()
+        }
+        RestartBlocker::HashWork(HashWork::Retiring) => {
+            "Hash Generator is still stopping its previous calculation. Wait for it to retire, then retry the egui restart.".to_owned()
+        }
+        RestartBlocker::HashWork(HashWork::Idle) => {
+            "The restart confirmation is no longer active. Start it again to switch to egui.".to_owned()
+        }
+        RestartBlocker::PendingEffects(count) => format!(
+            "Wait for the {count} pending GPUI operation(s) to finish, then retry the egui restart."
+        ),
+        RestartBlocker::ConfirmationInactive => {
+            "The egui restart confirmation is no longer active. Start it again to switch frontends."
+                .to_owned()
+        }
+    }
+}
+
 impl RootWindow {
+    fn capture_restart_snapshot(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<RestartSnapshot, String> {
+        if self.coordinate_hud_probe_pending {
+            return Err(
+                "Coordinate HUD is still changing state. Wait for it to finish, then retry the egui restart."
+                    .to_owned(),
+            );
+        }
+
+        let mut child_windows = Vec::new();
+        let mut native_windows = self.native_window.into_iter().collect::<Vec<_>>();
+        let utility = match &self.secondary {
+            SecondaryWindowState::Closed => None,
+            SecondaryWindowState::OpenPending => {
+                return Err(
+                    "The retained utility window is still opening. Wait for it to finish, then retry the egui restart."
+                        .to_owned(),
+                );
+            }
+            SecondaryWindowState::Live { window, view } => {
+                let handle = *window;
+                let (text, native) =
+                    update_kit_window_content(handle, view, cx, |utility, _, cx| {
+                        (
+                            utility.query.read(cx).value().to_string(),
+                            utility.native_window,
+                        )
+                    })
+                    .map_err(|error| {
+                        format!("Could not inspect the retained utility draft: {error}")
+                    })?;
+                child_windows.push(handle);
+                if let Some(native) = native {
+                    native_windows.push(native);
+                } else if cfg!(windows) {
+                    return Err(
+                        "The retained utility window has no checked Windows handle; close it and retry the egui restart."
+                            .to_owned(),
+                    );
+                }
+                Some(text)
+            }
+        };
+
+        let (mut hash_text, hash_work, hash_window_open) = {
+            let session = self
+                .hash_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let work = if session.is_running() {
+                HashWork::Active
+            } else if session.has_job() {
+                HashWork::Retiring
+            } else {
+                HashWork::Idle
+            };
+            (
+                session.text().to_owned(),
+                work,
+                matches!(&self.hash_window, HashWindowState::Live { .. }),
+            )
+        };
+        if let HashWindowState::Live { window, view } = &self.hash_window {
+            let handle = *window;
+            let (editor_text, native) =
+                update_kit_window_content(handle, view, cx, |tool, _, cx| {
+                    (tool.input.read(cx).value().to_string(), tool.native_window)
+                })
+                .map_err(|error| format!("Could not inspect the Hash Generator window: {error}"))?;
+            hash_text = editor_text;
+            child_windows.push(handle);
+            if let Some(native) = native {
+                native_windows.push(native);
+            } else if cfg!(windows) {
+                return Err(
+                    "The Hash Generator window has no checked Windows handle; close it and retry the egui restart."
+                        .to_owned(),
+                );
+            }
+        }
+
+        if cfg!(windows) {
+            if self.native_window.is_none() {
+                return Err(
+                    "The GPUI root has no checked Windows handle; restart is unavailable until the window is restored."
+                        .to_owned(),
+                );
+            }
+            if native_windows
+                .iter()
+                .any(|window| !native_window_is_valid(*window))
+            {
+                return Err(
+                    "A GPUI window handle became stale. Close any utility windows and retry the egui restart."
+                        .to_owned(),
+                );
+            }
+        }
+
+        Ok(RestartSnapshot {
+            drafts: RestartDrafts {
+                search: self.query.read(cx).value().to_string(),
+                utility,
+                hash: hash_text,
+                hash_window_open,
+            },
+            hash_work,
+            child_windows,
+            native_windows,
+        })
+    }
+
+    fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(context) = self.restart_context.clone() else {
+            self.restart_status = Some(
+                "Could not capture the executable path and working directory before restart. Close and relaunch manually with --ui=egui."
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        if !self.restart_admission.begin_confirmation() {
+            self.restart_status = Some(
+                "An egui restart has already been accepted or is awaiting cancellation.".to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+
+        let snapshot = match self.capture_restart_snapshot(cx) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.restart_admission.cancel_confirmation();
+                self.restart_status = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        if snapshot.hash_work != HashWork::Idle {
+            self.restart_admission.cancel_confirmation();
+            self.restart_status = Some(restart_blocker_message(RestartBlocker::HashWork(
+                snapshot.hash_work,
+            )));
+            cx.notify();
+            return;
+        }
+        let pending = self.restart_admission.pending_effects();
+        if pending != 0 {
+            self.restart_admission.cancel_confirmation();
+            self.restart_status = Some(restart_blocker_message(RestartBlocker::PendingEffects(
+                pending,
+            )));
+            cx.notify();
+            return;
+        }
+
+        let description = describe_restart_drafts(&snapshot.drafts);
+        let expected_drafts = snapshot.drafts;
+        let root = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let root_for_cancel = root.clone();
+            let root_for_close = root.clone();
+            let root_for_accept = root.clone();
+            let context_for_accept = context.clone();
+            let expected_drafts_for_accept = expected_drafts.clone();
+            alert
+                .title(Label::new("Restart in egui?"))
+                .description(Label::new(description.clone()))
+                .confirm()
+                .ok_text("Restart in egui")
+                .cancel_text("Cancel")
+                .on_cancel(move |_, _, app| {
+                    let _ = root_for_cancel.update(app, |root, cx| {
+                        root.restart_admission.cancel_confirmation();
+                        root.restart_status = None;
+                        cx.notify();
+                    });
+                    true
+                })
+                .on_close(move |_, _, app| {
+                    let _ = root_for_close.update(app, |root, cx| {
+                        root.restart_admission.cancel_confirmation();
+                        cx.notify();
+                    });
+                })
+                .on_ok(move |_, _, app| {
+                    let root_for_task = root_for_accept.clone();
+                    let accepted = root_for_accept.update(app, |root, cx| {
+                        root.accept_restart(
+                            context_for_accept.clone(),
+                            &expected_drafts_for_accept,
+                            cx,
+                        )
+                    });
+                    match accepted {
+                        Ok(Ok(accepted)) => {
+                            app.spawn(async move |cx| {
+                                Self::complete_restart(root_for_task, accepted, cx).await;
+                            })
+                            .detach();
+                        }
+                        Ok(Err(error)) => {
+                            let _ = root_for_accept.update(app, |root, cx| {
+                                root.restart_admission.cancel_confirmation();
+                                root.restart_status = Some(error);
+                                cx.notify();
+                            });
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "could not validate the GPUI restart request");
+                        }
+                    }
+                    true
+                })
+        });
+    }
+
+    fn accept_restart(
+        &mut self,
+        context: RestartContext,
+        expected_drafts: &RestartDrafts,
+        cx: &mut Context<Self>,
+    ) -> Result<AcceptedRestart, String> {
+        let snapshot = self.capture_restart_snapshot(cx)?;
+        if &snapshot.drafts != expected_drafts {
+            return Err(
+                "A GPUI editor changed after the confirmation opened. Review its current draft and confirm the egui restart again."
+                    .to_owned(),
+            );
+        }
+        let root_window = self.root_window.ok_or_else(|| {
+            "The GPUI root window handle is unavailable; no egui process was started.".to_owned()
+        })?;
+        self.restart_admission
+            .try_accept(snapshot.hash_work)
+            .map_err(restart_blocker_message)?;
+
+        self.query
+            .update(cx, |input, cx| input.set_readonly(true, cx));
+        if let SecondaryWindowState::Live { view, .. } = &self.secondary {
+            let view = view.clone();
+            view.update(cx, |utility, cx| {
+                utility
+                    .query
+                    .update(cx, |input, cx| input.set_readonly(true, cx));
+            });
+        }
+        if let HashWindowState::Live { view, .. } = &self.hash_window {
+            let view = view.clone();
+            view.update(cx, |tool, cx| {
+                tool.input
+                    .update(cx, |input, cx| input.set_readonly(true, cx));
+            });
+        }
+
+        self.hash_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_text(snapshot.drafts.hash.clone());
+        self.root_visibility.active.store(false, Ordering::Release);
+        self.root_visibility
+            .request_revision
+            .fetch_add(1, Ordering::AcqRel);
+        self.coordinate_hud_probe_closing
+            .store(true, Ordering::Release);
+        self.coordinate_hud_probe_status = "Closing GPUI services for the egui restart…".to_owned();
+        self.hash_wake_signal.close();
+        self.hash_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown();
+        self.hash_window_revision.fetch_add(1, Ordering::AcqRel);
+        self.secondary_revision.fetch_add(1, Ordering::AcqRel);
+        self.restart_status = None;
+        cx.notify();
+
+        Ok(AcceptedRestart {
+            context,
+            root_window,
+            child_windows: snapshot.child_windows,
+            native_windows: snapshot.native_windows,
+            listener_slot: Arc::clone(&self.listener_slot),
+            coordinate_controller: Arc::clone(&self.coordinate_hud_probe_controller),
+            coordinate_shutdown_complete: Arc::clone(&self.coordinate_shutdown_complete),
+            restart_retiring: Arc::clone(&self.restart_retiring),
+            restart_exit: Rc::clone(&self.restart_exit),
+            restart_failure: Rc::clone(&self.restart_failure),
+        })
+    }
+
+    async fn complete_restart(
+        root: WeakEntity<Self>,
+        accepted: AcceptedRestart,
+        cx: &mut AsyncApp,
+    ) {
+        let listener_slot = Arc::clone(&accepted.listener_slot);
+        let coordinate_controller = Arc::clone(&accepted.coordinate_controller);
+        let coordinate_shutdown_complete = Arc::clone(&accepted.coordinate_shutdown_complete);
+        let teardown = cx
+            .background_executor()
+            .spawn(async move {
+                let listener_stop = match listener_slot.lock() {
+                    Ok(mut slot) => slot
+                        .take()
+                        .map_or(Ok(()), |mut listener| listener.stop_checked()),
+                    Err(_) => Err("the hotkey listener owner lock was poisoned".to_owned()),
+                };
+                listener_stop?;
+                coordinate_controller
+                    .lock()
+                    .map_err(|_| "the Coordinate HUD controller lock was poisoned".to_owned())?
+                    .shutdown()?;
+                coordinate_shutdown_complete.store(true, Ordering::Release);
+                Ok::<(), String>(())
+            })
+            .await;
+
+        if let Err(error) = teardown {
+            let _ = root.update(cx, |root, cx| {
+                root.restart_status = Some(format!(
+                    "Egui restart stopped because GPUI teardown failed: {error}. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with --ui=egui."
+                ));
+                cx.notify();
+            });
+            return;
+        }
+
+        let child_windows = accepted.child_windows;
+        let child_native_windows = accepted
+            .native_windows
+            .iter()
+            .skip(1)
+            .copied()
+            .collect::<Vec<_>>();
+        let close_children_error = RefCell::new(None::<String>);
+        cx.update(|app| {
+            for window in child_windows {
+                if let Err(error) = window.update(app, |_, window, _| window.remove_window()) {
+                    close_children_error
+                        .borrow_mut()
+                        .replace(format!("could not retire a GPUI utility window: {error}"));
+                    break;
+                }
+            }
+        });
+        let close_children = close_children_error.into_inner().map_or(Ok(()), Err);
+        if let Err(error) = close_children {
+            let _ = root.update(cx, |root, cx| {
+                root.restart_status = Some(format!(
+                    "Egui restart stopped because a GPUI utility window could not be closed: {error}. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with --ui=egui."
+                ));
+                cx.notify();
+            });
+            return;
+        }
+        if !wait_for_native_retirement(cx, &child_native_windows).await {
+            let _ = root.update(cx, |root, cx| {
+                root.restart_status = Some(
+                    "Egui restart stopped because a utility window did not retire. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with --ui=egui.".to_owned(),
+                );
+                cx.notify();
+            });
+            return;
+        }
+
+        let root_window = accepted.root_window;
+        let close_root_error = RefCell::new(None::<String>);
+        cx.update(|app| {
+            app.set_quit_mode(QuitMode::Explicit);
+            accepted.restart_retiring.store(true, Ordering::Release);
+            if let Err(error) = root_window.update(app, |_, window, _| window.remove_window()) {
+                close_root_error
+                    .borrow_mut()
+                    .replace(format!("could not retire the GPUI root window: {error}"));
+            }
+        });
+        let close_root = close_root_error.into_inner().map_or(Ok(()), Err);
+        if let Err(error) = close_root {
+            accepted.restart_failure.borrow_mut().replace(format!(
+                "The GPUI root window could not be closed during restart: {error}. No egui process was started; manually close Multi Launcher and rerun with --ui=egui."
+            ));
+            let _ = cx.update(|app| app.quit());
+            return;
+        }
+
+        let root_native_window = accepted.native_windows.first().copied();
+        let root_retired = match root_native_window {
+            Some(window) => wait_for_native_retirement(cx, &[window]).await,
+            None => true,
+        };
+        if !root_retired {
+            accepted.restart_failure.borrow_mut().replace(
+                "The GPUI root window did not retire before restart. No egui process was started; manually close Multi Launcher and rerun with --ui=egui.".to_owned(),
+            );
+            let _ = cx.update(|app| app.quit());
+            return;
+        }
+
+        accepted
+            .restart_exit
+            .borrow_mut()
+            .replace((accepted.context, accepted.native_windows));
+        let _ = cx.update(|app| app.quit());
+    }
+
     fn run_hash_generator_open(&mut self, cx: &mut Context<Self>) {
+        let Some(operation) = self.restart_admission.admit() else {
+            self.restart_status =
+                Some("GPUI is closing; new utility operations are disabled.".to_owned());
+            cx.notify();
+            return;
+        };
         let outcome = handle_hash_generator(&HashGeneratorCommand::Open, || {
-            self.open_hash_generator_window(cx)
+            self.open_hash_generator_window(operation, cx)
         });
         self.hash_open_error = outcome
             .err()
@@ -336,7 +852,11 @@ impl RootWindow {
         cx.notify();
     }
 
-    fn open_hash_generator_window(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+    fn open_hash_generator_window(
+        &mut self,
+        operation: EffectPermit,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         let existing = match &self.hash_window {
             HashWindowState::Closed => None,
             HashWindowState::Live { window, view } => Some((*window, view.clone())),
@@ -355,6 +875,7 @@ impl RootWindow {
                 Ok(Some(native_window)) => {
                     let revision_guard = Arc::clone(&self.hash_window_revision);
                     cx.spawn(async move |_, cx| {
+                        let _operation = operation;
                         cx.background_executor()
                             .spawn(async move {
                                 activate_for_secondary_window(
@@ -395,6 +916,7 @@ impl RootWindow {
             .begin(None);
         let session = Arc::clone(&self.hash_session);
         let wake_signal = Arc::clone(&self.hash_wake_signal);
+        let restart_admission = Arc::clone(&self.restart_admission);
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("Multi Launcher GPUI Hash Generator".into()),
@@ -426,6 +948,7 @@ impl RootWindow {
                     session,
                     wake_signal,
                     native_window,
+                    restart_admission,
                     _input_subscription: input_subscription,
                 }
             })
@@ -477,6 +1000,12 @@ impl RootWindow {
         {
             return;
         }
+        let Some(operation) = self.restart_admission.admit() else {
+            self.coordinate_hud_probe_status =
+                "GPUI is closing; Coordinate HUD changes are disabled.".to_owned();
+            cx.notify();
+            return;
+        };
 
         self.coordinate_hud_probe_pending = true;
         self.coordinate_hud_probe_status = "Updating Coordinate HUD…".to_owned();
@@ -485,6 +1014,7 @@ impl RootWindow {
         let controller = Arc::clone(&self.coordinate_hud_probe_controller);
         let closing = Arc::clone(&self.coordinate_hud_probe_closing);
         cx.spawn(async move |this, cx| {
+            let _operation = operation;
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -514,10 +1044,16 @@ impl RootWindow {
     }
 
     fn open_or_toggle_secondary(&mut self, cx: &mut Context<Self>) {
+        let Some(operation) = self.restart_admission.admit() else {
+            self.restart_status =
+                Some("GPUI is closing; utility window changes are disabled.".to_owned());
+            cx.notify();
+            return;
+        };
         let foreground_before_request = current_foreground_identity();
         let (handle, view) = match &self.secondary {
             SecondaryWindowState::Closed => {
-                self.open_secondary(cx);
+                self.open_secondary(operation, cx);
                 return;
             }
             SecondaryWindowState::OpenPending => return,
@@ -541,6 +1077,7 @@ impl RootWindow {
                 let secondary_revision = Arc::clone(&self.secondary_revision);
                 let revision = secondary_revision.fetch_add(1, Ordering::AcqRel) + 1;
                 cx.spawn(async move |_, cx| {
+                    let _operation = operation;
                     if secondary_revision.load(Ordering::Acquire) != revision {
                         return;
                     }
@@ -585,10 +1122,10 @@ impl RootWindow {
             }
         }
 
-        self.open_secondary(cx);
+        self.open_secondary(operation, cx);
     }
 
-    fn open_secondary(&mut self, cx: &mut Context<Self>) {
+    fn open_secondary(&mut self, operation: EffectPermit, cx: &mut Context<Self>) {
         if !matches!(self.secondary, SecondaryWindowState::Closed) {
             return;
         }
@@ -601,7 +1138,9 @@ impl RootWindow {
             ..Default::default()
         };
         let secondary_revision = Arc::clone(&self.secondary_revision);
+        let restart_admission = Arc::clone(&self.restart_admission);
         cx.spawn(async move |this, cx| {
+            let _operation = operation;
             let opened = cx.update(|cx| {
                 gpui_kit::open_window(options, cx, |window, cx| {
                     let query = cx.new(|cx| {
@@ -619,6 +1158,7 @@ impl RootWindow {
                         query,
                         native_window,
                         secondary_revision: Arc::clone(&secondary_revision),
+                        restart_admission: Arc::clone(&restart_admission),
                     })
                 })
             });
@@ -689,6 +1229,9 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &OpenHashGenerator, _, cx| {
                 this.run_hash_generator_open(cx);
             }))
+            .on_action(cx.listener(|this, _: &RestartWithEgui, window, cx| {
+                this.open_restart_confirmation(window, cx);
+            }))
             .child(
                 div()
                     .flex()
@@ -696,7 +1239,11 @@ impl Render for RootWindow {
                     .gap_2()
                     .w(px(420.))
                     .child(Label::new("Search"))
-                    .child(Input::new(&self.query).aria_label("Search"))
+                    .child(
+                        Input::new(&self.query)
+                            .aria_label("Search")
+                            .readonly(self.restart_admission.is_fenced()),
+                    )
                     .child(Label::new(
                         "Ctrl+Enter: open or dismiss the retained window",
                     ))
@@ -721,7 +1268,19 @@ impl Render for RootWindow {
                                 this.run_hash_generator_open(cx);
                             })),
                     )
+                    .child(
+                        Button::new("restart-egui")
+                            .label("Restart in egui (Ctrl+Shift+E)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_restart_confirmation(window, cx);
+                            })),
+                    )
                     .child(Label::new(self.coordinate_hud_probe_status.clone()))
+                    .children(
+                        self.restart_status
+                            .as_ref()
+                            .map(|status| Label::new(status.clone())),
+                    )
                     .child(
                         Button::new("quit-gpui")
                             .label("Quit Multi Launcher")
@@ -747,11 +1306,15 @@ struct HashGeneratorWindow {
     session: Arc<Mutex<HashSession>>,
     wake_signal: Arc<HashWakeSignal>,
     native_window: Option<NativeWindow>,
+    restart_admission: Arc<RestartAdmission>,
     _input_subscription: Subscription,
 }
 
 impl HashGeneratorWindow {
     fn calculate_hash(&mut self, cx: &mut Context<Self>) {
+        let Some(_operation) = self.restart_admission.admit() else {
+            return;
+        };
         let text = self.input.read(cx).value().to_string();
         let mut session = self
             .session
@@ -803,7 +1366,11 @@ impl Render for HashGeneratorWindow {
                     .gap_2()
                     .w(px(520.))
                     .child(Label::new("Text · SHA-256 · exact UTF-8 bytes"))
-                    .child(Input::new(&self.input).aria_label("Text to hash"))
+                    .child(
+                        Input::new(&self.input)
+                            .aria_label("Text to hash")
+                            .readonly(self.restart_admission.is_fenced()),
+                    )
                     .child(Label::new("Ctrl+Enter: calculate"))
                     .child(
                         Button::new("calculate-sha256")
@@ -838,6 +1405,7 @@ struct SecondaryWindow {
     query: Entity<InputState>,
     native_window: Option<NativeWindow>,
     secondary_revision: Arc<AtomicU64>,
+    restart_admission: Arc<RestartAdmission>,
 }
 
 impl Render for SecondaryWindow {
@@ -854,16 +1422,24 @@ impl Render for SecondaryWindow {
                     .gap_2()
                     .w(px(420.))
                     .child(Label::new("Retained window input"))
-                    .child(Input::new(&self.query).aria_label("Retained window input"))
+                    .child(
+                        Input::new(&self.query)
+                            .aria_label("Retained window input")
+                            .readonly(self.restart_admission.is_fenced()),
+                    )
                     .child(
                         Button::new("dismiss-retained-window")
                             .label("Dismiss window")
                             .on_click(cx.listener(|this, _, _, cx| {
+                                let Some(operation) = this.restart_admission.admit() else {
+                                    return;
+                                };
                                 if let Some(native_window) = this.native_window {
                                     let secondary_revision = Arc::clone(&this.secondary_revision);
                                     let revision =
                                         secondary_revision.fetch_add(1, Ordering::AcqRel) + 1;
                                     cx.spawn(async move |_, _cx| {
+                                        let _operation = operation;
                                         if secondary_revision.load(Ordering::Acquire) != revision {
                                             return;
                                         }
@@ -1166,7 +1742,10 @@ fn activate_for_secondary_window(
 pub(crate) fn run_foundation_window(
     hotkey: multi_launcher::hotkey::Hotkey,
     coordinate_tool_preferences: CoordinateToolPreferences,
-) -> Result<(), String> {
+) -> Result<Option<RestartPlan>, String> {
+    let restart_context = RestartContext::capture().ok();
+    let restart_exit = Rc::new(RefCell::new(None));
+    let restart_exit_after_run = Rc::clone(&restart_exit);
     let startup_error = Rc::new(RefCell::new(None));
     let startup_error_sink = Rc::clone(&startup_error);
     let subscriptions = Rc::new(RefCell::new(Vec::new()));
@@ -1174,8 +1753,19 @@ pub(crate) fn run_foundation_window(
     let listener_slot = Arc::new(Mutex::new(None::<HotkeyListener>));
     let listener_slot_for_run = Arc::clone(&listener_slot);
     let listener_slot_for_quit = Arc::clone(&listener_slot);
+    let listener_slot_for_root = Arc::clone(&listener_slot);
+    let restart_admission = Arc::new(RestartAdmission::default());
+    let restart_admission_for_quit = Arc::clone(&restart_admission);
+    let restart_admission_for_root = Arc::clone(&restart_admission);
+    let restart_admission_for_hotkey = Arc::clone(&restart_admission);
     let visibility = RootVisibility::new();
     let visibility_for_quit = visibility.clone();
+    let visibility_for_root = visibility.clone();
+    let restart_retiring = Arc::new(AtomicBool::new(false));
+    let restart_retiring_for_root = Arc::clone(&restart_retiring);
+    let restart_retiring_for_root_close = Arc::clone(&restart_retiring);
+    let restart_failure = Rc::new(RefCell::new(None));
+    let restart_failure_after_run = Rc::clone(&restart_failure);
     let initial_return_target = capture_foreground_identity();
     let hash_session = Arc::new(Mutex::new(HashSession::new()));
     let hash_session_for_quit = Arc::clone(&hash_session);
@@ -1193,6 +1783,8 @@ pub(crate) fn run_foundation_window(
             coordinate_tool_preferences,
         )));
     let coordinate_hud_probe_closing = Arc::new(AtomicBool::new(false));
+    let coordinate_shutdown_complete = Arc::new(AtomicBool::new(false));
+    let coordinate_shutdown_complete_for_root = Arc::clone(&coordinate_shutdown_complete);
     let controller_for_app = Arc::clone(&coordinate_hud_probe_controller);
     let closing_for_app = Arc::clone(&coordinate_hud_probe_closing);
 
@@ -1202,14 +1794,17 @@ pub(crate) fn run_foundation_window(
             KeyBinding::new("ctrl-enter", ToggleSecondaryWindow, Some("RootWindow")),
             KeyBinding::new("f6", ToggleCoordinateHudProbe, Some("RootWindow")),
             KeyBinding::new("ctrl-g", OpenHashGenerator, Some("RootWindow")),
+            KeyBinding::new("ctrl-shift-e", RestartWithEgui, Some("RootWindow")),
             KeyBinding::new("ctrl-enter", CalculateHash, Some("HashGeneratorWindow")),
         ]);
         let coordinate_hud_probe_closing_for_quit = Arc::clone(&closing_for_app);
         let hash_session_for_quit = Arc::clone(&hash_session_for_quit);
         let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal_for_quit);
         let hash_window_revision_for_quit = Arc::clone(&hash_window_revision_for_app);
+        let restart_admission_for_quit = Arc::clone(&restart_admission_for_quit);
         let quit_subscription = cx.on_app_quit(move |_| {
             visibility_for_quit.active.store(false, Ordering::Release);
+            restart_admission_for_quit.fence();
             coordinate_hud_probe_closing_for_quit.store(true, Ordering::Release);
             hash_wake_signal_for_quit.close();
             hash_window_revision_for_quit.fetch_add(1, Ordering::AcqRel);
@@ -1238,12 +1833,18 @@ pub(crate) fn run_foundation_window(
         let session_for_root = Arc::clone(&hash_session_for_root);
         let wake_signal_for_root = Arc::clone(&hash_wake_signal_for_root);
         let window_revision_for_root = Arc::clone(&hash_window_revision_for_app);
+        let restart_exit_for_root = Rc::clone(&restart_exit);
+        let restart_failure_for_root = Rc::clone(&restart_failure);
+        let restart_context_for_root = restart_context.clone();
         let (root_window, root_view) = match open_window(options, cx, move |window, cx| {
             let query = cx.new(|cx| InputState::new(window, cx).placeholder("Type a query"));
             query.focus_handle(cx).focus(window, cx);
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window, cx);
             cx.new(|_| RootWindow {
+                root_window: None,
+                listener_slot: Arc::clone(&listener_slot_for_root),
+                root_visibility: visibility_for_root.clone(),
                 query,
                 native_window: None,
                 focus_handle,
@@ -1261,6 +1862,13 @@ pub(crate) fn run_foundation_window(
                 coordinate_hud_probe_closing: closing_for_root,
                 coordinate_hud_probe_pending: false,
                 coordinate_hud_probe_status: "Coordinate HUD probe is idle.".to_owned(),
+                coordinate_shutdown_complete: Arc::clone(&coordinate_shutdown_complete_for_root),
+                restart_context: restart_context_for_root,
+                restart_admission: Arc::clone(&restart_admission_for_root),
+                restart_retiring: Arc::clone(&restart_retiring_for_root),
+                restart_status: None,
+                restart_exit: restart_exit_for_root,
+                restart_failure: restart_failure_for_root,
             })
         }) {
             Ok((window, view)) => (window, view),
@@ -1275,6 +1883,7 @@ pub(crate) fn run_foundation_window(
             match update_kit_window_content(root_window, &root_view, cx, |root, window, cx| {
                 let native_window = checked_native_window(window)?;
                 root.native_window = native_window;
+                root.root_window = Some(root_window);
                 root.query.focus_handle(cx).focus(window, cx);
                 Ok::<_, String>(native_window)
             }) {
@@ -1309,7 +1918,9 @@ pub(crate) fn run_foundation_window(
                 if closed == root_id {
                     hash_wake_signal_for_root_close.close();
                     hash_window_revision_for_root_close.fetch_add(1, Ordering::AcqRel);
-                    cx.quit();
+                    if !restart_retiring_for_root_close.load(Ordering::Acquire) {
+                        cx.quit();
+                    }
                 }
             }));
 
@@ -1398,6 +2009,9 @@ pub(crate) fn run_foundation_window(
                     if !trigger.take() {
                         continue;
                     }
+                    let Some(_operation) = restart_admission_for_hotkey.admit() else {
+                        break;
+                    };
 
                     let (revision, desired_visible) = visibility.next_toggle();
                     let foreground = if desired_visible {
@@ -1485,6 +2099,8 @@ pub(crate) fn run_foundation_window(
         }
     });
 
+    let restart_exit = restart_exit_after_run.borrow_mut().take();
+
     hash_wake_signal.close();
     hash_window_revision.fetch_add(1, Ordering::AcqRel);
     hash_session
@@ -1493,12 +2109,18 @@ pub(crate) fn run_foundation_window(
         .shutdown();
 
     coordinate_hud_probe_closing.store(true, Ordering::Release);
-    let shutdown_result = coordinate_hud_probe_controller
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .shutdown();
-    if let Err(error) = shutdown_result {
-        tracing::warn!(%error, "could not fully shut down the GPUI Coordinate HUD probe");
+    let coordinate_shutdown_result = if coordinate_shutdown_complete.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        coordinate_hud_probe_controller
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown()
+    };
+    if let Err(error) = &coordinate_shutdown_result {
+        if restart_exit.is_none() {
+            tracing::warn!(%error, "could not fully shut down the GPUI Coordinate HUD probe");
+        }
     }
 
     if let Ok(mut listener) = listener_slot.lock()
@@ -1507,12 +2129,35 @@ pub(crate) fn run_foundation_window(
         listener.stop();
     }
 
-    match startup_error.borrow_mut().take() {
-        Some(error) => Err(format!(
+    if let Some(error) = startup_error.borrow_mut().take() {
+        return Err(format!(
             "GPUI could not open its window: {error}. Restart with --ui=egui to use the fallback frontend."
-        )),
-        None => Ok(()),
+        ));
     }
+    if let Some(error) = restart_failure_after_run.borrow_mut().take() {
+        return Err(error);
+    }
+
+    let Some((context, native_windows)) = restart_exit else {
+        return Ok(None);
+    };
+    let coordinate_shutdown_result = coordinate_shutdown_result.map_err(|error| {
+        format!(
+            "The Coordinate HUD did not shut down cleanly; no egui process was started: {error}"
+        )
+    });
+    #[cfg(windows)]
+    let windows_retired = !native_windows
+        .iter()
+        .any(|window| native_window_is_valid(*window));
+    #[cfg(not(windows))]
+    let windows_retired = {
+        let _ = native_windows;
+        true
+    };
+
+    crate::gpui_restart::plan_after_teardown(context, coordinate_shutdown_result, windows_retired)
+        .map(Some)
 }
 
 #[cfg(test)]

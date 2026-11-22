@@ -67,9 +67,10 @@ use std::{
 const RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE_ENV: &str =
     "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE";
 
+mod gpui_frontend;
+mod gpui_restart;
 #[path = "startup_catalog.rs"]
 mod startup_catalog;
-mod gpui_frontend;
 
 fn startup_index_coordinator_for_owner() -> Result<
     multi_launcher::indexer::coordinator::IndexCoordinator,
@@ -4668,12 +4669,33 @@ fn main() -> anyhow::Result<()> {
         );
     }
     if frontend == gpui_frontend::Frontend::Gpui {
-        if let Err(error) = gpui_frontend::run_foundation_window(
+        let restart_plan = match gpui_frontend::run_foundation_window(
             settings.hotkey(),
             settings.coordinate_tool.clone(),
         ) {
-            gpui_frontend::show_startup_error(&error);
-            return Err(anyhow::anyhow!(error));
+            Ok(restart_plan) => restart_plan,
+            Err(error) => {
+                gpui_frontend::show_startup_error(&error);
+                return Err(anyhow::anyhow!(error));
+            }
+        };
+        if let Some(plan) = restart_plan {
+            drop(_logging_guard);
+            let (plan, spawn_result) =
+                gpui_restart::after_guard_release(plan, _single_instance_guard, |plan| {
+                    std::process::Command::new(&plan.executable)
+                        .args(plan.selector_args())
+                        .current_dir(&plan.working_directory)
+                        .spawn()
+                });
+            if let Err(error) = spawn_result {
+                let message = format!(
+                    "Could not start the egui fallback automatically: {error}\n\nRun this command manually:\n{}",
+                    plan.manual_command()
+                );
+                gpui_frontend::show_startup_error(&message);
+                return Err(anyhow::anyhow!(message));
+            }
         }
         return Ok(());
     }

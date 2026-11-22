@@ -1,6 +1,6 @@
 # G03 — Complete selection, switching and fallback semantics
 
-**Status: In implementation.** G01 established the selected runtime and startup truth-table baseline. G03-B verified explicit duplicate feedback in both directions. G03-C/D own the remaining controlled restart and cross-frontend persistence.
+**Status: In implementation.** G01 established the selected runtime and startup truth-table baseline. G03-B verified explicit duplicate feedback in both directions. G03-C1 verified confirmed GPUI-to-egui restart on Windows. G03-C/D still own the reverse switch and cross-frontend persistence.
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 

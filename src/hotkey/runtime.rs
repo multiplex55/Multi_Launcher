@@ -310,13 +310,21 @@ impl HotkeyListener {
         &self.triggers
     }
 
-    pub fn stop(&mut self) {
+    pub fn stop_checked(&mut self) -> Result<(), String> {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+        let join_result = self.join.take().map_or(Ok(()), |join| {
+            join.join()
+                .map_err(|_| "hotkey listener thread panicked during shutdown".to_owned())
+        });
         for trigger in &self.triggers {
             trigger.clear_recording_stop_pending();
+        }
+        join_result
+    }
+
+    pub fn stop(&mut self) {
+        if let Err(error) = self.stop_checked() {
+            tracing::warn!(%error, "hotkey listener did not shut down cleanly");
         }
     }
 }
@@ -506,6 +514,19 @@ mod tests {
         let (triggered, fired) = update_trigger_cycle(triggered, true, false);
         assert!(triggered);
         assert!(fired);
+    }
+
+    #[test]
+    fn checked_stop_reports_listener_thread_panic() {
+        let mut listener = HotkeyListener {
+            stop: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(AtomicBool::new(false)),
+            suppress_first_active_scan: Arc::new(AtomicBool::new(false)),
+            join: Some(thread::spawn(|| panic!("listener test panic"))),
+            triggers: Vec::new(),
+        };
+
+        assert!(listener.stop_checked().is_err());
     }
 
     #[test]

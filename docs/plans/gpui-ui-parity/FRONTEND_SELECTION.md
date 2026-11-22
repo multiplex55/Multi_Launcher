@@ -1,6 +1,6 @@
 # Frontend selection and restart contract
 
-The basic selector and both launch paths have Windows evidence from G01. G03-B verifies lock-conflict feedback in both frontend directions. Remembered chooser behavior and controlled restart remain pending. See the [validation log](VALIDATION_LOG.md).
+The basic selector and both launch paths have Windows evidence from G01. G03-B verifies lock-conflict feedback in both directions. G03-C1 verifies a confirmed restart from the GPUI preview to explicit egui with multiple windows and the HUD active. The reverse direction, remembered chooser behavior and cross-frontend persistence remain pending. See the [validation log](VALIDATION_LOG.md).
 
 ## Controlling precedence
 
