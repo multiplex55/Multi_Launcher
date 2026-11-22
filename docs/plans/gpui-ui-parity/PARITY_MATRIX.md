@@ -95,4 +95,6 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Date & Time Studio](gui/date-time-studio.md) | DATE-STUDIO-01–DATE-STUDIO-04 | G16 | Specified | Native Between calculation and retained dates on reopen observed. Other modes/effects, host and GPUI remain pending. |
 | [Convert Panel](gui/convert.md) | CONVERT-01–CONVERT-03 | G16 | Specified | Source physical/base modes, targets and explicit preferences mapped. Native and GPUI remain pending. |
 | [Password Generator](gui/password-generator.md) | PASSWORD-01–PASSWORD-03 | G16 | Specified | Source policy, concealed identity and protected copy ownership mapped. Native and GPUI remain pending. |
+| [Diagram Studio](gui/diagram-studio.md) | DIAGRAM-01–DIAGRAM-05 | G17 | Specified | Source document/scene, host, dirty transitions and exact Markdown/Note return mapped. Native and GPUI remain pending. |
+| [Diagram Viewer](gui/diagram-viewer.md) | DIAGRAM-VIEW-01–DIAGRAM-VIEW-03 | G17 | Specified | Source viewer authority, camera, native lifecycle and parent retirement mapped. Native and GPUI remain pending. |
 | [Paste Sequences](gui/paste-sequences.md) | PASTE-SEQUENCE-01–PASTE-SEQUENCE-04 | G21 | Specified | Source editor, preflight, playback and retained host mapped. Native and GPUI remain pending. |
