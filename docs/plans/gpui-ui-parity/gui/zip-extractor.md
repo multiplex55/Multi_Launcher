@@ -1,0 +1,14 @@
+# ZIP Extractor
+
+G10 owns `zip-extractor`. The built-in `zip_extractor` plugin matches `zip` and opens a fresh utility without archive I/O. Downloads Triage can hand off the exact selected archive snapshot and a suggested destination. `src/gui/zip_extractor_dialog.rs` owns one retained Windows host with Extract and Create modes. `src/archive` owns catalog, plan, writing, provenance and creation validation.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| ZIP-01 | The direct launcher opens Extract without a path payload. Triage loads only the exact selected archive and may suggest a vacant sibling destination. Preserve native docking and popout, remembered geometry and one session, including hidden-root polling and correct close retirement. |
+| ZIP-02 | Extract can choose or reload the source, edit or choose the destination, filter catalog names, sort by archive order or name, and select all, clear or choose physical entry/subtree identities. Preserve valid same-source overrides and reject stale picker results by owner, mode and revision. |
+| ZIP-03 | Preview the plan without writing. Show destination, selected physical entries, planned outputs and issues. Confirm and extract requires the current eligible `PreviewToken` and explicit acknowledgement. Source, destination or selection changes revoke stale authority. |
+| ZIP-04 | Only one accepted writer uses the exact guarded plan and captured paths. Preserve Stored/Deflated support, quotas, CRC checks, collision/no-overwrite behavior, provenance warning and complete, partial, canceled and not-started outcomes. Use the existing cancel and cleanup path. |
+| ZIP-05 | Create adds files or folders, chooses an output ZIP, provides bounded member rows and per-entry path Apply/Remove, and reports layout conflicts. Validate the exact current revision. Create requires a nonempty validated layout, no unapplied drafts and a chosen destination. Preserve source revalidation, atomic no-overwrite publish, progress, cancellation and cleanup. |
+| ZIP-06 | Collect owner-bound pickers for the archive, extraction destination, files, folder and save path. Rehost preserves current applicable drafts, while mode/host revisions fence stale picker and write decisions. On close, request cancellation and drain retained work through the app owner. |
+
+`G10-EGUI-ZIP-HANDOFF-PREVIEW` records native Downloads Triage handoff, read-only preview and the empty Create gate. No archive write occurred. Use `zip_extractor_command_opens_panel_without_starting_archive_io`, `extract_picker_cancel_and_stale_results_preserve_drafts`, `zip_host_preview_confirm_survives_moves_and_rejects_discarded_actions`, `session_preview_keeps_held_handles_and_has_no_effect_before_confirmation` and the scoped creation tests. GPUI, actual output operations and remaining native interaction evidence are pending.
