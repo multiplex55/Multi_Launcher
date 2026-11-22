@@ -37,6 +37,10 @@ Verified command outcomes include query changes, result invalidation, history, t
 
 **Evidence and acceptance:** A contract table plus focused old-core/egui checks establishes expected transitions and side effects. Record no-op host coverage gaps explicitly. **Commit boundary:** Shared contract/extraction and its regression evidence, without an unrelated search rewrite.
 
+**First source slice:** Extract the searchable entry and candidate scoring used by the local catalog in `search_actions` and by the cached fallback in `search_plugins_from_results`. Both actual egui loops must call the same borrowed scorer. Keep iteration, filter order, clone accounting and result installation with those callers. Preserve folder-before-bookmark alias lookup, exact matching when the fuzzy weight is nonpositive, the alias bonus, and the maximum label/description fuzzy score. Provider results retain their own admission rules. Usage weighting and stable ordering continue to operate on full actions, including rows that share an ID and differ in arguments.
+
+Run the existing `gui::search::tests` cases `track_c2a_oracle_covers_local_filter_identity_usage_and_mode_edges`, `track_c2a_oracle_covers_provider_precedence_and_snapshot_outcomes`, `unified_launcher_and_read_only_snapshot_keep_order`, and `app_prefixed_qmarker_fixture_returns_alpha_before_beta` in the application library. Then extract read-only result composition behind `search_read_only_outcome` and its captured-provider and fallback paths. Keep widget selection and repaint in the frontend and provider admission and revision capture at the adapter boundary. GPUI row activation must use the result generation and row position before dispatching the complete action payload.
+
 ### B — Build the complete query/result working surface
 
 **Owner:** G05 frontend implementer. Implement Kit query editing, composition/caret/selection, results, stable row selection, scrolling, grid/list layouts, metadata, and action dispatch through the authoritative engine. Add notifications/wakeups for actual changes; retain view state across GPUI renders.

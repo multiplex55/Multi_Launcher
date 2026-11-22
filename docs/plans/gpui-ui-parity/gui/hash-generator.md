@@ -1,6 +1,6 @@
 # Hash Generator
 
-G04 owns `hash-generator`. Source confirmed at the execution parent. Native baseline and GPUI acceptance are pending.
+G04 owns `hash-generator`. Source confirmed at the execution parent. `G00-C-EGUI-WORKFLOW` and `G04-EGUI-TEXT-BASELINE` record native egui observations for the keyboard route, independent popout, Text calculation and comparison edits. The remaining native baseline checks and GPUI acceptance are pending. See the [validation log](../VALIDATION_LOG.md).
 
 ## Routes and host
 
@@ -20,6 +20,14 @@ The `hash` plugin query emits `hash:open`, which dispatches `HashGeneratorComman
 | HASH-06 | Calculate uses the shared `HashRequest` and `HashJob`, registers the existing Activity Center operation when available, and exposes byte progress. Cancel invalidates the result. While a cancelled worker drains, show stopping state and keep Calculate disabled. Edits that change the selected input, mode or algorithm invalidate earlier results. Close, reopen and late completion cannot publish into a replacement session. |
 | HASH-07 | Show digest and Copy Digest after a successful current request. Clipboard error leaves the digest usable and displays feedback. There is no copy while a request is running. |
 | HASH-08 | The Close and Dock/Pop Out buttons, native close and keyboard routes retain their respective behavior. Verify return to parent, hidden root and reopen. Respect the shared presentation preference and preserve Jump Mode and ordinary keyboard focus. Draft and results are session data. |
+
+## Kit 0.10.0 implementation mapping
+
+- Retain a `TextareaState` for Text and an `InputState` for Expected digest. Subscribe to `InputEvent::Change` and pass the value unchanged to the session. Recreate window-bound control entities on rehosting and seed them from the same session. Use `set_value` for a genuine reset or bind rather than a routine refresh, because it resets caret and undo state.
+- Use retained `SelectState` with typed source and algorithm values, stable control IDs and accessible labels. Apply `SelectEvent::Confirm` through the session setters. Reflect source changes from clipboard load and accepted file input. Render the existing SHA-1 notice.
+- Attach Calculate, Cancel and Copy to the session capability checks. Kit progress accepts 0–100. Show bytes and an indeterminate state for an unknown total. Remain capable of draining a retired worker while its utility is closed. Preserve digest visibility and separate feedback after clipboard errors.
+- Invoke the built-in asynchronous picker on the accepted Choose File event after checking that the originating HWND is the active owner on that thread. Use single-file selection, distinguish cancellation and error, and reject completion from a retired host or session. Read and copy clipboard content through the existing backend and preserve prior snapshots on failure.
+- Preserve live popout and accepted parent-popout precedence, followed by the remembered or default docked mode. Rehosting retains the session and job. Actual close ends the session. Reuse the utility presentation revision and save-worker policy with the canonical `hash-generator` key, preserving unsupported fields and separate docked size/native geometry records. Keep settings side effects bound to an accepted presentation action.
 
 ## Verification
 

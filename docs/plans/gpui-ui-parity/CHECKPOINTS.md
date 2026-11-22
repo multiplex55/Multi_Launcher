@@ -84,4 +84,12 @@ The owned build finished successfully in 17 min 22 s. See `G01-D-RELEASE` and `G
 
 `HashSession` now owns the draft, exact source, generation, worker and result lifecycle. The egui adapter still owns presentation, file picker plumbing, focus and effect admission. The scoped Nextest run passed 34 tests, including Hash, native-host File Search handoff, Jump Mode focus and size acknowledgement. The independent [review](reviews/G02-B-hash-session.md) found no remaining blocking finding. See `G02-B-HASH-SESSION` for the test receipt.
 
+The G02-B source checkpoint is `d942d9b65`, pushed to `origin/feat/gpui-ui-parity`.
+
 Next, establish the coalesced Hash worker wake path and a real typed GPUI Hash open and Calculate route. The general launcher query and full Hash panel parity remain with G05 and G04. The G03 baseline confirms that an explicit duplicate selector still exits silently in a same-desktop test. No fixture process is running.
+
+## G02-C/D — Typed Hash proof in progress
+
+The source branch still starts from `d942d9b65`. The single implementer owns the unstaged shared Hash worker, command handler, egui command host and GPUI preview changes. The first locked application build reached the GPUI target and identified a missing Kit `Disableable` import and an incorrect return type assumption in the receiver. The first review also identified a stale digest after text edits and synthetic Alt activation during reopen. The next source pass closes those issues, removes the blocking receiver wait, and tests wake ordering at delivery. This draft has no successful Windows binary receipt yet.
+
+The existing release still provides the egui Text and comparison baseline. See `G04-EGUI-TEXT-BASELINE` in the validation log. The separate source-choice probe reached the File menu item through accessibility, but the controller could not select it without pointer geometry. The scratch `hash-fixture.txt` contains exact bytes for later native picker tests. No owned fixture process is running. Continue with the corrected locked app build, scoped Hash and File Search tests, independent review, and a native GPUI keyboard calculation. G03-B duplicate feedback is the next source checkpoint after this slice.

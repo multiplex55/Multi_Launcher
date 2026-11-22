@@ -36,5 +36,6 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 
 | GUI | Criteria | Owner | Stage | Remaining evidence |
 | --- | --- | --- | --- | --- |
-| [Hash Generator](gui/hash-generator.md) | HASH-01–HASH-08 | G04 | Specified | Baseline native smoke, both adapter paths, clipboard/file operations, lifecycle, visual and accessibility checks |
+| [Hash Generator](gui/hash-generator.md) | HASH-01–HASH-08 | G04 | Specified | egui keyboard, Text, comparison and popout baseline observed. GPUI product view, file and clipboard operations, lifecycle, and visual and accessibility checks remain pending. |
 | [Launcher](gui/launcher.md) | LAUNCH-01–LAUNCH-09 | G05 | Specified | Scoped egui keyboard baseline observed. GPUI product view, typed routing, global invocation, native keyboard and visual evidence remain pending. |
+| [Coordinate overlay](gui/coordinate-overlay.md) | COORD-01–COORD-05 | G22 | Specified | Existing controller start, stop and DPI sampling observed from GPUI. Production command routes, visible HUD, pointer pass-through, capture behavior and mixed DPI remain pending. |

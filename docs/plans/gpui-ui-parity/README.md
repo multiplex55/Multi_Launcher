@@ -4,7 +4,7 @@
 
 Execution is on `feat/gpui-ui-parity`. The G00-A baseline checkpoint is `3e67f7396f127d6dcb7bec432e9bb1684e9e6ae3`, pushed to `origin/feat/gpui-ui-parity`. The planning reference and execution parent are recorded separately in [Source baseline](SOURCE_BASELINE.md).
 
-The latest work is G01 foundation feasibility. The same Windows dev executable opened both startup choices and supported native text editing in the GPUI proof. See [Checkpoints](CHECKPOINTS.md) for the remaining native work and [Progress](PROGRESS.md) for delivered coverage.
+The ordinary Windows release at `e73bb09c1` opened both startup choices and supported native text editing in the GPUI proof. G02-B at `d942d9b65` extracted the shared Hash Generator session and passed the scoped egui regressions. See [Checkpoints](CHECKPOINTS.md) for the typed GPUI route in progress and [Progress](PROGRESS.md) for delivered coverage.
 
 ## Contracts and work
 
