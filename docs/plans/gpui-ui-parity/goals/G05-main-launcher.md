@@ -1,6 +1,6 @@
 # G05 — Main launcher, query interaction, results, and help
 
-**Status:** Pending; no implementation or validation has occurred. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
+**Status:** First [real Search result activation](../gui/launcher.md#first-gpui-result-activation-checkpoint) in implementation from `9ca6941a8`. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
 
 ## Objective and dependencies
 

@@ -11,7 +11,7 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | G02 | [Shared commands, state, services, and adapters](goals/G02-shared-engine-boundaries.md) | G00; use G01 findings | In implementation |
 | G03 | [Frontend selection, instance ownership, restart, and data identity](goals/G03-frontend-selection-and-lifecycle.md) | G01, G02 relevant seams | In implementation |
 | G04 | [GPUI design system and complete Hash Generator pilot](goals/G04-design-system-and-pilot.md) | G01–G03 relevant contracts | In implementation |
-| G05 | [Main launcher, search, navigation, Jump Mode, and universal actions](goals/G05-main-launcher.md) | G00–G04 | Not started |
+| G05 | [Main launcher, search, navigation, Jump Mode, and universal actions](goals/G05-main-launcher.md) | G00–G04 | In implementation |
 | G06 | [Settings, plugin configuration, authoring, and recovery](goals/G06-settings-and-authoring.md) | G00–G05 | Not started |
 | G07 | [File Search, previews, filters, and window modes](goals/G07-file-search.md) | G00–G05 | Not started |
 | G08 | [Text, binary, and folder Diff with all child flows](goals/G08-diff.md) | G00–G05; G07 for search handoffs | Not started |
