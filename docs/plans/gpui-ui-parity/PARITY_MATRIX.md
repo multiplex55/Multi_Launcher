@@ -150,11 +150,11 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Mouse Gesture Hint Overlay](gui/mouse-gesture-hint-overlay.md) | GESTURE-HINT-01–GESTURE-HINT-02 | G21 | Specified | Existing Windows passive host and precise runtime lifecycle mapped. Native and GPUI remain pending. |
 | [Hot Folder Manager](gui/hot-folder-manager.md) | HOT-FOLDER-01–HOT-FOLDER-03 | G21 | Specified | Native empty manager and disabled draft cancellation passed. Save, watches and GPUI remain pending. |
 | [Hot Folder Target Picker](gui/hot-folder-target-picker.md) | HOT-FOLDER-TARGET-01–HOT-FOLDER-TARGET-02 | G21 | Specified | Native registered launcher action picker and Escape passed. Binding/other choices and GPUI remain pending. |
-| [Screenshot Pins](gui/pinboard.md) | PIN-LIST-01–PIN-LIST-02 | G22 | Specified | Source list, pin ownership and recovery mapped. Native and GPUI remain pending. |
+| [Screenshot Pins](gui/pinboard.md) | PIN-LIST-01–PIN-LIST-02 | G22 | Specified | Actual empty list and dismissal passed. Live rows and GPUI remain pending. |
 | [Screenshot Image Pin](gui/image-pin.md) | IMAGE-PIN-01–IMAGE-PIN-03 | G22 | Specified | Source signed capture selection, retained host and outputs mapped. Native and GPUI remain pending. |
 | [Pin Capture Feedback](gui/pin-capture-feedback.md) | PIN-FEEDBACK-01 | G22 | Specified | Source deferred native failure surface and exact retirement mapped. Native and GPUI remain pending. |
 | [Coordinate Overlay](gui/coordinate-overlay.md) | COORD-01–COORD-05 | G22 | Specified | G01 passive native HUD probe exercised. Normal routes, pick, effects and mixed DPI remain pending. |
-| [Screen Draw Toolbar](gui/screen-draw-toolbar.md) | SCREEN-DRAW-BAR-01–SCREEN-DRAW-BAR-02 | G22 | Specified | Source independent toolbar, capture admission and tools mapped. Native and GPUI remain pending. |
+| [Screen Draw Toolbar](gui/screen-draw-toolbar.md) | SCREEN-DRAW-BAR-01–SCREEN-DRAW-BAR-02 | G22 | Specified | Actual idle route created and retired a native window. Body controls, capture and GPUI remain pending. |
 | [Screen Draw Canvas](gui/screen-draw-canvas.md) | SCREEN-DRAW-CANVAS-01–SCREEN-DRAW-CANVAS-02 | G22 | Specified | Source signed canvas, input and passive transitions mapped. Native and GPUI remain pending. |
 | [OCR Region Selection](gui/ocr-selection.md) | OCR-SELECTION-01–OCR-SELECTION-02 | G22 | Specified | Source shared selector and exact capture lifecycle mapped. Native and GPUI remain pending. |
 | [OCR Results](gui/ocr-results.md) | OCR-RESULT-01–OCR-RESULT-02 | G22 | Specified | Source editor, explicit Copy and generation cancellation mapped. Native and GPUI remain pending. |
@@ -199,3 +199,17 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Processes Widget](gui/dashboard-widget-processes.md) | DASH-PROCESSES-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
 | [Windows Widget](gui/dashboard-widget-windows.md) | DASH-WINDOWS-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
 | [Windows Overview](gui/dashboard-widget-windows_overview.md) | DASH-WINDOWS-OVER-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [System Actions](gui/dashboard-widget-system.md) | DASH-SYSTEM-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [System Controls](gui/dashboard-widget-system_controls.md) | DASH-SYS-CONTROL-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [System Status](gui/dashboard-widget-system_status.md) | DASH-SYS-STATUS-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Media Controls](gui/dashboard-widget-now_playing.md) | DASH-MEDIA-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Favorite Snippets](gui/dashboard-widget-snippets_favorites.md) | DASH-SNIP-FAV-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Scratchpad](gui/dashboard-widget-scratchpad.md) | DASH-SCRATCHPAD-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Notes Recent](gui/dashboard-widget-notes_recent.md) | DASH-NOTES-RECENT-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Notes Tags](gui/dashboard-widget-notes_tags.md) | DASH-NOTES-TAGS-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Notes Graph Widget](gui/dashboard-widget-notes_graph.md) | DASH-NOTES-GRAPH-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Todo Focus](gui/dashboard-widget-todo_focus.md) | DASH-TODO-FOCUS-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Recycle Bin Widget](gui/dashboard-widget-recycle_bin.md) | DASH-RECYCLE-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Temporary Files Widget](gui/dashboard-widget-tempfiles.md) | DASH-TEMPFILES-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Volume Widget](gui/dashboard-widget-volume.md) | DASH-VOLUME-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Stopwatch Widget](gui/dashboard-widget-stopwatch.md) | DASH-STOPWATCH-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
