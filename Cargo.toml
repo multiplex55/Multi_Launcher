@@ -334,6 +334,7 @@ strip = "none"
 
 # Local lifecycle seam for hidden-root prompt viewport bootstrapping.
 [patch.crates-io]
+accesskit_windows = { path = "vendor/accesskit_windows" }
 epaint = { path = "vendor/epaint" }
 egui = { path = "vendor/egui" }
 eframe = { path = "vendor/eframe" }
