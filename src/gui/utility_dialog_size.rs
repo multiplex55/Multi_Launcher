@@ -9,14 +9,17 @@ use crate::gui::utility_window_geometry::{
     NativeGeometryObservation, NativeGeometryObserver, NativeViewportIdentity, NativeWindowRect,
     RootWindowIdentity,
 };
-use crate::settings::utility_dialog_sizes::UtilitySizeMutation;
 use crate::settings::{
-    NativeWindowGeometry, PreferredWindowSize, UtilityDialogSizes, UtilitySizeAcknowledgement,
-    UtilitySizePreference, UtilitySizeRevision, UtilityToolKey,
+    NativeWindowGeometry, PreferredWindowSize, UtilityDialogSizes, UtilitySizePreference,
+    UtilitySizeRevision, UtilityToolKey,
 };
 use crate::settings_save::SettingsSaveWorkerRegistry;
+use crate::utility_size::{
+    PhysicalWindowRect, UtilityNativeGeometrySample, UtilitySizeAcceptedAcknowledgement,
+    UtilitySizeStore, UtilitySizeWriteFailure,
+};
 use eframe::egui::{self, Context, Id, InnerResponse, Rect, Ui, Vec2, Window};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -102,113 +105,6 @@ impl NativePlacement {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum NativeGeometryIntent {
-    Geometry {
-        geometry: NativeWindowGeometry,
-        position_sequence: u64,
-        size_sequence: u64,
-    },
-    Reset {
-        sequence: u64,
-    },
-}
-
-impl NativeGeometryIntent {
-    fn from_committed(geometry: Option<NativeWindowGeometry>) -> Self {
-        geometry.map_or(Self::Reset { sequence: 0 }, |geometry| Self::Geometry {
-            geometry,
-            position_sequence: 0,
-            size_sequence: 0,
-        })
-    }
-
-    fn geometry(self) -> Option<NativeWindowGeometry> {
-        match self {
-            Self::Geometry { geometry, .. } => Some(geometry),
-            Self::Reset { .. } => None,
-        }
-    }
-
-    fn followed_by(
-        self,
-        observation: NativeGeometryObservation,
-        factory_size: Option<PreferredWindowSize>,
-    ) -> Option<Self> {
-        if !observation.position.is_valid()
-            || !observation.position_scale.is_finite()
-            || observation.position_scale <= 0.0
-        {
-            return None;
-        }
-        let (previous, previous_position_sequence, previous_size_sequence, reset_sequence) =
-            match self {
-                Self::Geometry {
-                    geometry,
-                    position_sequence,
-                    size_sequence,
-                } => (Some(geometry), position_sequence, size_sequence, 0),
-                Self::Reset { sequence } => (None, sequence, sequence, sequence),
-            };
-        let position_is_new = observation.position_sequence > previous_position_sequence
-            && observation.position_sequence > reset_sequence;
-        let size_event = observation
-            .size_sequence
-            .filter(|sequence| *sequence > previous_size_sequence && *sequence > reset_sequence);
-        if !position_is_new && size_event.is_none() {
-            return None;
-        }
-
-        let scale = if position_is_new {
-            observation.position_scale
-        } else {
-            previous?.scale_factor
-        };
-        if !scale.is_finite() || scale <= 0.0 {
-            return None;
-        }
-        let position = if position_is_new {
-            crate::settings::SavedWindowPosition::new(
-                observation.position.left as f32 / scale,
-                observation.position.top as f32 / scale,
-            )
-            .ok()?
-        } else {
-            previous?.position
-        };
-        let size = if let Some(_sequence) = size_event {
-            let rect = observation.size?;
-            if !rect.is_valid() {
-                return None;
-            }
-            PreferredWindowSize::new(rect.width() as f32 / scale, rect.height() as f32 / scale)
-                .ok()?
-        } else if let Some(previous) = previous {
-            if position_is_new {
-                PreferredWindowSize::new(
-                    previous.size.width * previous.scale_factor / scale,
-                    previous.size.height * previous.scale_factor / scale,
-                )
-                .ok()?
-            } else {
-                previous.size
-            }
-        } else {
-            factory_size?
-        };
-        let geometry = NativeWindowGeometry::new(position, size, scale).ok()?;
-        Some(Self::Geometry {
-            geometry,
-            position_sequence: if position_is_new {
-                observation.position_sequence
-            } else {
-                previous_position_sequence
-            },
-            size_sequence: size_event.unwrap_or(previous_size_sequence),
-        })
-    }
-}
-
 impl NativeWindowInstance {
     fn new(key: UtilityToolKey) -> Self {
         Self {
@@ -229,28 +125,14 @@ pub(crate) struct UtilityDialogSizeManager {
 }
 
 struct UtilityDialogSizeState {
-    settings_path: String,
-    workers: SettingsSaveWorkerRegistry,
-    sizes: UtilityDialogSizes,
+    store: UtilitySizeStore,
     frame: u64,
     instances: HashMap<Id, WindowInstance>,
     native_instances: HashMap<Id, NativeWindowInstance>,
     native_geometry_instances: HashMap<NativeViewportIdentity, NativeGeometryInstance>,
-    native_geometry_intents: HashMap<UtilityToolKey, NativeGeometryIntent>,
-    accepted_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
-    waiting_for_ack: HashMap<UtilityToolKey, UtilitySizeRevision>,
-    local_resize_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
-    reset_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
-    accepted_reset_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
-    known_keys: HashSet<UtilityToolKey>,
-    reported_failures: HashMap<UtilityToolKey, UtilitySizeRevision>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct UtilityDialogSizeWriteFailure {
-    pub(crate) key: UtilityToolKey,
-    pub(crate) message: String,
-}
+pub(crate) type UtilityDialogSizeWriteFailure = UtilitySizeWriteFailure;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct UtilityDialogSizeStatus {
@@ -281,21 +163,11 @@ impl UtilityDialogSizeManager {
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(UtilityDialogSizeState {
-                settings_path,
-                workers,
-                sizes,
+                store: UtilitySizeStore::new(settings_path, workers, sizes),
                 frame: 0,
                 instances: HashMap::new(),
                 native_instances: HashMap::new(),
                 native_geometry_instances: HashMap::new(),
-                native_geometry_intents: HashMap::new(),
-                accepted_revisions: HashMap::new(),
-                waiting_for_ack: HashMap::new(),
-                local_resize_revisions: HashMap::new(),
-                reset_revisions: HashMap::new(),
-                accepted_reset_revisions: HashMap::new(),
-                known_keys: HashSet::new(),
-                reported_failures: HashMap::new(),
             })),
             native_geometry_observer: NativeGeometryObserver::default(),
         }
@@ -322,9 +194,7 @@ impl UtilityDialogSizeManager {
     }
 
     pub(crate) fn rebind(&self, settings_path: String, workers: SettingsSaveWorkerRegistry) {
-        let mut state = self.lock();
-        state.settings_path = settings_path;
-        state.workers = workers;
+        self.lock().store.rebind(settings_path, workers);
     }
 
     fn submit_resize(
@@ -334,62 +204,27 @@ impl UtilityDialogSizeManager {
         ctx: Option<&Context>,
         restore_after_ack: Option<Id>,
     ) -> Result<(), String> {
-        let (workers, path) = {
-            let state = self.lock();
-            (state.workers.clone(), state.settings_path.clone())
+        let result = {
+            let mut state = self.lock();
+            let result = state.store.set_preferred_size(key, size);
+            if result.is_ok()
+                && let Some(id) = restore_after_ack
+                && let Some(instance) = state.instances.get_mut(&id)
+            {
+                instance.restore_after_size_ack = true;
+            }
+            result
         };
-        if let Err(error) =
-            workers.queue_utility_size_mutation(path, key, UtilitySizeMutation::Set(size))
-        {
+        if let Err(error) = result {
             tracing::warn!(tool = key.as_str(), %error, "could not queue utility window size");
             if let Some(ctx) = ctx {
                 ctx.request_repaint();
             }
             return Err(error);
         }
-
-        let revision = workers
-            .utility_size_latest_revision(key)
-            .ok_or_else(|| "utility size write was queued without a revision".to_owned())?;
-        let mut state = self.lock();
-        state.known_keys.insert(key);
-        state.local_resize_revisions.insert(key, revision);
-        state.waiting_for_ack.insert(key, revision);
-        if let Some(id) = restore_after_ack
-            && let Some(instance) = state.instances.get_mut(&id)
-        {
-            instance.restore_after_size_ack = true;
-        }
         if let Some(ctx) = ctx {
             ctx.request_repaint_after(ACK_POLL_INTERVAL);
         }
-        Ok(())
-    }
-
-    fn submit_native_geometry(
-        &self,
-        key: UtilityToolKey,
-        geometry: NativeWindowGeometry,
-        ctx: &Context,
-    ) -> Result<(), String> {
-        let (workers, path) = {
-            let state = self.lock();
-            (state.workers.clone(), state.settings_path.clone())
-        };
-        if let Err(error) =
-            workers.queue_utility_size_mutation(path, key, UtilitySizeMutation::SetNative(geometry))
-        {
-            tracing::warn!(tool = key.as_str(), %error, "could not queue utility native geometry");
-            ctx.request_repaint();
-            return Err(error);
-        }
-        let revision = workers
-            .utility_size_latest_revision(key)
-            .ok_or_else(|| "utility geometry write was queued without a revision".to_owned())?;
-        let mut state = self.lock();
-        state.known_keys.insert(key);
-        state.waiting_for_ack.insert(key, revision);
-        ctx.request_repaint_after(ACK_POLL_INTERVAL);
         Ok(())
     }
 
@@ -405,23 +240,14 @@ impl UtilityDialogSizeManager {
     pub(crate) fn begin_frame(&self, ctx: &Context) -> Result<(), String> {
         let mut state = self.lock();
         state.frame = state.frame.wrapping_add(1).max(1);
-
-        for acknowledgement in state.workers.drain_utility_size_acknowledgements() {
-            state.publish_acknowledgement(acknowledgement)?;
+        let poll = state.store.poll()?;
+        for accepted in poll.accepted {
+            state.apply_acknowledgement(accepted);
         }
-
-        let waiting = std::mem::take(&mut state.waiting_for_ack);
-        for (key, revision) in waiting {
-            let latest = state.workers.utility_size_latest_revision(key);
-            let revision = latest.unwrap_or(revision);
-            if state.accepted_revisions.get(&key) == Some(&revision) {
-                continue;
-            }
-            if state.workers.utility_size_write_failure(key).is_some() {
-                ctx.request_repaint();
-                continue;
-            }
-            state.waiting_for_ack.insert(key, revision);
+        if poll.write_failed {
+            ctx.request_repaint();
+        }
+        if poll.awaiting_acknowledgement {
             ctx.request_repaint_after(ACK_POLL_INTERVAL);
         }
         Ok(())
@@ -431,26 +257,41 @@ impl UtilityDialogSizeManager {
         let observations = self.native_geometry_observer.drain();
         for observation in observations {
             let key = observation.identity.key;
-            let next_intent = {
-                let state = self.lock();
-                let current = state
-                    .native_geometry_intents
-                    .get(&key)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        NativeGeometryIntent::from_committed(state.sizes.native_geometry(key))
-                    });
+            let result = {
+                let mut state = self.lock();
                 let factory_size = state
                     .native_geometry_instances
                     .get(&observation.identity)
                     .and_then(|instance| instance.factory_outer_size);
-                current.followed_by(observation, factory_size)
+                state.store.observe_native_geometry(
+                    key,
+                    UtilityNativeGeometrySample {
+                        position: PhysicalWindowRect {
+                            left: observation.position.left,
+                            top: observation.position.top,
+                            right: observation.position.right,
+                            bottom: observation.position.bottom,
+                        },
+                        position_scale: observation.position_scale,
+                        position_sequence: observation.position_sequence,
+                        size: observation.size.map(|rect| PhysicalWindowRect {
+                            left: rect.left,
+                            top: rect.top,
+                            right: rect.right,
+                            bottom: rect.bottom,
+                        }),
+                        size_sequence: observation.size_sequence,
+                    },
+                    factory_size,
+                )
             };
-            if let Some(next_intent) = next_intent
-                && let Some(geometry) = next_intent.geometry()
-                && self.submit_native_geometry(key, geometry, ctx).is_ok()
-            {
-                self.lock().native_geometry_intents.insert(key, next_intent);
+            match result {
+                Ok(Some(_)) => ctx.request_repaint_after(ACK_POLL_INTERVAL),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(tool = key.as_str(), %error, "could not queue utility native geometry");
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -459,32 +300,12 @@ impl UtilityDialogSizeManager {
     /// mutation clears the old failure; a later failure is reported for its
     /// new revision.
     pub(crate) fn take_new_write_failures(&self) -> Vec<UtilityDialogSizeWriteFailure> {
-        let keys = {
-            let state = self.lock();
-            state.known_keys.iter().copied().collect::<Vec<_>>()
-        };
-        let mut failures = Vec::new();
-        for key in keys {
-            let mut state = self.lock();
-            match state.workers.utility_size_write_failure(key) {
-                Some((revision, message)) => {
-                    if state.reported_failures.get(&key) != Some(&revision) {
-                        state.reported_failures.insert(key, revision);
-                        failures.push(UtilityDialogSizeWriteFailure { key, message });
-                    }
-                }
-                None => {
-                    state.reported_failures.remove(&key);
-                }
-            }
-        }
-        failures.sort_by_key(|failure| failure.key);
-        failures
+        self.lock().store.take_new_write_failures()
     }
 
     #[cfg(test)]
     pub(crate) fn snapshot(&self) -> UtilityDialogSizes {
-        self.lock().sizes.clone()
+        self.lock().store.committed_sizes().clone()
     }
 
     #[cfg(test)]
@@ -493,10 +314,7 @@ impl UtilityDialogSizeManager {
         key: UtilityToolKey,
         size: crate::settings::PreferredWindowSize,
     ) {
-        self.lock()
-            .sizes
-            .set(key, size)
-            .expect("test utility window size is valid");
+        self.lock().store.test_set_preferred_size(key, size);
     }
 
     #[cfg(test)]
@@ -509,27 +327,18 @@ impl UtilityDialogSizeManager {
     }
 
     fn preference(&self, key: UtilityToolKey) -> UtilitySizePreference {
-        self.lock().sizes.preference(key)
+        self.lock().store.preference(key)
     }
 
     fn status(&self, key: UtilityToolKey) -> UtilityDialogSizeStatus {
         let state = self.lock();
-        let latest_revision = state.workers.utility_size_latest_revision(key);
-        let failure = state.workers.utility_size_write_failure(key);
-        let pending_revision = if failure.is_none() {
-            state.waiting_for_ack.get(&key).copied().filter(|revision| {
-                Some(*revision) == latest_revision
-                    && state.accepted_revisions.get(&key) != Some(revision)
-            })
-        } else {
-            None
-        };
+        let status = state.store.status(key);
         UtilityDialogSizeStatus {
             available: true,
-            preference: state.sizes.preference(key),
-            acknowledged_revision: state.accepted_revisions.get(&key).copied(),
-            pending_revision,
-            failure,
+            preference: status.preference,
+            acknowledged_revision: status.acknowledged_revision,
+            pending_revision: status.pending_revision,
+            failure: status.failure,
         }
     }
 
@@ -542,8 +351,8 @@ impl UtilityDialogSizeManager {
         maximum_inner_size: Option<Vec2>,
     ) -> Option<Vec2> {
         let mut state = self.lock();
-        let preference = state.sizes.preference(key);
-        let accepted_reset_revision = state.accepted_reset_revisions.get(&key).copied();
+        let preference = state.store.preference(key);
+        let accepted_reset_revision = state.store.accepted_reset_revision(key);
         let instance_id = native_instance_id(key);
         let instance = state
             .native_instances
@@ -591,12 +400,12 @@ impl UtilityDialogSizeManager {
         let mut state = self.lock();
         let key = identity.key;
         let factory_outer_size = native_factory_outer_size(viewport_info, factory_inner_size);
-        let preference = state.sizes.preference(key);
+        let preference = state.store.preference(key);
         if matches!(preference, UtilitySizePreference::Unsupported) {
             return None;
         }
-        let native_geometry = state.sizes.native_geometry(key);
-        let accepted_reset_revision = state.accepted_reset_revisions.get(&key).copied();
+        let native_geometry = state.store.native_geometry(key);
+        let accepted_reset_revision = state.store.accepted_reset_revision(key);
         let instance =
             state
                 .native_geometry_instances
@@ -733,34 +542,7 @@ impl UtilityDialogSizeManager {
 
     /// Retry a retained failure only from an explicit controlled event.
     pub(crate) fn retry_failed(&self, ctx: &Context) -> Result<(), String> {
-        let (workers, path, known_keys) = {
-            let state = self.lock();
-            (
-                state.workers.clone(),
-                state.settings_path.clone(),
-                state.known_keys.iter().copied().collect::<Vec<_>>(),
-            )
-        };
-        let failed = known_keys
-            .into_iter()
-            .filter_map(|key| {
-                workers
-                    .utility_size_write_failure(key)
-                    .map(|(revision, _)| (key, revision))
-            })
-            .collect::<Vec<_>>();
-        workers.retry_utility_size_mutations(path)?;
-
-        let mut state = self.lock();
-        for (key, failed_revision) in failed {
-            let latest_revision = state.workers.utility_size_latest_revision(key);
-            if latest_revision == Some(failed_revision)
-                && state.accepted_revisions.get(&key) != Some(&failed_revision)
-            {
-                state.waiting_for_ack.insert(key, failed_revision);
-            }
-        }
-        drop(state);
+        self.lock().store.retry_failed()?;
         ctx.request_repaint();
         ctx.request_repaint_after(ACK_POLL_INTERVAL);
         Ok(())
@@ -814,7 +596,7 @@ impl UtilityDialogSizeManager {
         );
         let mut state = self.lock();
         let frame = state.frame;
-        state.known_keys.insert(key);
+        state.store.track_key(key);
         let mut completed_release = None;
         let mut previous_size_after_kind_change = None;
 
@@ -842,9 +624,9 @@ impl UtilityDialogSizeManager {
             return None;
         }
 
-        let preference = state.sizes.preference(key);
-        let revision = state.accepted_revisions.get(&key).copied();
-        let pending_local_resize = state.local_resize_revisions.contains_key(&key);
+        let preference = state.store.preference(key);
+        let revision = state.store.acknowledged_revision(key);
+        let pending_local_resize = state.store.has_local_resize(key);
         let instance = state
             .instances
             .entry(instance_id)
@@ -959,7 +741,7 @@ impl UtilityDialogSizeManager {
         let mut completed_release = None;
         {
             let mut state = self.lock();
-            state.known_keys.insert(plan.key);
+            state.store.track_key(plan.key);
             if let Some(instance) = state.instances.get_mut(&plan.instance_id) {
                 if !open {
                     if grip.stopped
@@ -1031,23 +813,7 @@ impl UtilityDialogSizeManager {
 
     pub(crate) fn reset(&self, key: UtilityToolKey) -> Result<UtilitySizeRevision, String> {
         let sequence = self.native_geometry_observer.next_sequence();
-        let (workers, path) = {
-            let mut state = self.lock();
-            state.known_keys.insert(key);
-            (state.workers.clone(), state.settings_path.clone())
-        };
-        workers.queue_utility_size_mutation(path, key, UtilitySizeMutation::Reset)?;
-        let revision = workers
-            .utility_size_latest_revision(key)
-            .ok_or_else(|| "utility size reset was queued without a revision".to_owned())?;
-        let mut state = self.lock();
-        state.reset_revisions.insert(key, revision);
-        state
-            .native_geometry_intents
-            .insert(key, NativeGeometryIntent::Reset { sequence });
-        state.local_resize_revisions.remove(&key);
-        state.waiting_for_ack.insert(key, revision);
-        Ok(revision)
+        self.lock().store.reset(key, sequence)
     }
 }
 
@@ -1727,46 +1493,10 @@ fn finite_rect(rect: Rect) -> bool {
 }
 
 impl UtilityDialogSizeState {
-    fn publish_acknowledgement(
-        &mut self,
-        acknowledgement: UtilitySizeAcknowledgement,
-    ) -> Result<(), String> {
+    fn apply_acknowledgement(&mut self, accepted: UtilitySizeAcceptedAcknowledgement) {
+        let acknowledgement = accepted.acknowledgement;
         let key = acknowledgement.key;
         let revision = acknowledgement.revision;
-        if self.workers.utility_size_latest_revision(key) != Some(revision) {
-            return Ok(());
-        }
-
-        self.sizes
-            .replace_committed(
-                key,
-                acknowledgement.preference,
-                acknowledgement.native_geometry,
-            )
-            .map(|_| ())
-            .map_err(|error| error.to_string())?;
-
-        self.accepted_revisions.insert(key, revision);
-        self.waiting_for_ack.remove(&key);
-        // A later native-only revision can be the first current acknowledgement
-        // after an in-flight resize/reset committed. Carry that older accepted
-        // intent forward before retiring its per-window bookkeeping.
-        let locally_resized = self
-            .local_resize_revisions
-            .get(&key)
-            .is_some_and(|resize_revision| *resize_revision <= revision);
-        if locally_resized {
-            self.local_resize_revisions.remove(&key);
-        }
-        let explicitly_reset = self
-            .reset_revisions
-            .get(&key)
-            .filter(|reset_revision| **reset_revision <= revision)
-            .copied();
-        if let Some(reset_revision) = explicitly_reset {
-            self.accepted_reset_revisions.insert(key, reset_revision);
-            self.reset_revisions.remove(&key);
-        }
 
         for instance in self
             .instances
@@ -1777,8 +1507,8 @@ impl UtilityDialogSizeState {
             if !instance.is_open || !instance.has_applied_restore || instance.restore_pending {
                 continue;
             }
-            if explicitly_reset.is_some()
-                || (acknowledgement.affects_size && !locally_resized)
+            if accepted.explicitly_reset.is_some()
+                || (acknowledgement.affects_size && !accepted.locally_resized)
                 || instance.restore_after_size_ack
             {
                 instance.restore_pending = true;
@@ -1790,7 +1520,6 @@ impl UtilityDialogSizeState {
                 instance.last_revision = Some(revision);
             }
         }
-        Ok(())
     }
 }
 fn completed_resize_size(instance: &WindowInstance) -> Option<PreferredWindowSize> {
@@ -2310,66 +2039,6 @@ mod tests {
         assert_eq!(placement.observe(new, 1.5), Some(true));
         assert_eq!(placement.observe(old, 1.0), None);
         assert_eq!(placement.observe(old, 1.0), Some(false));
-    }
-
-    #[test]
-    fn native_geometry_intent_keeps_unacknowledged_resize_across_later_move() {
-        use crate::settings::SavedWindowPosition;
-
-        let key = key();
-        let identity = NativeViewportIdentity {
-            key,
-            viewport_id: egui::ViewportId::from_hash_of("native-geometry-intent-test"),
-            owner_generation: 1,
-            host_generation: 2,
-        };
-        let committed = NativeWindowGeometry::new(
-            SavedWindowPosition::new(-400.0, 100.0).unwrap(),
-            PreferredWindowSize::new(700.0, 500.0).unwrap(),
-            1.0,
-        )
-        .unwrap();
-        let resize_rect = NativeWindowRect {
-            left: -500,
-            top: 100,
-            right: 420,
-            bottom: 800,
-        };
-        let resized = NativeGeometryObservation {
-            identity,
-            position: resize_rect,
-            position_scale: 1.0,
-            position_sequence: 1,
-            size: Some(resize_rect),
-            size_sequence: Some(1),
-        };
-        let after_resize = NativeGeometryIntent::from_committed(Some(committed))
-            .followed_by(resized, None)
-            .expect("the resize is newer than the acknowledged geometry");
-        let clamped_move = NativeGeometryObservation {
-            identity,
-            position: NativeWindowRect {
-                left: -250,
-                top: 180,
-                right: 250,
-                bottom: 480,
-            },
-            position_scale: 1.0,
-            position_sequence: 2,
-            size: None,
-            size_sequence: None,
-        };
-        let after_move = after_resize
-            .followed_by(clamped_move, None)
-            .expect("the later move updates position while retaining resize intent");
-        let geometry = after_move.geometry().unwrap();
-
-        assert_eq!(geometry.position.x, -250.0);
-        assert_eq!(
-            geometry.size,
-            PreferredWindowSize::new(920.0, 700.0).unwrap()
-        );
-        assert!(after_move.followed_by(clamped_move, None).is_none());
     }
 
     fn raw_input_with_native_viewport(info: egui::ViewportInfo) -> RawInput {
@@ -3702,9 +3371,8 @@ mod tests {
         .unwrap();
         manager
             .lock()
-            .sizes
-            .set_native_geometry(key(), initial_geometry)
-            .unwrap();
+            .store
+            .test_set_native_geometry(key(), initial_geometry);
         assert!(
             manager
                 .restore_native_geometry(
@@ -3839,9 +3507,8 @@ mod tests {
         .unwrap();
         manager
             .lock()
-            .sizes
-            .set_native_geometry(key(), previous_geometry)
-            .unwrap();
+            .store
+            .test_set_native_geometry(key(), previous_geometry);
         assert!(
             manager
                 .restore_native_geometry(
@@ -3878,38 +3545,33 @@ mod tests {
             size: None,
             size_sequence: None,
         };
-        assert!(
-            NativeGeometryIntent::Reset {
-                sequence: position_sequence.saturating_sub(1),
-            }
-            .followed_by(move_observation, None)
-            .is_none(),
+        let sample = UtilityNativeGeometrySample {
+            position: PhysicalWindowRect {
+                left: move_observation.position.left,
+                top: move_observation.position.top,
+                right: move_observation.position.right,
+                bottom: move_observation.position.bottom,
+            },
+            position_scale: move_observation.position_scale,
+            position_sequence: move_observation.position_sequence,
+            size: None,
+            size_sequence: None,
+        };
+        assert_eq!(
+            manager
+                .lock()
+                .store
+                .observe_native_geometry(key(), sample, None)
+                .unwrap(),
+            None,
             "without trustworthy factory metadata, a move does not persist the stale visible size"
         );
-        let reset_intent = manager
+        let accepted_revision = manager
             .lock()
-            .native_geometry_intents
-            .get(&key())
-            .copied()
-            .expect("reset owns the unacknowledged geometry intent");
-        let candidate_intent = reset_intent
-            .followed_by(move_observation, Some(factory_outer_size))
-            .expect("a move after reset keeps the factory size");
-        let candidate_geometry = candidate_intent
-            .geometry()
-            .expect("the moved position plus factory size is complete geometry");
-        assert_eq!(candidate_geometry.position.x, -500.0);
-        assert_eq!(candidate_geometry.position.y, 100.0);
-        assert_eq!(candidate_geometry.size, factory_outer_size);
-        manager
-            .submit_native_geometry(key(), candidate_geometry, &ctx)
-            .unwrap();
-        manager
-            .lock()
-            .native_geometry_intents
-            .insert(key(), candidate_intent);
-
-        let accepted_revision = workers.utility_size_latest_revision(key()).unwrap();
+            .store
+            .observe_native_geometry(key(), sample, Some(factory_outer_size))
+            .unwrap()
+            .expect("a move after reset persists the factory size");
         assert!(accepted_revision > reset_revision);
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {

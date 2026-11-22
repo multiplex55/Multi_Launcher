@@ -972,7 +972,7 @@ impl SettingsSaveWorkerRegistry {
         settings_path: String,
         key: UtilityToolKey,
         mutation: UtilitySizeMutation,
-    ) -> Result<(), String> {
+    ) -> Result<UtilitySizeRevision, String> {
         let mut state = self
             .0
             .lock()
@@ -1015,7 +1015,7 @@ impl SettingsSaveWorkerRegistry {
         }
         drop(state);
         self.reap_finished();
-        Ok(())
+        Ok(revision)
     }
 
     /// Retry retained failures after an explicit user action or later

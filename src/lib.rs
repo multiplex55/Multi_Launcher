@@ -120,6 +120,7 @@ pub mod workspace;
 pub mod xml_toolkit_engine;
 pub mod xml_toolkit_session;
 pub mod utility_presentation;
+pub mod utility_size;
 
 // The shared startup owner is compiled into the library only for its
 // deterministic scanner-injection contract. Production library builds expose

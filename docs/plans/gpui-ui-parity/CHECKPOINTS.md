@@ -190,7 +190,7 @@ The final build `11E59FCE…` and all 16 scoped Nextest cases passed. The actual
 
 Continue G04-C5-A with the shared geometry persistence and intent extraction before attaching GPUI to actual native HWND observations. Keep the existing egui host/bounds/repaint behavior and narrow the run to the affected library tests. There are zero accepted full Hash GUI rows. Geometry, native Clipboard I/O, global hidden-root and visual proof remain active obligations.
 
-## G04-C5-A — Shared geometry persistence in implementation
+## G04-C5-A — Shared geometry persistence verified
 
 The verified source parent is `a378b407f`, pushed to `origin/feat/gpui-ui-parity`. The sole implementer owns the neutral geometry intent and acknowledgement store, settings queue boundary and egui adapter. The [Hash geometry handoff](gui/hash-generator.md#pending-geometry-checkpoint) defines the extraction. The existing egui placement, observers and retained passes stay in this checkpoint's adapter. Actual GPUI placement and direct HWND gesture binding follow after verification. The parent owns docs and Git. The scratch root is idle with original settings and final Clipboard artifact `11E59FCE…`.
 
@@ -200,4 +200,6 @@ Branch HEAD `d2bfd674d` includes the independent G11 Explorer Tabs, File Search 
 
 The final C4 `11E59FCE…` build passed actual protected Windows Clipboard Load and Copy with user-prepared `abc`. The popout retained the result, Copy reached the OS, and reloading and hashing the 64 copied bytes confirmed the exact digest. Fresh reopen cleared the snapshot. The scratch app exited 0 and the original test settings were restored. See `G04-C4-NATIVE-CLIPBOARD`.
 
-That source snapshot passed all 38 selected Nextest cases in two binaries with 8,690 skipped. The source writer is now applying the targeted focus return correction. Reuse the same Docked seed and the final linked executable only after the correction is built. The existing first-run evidence still covers unaffected draft/result retention and the canonical worker path.
+The final scoped library Nextest selection passed all 11 cases, including exact queue revision and acknowledgement, merged resize/move intent, failed-write recovery, reset provenance, independent geometry, opaque payloads and shutdown flush. Independent read-only review checked the egui rendering and acknowledgement adapter, retry and rebind, and the corrected observation API. See `G04-C5-A-GEOMETRY-STORE`. The linked Windows smoke follows with C5-B.
+
+Continue with the [C5-B popout handoff](gui/hash-generator.md#c5-b-popout-handoff). Attach the existing gesture observer to the checked GPUI HWND, restore the saved outer geometry, and drain exact native intent before retirement. Validate real Windows Move and Size using the captured egui seed. Docked grip, mixed DPI and visual acceptance are still open.
