@@ -1,6 +1,6 @@
 # Hash Generator
 
-G04 owns `hash-generator`. Source confirmed at the execution parent. `G00-C-EGUI-WORKFLOW` and `G04-EGUI-TEXT-BASELINE` record native egui observations for the keyboard route, independent popout, Text calculation and comparison edits. The remaining native baseline checks and GPUI acceptance are pending. See the [validation log](../VALIDATION_LOG.md).
+G04 owns `hash-generator`. Source confirmed at the execution parent. Native egui evidence covers the keyboard route, independent popout, Text calculation, comparison edits, all algorithm options, SHA-1 warnings and Unicode multiline comparison, plus native picker dismissal and empty-path validation. Selecting a file, clipboard actions and remaining native baseline checks are pending. See the [validation log](../VALIDATION_LOG.md).
 
 ## Routes and host
 

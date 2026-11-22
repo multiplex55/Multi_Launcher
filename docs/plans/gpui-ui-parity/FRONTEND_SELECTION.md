@@ -1,6 +1,6 @@
 # Frontend selection and restart contract
 
-The basic selector and both launch paths have Windows evidence from G01. G03-B verifies lock-conflict feedback in both directions. G03-C1 verifies a confirmed restart from the GPUI preview to explicit egui with multiple windows and the HUD active. The reverse direction, remembered chooser behavior and cross-frontend persistence remain pending. See the [validation log](VALIDATION_LOG.md).
+The basic selector and both launch paths have Windows evidence from G01. G03-B verifies lock-conflict feedback in both directions. G03-C1 verifies a confirmed restart from the GPUI preview to explicit egui with multiple windows and the HUD active. The canonical Hash presentation completed an egui→GPUI→egui round trip. The in-app reverse restart, remembered chooser behavior and broader cross-frontend settings remain pending. See the [validation log](VALIDATION_LOG.md).
 
 ## Controlling precedence
 
@@ -52,6 +52,16 @@ The first G03-C checkpoint can exercise the GPUI foundation to egui. Capture the
 Kit 0.10.0 exposes `WindowExt::open_alert_dialog` for confirmation. The builder can rerender, so accept the restart only in its confirmation callback. Recheck the Hash job slot and pending secondary, HUD and admitted foreground effects before closing further requests. The hotkey stop join needs a checked outcome. Retire owned HWNDs while the event loop can still process native teardown. Exercise normal cancellation, failed teardown, failed spawn, and an injected spawn that reacquires the same canonical data root after the outgoing guard drops. Use the original working directory for the child and the canonical root for identity checks.
 
 The egui switch needs authoritative editor and job decisions. The existing ordinary exit guard handles some runtime teardown and cancellations. It does not provide a save/discard decision for user documents. `ActivityCenter` snapshots cannot stand in for job admission and retirement. Wire a settings action through its existing owner and accepted actions. `SettingsWindowHost::complete` temporarily takes the editor out of `LauncherApp`, so draft preflight must inspect the actual editor or run after it is restored. Preserve pending writes and prevent a new admission between the accepted switch and shutdown. Keep two-way switching and each unresolved owner visible in G03 and its feature goal until verified.
+
+### Reverse switch implementation boundaries
+
+The first egui-to-GPUI checkpoint can admit a provably idle session. Stage Restart in GPUI in `SettingsHostAction`, accept it through the retained Settings host and attach consent to its current owner and accepted pass. Compare the actual Settings save projection and plugin inputs with their baseline. Resolve dirty Settings through its existing Save or Cancel; unresolved document drafts, recording reviews, active or queued file transfers, active or retiring Hash work and sequence playback need owner decisions before admission. A hidden editor can still own a draft.
+
+After confirmation, recheck the editors and reserve the relevant process owners before requesting root close. Main still accepts app, hotkey and radial actions while the egui worker runs. MkMacro brings up its process runtime and pollers even when the visible plugin is disabled. Its `SharedOperationGuard` is the actual playback and recording admission boundary, and `set_shared_store_components` shows the poller, stop-coordinator and worker retirement order. An active operation or autonomous owner without a checked fence needs actionable feedback and leaves the current frontend usable.
+
+Carry a one-shot typed restart result through `GuiStartupServices` and the `GuiWorker` return. Require successful `eframe::run_native`, successful join, a checked receipt for existing shutdown hooks and a completed canonical settings drain. `LauncherInvocationService::stop` and `RadialController::shutdown` can hand native threads to a reaper. Confirm actual retirement when those owners are active. Reuse the typed outer relaunch for both directions. Capture the executable and original working directory, release the data guard at the existing boundary and launch only `--ui=gpui` for the reverse direction. A user cancel, normal close or incomplete shutdown cannot spawn a child.
+
+Use focused Settings host action, `gui_worker_` and `gpui_restart` cases. Native proof needs dirty Settings to defer restart, a resolved draft, a canceled confirmation, one accepted same-root child, and retained bare-launch egui selection. Source inspection at `848c6756d` established these ownership boundaries. No reverse switch is currently implemented.
 
 ## Acceptance scenarios
 
