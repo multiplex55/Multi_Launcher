@@ -1,15 +1,20 @@
+use std::pin::Pin;
 #[cfg(windows)]
 use std::sync::mpsc::{Receiver, channel};
 use std::{
     cell::RefCell,
     ffi::{OsStr, OsString},
+    future::Future,
     rc::Rc,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::{Context as FutureContext, Poll, Waker},
 };
 
+use gpui_kit::base::Disableable;
+use gpui_kit::component::input::InputEvent;
 use gpui_kit::component::{
     button::Button,
     input::{Input, InputState},
@@ -20,14 +25,22 @@ use gpui_kit::*;
 #[cfg(windows)]
 use std::ffi::c_void;
 
+use multi_launcher::commands::HashGeneratorCommand;
+use multi_launcher::commands::handlers::handle_hash_generator;
 use multi_launcher::coordinate_tool::{
     CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
 };
+use multi_launcher::hash_generator::HashSession;
 use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
 
-gpui_kit::actions!([ToggleSecondaryWindow, ToggleCoordinateHudProbe]);
+gpui_kit::actions!([
+    ToggleSecondaryWindow,
+    ToggleCoordinateHudProbe,
+    OpenHashGenerator,
+    CalculateHash
+]);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Frontend {
@@ -146,6 +159,12 @@ struct RootWindow {
     query: Entity<InputState>,
     native_window: Option<NativeWindow>,
     focus_handle: FocusHandle,
+    hash_session: Arc<Mutex<HashSession>>,
+    hash_wake_signal: Arc<HashWakeSignal>,
+    hash_window: HashWindowState,
+    hash_window_revision: Arc<AtomicU64>,
+    hash_window_close_subscription: Option<Subscription>,
+    hash_open_error: Option<String>,
     secondary: SecondaryWindowState,
     secondary_revision: Arc<AtomicU64>,
     secondary_close_subscription: Option<Subscription>,
@@ -154,6 +173,107 @@ struct RootWindow {
     coordinate_hud_probe_closing: Arc<AtomicBool>,
     coordinate_hud_probe_pending: bool,
     coordinate_hud_probe_status: String,
+}
+
+enum HashWindowState {
+    Closed,
+    Live {
+        window: AnyWindowHandle,
+        view: Entity<HashGeneratorWindow>,
+    },
+}
+
+/// Coalescing wake signal for the one retained HashSession job.
+///
+/// The receiver awaits this future instead of blocking a GPUI executor worker.
+/// The signal is closed from app/root teardown so the stored task waker cannot
+/// retain an abandoned receiver task.
+#[derive(Default)]
+struct HashWakeSignal {
+    state: Mutex<HashWakeState>,
+}
+
+#[derive(Default)]
+struct HashWakeState {
+    pending: bool,
+    closed: bool,
+    waker: Option<Waker>,
+}
+
+impl HashWakeSignal {
+    fn notify(&self) {
+        let waker = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed {
+                return;
+            }
+            state.pending = true;
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn close(&self) {
+        let waker = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.closed = true;
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn wait(self: &Arc<Self>) -> HashWakeFuture {
+        HashWakeFuture {
+            signal: Arc::clone(self),
+        }
+    }
+}
+
+struct HashWakeFuture {
+    signal: Arc<HashWakeSignal>,
+}
+
+impl Future for HashWakeFuture {
+    type Output = bool;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut FutureContext<'_>) -> Poll<Self::Output> {
+        let mut state = self
+            .get_mut()
+            .signal
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            Poll::Ready(false)
+        } else if state.pending {
+            state.pending = false;
+            Poll::Ready(true)
+        } else {
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for HashWakeFuture {
+    fn drop(&mut self) {
+        self.signal
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waker
+            .take();
+    }
 }
 
 enum SecondaryWindowState {
@@ -179,6 +299,151 @@ fn update_kit_window_content<T: 'static, C: AppContext, R>(
 }
 
 impl RootWindow {
+    fn run_hash_generator_open(&mut self, cx: &mut Context<Self>) {
+        let outcome = handle_hash_generator(&HashGeneratorCommand::Open, || {
+            self.open_hash_generator_window(cx)
+        });
+        self.hash_open_error = outcome
+            .err()
+            .map(|error| format!("Could not open Hash Generator: {error}"));
+        cx.notify();
+    }
+
+    fn open_hash_generator_window(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let existing = match &self.hash_window {
+            HashWindowState::Closed => None,
+            HashWindowState::Live { window, view } => Some((*window, view.clone())),
+        };
+        if let Some((window, view)) = existing {
+            let expected_foreground = current_foreground_identity();
+            let revision = self
+                .hash_window_revision
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1)
+                .max(1);
+            match update_kit_window_content(window, &view, cx, |tool, window, cx| {
+                tool.input.focus_handle(cx).focus(window, cx);
+                tool.native_window
+            }) {
+                Ok(Some(native_window)) => {
+                    let revision_guard = Arc::clone(&self.hash_window_revision);
+                    cx.spawn(async move |_, cx| {
+                        cx.background_executor()
+                            .spawn(async move {
+                                activate_for_secondary_window(
+                                    &revision_guard,
+                                    revision,
+                                    native_window,
+                                    expected_foreground,
+                                );
+                            })
+                            .await;
+                    })
+                    .detach();
+                    return Ok(());
+                }
+                Ok(None) if !cfg!(windows) => return Ok(()),
+                Ok(None) => {
+                    return Err(
+                        "The Hash Generator window has no checked Windows handle to activate."
+                            .to_owned(),
+                    );
+                }
+                Err(error) => {
+                    self.hash_window = HashWindowState::Closed;
+                    self.hash_window_close_subscription = None;
+                    self.hash_window_revision.fetch_add(1, Ordering::AcqRel);
+                    self.hash_session
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .end();
+                    return Err(format!("Could not focus the existing window: {error}"));
+                }
+            }
+        }
+
+        self.hash_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin(None);
+        let session = Arc::clone(&self.hash_session);
+        let wake_signal = Arc::clone(&self.hash_wake_signal);
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some("Multi Launcher GPUI Hash Generator".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (window, view) = match gpui_kit::open_window(options, cx, move |window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Enter text to hash"));
+            input.focus_handle(cx).focus(window, cx);
+            let native_window = checked_native_window(window).ok().flatten();
+            cx.new(|cx| {
+                let input_subscription = cx.subscribe(
+                    &input,
+                    |this: &mut HashGeneratorWindow, input, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let text = input.read(cx).value().to_string();
+                            this.session
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .set_text(text);
+                            cx.notify();
+                        }
+                    },
+                );
+                HashGeneratorWindow {
+                    input,
+                    focus_handle: cx.focus_handle(),
+                    session,
+                    wake_signal,
+                    native_window,
+                    _input_subscription: input_subscription,
+                }
+            })
+        }) {
+            Ok(opened) => opened,
+            Err(error) => {
+                self.hash_session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .end();
+                return Err(format!(
+                    "Kit could not create the Hash Generator window: {error}"
+                ));
+            }
+        };
+
+        let window_id = window.window_id();
+        let root = cx.entity().downgrade();
+        let hash_window_revision = Arc::clone(&self.hash_window_revision);
+        let close_subscription = cx.on_window_closed(move |cx, closed| {
+            if closed != window_id {
+                return;
+            }
+            let _ = root.update(cx, |root, cx| {
+                if matches!(
+                    &root.hash_window,
+                    HashWindowState::Live { window, .. } if window.window_id() == window_id
+                ) {
+                    root.hash_session
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .end();
+                    root.hash_window = HashWindowState::Closed;
+                    hash_window_revision.fetch_add(1, Ordering::AcqRel);
+                    root.hash_window_close_subscription = None;
+                    cx.notify();
+                }
+            });
+        });
+        self.hash_window = HashWindowState::Live { window, view };
+        self.hash_window_close_subscription = Some(close_subscription);
+        self.hash_open_error = None;
+        Ok(())
+    }
+
     fn toggle_coordinate_hud_probe(&mut self, cx: &mut Context<Self>) {
         if self.coordinate_hud_probe_pending
             || self.coordinate_hud_probe_closing.load(Ordering::Acquire)
@@ -394,6 +659,9 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &ToggleCoordinateHudProbe, _, cx| {
                 this.toggle_coordinate_hud_probe(cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenHashGenerator, _, cx| {
+                this.run_hash_generator_open(cx);
+            }))
             .child(
                 div()
                     .flex()
@@ -419,6 +687,13 @@ impl Render for RootWindow {
                                 this.toggle_coordinate_hud_probe(cx);
                             })),
                     )
+                    .child(
+                        Button::new("open-hash-generator")
+                            .label("Open Hash Generator (Ctrl+G)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_hash_generator_open(cx);
+                            })),
+                    )
                     .child(Label::new(self.coordinate_hud_probe_status.clone()))
                     .child(
                         Button::new("quit-gpui")
@@ -429,7 +704,105 @@ impl Render for RootWindow {
                         self.secondary_error
                             .as_ref()
                             .map(|error| Label::new(error.clone())),
+                    )
+                    .children(
+                        self.hash_open_error
+                            .as_ref()
+                            .map(|error| Label::new(error.clone())),
                     ),
+            )
+    }
+}
+
+struct HashGeneratorWindow {
+    input: Entity<InputState>,
+    focus_handle: FocusHandle,
+    session: Arc<Mutex<HashSession>>,
+    wake_signal: Arc<HashWakeSignal>,
+    native_window: Option<NativeWindow>,
+    _input_subscription: Subscription,
+}
+
+impl HashGeneratorWindow {
+    fn calculate_hash(&mut self, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().to_string();
+        let mut session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if session.has_job() {
+            return;
+        }
+        session.set_text(text);
+        let wake_signal = Arc::clone(&self.wake_signal);
+        if let Err(error) = session.calculate(Arc::new(move || wake_signal.notify())) {
+            session.set_error(error);
+        }
+        cx.notify();
+    }
+}
+
+impl Render for HashGeneratorWindow {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (has_job, is_running, is_stopping, progress, digest, error) = {
+            let session = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                session.has_job(),
+                session.is_running(),
+                session.is_stopping_stale_job(),
+                session.progress(),
+                session.result().map(|result| result.digest.clone()),
+                session.error().map(str::to_owned),
+            )
+        };
+
+        div()
+            .flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .track_focus(&self.focus_handle)
+            .key_context("HashGeneratorWindow")
+            .on_action(cx.listener(|this, _: &CalculateHash, _, cx| {
+                this.calculate_hash(cx);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w(px(520.))
+                    .child(Label::new("Text · SHA-256 · exact UTF-8 bytes"))
+                    .child(Input::new(&self.input).aria_label("Text to hash"))
+                    .child(Label::new("Ctrl+Enter: calculate"))
+                    .child(
+                        Button::new("calculate-sha256")
+                            .label("Calculate SHA-256")
+                            .disabled(has_job)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.calculate_hash(cx);
+                            })),
+                    )
+                    .children(progress.map(|progress| {
+                        Label::new(format!("Hashing · {} bytes", progress.bytes_processed))
+                    }))
+                    .children(is_stopping.then(|| Label::new("Stopping the previous calculation…")))
+                    .children(digest.map(|digest| Label::new(format!("SHA-256: {digest}"))))
+                    .children(error.map(|error| Label::new(error)))
+                    .children(is_running.then(|| {
+                        Button::new("cancel-sha256")
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.session
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .cancel();
+                                cx.notify();
+                            }))
+                    })),
             )
     }
 }
@@ -777,6 +1150,16 @@ pub(crate) fn run_foundation_window(
     let visibility = RootVisibility::new();
     let visibility_for_quit = visibility.clone();
     let initial_return_target = capture_foreground_identity();
+    let hash_session = Arc::new(Mutex::new(HashSession::new()));
+    let hash_session_for_quit = Arc::clone(&hash_session);
+    let hash_session_for_root = Arc::clone(&hash_session);
+    let hash_window_revision = Arc::new(AtomicU64::new(0));
+    let hash_window_revision_for_app = Arc::clone(&hash_window_revision);
+    let hash_wake_signal = Arc::new(HashWakeSignal::default());
+    let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal);
+    let hash_wake_signal_for_root = Arc::clone(&hash_wake_signal);
+    let hash_wake_signal_for_task = Arc::clone(&hash_wake_signal);
+    let hash_wake_signal_for_root_close = Arc::clone(&hash_wake_signal);
     let coordinate_hud_probe_controller =
         Arc::new(Mutex::new(CoordinateToolController::new_with_preferences(
             Arc::new(NativeCoordinateRuntimeFactory),
@@ -791,11 +1174,22 @@ pub(crate) fn run_foundation_window(
         cx.bind_keys([
             KeyBinding::new("ctrl-enter", ToggleSecondaryWindow, Some("RootWindow")),
             KeyBinding::new("f6", ToggleCoordinateHudProbe, Some("RootWindow")),
+            KeyBinding::new("ctrl-g", OpenHashGenerator, Some("RootWindow")),
+            KeyBinding::new("ctrl-enter", CalculateHash, Some("HashGeneratorWindow")),
         ]);
         let coordinate_hud_probe_closing_for_quit = Arc::clone(&closing_for_app);
+        let hash_session_for_quit = Arc::clone(&hash_session_for_quit);
+        let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal_for_quit);
+        let hash_window_revision_for_quit = Arc::clone(&hash_window_revision_for_app);
         let quit_subscription = cx.on_app_quit(move |_| {
             visibility_for_quit.active.store(false, Ordering::Release);
             coordinate_hud_probe_closing_for_quit.store(true, Ordering::Release);
+            hash_wake_signal_for_quit.close();
+            hash_window_revision_for_quit.fetch_add(1, Ordering::AcqRel);
+            hash_session_for_quit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown();
             if let Ok(mut listener) = listener_slot_for_quit.lock()
                 && let Some(mut listener) = listener.take()
             {
@@ -814,6 +1208,9 @@ pub(crate) fn run_foundation_window(
         };
         let controller_for_root = Arc::clone(&controller_for_app);
         let closing_for_root = Arc::clone(&closing_for_app);
+        let session_for_root = Arc::clone(&hash_session_for_root);
+        let wake_signal_for_root = Arc::clone(&hash_wake_signal_for_root);
+        let window_revision_for_root = Arc::clone(&hash_window_revision_for_app);
         let (root_window, root_view) = match open_window(options, cx, move |window, cx| {
             let query = cx.new(|cx| InputState::new(window, cx).placeholder("Type a query"));
             query.focus_handle(cx).focus(window, cx);
@@ -823,6 +1220,12 @@ pub(crate) fn run_foundation_window(
                 query,
                 native_window: None,
                 focus_handle,
+                hash_session: session_for_root,
+                hash_wake_signal: wake_signal_for_root,
+                hash_window: HashWindowState::Closed,
+                hash_window_revision: window_revision_for_root,
+                hash_window_close_subscription: None,
+                hash_open_error: None,
                 secondary: SecondaryWindowState::Closed,
                 secondary_revision: Arc::new(AtomicU64::new(0)),
                 secondary_close_subscription: None,
@@ -872,13 +1275,40 @@ pub(crate) fn run_foundation_window(
             };
 
         let root_id = root_window.window_id();
+        let hash_window_revision_for_root_close = Arc::clone(&hash_window_revision_for_app);
         subscription_sink
             .borrow_mut()
             .push(cx.on_window_closed(move |cx, closed| {
                 if closed == root_id {
+                    hash_wake_signal_for_root_close.close();
+                    hash_window_revision_for_root_close.fetch_add(1, Ordering::AcqRel);
                     cx.quit();
                 }
             }));
+
+        let hash_root_view = root_view.downgrade();
+        cx.spawn(async move |cx| {
+            while hash_wake_signal_for_task.wait().await {
+                let _ = cx.update(|cx| {
+                    let live_window = hash_root_view.update(cx, |root, _| {
+                        root.hash_session
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .poll();
+                        match &root.hash_window {
+                            HashWindowState::Closed => None,
+                            HashWindowState::Live { window, view } => Some((*window, view.clone())),
+                        }
+                    });
+                    if let Ok(Some((window, view))) = live_window {
+                        let _ = update_kit_window_content(window, &view, cx, |_, _, cx| {
+                            cx.notify();
+                        });
+                    }
+                });
+            }
+        })
+        .detach();
 
         #[cfg(windows)]
         {
@@ -970,8 +1400,6 @@ pub(crate) fn run_foundation_window(
                         break;
                     }
 
-                    // Sample the active window on GPUI's owner thread. A stale
-                    // worker snapshot must never authorize restoring focus.
                     let foreground_before_transition = current_foreground_identity();
                     let should_restore = !desired_visible
                         && foreground_before_transition == Some(native_window.identity);
@@ -991,8 +1419,6 @@ pub(crate) fn run_foundation_window(
                         tracing::error!(%error, "could not change GPUI root window visibility");
                         continue;
                     }
-                    // Query the actual post-ShowWindow foreground on the GPUI owner thread.
-                    // The activation worker will only proceed while this identity is still current.
                     let foreground_after_transition = current_foreground_identity();
                     let show_request_is_current = show_request_is_current
                         && foreground_after_transition == foreground_before_transition;
@@ -1032,6 +1458,13 @@ pub(crate) fn run_foundation_window(
         }
     });
 
+    hash_wake_signal.close();
+    hash_window_revision.fetch_add(1, Ordering::AcqRel);
+    hash_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .shutdown();
+
     coordinate_hud_probe_closing.store(true, Ordering::Release);
     let shutdown_result = coordinate_hud_probe_controller
         .lock()
@@ -1057,8 +1490,23 @@ pub(crate) fn run_foundation_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{Frontend, selection_from_args};
+    use super::{Frontend, FutureContext, HashWakeSignal, Poll, selection_from_args};
     use std::ffi::OsString;
+    use std::future::Future;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::task::{Wake, Waker};
+
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     fn args(args: &[&str]) -> Vec<OsString> {
         args.iter().map(|arg| OsString::from(*arg)).collect()
@@ -1090,5 +1538,24 @@ mod tests {
         assert!(selection_from_args(args(&["--ui"])).is_err());
         assert!(selection_from_args(args(&["--ui=egui", "--ui=gpui"])).is_err());
         assert!(selection_from_args(args(&["--ui=egui", "--ui=egui"])).is_err());
+    }
+
+    #[test]
+    fn hash_wake_coalesces_notifications_and_closes_waiter() {
+        let signal = Arc::new(HashWakeSignal::default());
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(Arc::clone(&wake_counter));
+        let mut wait = Box::pin(signal.wait());
+        let mut cx = FutureContext::from_waker(&waker);
+
+        assert!(matches!(wait.as_mut().poll(&mut cx), Poll::Pending));
+        signal.notify();
+        signal.notify();
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(wait.as_mut().poll(&mut cx), Poll::Ready(true)));
+        assert!(matches!(wait.as_mut().poll(&mut cx), Poll::Pending));
+        signal.close();
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 2);
+        assert!(matches!(wait.as_mut().poll(&mut cx), Poll::Ready(false)));
     }
 }

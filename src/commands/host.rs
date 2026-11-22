@@ -74,7 +74,9 @@ pub trait DialogCommandHost {
     fn stage_explorer_tabs(&mut self, _command: super::ExplorerTabsCommand, _source: super::ActivationSource) -> Result<(), String> {
         Err("Explorer Tabs requires the launcher interface".into())
     }
-    fn open_hash_generator_dialog(&mut self) {}
+    fn open_hash_generator_dialog(&mut self) -> Result<(), String> {
+        Err("Hash Generator requires a frontend that can open its window".into())
+    }
     fn open_activity_dialog(&mut self) {}
     fn open_file_operations_center_dialog(&mut self) {}
     fn open_downloads_triage_dialog(&mut self) {}

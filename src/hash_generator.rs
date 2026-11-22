@@ -13,6 +13,7 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 mod session;
 
@@ -468,6 +469,33 @@ pub struct HashJobEvent {
     pub result: Result<HashResult, HashError>,
 }
 
+struct TerminalWake {
+    sender: Option<mpsc::SyncSender<HashJobEvent>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    notified: bool,
+}
+
+impl TerminalWake {
+    fn publish(&mut self, event: HashJobEvent) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(event);
+            drop(sender);
+        }
+        self.notified = true;
+        (self.wake)();
+    }
+}
+
+impl Drop for TerminalWake {
+    fn drop(&mut self) {
+        self.sender.take();
+        if !self.notified {
+            self.notified = true;
+            (self.wake)();
+        }
+    }
+}
+
 /// One detached worker. Progress is a single replaceable snapshot, while the
 /// bounded one-item channel carries exactly one terminal result.
 pub struct HashJob {
@@ -480,17 +508,17 @@ pub struct HashJob {
 impl HashJob {
     pub fn start(
         request: HashRequest,
-        repaint: Arc<dyn Fn() + Send + Sync>,
+        wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, HashError> {
-        Self::start_with_activity(request, repaint, None)
+        Self::start_with_activity(request, wake, None)
     }
 
     pub fn start_with_activity(
         request: HashRequest,
-        repaint: Arc<dyn Fn() + Send + Sync>,
+        wake: Arc<dyn Fn() + Send + Sync>,
         activity: Option<crate::activity::ActivityTask>,
     ) -> Result<Self, HashError> {
-        Self::start_with_spawn(request, repaint, activity, |worker| {
+        Self::start_with_spawn(request, wake, activity, |worker| {
             std::thread::Builder::new()
                 .name("hash-generator".into())
                 .spawn(worker)
@@ -500,7 +528,7 @@ impl HashJob {
 
     fn start_with_spawn(
         request: HashRequest,
-        repaint: Arc<dyn Fn() + Send + Sync>,
+        wake: Arc<dyn Fn() + Send + Sync>,
         activity: Option<crate::activity::ActivityTask>,
         spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
     ) -> Result<Self, HashError> {
@@ -519,21 +547,37 @@ impl HashJob {
             activity.set_cancel_handler(move || cancel.cancel());
         }
         let worker_activity = activity.clone();
+        let progress_wake = Arc::clone(&wake);
+        let mut terminal_wake = TerminalWake {
+            sender: Some(sender),
+            wake,
+            notified: false,
+        };
         let worker = Box::new(move || {
             if let Some(activity) = worker_activity.as_ref() {
                 activity.mark_running();
             }
+            let mut last_progress_wake = None;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 hash_request(request, &worker_cancellation, |snapshot| {
-                    *worker_progress
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+                    {
+                        *worker_progress
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+                    }
                     if let Some(activity) = worker_activity.as_ref() {
                         activity.set_progress(Some(crate::activity::ActivityProgress::new(
                             snapshot.bytes_processed,
                             snapshot.total_bytes,
                             crate::activity::ActivityProgressUnit::Bytes,
                         )));
+                    }
+                    let now = Instant::now();
+                    if last_progress_wake.is_none_or(|last| {
+                        now.saturating_duration_since(last) >= Duration::from_millis(35)
+                    }) {
+                        last_progress_wake = Some(now);
+                        progress_wake();
                     }
                 })
             }))
@@ -560,9 +604,7 @@ impl HashJob {
                     crate::activity::ActivityRetirement::Unavailable,
                 );
             }
-            if sender.send(HashJobEvent { request_id, result }).is_ok() {
-                repaint();
-            }
+            terminal_wake.publish(HashJobEvent { request_id, result });
         });
         if let Err(error) = spawn(worker) {
             if let Some(activity) = activity.as_ref() {
@@ -1080,6 +1122,129 @@ mod tests {
         assert_eq!(event.result.unwrap().digest, known_answers()[1].2);
         assert!(job.poll().is_none());
         assert_eq!(job.progress().request_id, request_id);
+    }
+
+    #[test]
+    fn worker_wakes_on_progress_and_after_terminal_publication() {
+        let request = request(HashAlgorithm::Sha256, HashInput::Text("abc".into()), None);
+        let wakes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let wakes_for_callback = Arc::clone(&wakes);
+        let job_slot = Arc::new(Mutex::new(None));
+        let job_slot_for_callback = Arc::clone(&job_slot);
+        let observed_terminal = Arc::new(Mutex::new(None));
+        let observed_terminal_for_callback = Arc::clone(&observed_terminal);
+        let worker_slot = Arc::new(Mutex::new(None));
+        let worker_slot_for_spawn = Arc::clone(&worker_slot);
+        let job = HashJob::start_with_spawn(
+            request,
+            Arc::new(move || {
+                wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+                let event = job_slot_for_callback
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_mut()
+                    .and_then(HashJob::poll);
+                if let Some(event) = event {
+                    *observed_terminal_for_callback
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(event);
+                }
+            }),
+            None,
+            move |worker| {
+                *worker_slot_for_spawn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        *job_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
+        worker_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("worker was captured")();
+
+        assert!(wakes.load(Ordering::Relaxed) >= 2);
+        let event = observed_terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("wake callback observes the published terminal result");
+        assert_eq!(event.result.unwrap().digest, known_answers()[1].2);
+        assert!(
+            job_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+                .is_some_and(|job| job.poll().is_none())
+        );
+    }
+
+    #[test]
+    fn dropped_worker_wakes_owner_after_terminal_sender_disconnects() {
+        let request = request(HashAlgorithm::Sha256, HashInput::Text("abc".into()), None);
+        let wakes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let wakes_for_callback = Arc::clone(&wakes);
+        let job_slot = Arc::new(Mutex::new(None));
+        let job_slot_for_callback = Arc::clone(&job_slot);
+        let observed_disconnect = Arc::new(Mutex::new(None));
+        let observed_disconnect_for_callback = Arc::clone(&observed_disconnect);
+        let worker_slot = Arc::new(Mutex::new(None));
+        let worker_slot_for_spawn = Arc::clone(&worker_slot);
+        let job = HashJob::start_with_spawn(
+            request,
+            Arc::new(move || {
+                wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+                let event = job_slot_for_callback
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_mut()
+                    .and_then(HashJob::poll);
+                if let Some(event) = event {
+                    *observed_disconnect_for_callback
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(event);
+                }
+            }),
+            None,
+            move |worker| {
+                *worker_slot_for_spawn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        *job_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
+        drop(
+            worker_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("worker was captured"),
+        );
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        let event = observed_disconnect
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("wake callback observes the disconnected terminal sender");
+        assert!(matches!(event.result, Err(HashError::WorkerDisconnected)));
+        assert!(
+            job_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+                .is_some_and(|job| job.poll().is_none())
+        );
     }
 
     #[test]

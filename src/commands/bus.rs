@@ -51,7 +51,11 @@ impl CommandBus {
             Command::BatchRename(command) => Ok(handle_batch_rename(host, *command)),
             Command::SearchReplace(command) => Ok(handle_search_replace(host, *command)),
             Command::HotFolder(command) => handle_hotfolder(host, *command),
-            Command::HashGenerator(command) => Ok(handle_hash_generator(host, command)),
+            Command::HashGenerator(command) => {
+                handle_hash_generator(command, || host.open_hash_generator_dialog()).map_err(
+                    |error| CommandError::new("hash_generator", error).with_gui_failure_policy(),
+                )
+            }
             Command::ColorPick(command) => handle_color_pick(host, command),
             Command::Ocr(command) => handle_ocr(host, command),
             Command::Calendar(command) => Ok(handle_calendar(host, command)),
@@ -170,6 +174,7 @@ mod tests {
         search_replace_opens: usize,
         hotfolder_commands: Vec<crate::commands::HotFolderCommand>,
         hash_generator_opens: usize,
+        hash_generator_failure: bool,
         zip_extractor_opens: usize,
         radial_calls: usize,
     }
@@ -238,8 +243,13 @@ mod tests {
         fn open_snippet_dialog(&mut self) {
             self.dialog_calls += 1;
         }
-        fn open_hash_generator_dialog(&mut self) {
+        fn open_hash_generator_dialog(&mut self) -> Result<(), String> {
             self.hash_generator_opens += 1;
+            if self.hash_generator_failure {
+                Err("Hash Generator presentation failed".into())
+            } else {
+                Ok(())
+            }
         }
         fn open_snippet_editor(&mut self, _: &str) {
             self.dialog_calls += 1;
@@ -1057,6 +1067,24 @@ mod tests {
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn hash_generator_dispatch_surfaces_presentation_failure() {
+        let mut host = FakeHost {
+            hash_generator_failure: true,
+            ..Default::default()
+        };
+        let invocation = invocation(Command::HashGenerator(
+            crate::commands::HashGeneratorCommand::Open,
+        ));
+
+        let error = CommandBus.dispatch(&invocation, &mut host).unwrap_err();
+
+        assert_eq!(host.hash_generator_opens, 1);
+        assert_eq!(error.domain, "hash_generator");
+        assert!(error.toast && error.refocus);
+        assert!(error.message.contains("Hash Generator presentation failed"));
     }
 
     #[test]

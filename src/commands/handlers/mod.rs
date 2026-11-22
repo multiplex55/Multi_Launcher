@@ -39,7 +39,7 @@ pub(crate) use coordinate_tool::handle_coordinate_tool;
 pub(crate) use data::handle_data;
 pub(crate) use dialog_crop::{handle_crop, handle_simple_dialog};
 pub(crate) use file_search_diff::{handle_diff, handle_file_search};
-pub(crate) use hash_generator::handle_hash_generator;
+pub use hash_generator::handle_hash_generator;
 pub(crate) use headless_gui::{
     handle_headless_gui, handle_headless_gui_with_history_query, success_outcome,
 };

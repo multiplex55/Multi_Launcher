@@ -399,9 +399,10 @@ impl DialogCommandHost for LauncherApp {
         Ok(())
     }
 
-    fn open_hash_generator_dialog(&mut self) {
+    fn open_hash_generator_dialog(&mut self) -> Result<(), String> {
         self.hash_generator_dialog.ensure_open();
         self.focus_panel(super::Panel::HashGeneratorDialog);
+        Ok(())
     }
 
     fn run_paste_sequence(

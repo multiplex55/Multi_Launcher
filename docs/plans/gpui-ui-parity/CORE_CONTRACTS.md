@@ -43,7 +43,7 @@ Compare meaningful outcomes with baseline fixtures or known intended behavior. A
 
 ### G02-A source map for the first extraction
 
-| Path | Current owner and observable behavior | Next boundary |
+| Path | Starting owner and observable behavior | Extraction boundary |
 | --- | --- | --- |
 | Process entry | `src/main.rs` handles the private brightness helper, canonical data-root mutex, recovery/preload, settings and logging before activating plugins, index or GUI services. eframe construction and root capture live in `spawn_gui`. | Keep helper, data identity and recovery common. Select one runtime. Extract a process service only when its alternate caller needs it. |
 | Typed routing | `commands::CommandBus` parses and dispatches typed invocations to handler-specific host traits. `commands::handlers::hash_generator` calls `DialogCommandHost::open_hash_generator_dialog` and leaves query, visibility and history unchanged. | Keep real command and handler ownership. Account for the Hash Generator host default, which currently can return without opening a tool. An installed GPUI route must deliver a concrete present/focus intent and use the real tool. |
@@ -56,11 +56,11 @@ G02-B starts with the two ownership changes in the Hash case: move semantic sess
 
 G02-B now owns the semantic state in `src/hash_generator/session.rs::HashSession`. `HashGeneratorDialogState` delegates those operations and retains window/popup state and accepted egui effects. The session exposes the clipboard snapshot's byte count for presentation. See the [G02-B review](reviews/G02-B-hash-session.md) and [validation log](VALIDATION_LOG.md) for the targeted egui and shared-engine evidence.
 
-### Next Hash wake and typed presentation seams
+### G02-C/D Hash wake and typed presentation seams
 
-- G02-C keeps one latest progress snapshot, one terminal slot and the retiring job in the shared session. Treat the existing callback as an event wake and deliver it after releasing the progress lock. Publish initial and rate-limited progress and terminal completion. Keep egui's existing job-only cadence until the new path also proves progress and worker-disconnect delivery. Bind a bounded, coalescing receiver to the selected GPUI runtime so a closed utility can still retire its old job. A full wake slot already represents pending work. The receiver reads the latest snapshot and drains the terminal result on the GPUI owner.
-- G02-D uses the existing `HashGeneratorCommand::Open` handler through a narrow, fallible presentation callback. Preserve the ordinary egui aggregate `CommandBus`, its ensure-and-focus behavior and the existing default command outcome on success. A missing capability or failed host open must report an explicit error. GPUI binds this same handler to one real Kit tool window backed by the shared session. An explicit Open Hash Generator control is a valid first route. The general `hash` query requires the real launcher/plugin path in G05.
-- Verify the wake with deterministic progress, terminal and stale-generation cases, and verify typed routing with existing command/Hash tests. In both adapters use the real `abc` SHA-256 vector, repeat open on the active tool without resetting work, and exercise close/reopen with an old worker. The remaining complete controls, all source modes, native file picker, clipboard and relevant hosting behavior are in the [G04 packet](goals/G04-design-system-and-pilot.md).
+- The shared Hash worker has one latest progress snapshot and one terminal slot. Initial and rate-limited progress wakes follow snapshot publication and run outside the progress lock. The final wake exposes the terminal result or sender disconnection. egui keeps its existing job-only cadence. GPUI awaits a coalesced one-bit signal with a weak root reference, and the root keeps polling the retained session when its utility has closed and a job is retiring.
+- The existing typed `HashGeneratorCommand::Open` handler uses a fallible presentation callback. The egui `CommandBus` preserves its panel ensure-and-focus and default success outcome. A host missing the window capability returns an error. GPUI uses the same handler for its keyboard and button entry and backs the Kit tool with the shared `HashSession`. G05 owns the general `hash` query and result activation path.
+- Native evidence includes the same `abc` SHA-256 result, retained reopen, stale digest invalidation after editing and a fresh session after close. See `G02-C-D-GPUI-HASH` in the [validation log](VALIDATION_LOG.md). Full source modes, comparison, clipboard, native file picker and presentation remain with the [G04 packet](goals/G04-design-system-and-pilot.md).
 
 ## Evidence required before final acceptance
 

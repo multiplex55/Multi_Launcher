@@ -252,10 +252,10 @@ impl HashSession {
         }
     }
 
-    pub fn calculate(&mut self, repaint: Arc<dyn Fn() + Send + Sync>) -> Result<(), String> {
+    pub fn calculate(&mut self, wake: Arc<dyn Fn() + Send + Sync>) -> Result<(), String> {
         let activity_center = self.activity_center.clone();
-        self.calculate_with_start(repaint, activity_center, |request, repaint, activity| {
-            HashJob::start_with_activity(request, repaint, activity)
+        self.calculate_with_start(wake, activity_center, |request, wake, activity| {
+            HashJob::start_with_activity(request, wake, activity)
         })
     }
 
