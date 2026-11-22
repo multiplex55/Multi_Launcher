@@ -1,0 +1,12 @@
+# Note Editor
+
+G12 owns `note-editor`, with runtime navigation ID `note-panel`. The [Quick Notes](quick-notes.md) row Open action, Jump Mode and the `note open <title or alias>` and `note new|add|create <title>` routes reach the full editor. The retained `NotePanel` owns per-note view and selection. The notes plugin owns authoritative persistence, slug identity and cache updates.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| NOTE-EDITOR-01 | Reuse the live editor for the same slug and preserve its dirty source and current mode. Allow independent notes, remembered Dock/Pop Out, valid inherited native ownership and retained draft/caret across moves. New supports an optional existing template. |
+| NOTE-EDITOR-02 | Preserve Markdown Edit/Render/Split and configured defaults and fallback. Render tasks, links and assets. Follow existing typed note links and show supported outline, details, tags, aliases and backlinks. |
+| NOTE-EDITOR-03 | Find, Previous/Next and scoped replacement use exact original source ranges in the supported views. Preserve selection, caret and scroll through accepted actions. |
+| NOTE-EDITOR-04 | Save uses the current note identity and backing path. Close follows save-on-close and dirty-decision policy. Save failures and external overwrite conflicts retain the draft. Export opens the shared [Export / Print](markdown-print.md) child for the exact note owner. |
+
+Select `open_note_panel_reuses_existing_panel_for_same_slug`, `native_notes_and_wiki_open_reuse_dirty_editor_with_inherited_popout`, `retained_note_edit_finishes_before_inherited_promotion`, `note_find_navigation_renders_original_ranges_in_all_view_modes`, `note_panel_native_jump_focuses_source_and_preserves_multiline_input`, `note_panel_auto_saves_on_close` and `note_panel_remains_closable_after_auto_save_failure_then_retry`. Native baseline uses an explicitly isolated `ML_NOTES_DIR` with a synthetic note and checks source hash after a read-only open and find. Native and GPUI evidence are pending.
