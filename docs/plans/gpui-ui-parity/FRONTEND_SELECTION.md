@@ -65,6 +65,10 @@ Use focused Settings host action, `gui_worker_` and `gpui_restart` cases. Native
 
 #### First idle egui restart checkpoint
 
+Split the implementation into two dependent source checkpoints. C2a first preserves the actual `eframe::run_native` outcome through the existing `GuiWorker` completion and join boundary, including a separate panic outcome. Observe it after the current producer shutdown and settings drain without changing ordinary egui close or exit status. Type the existing relaunch target as `Frontend`, derive its selector and recovery command from the same value, and reuse the verified captured executable, original working directory and guard-release spawn path with `Frontend::Egui`. Select binary Nextest `test(gui_worker_) | test(gpui_restart::tests)`, including injected lock reacquisition and exactly one spawn for each target. C2a provides live worker and forward relaunch correctness. The actual Settings route and reverse native evidence follow in C2b.
+
+C2b implements the following idle admission and retirement contract. Add checked persistence outcomes for the final Settings writer and close-preference drain where they are currently unavailable.
+
 Reconcile the preceding boundaries with the current `aeb726d5a` source. Use a dedicated Settings-owned confirmation and defer preflight until both `SettingsWindowHost` and `SettingsEditor` are restored to `LauncherApp`. Validate saved projection, current plugin drafts and invalid raw input, pending settings saves and retained document/live-work owners. An owner without a current idle receipt leaves restart unavailable with an actionable reason.
 
 Once confirmed, use one reversible prepare/ack through `GuiStartupServices` and the existing wake. Main processes preparation before further route dispatch, gates current hotkey/radial/session transitions and freezes MkMacro through the existing `SharedOperationGuard`. The GUI rechecks its current state after the ack. Denial or loss of the exact owner restores admission and egui interaction before any effective close.
