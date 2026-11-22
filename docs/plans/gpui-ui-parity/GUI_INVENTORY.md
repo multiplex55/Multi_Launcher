@@ -82,6 +82,64 @@ Assign each real GUI/independent child an owner goal; modes may share a parent r
 | CAND-074 | Mouse settings and shared mouse-form host | G22 | [src/gui/mouse_settings_dialog.rs](https://github.com/multiplex55/Multi_Launcher/blob/f7bc610a86bcad1c14b69dce65b1d804df1b7934/src/gui/mouse_settings_dialog.rs); [src/gui/mouse_form_host.rs](https://github.com/multiplex55/Multi_Launcher/blob/f7bc610a86bcad1c14b69dce65b1d804df1b7934/src/gui/mouse_form_host.rs) |
 
 
+## Execution discovery
+
+These IDs have source routes on the execution baseline. Counts remain provisional. Runtime confirmation is pending across these rows. A mode or inline decision shares its parent ID when it uses the same surface and lifetime.
+
+| Owner | Stable surface IDs | Routes, modes and dependencies |
+| --- | --- | --- |
+| G04 | [`hash-generator`](gui/hash-generator.md) | Typed action from `hash`, and path handoffs from File Search and Downloads Triage. Docked and independent presentation via the common utility host. |
+| G05 | `launcher`, `launcher-result-context-menu`, `universal-action-sheet`, `quick-help`, `command-help`, `jump-mode-overlay` | Root list/grid, result context menu and sheet use `gui/render.rs` and `gui/action_sheet.rs`. `help_window.rs` has separate help entry points. `gui/jump_mode/ui.rs` has 60 named route kinds and registers popup and modal ownership. |
+| G06 | `settings-main`, `plugin-editor`, `theme-settings`, `actions-editor`, `add-action`, `add-bookmark`, `alias-editor`, `bookmark-alias-editor`, `tempfile-alias-editor`, `favorites-editor`, `shell-command-editor`, `data-recovery`, `data-recovery-confirmation`, `plugin-settings-dynamic-library` | `settings_editor/catalog.rs::MainSettingsSection::ALL` defines eight main sections. The catalog tracks conditional controls and plugin origin/epoch. `settings_editor/render.rs` invokes plugin callbacks in both rendering paths. Data Recovery owns separate revision-bound confirmation. Dynamic plugin controls depend on the available plugin binaries and their capabilities. |
+| G07 | `file-search`, `file-preview` | Filename/content and global/directory modes, filters, diagnostics, nested result actions, native directory/ripgrep/export pickers in `gui/file_search_dialog*`. `OpenPreview` in results uses its own viewport under File Search ownership. |
+| G08 | `diff`, `diff-comparison-rules`, `diff-folder-rules`, `diff-text-input`, `diff-folder-operation-preview`, `diff-unsaved-comparison` | Text/binary/folder and nested drill-down workspaces. `gui/diff_dialog/child_hosts.rs` owns rule and input forms. Preview, export and dirty decisions preserve the comparison/session identity. |
+| G09 | `batch-rename`, `batch-rename-confirm`, `batch-rename-undo-confirm`, `search-replace`, `search-replace-confirm` | `gui/batch_rename_dialog.rs`, `gui/search_replace_dialog.rs` and jump owners route transactional confirmation. Recovery variants belong to the Search & Replace confirmation. |
+| G10 | `zip-extractor`, `duplicate-finder`, `folder-size`, `file-lock` | Specialized common-host adapters. ZIP extract/create, Folder Size table/treemap, repeated file actions and operating-system lock queries. |
+| G11 | `file-operations-center`, `downloads-triage`, `explorer-tabs`, `explorer-tabs-saved-folders` | Copy/move/duplicate, review/conflicts, job queue/history/recovery. Triage recycles with a decision and hands selected paths to tools. Explorer Tabs picker and dirty decisions carry editor/session identity. |
+| G12 | `quick-notes`, `note-editor`, `note-graph`, `unused-note-assets`, `note-templates`, `note-template-delete`, `note-custom-table-builder`, `note-insert-link`, `note-link-new`, `note-close-decision`, `note-save-conflict`, `note-plain-link-conversion`, `markdown-studio`, `markdown-print` | Note and Markdown editor/preview/split; find/replace, outline/backlinks and owned form children. `note_form_dialog.rs` has separate form specifications. `note_find_preview.rs` supports the editor. Markdown Studio hands off to Diagram Studio. Shared export/print owns native printer chooser. |
+| G13 | `clipboard-history`, `clipboard-modify`, `snippets`, `snippet-prompt`, `create-tempfile` | Clipboard Modify tabs and pending source/overwrite/mutation decisions preserve authority and draft. Snippet prompt supports execute, preview and Paste Sequence preflight, inline companion or standalone root. |
+| G14 | `json-utility`, `xml-toolkit`, `xml-toolkit-overwrite`, `regex-tester` | JSON text/tree; XML source/tree/XPath/validation/output and native XML/schema pickers. Regex sections span matches, analysis, reference, presets/history, substitution, clipboard and test cases. |
+| G15 | `calculation-pad`, `calculation-pad-reference`, `programmer-inspector`, `calculation-pad-dependencies`, `calculation-pad-charts`, `calculation-pad-sensitivity` | Retained Pad and independently hosted companions. Save-as, transition, chooser, conflict and rename are Pad states. |
+| G16 | `table-utility`, `date-time-studio`, `convert`, `password-generator` | Table export overwrite review. Date/Time between/add-subtract/time-zone/schedule and calendar/zone choosers. Numeric/physical conversion. Password copy keeps generation/revision and secret accessibility policy. |
+| G17 | `diagram-studio`, `diagram-viewer` | Mermaid and Visual modes, source/preview/split, inspectors, export/import and dirty review. Viewer is owner-scoped and has a separate viewport. |
+| G18 | `screenshot-countdown`, `screenshot-editor`, `screenshot-region-selection`, `image-crop-editor`, `image-comparison`, `image-viewer`, `screen-color-picker`, `qr-generator` | Native countdown and cancel, capture editor, crop overwrite, A/B/wipe/difference, per-file image panel. Region selection invokes Windows Snipping Tool via `src/actions/screenshot.rs`. The native color overlay is in `src/color_pick/native.rs`. |
+| G19 | `mkmacro`, `mkmacro-window-picker`, `mkmacro-launcher-picker`, `mkmacro-reference-crop`, `mkmacro-action-catalog`, `mkmacro-action-editor`, `mkmacro-step-search`, `mkmacro-parameter-prompt`, `mkmacro-recording-annotation`, `mkmacro-recording-review`, `mkmacro-package-import`, `mkmacro-package-export`, `mkmacro-template-save`, `mkmacro-templates`, `mkmacro-help`, `legacy-macros`, `screen-recorder-setup`, `screen-recorder-controller` | Child routes in `gui/mkmacro_dialog/mod.rs` and `package_ui.rs`. `recording_dialog.rs` has detached controller paths. Visual overlay windows distinguish interaction shields and passive badges. |
+| G20 | `radial-runtime`, `radial-designer`, `radial-cell-properties`, `radial-add-to-menu`, `radial-unsaved-changes`, `radial-delete-impact`, `radial-delete-ring`, `radial-resolve-populated-cells`, `radial-preview`, `radial-skin-editor`, `radial-asset-picker`, `radial-import-export` | Native runtime and modal/editor constructions in `gui/radial_editor`. Preserve ring/session identity and source handoffs from launcher. |
+| G21 | `paste-sequences`, `mouse-gestures`, `mouse-gesture-bind-action`, `mouse-gesture-settings`, `mouse-gesture-window-picker`, `mouse-gesture-hint-overlay`, `hot-folder-manager`, `hot-folder-target-picker` | Paste Sequence preflight/preview and run status. Window picker has two distinct parent sessions. Hot Folder chooser is embedded in manager; existing/new rules, delete/history and quarantine are manager states. |
+| G22 | `pinboard`, `image-pin`, `pin-capture-feedback`, `screen-draw-toolbar`, `screen-draw-canvas`, `ocr-selection`, `ocr-results`, `coordinate-overlay`, `mouse-settings` | Per-pin and feedback window creation in `gui/pinboard_windows.rs`. Screen Draw recovery is a flow owned by the toolbar/canvas. The native coordinate runtime and shared mouse form expose separate controls. |
+| G23 | `dashboard`, `dashboard-editor`, `dashboard-remove-slot-confirmation`, `calendar`, `calendar-event-editor`, `calendar-event-details`, `todo-list`, `todo-view`, `timer-manager`, `timer-completion`, `notification-inbox`, `activity-center`, `toast-history` | Dashboard registry expands below. Calendar child hosts and timer completion own distinct lifetimes. Timer completion depends on `completion_dialog` capability. |
+| G24 | `multi-manager`, `multi-manager-settings`, `hotkey-directory`, `volume`, `brightness`, `cpu-list` | MultiManager system menu and settings routes differ. Hotkey Directory cross-opens typed settings/macro/sequence/gesture targets with owner/epoch. Inspect remaining plugin result controls and window/layout commands in G24 before acceptance. |
+
+### Built-in plugin settings
+
+The two settings render paths call 17 production overrides. Register `plugin-settings-<key>` per item. G06 owns origin/epoch, edits and persistence in the common host. Feature owners own the controls and child interactions.
+
+| Owner | Keys |
+| --- | --- |
+| G05 | `history`, `omni-search` |
+| G07 | `file-search` |
+| G08 | `diff` |
+| G12 | `note` |
+| G13 | `clipboard`, `clipboard-modify` |
+| G15 | `calculator` |
+| G18 | `screenshot`, `color-picker` |
+| G19 | `mkmacro` |
+| G21 | `mouse-gestures` |
+| G23 | `stopwatch` |
+| G24 | `browser-tabs`, `network`, `shell`, `virtual-desktop` |
+
+`PluginManager::load_dir` in `src/plugin.rs` also loads native libraries exposing `create_plugin -> Box<dyn Plugin>`. A library can supply its own egui callback. G06 must inspect supported shipped libraries, preserve the existing loader/ABI in egui, and establish a GPUI capability contract for independently authored libraries. Arbitrary legacy callback content is still an unresolved coverage dependency.
+
+### Dashboard widget registrations
+
+G23 owns one `dashboard-widget-<key>` for each `src/dashboard/widgets/registry.rs::register_defaults` entry. The following 36 have settings callbacks dispatched by the dashboard editor: `weather_site`, `plugin_home`, `command_history`, `recent_commands`, `frequent_commands`, `gesture_cheat_sheet`, `gesture_recent`, `todo`, `layouts`, `recent_notes`, `pinned_commands`, `pinned_query_results`, `query_list`, `timers`, `clipboard_snippets`, `clipboard_recent`, `browser_tabs`, `calendar`, `processes`, `windows`, `windows_overview`, `system`, `system_controls`, `system_status`, `now_playing`, `snippets_favorites`, `scratchpad`, `notes_recent`, `notes_tags`, `notes_graph`, `todo_focus`, `quick_tools`, `recycle_bin`, `tempfiles`, `volume`, and `stopwatch`. `diagnostics`, `context_links`, and `gesture_health` have render callbacks without registry settings callbacks.
+
+### Source leads requiring disposition
+
+- Trace `unicode-inspector` from the persisted utility key and pure module before counting it. The source search found no production open route.
+- Reconcile standalone native construction and optional Cargo gates. The launcher invocation message window is infrastructure; passive tooltips and capture feedback have presentation criteria. Developer smoke/performance binaries are verification targets.
+- Reconcile all command-only plugin result controls, dynamic libraries and each per-feature inline menu/confirmation before declaring discovery complete. Cross-check the production registrations in `gui/render.rs` and `gui/mod.rs` against `NavigationDialogKind::ALL` and `STABLE_TOOL_KEYS`.
+
 ## Discovery completion checklist
 
 Inspect window creation, tool/Panel dispatch, visibility, viewport use, settings and widget factories, custom drawing, command routes, plugin registries, context menus, confirmations, capture/native surfaces and configuration gates. Walk actual reachable routes with controlled fixtures.

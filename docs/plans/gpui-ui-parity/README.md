@@ -2,9 +2,9 @@
 
 ## Current state
 
-**Preparation complete; implementation not started.** Planning reference: master `f7bc610a86bcad1c14b69dce65b1d804df1b7934`. No migration branch, build, test run, or accepted GPUI surface is claimed by this package.
+Execution is on `feat/gpui-ui-parity`. The G00-A baseline checkpoint is `3e67f7396f127d6dcb7bec432e9bb1684e9e6ae3`, pushed to `origin/feat/gpui-ui-parity`. The planning reference and execution parent are recorded separately in [Source baseline](SOURCE_BASELINE.md).
 
-First execution action: follow the [Kickstart](../../CODEX_KICKSTART_GPUI_UI_PARITY.md) and perform [G00-A](goals/G00-baseline-and-inventory.md). Refresh master and preserve user work before creating the dedicated branch.
+Current work is G00 source discovery and G01 foundation feasibility. See [Checkpoints](CHECKPOINTS.md) for the continuation and [Progress](PROGRESS.md) for delivered coverage.
 
 ## Contracts and work
 

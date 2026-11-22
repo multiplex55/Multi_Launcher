@@ -31,3 +31,9 @@ Use one criterion per meaningful behavior/control group or supported window mode
 - Final artifact and performance evidence.
 
 A GUI cannot be accepted while a mandatory row is merely Implemented or Validation pending. A user-approved exception is a separately reported scope change, not a passing row.
+
+## Source-confirmed pilot
+
+| GUI | Criteria | Owner | Stage | Remaining evidence |
+| --- | --- | --- | --- | --- |
+| [Hash Generator](gui/hash-generator.md) | HASH-01–HASH-08 | G04 | Specified | Baseline native smoke, both adapter paths, clipboard/file operations, lifecycle, visual and accessibility checks |

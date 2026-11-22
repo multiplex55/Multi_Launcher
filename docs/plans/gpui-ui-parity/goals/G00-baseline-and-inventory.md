@@ -1,6 +1,6 @@
 # G00 — Establish source, scope and durable execution records
 
-**Status: Not started.** This is an executable work packet, not a record of implementation or verification.
+**Status: In implementation.** G00-A is complete. See [Checkpoints](../CHECKPOINTS.md) for its receipt and the current work.
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 

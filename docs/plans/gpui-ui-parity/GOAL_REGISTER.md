@@ -7,7 +7,7 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | Goal | Outcome and packet | Dependencies | Current stage |
 | --- | --- | --- | --- |
 | G00 | [Source baseline, complete discovery, and execution records](goals/G00-baseline-and-inventory.md) | None | In implementation |
-| G01 | [Same-executable GPUI Kit and Windows feasibility](goals/G01-windows-and-kit-feasibility.md) | G00 initial source/branch checkpoint | Not started |
+| G01 | [Same-executable GPUI Kit and Windows feasibility](goals/G01-windows-and-kit-feasibility.md) | G00 initial source/branch checkpoint | In implementation |
 | G02 | [Shared commands, state, services, and adapters](goals/G02-shared-engine-boundaries.md) | G00; use G01 findings | Not started |
 | G03 | [Frontend selection, instance ownership, restart, and data identity](goals/G03-frontend-selection-and-lifecycle.md) | G01, G02 relevant seams | Not started |
 | G04 | [GPUI design system and complete Hash Generator pilot](goals/G04-design-system-and-pilot.md) | G01–G03 relevant contracts | Not started |

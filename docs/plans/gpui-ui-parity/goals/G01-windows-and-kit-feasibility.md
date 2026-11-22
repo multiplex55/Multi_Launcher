@@ -1,6 +1,6 @@
 # G01 — Prove the actual Windows frontend foundation
 
-**Status: Not started.** This is an executable work packet, not a record of implementation or verification.
+**Status: In implementation.** G01-A is active. See the [validation log](../VALIDATION_LOG.md) for completed evidence.
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
