@@ -182,3 +182,33 @@ Source checked at `98bbc0ccc22a297e8eafae7e844c2f7e45854856`. Stable GUI IDs lin
 | `toast-log` | `toast-history` |
 | `todos` | `todo-list` |
 | `unicode-inspector` | Reserved. No production GUI route. |
+
+## Built-in plugin routes (91 Windows registrations)
+
+`src/plugin.rs::PluginManager::reload_from_dirs` registers the following providers on Windows. G05 owns the common launcher projection and activation of result rows. The feature goal in the table owns any specialized settings, target view, operation or external handoff. A provider can contribute a result row without opening a standalone GUI. The [inventory](GUI_INVENTORY.md) identifies each dedicated surface and settings callback.
+
+| Owner | Registered provider types | Disposition |
+| --- | --- | --- |
+| G04 | `HashGeneratorPlugin` | Hash Generator. |
+| G05 | `WebSearchPlugin`, `RunescapeSearchPlugin`, `YoutubePlugin`, `RedditPlugin`, `WikipediaPlugin`, `OmniSearchPlugin`, `HistoryPlugin`, `AsciiArtPlugin`, `EmojiPlugin`, `TextCasePlugin`, `LoremPlugin`, `HelpPlugin` | Root result rows, generated text, web handoffs, history and help. |
+| G06 | `BookmarksPlugin`, `FoldersPlugin`, `FavPlugin`, `MissingPlugin`, `DataPlugin`, `SettingsPlugin` | Settings, authoring, saved-target repair and recovery routes. |
+| G07 | `FileSearchPlugin` | File Search and preview route. |
+| G08 | `DiffPlugin` | Diff modes and child routes. |
+| G09 | `BatchRenamePlugin`, `SearchReplacePlugin` | Rename and replacement workspaces. |
+| G10 | `ZipExtractorPlugin`, `DuplicateFinderPlugin`, `FolderSizePlugin`, `FileLockPlugin` | Archive, scan and lock tools. |
+| G11 | `ExplorerTabsPlugin`, `FileOperationsPlugin`, `DownloadsTriagePlugin` | Explorer workflows and Windows-only transfer/triage registrations. |
+| G12 | `NotePlugin`, `MarkdownStudioPlugin`, `LinkPlugin` | Notes, Markdown and link resolution. Todo destinations remain G23. |
+| G13 | `ClipboardPlugin`, `ClipboardModifyPlugin`, `SnippetsPlugin`, `TempfilePlugin` | Clipboard, snippets and temporary-file content. |
+| G14 | `JsonUtilityPlugin`, `XmlToolkitPlugin`, `RegexTesterPlugin` | Structured-text workspaces. |
+| G15 | `CalculatorPlugin`, `DropCalcPlugin` | Inline calculation behavior and the Calculation Pad. |
+| G16 | `UnitConvertPlugin`, `BaseConvertPlugin`, `TimestampPlugin`, `DateArithmeticPlugin`, `RandomPlugin`, `ConvertPanelPlugin`, `TableUtilityPlugin`, `CsvPlugin` | Inline and hosted conversion, dates, table profiles and password generation. |
+| G17 | `DiagramStudioPlugin` | Diagram Studio and viewer. |
+| G18 | `ScreenshotPlugin`, `CropPlugin`, `ImageComparePlugin`, `QrPlugin`, `ColorPickerPlugin` | Capture, image tools, QR and color. |
+| G19 | `MacrosPlugin`, `MkMacroPlugin`, `RecordingPlugin` | Legacy macros, MkMacro and recorder. |
+| G20 | `RadialPlugin` | Radial run and authoring handoffs. |
+| G21 | `PasteSequencePlugin`, `MouseGesturesPlugin`, `HotFolderPlugin` | Editor routes, runtime states and underlying automation. |
+| G22 | `PinboardPlugin`, `ScreenDrawPlugin`, `MousePlugin`, `OcrPlugin` | Native capture/control tools, Mouse Settings and overlays. |
+| G23 | `TodoPlugin`, `CalendarPlugin`, `NotificationInboxPlugin`, `ActivityPlugin`, `TimerPlugin`, `StopwatchPlugin`, `WeatherPlugin` | Organizers, status surfaces and dashboard integrations. |
+| G24 | `SystemPlugin`, `ProcessesPlugin`, `SysInfoPlugin`, `NetworkPlugin`, `ShellPlugin`, `KeysPlugin`, `MultiManagerPlugin`, `RecyclePlugin`, `MediaPlugin`, `IpPlugin`, `VolumePlugin`, `BrightnessPlugin`, `TaskManagerPlugin`, `WindowsPlugin`, `VirtualDesktopPlugin`, `BrowserTabsPlugin`, `LayoutPlugin` | System results, native controls and established external handoffs. |
+
+The same reload path uses `load_dir` for configured directories. G06 owns supported dynamic plugin settings capability and lifetime. Preserve built-in, registered and dynamic origin identities. The runtime enumeration must be repeated against an actual supported dynamic library before accepting that route.
