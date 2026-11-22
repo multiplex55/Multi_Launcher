@@ -163,8 +163,14 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Dashboard Editor](gui/dashboard-editor.md) | DASHBOARD-EDITOR-01–DASHBOARD-EDITOR-02 | G23 | Specified | Source layout, saved draft ownership and rehost mapped. Native and GPUI remain pending. |
 | [Dashboard Remove Slot](gui/dashboard-remove-slot-confirmation.md) | DASHBOARD-REMOVE-01 | G23 | Specified | Source exact current slot confirmation mapped. Native and GPUI remain pending. |
 | [Dashboard Reset Widget](gui/dashboard-reset-widget-confirmation.md) | DASHBOARD-RESET-01 | G23 | Specified | Source selected descriptor defaults and separate confirmation mapped. Native and GPUI remain pending. |
-| [Calendar](gui/calendar.md) | CALENDAR-01–CALENDAR-02 | G23 | Specified | Source view state, agenda and retained children mapped. Native and GPUI remain pending. |
-| [Calendar Event Editor](gui/calendar-event-editor.md) | CALENDAR-EDITOR-01–CALENDAR-EDITOR-02 | G23 | Specified | Source draft, exact occurrence and recurrence publication mapped. Native and GPUI remain pending. |
-| [Calendar Event Details](gui/calendar-event-details.md) | CALENDAR-DETAILS-01–CALENDAR-DETAILS-02 | G23 | Specified | Source retained occurrence and current mutation receipts mapped. Native and GPUI remain pending. |
+| [Calendar](gui/calendar.md) | CALENDAR-01–CALENDAR-02 | G23 | Specified | Native Day and exact agenda handoff passed. Other navigation and GPUI remain pending. |
+| [Calendar Event Editor](gui/calendar-event-editor.md) | CALENDAR-EDITOR-01–CALENDAR-EDITOR-02 | G23 | Specified | Native exact draft, title edit and Cancel passed. Save and GPUI remain pending. |
+| [Calendar Event Details](gui/calendar-event-details.md) | CALENDAR-DETAILS-01–CALENDAR-DETAILS-02 | G23 | Specified | Native exact occurrence and Edit handoff passed. Mutation and GPUI remain pending. |
 | [Todo List](gui/todo-list.md) | TODO-LIST-01–TODO-LIST-02 | G23 | Specified | Source list, owned drafts and clear confirmation mapped. Native and GPUI remain pending. |
-| [View Todos](gui/todo-view.md) | TODO-VIEW-01–TODO-VIEW-02 | G23 | Specified | Source stable target, optimistic edit and note handoff mapped. Native and GPUI remain pending. |
+| [View Todos](gui/todo-view.md) | TODO-VIEW-01–TODO-VIEW-02 | G23 | Specified | Native synthetic row and filter verified. Edit, handoffs and GPUI remain pending. |
+| [Timer and Alarm Authoring](gui/timer-manager.md) | TIMER-FORM-01–TIMER-FORM-02 | G23 | Specified | Source mode drafts, accepted Start and rehost mapped. Native and GPUI remain pending. |
+| [Timer Completion](gui/timer-completion.md) | TIMER-FINISHED-01 | G23 | Specified | Source exact completion, capability and local fact mapped. Native and GPUI remain pending. |
+| [Notification Inbox](gui/notification-inbox.md) | INBOX-01–INBOX-02 | G23 | Specified | Source local facts, retained host and exact Windows consent mapped. Native and GPUI remain pending. |
+| [Activity Center](gui/activity-center.md) | ACTIVITY-01–ACTIVITY-02 | G23 | Specified | Source refresh, diagnostics and operation handoff mapped. Native and GPUI remain pending. |
+| [Toast History](gui/toast-history.md) | TOAST-HISTORY-01 | G23 | Specified | Source read-only last-20 viewer and explicit refresh mapped. Native and GPUI remain pending. |
+| [Stopwatch Plugin Settings](gui/stopwatch.md) | STOPWATCH-SETTINGS-01 | G23 | Specified | Source built-in callback, live application and persistence mapped. Native and GPUI remain pending. |
