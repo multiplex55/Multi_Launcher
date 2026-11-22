@@ -32,7 +32,7 @@ Use one criterion per meaningful behavior/control group or supported window mode
 
 A GUI cannot be accepted while a mandatory row is merely Implemented or Validation pending. A user-approved exception is a separately reported scope change, not a passing row.
 
-## Source-confirmed pilot
+## Source-backed GUI criteria
 
 | GUI | Criteria | Owner | Stage | Remaining evidence |
 | --- | --- | --- | --- | --- |

@@ -48,6 +48,11 @@ Do not require a finished radial designer/Screen Draw studio now. Prove the shar
 - Use the existing `HotkeyTrigger::prepare_listener` and wake channel. Keep receives and bounded native foreground retries off the GUI thread. Validate the current request and external foreground identity before restoring focus. Shut down owned listeners and pending wake work on exit.
 - GPUI Windows Popup uses toolwindow/topmost styles, and `focus: false` at creation does not add persistent no-activate behavior. Use the existing native Coordinate Tool HUD adapter for a passive/topmost/pass-through and DPI probe. Keep its enable/shutdown work off the GUI thread and record actual native behavior.
 
+#### Current implementation boundaries
+
+- **G01-C1:** Bind one existing global hotkey listener to the retained root on process main. Accept a wake once, keep blockable I/O off the GUI thread, validate current request and HWND identity, and preserve the retained query on hide/show. Open a separately titled Kit utility. Verify owned-root close and listener shutdown, including when a utility is open.
+- **G01-C2:** Exercise the existing Coordinate Tool HUD in the selected GPUI session. Preserve its passive and topmost native styles, validate monitor/DPI conversion and test cleanup. Record the actual display configuration and any unavailable evidence. The probe covers native capability only.
+
 ## G01-D — Production packaging and fallback foundation
 
 Build through ordinary cargo build --release at this meaningful dependency/hosting boundary. Verify same-artifact launches from the normal distribution layout and a non-source working directory where supported, preserving canonical data rules. Inspect fonts/icons/resources; do not infer Windows executable identity from a platform-generic icon property.

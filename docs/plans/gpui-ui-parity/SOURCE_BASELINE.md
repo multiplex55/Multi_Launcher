@@ -57,7 +57,7 @@ No missing source response is evidence that a file has no behavior. No historica
 | Initial Git state | `master` tracked `origin/master` at the fetched SHA. Index, worktree and untracked list were clean before branch creation. |
 | Delta from planning SHA | One commit, `98bbc0cc` (`docs`), with 76 paths under `docs/`. No changes to startup, commands, core, UI, persistence, Cargo, tests or agent instructions. The goal package is already tracked. |
 | Windows environment | Build 19045, x64 MSVC Rust host, Windows SDK 10.0.26100.0 installed, Visual Studio VC tools installation 17.14.37301.10 detected |
-| Tool versions | Rust 1.100.0, Cargo 1.100.0, Nextest 0.9.135, PowerShell 7.6.9, Git 2.33.0.windows.2 |
+| Tool versions | Rust 1.100.0, Cargo 1.100.0, Nextest 0.9.135, CMake 3.18.2, PowerShell 7.6.9, Git 2.33.0.windows.2 |
 | Build contract | `multi_launcher` ordinary release profile, no declared default features. GPUI dependency and link feasibility are pending G01. |
 | Instructions | Root AGENTS and `.codex/config.toml` with configured planner and reviewer (GPT-6.2 Sol high) and implementer (GPT-6 Luna max). No nested AGENTS files found. |
 | Nextest | Windows app-package wrapper verified in source with a 4 MiB minimum and target runner inside wrapper. App fixtures disable Paste Sequence Next and Cancel shortcuts before construction. |

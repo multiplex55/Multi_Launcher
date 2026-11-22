@@ -38,4 +38,8 @@ The foundation checkpoint is `6b7f623a0` on `feat/gpui-ui-parity`. Its ordinary 
 
 The existing selector entered the selected runtime in all three Windows launch forms. A retained Kit input received native Unicode text and an editing key, with focus and the revised value observed through UI Automation. The owned GPUI process closed normally. See [G01-B-EDITABLE-STARTUP](VALIDATION_LOG.md#execution-receipts) for the linked artifact identity and limits. The representative egui workflow from G00-C is also recorded there.
 
+G01-B is `a2c90c2c3` on `feat/gpui-ui-parity`, pushed successfully. The next source work starts from this checkpoint.
+
 Continue G01-C with the existing hotkey and foreground service boundaries. Prove repeated hide/show, an independent utility and native passive overlay behavior with this binary lineage. Display capture is pending. G01-D release build and fallback after a controlled GPUI startup failure remain required. No production GPUI GUI is accepted.
+
+The plugin-route and Launcher specification checkpoint `ffa8dadea` is pushed. G01-C1 is the active source slice. The implementer owns the GPUI runtime source and its Cargo verification. The parent owns the desktop fixture, Git and the ledger. Use the [G01 packet](goals/G01-windows-and-kit-feasibility.md) and resume from its latest source checkpoint. The [shared Hash session map](CORE_CONTRACTS.md) and [selector lifecycle handoff](FRONTEND_SELECTION.md) describe queued G02/G03 work.

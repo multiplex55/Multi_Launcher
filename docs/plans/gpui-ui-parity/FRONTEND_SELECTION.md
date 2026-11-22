@@ -1,6 +1,6 @@
 # Frontend selection and restart contract
 
-Status: specified product policy; implementation and validation not started.
+The basic selector and both launch paths have Windows debug evidence from G01-A/B. G03 still owns lock-conflict feedback, remembered chooser behavior and controlled restart. See [Validation log](VALIDATION_LOG.md).
 
 ## Controlling precedence
 
@@ -34,6 +34,8 @@ Preferred minimum: a clear actionable existing-instance response identifying tha
 
 Specify the same-frontend invocation behavior consistently with the baseline. Distinguish a data-lock conflict from a frontend initialization error. For an unresponsive owner, provide recovery instructions that do not require its UI. Automatic termination or arbitrary crash recovery is not required.
 
+The G03-B implementation boundary is `main`'s canonical `SingleInstanceGuard::acquire` match. Preserve selector explicitness. Bare duplicates follow the existing silent exit. An explicit request gets a native response naming the requested selector and telling the user to close the current owner, then rerun from the same working directory. The current mutex identifies the data directory and does not report the owning frontend. The response should work for either requested frontend without changing the mutex namespace or adding an IPC protocol.
+
 ## Safe switch sequence
 
 1. Validate the requested frontend before disrupting the running session.
@@ -47,8 +49,12 @@ Specify the same-frontend invocation behavior consistently with the baseline. Di
 
 Do not imply jobs continue through restart unless the existing job format/engine actually supports durable resumption.
 
+The first G03-C checkpoint can exercise the GPUI foundation to egui. Capture the executable and original working directory when planning the switch. After explicit confirmation, pass a one-shot restart disposition from the selected runtime to `main`. Retire owned services and writers, report teardown failures, release the canonical data guard, then spawn the same executable with only the requested selector. A canceled confirmation or failed teardown leaves no child launch. A failed spawn gives an actionable explicit-egui recovery command.
+
+The egui switch needs authoritative editor and job decisions. The existing ordinary exit guard handles some runtime teardown and cancellations. It does not provide a save/discard decision for user documents. `ActivityCenter` snapshots cannot stand in for job admission and retirement. Wire a settings action through its existing owner and accepted actions. `SettingsWindowHost::complete` temporarily takes the editor out of `LauncherApp`, so draft preflight must inspect the actual editor or run after it is restored. Preserve pending writes and prevent a new admission between the accepted switch and shutdown. Keep two-way switching and each unresolved owner visible in G03 and its feature goal until verified.
+
 ## Acceptance scenarios
 
 Selection tests cover every table row; native scenarios cover the same release artifact with each frontend, clean shutdown/reopen, saved-GPUI plus bare launch selecting egui, current GPUI owner plus explicit egui, and manual fallback after GPUI initialization failure.
 
-Use an isolated instance/data context. Record binary path/hash, commit, actual command and outcome. The default should be checked again at final release closure. No acceptance evidence exists yet.
+Use an isolated instance/data context. Record binary path/hash, commit, actual command and outcome. The default should be checked again at final release closure. G01 startup receipts cover the current no-preference selector paths. G03-specific acceptance remains pending.

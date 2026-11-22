@@ -41,6 +41,19 @@ For each extraction, record the original owner/callers, new shared owner, public
 
 Compare meaningful outcomes with baseline fixtures or known intended behavior. Agreement between two rewritten adapters alone cannot detect a shared core regression.
 
+### G02-A source map for the first extraction
+
+| Path | Current owner and observable behavior | Next boundary |
+| --- | --- | --- |
+| Process entry | `src/main.rs` handles the private brightness helper, canonical data-root mutex, recovery/preload, settings and logging before activating plugins, index or GUI services. eframe construction and root capture live in `spawn_gui`. | Keep helper, data identity and recovery common. Select one runtime. Extract a process service only when its alternate caller needs it. |
+| Typed routing | `commands::CommandBus` parses and dispatches typed invocations to handler-specific host traits. `commands::handlers::hash_generator` calls `DialogCommandHost::open_hash_generator_dialog` and leaves query, visibility and history unchanged. | Keep real command and handler ownership. Account for the Hash Generator host default, which currently can return without opening a tool. An installed GPUI route must deliver a concrete present/focus intent and use the real tool. |
+| Outcome consumption | `gui/command_host.rs::apply_command_outcome_with_root_policy_guarded` owns egui application of query updates, pending query, result invalidation/replacement, search, visibility revision, focus/restore/caret, activation, history, favorite log and toasts. | Preserve each field and the order of relevant state changes. Apply the same out-of-date visibility protection in the alternate frontend before sharing the broader path. |
+| Hash computation | `src/hash_generator.rs` owns request identity, algorithms, exact bytes, streaming file reads, validation, cancellation and progress. `HashGeneratorDialogState` still owns the source/session draft, active request generation, result publication, compare and clipboard feedback. | Move the semantic session to the existing hash domain owner and keep the egui adapter’s host intent and viewport concerns local. Both frontends consume the same session and job operations. |
+| Hash hosting | `HashGeneratorWindowHost` and `HashHostActions` use presentation generations and egui pass/viewport identities to accept actions. File Search and Downloads Triage provide typed paths. | Keep rehosting, modal focus, file picker parenting and stale host actions in the host adapter. A dock/popout switch retains the semantic session. End the session only on tool close or shutdown. |
+| Job publication | Hash worker wakes its caller from `HashJob`. The dialog keeps a retiring worker in the slot until the terminal event is polled, then publishes only for the matching request and generation. | Preserve one job slot and nonblocking retirement. Use framework-local wake on actual events. Closing a window cannot publish an old result into a replacement session. |
+
+G02-B starts with the two ownership changes in the Hash case: move semantic session state and operations, then migrate the egui adapter and directly affected tests. Verification covers the existing `hash_generator` library filter, including lifecycle, typed routing and file-origin behavior. See [Hash Generator](gui/hash-generator.md) for baseline criteria. GPUI path and native evidence remain G02-D/G04 work.
+
 ## Evidence required before final acceptance
 
 Both frontend paths invoke the same operations; no duplicate core implementation or default no-op route remains. GPUI can execute all required operations without constructing LauncherApp/egui runtime. egui can execute all its operations without constructing GPUI runtime. Data/save semantics agree. Service ownership, task cancellation and lifecycle have relevant focused/native evidence.

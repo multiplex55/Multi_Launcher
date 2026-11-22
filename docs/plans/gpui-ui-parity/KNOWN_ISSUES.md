@@ -13,3 +13,7 @@ No new application defect was reproduced by this planning task. The following ar
 | Prior accepted GUI evidence can become stale after shared changes | Every owner, G25/G26 | Selective revalidation with applicability record |
 
 During execution classify issues as confirmed baseline defect, introduced migration regression, parity gap, environment limitation or optional observation. Record evidence, affected criterion, severity, owner, next action and disposition. Do not call a failure “pre-existing” without provenance, or expand unrelated repairs into this program.
+
+## Observed validation limitation
+
+The Windows capture tool timed out when requesting imagery of the G01-A and G01-B GPUI windows. The same owned windows exposed UI Automation content. G01-B handled native keyboard input and retained focus and text. Preserve those receipts and keep visual evidence pending. Retry visual capture from the release candidate or another working display session. See [validation log](VALIDATION_LOG.md).
