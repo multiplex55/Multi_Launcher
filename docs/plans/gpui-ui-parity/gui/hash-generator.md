@@ -79,4 +79,6 @@ Target `utility_dialog_sizes_keep_docked_and_native_geometry_independent`, `nati
 
 ## Verification
 
+C5-C has verified native keyboard grip focus, preview, Escape, one-axis commit, immediate owner retirement, rehost and independent native geometry. The oversized Windows fixture confirmed passive viewport fit and a fully clamped no-op. The same profile reopened in egui with docked presentation and identical canonical settings bytes. See `G04-C5-C-KEYBOARD-AND-FIT`, `G04-C5-C-PASSIVE-OVERSIZED-FIT`, `G04-C5-C-FOCUSED` and `G04-C5-C-FINAL-WINDOWS`. Pointer gesture calculations and stale mounts are covered by focused tests. Actual pointer dispatch, measured egui docked extent, mixed DPI and screenshots remain open.
+
 Use the existing Hash Generator unit tests for exact byte vectors, request lifecycle and errors, and the typed dispatch and file-origin tests for the entry paths. Select the `multi_launcher` library target before the `hash_generator` filter. Compare both actual frontend adapters with synthetic text and a disposable file. Run a scoped native test with isolated clipboard data for snapshot/read/write feedback. Exercise mutation while a job is active, popout with hidden root, cancellation and reopen, and compare docked and narrow popout presentation, focus and accessible control names. Establish result and lifecycle parity before accepting any row.

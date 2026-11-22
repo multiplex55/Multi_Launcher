@@ -54,8 +54,8 @@ use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
 use multi_launcher::settings::{
-    NativeWindowGeometry, PreferredWindowSize, RememberedPresentation, UtilityDialogSizes,
-    UtilityPresentations, UtilityToolKey,
+    AppliedWindowSize, NativeWindowGeometry, PreferredWindowSize, RememberedPresentation,
+    UtilityDialogSizes, UtilityPresentations, UtilityToolKey,
 };
 use multi_launcher::utility_geometry_binding::{
     CheckedNativeWindow, NativeGeometryBinding, NativeGeometrySlot, NativeGeometryStamp,
@@ -71,6 +71,7 @@ gpui_kit::actions!([
     ToggleSecondaryWindow,
     ToggleCoordinateHudProbe,
     OpenHashGenerator,
+    FocusDockedHashResize,
     CalculateHash,
     DockHashGenerator,
     PopoutHashGenerator,
@@ -225,9 +226,13 @@ struct RootWindow {
     query: Entity<InputState>,
     native_window: Option<NativeWindow>,
     focus_handle: FocusHandle,
+    resize_focus_handle: FocusHandle,
+    root_scroll: ScrollHandle,
     utility_presentations: UtilityPresentationStore,
     utility_size_store: Arc<Mutex<UtilitySizeStore>>,
     utility_size_polling: Arc<AtomicBool>,
+    hash_docked_preferred_size: PreferredWindowSize,
+    hash_docked_resize: Arc<Mutex<Option<DockedHashResize>>>,
     hash_geometry_sequence: Arc<AtomicU64>,
     hash_tool_key: UtilityToolKey,
     hash_session: Arc<Mutex<HashSession>>,
@@ -295,6 +300,209 @@ enum BuiltHashMount {
 enum HashPresentationMode {
     Docked,
     Popout,
+}
+
+#[derive(Clone, Copy)]
+enum DockedHashAction {
+    Calculate,
+    Dock,
+    Popout,
+    Close,
+}
+
+const HASH_DOCK_FACTORY_SIZE: PreferredWindowSize = PreferredWindowSize {
+    width: 620.0,
+    height: 440.0,
+};
+const HASH_DOCK_MIN_WIDTH: f32 = 420.0;
+const HASH_DOCK_MIN_HEIGHT: f32 = 320.0;
+const HASH_DOCK_MAX_DIMENSION: f32 = 8192.0;
+const HASH_DOCK_RESIZE_HANDLE_SIZE: f32 = 26.0;
+const HASH_DOCK_KEYBOARD_RESIZE_STEP: f32 = 16.0;
+const HASH_ROOT_CONTROLS_WIDTH: f32 = 520.0;
+
+#[derive(Clone, Copy, Debug)]
+enum DockedHashResizeOrigin {
+    Pointer {
+        position: Point<Pixels>,
+        visible_size: AppliedWindowSize,
+    },
+    Keyboard,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DockedHashResize {
+    mount_generation: u64,
+    session_epoch: u64,
+    start_size: PreferredWindowSize,
+    available_at_start: AppliedWindowSize,
+    preview_size: PreferredWindowSize,
+    changed_width: bool,
+    changed_height: bool,
+    drag_started: bool,
+    origin: DockedHashResizeOrigin,
+}
+
+#[derive(Clone)]
+struct DockedHashResizePayload {
+    mount_generation: u64,
+    session_epoch: u64,
+    start_size: PreferredWindowSize,
+    preview_extent: Arc<Mutex<Option<DockedHashResize>>>,
+}
+
+impl DockedHashResizePayload {
+    fn mark_drag_started(&self) {
+        let mut preview = self
+            .preview_extent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(resize) = preview.as_mut().filter(|resize| {
+            resize.mount_generation == self.mount_generation
+                && resize.session_epoch == self.session_epoch
+                && resize.start_size == self.start_size
+                && matches!(resize.origin, DockedHashResizeOrigin::Pointer { .. })
+        }) {
+            resize.drag_started = true;
+        }
+    }
+}
+
+fn docked_hash_available_size(
+    viewport_width: f32,
+    viewport_height: f32,
+    window_padding: f32,
+) -> AppliedWindowSize {
+    let content_width = (viewport_width - window_padding * 2.0).max(1.0);
+    let height = (viewport_height - window_padding * 2.0).max(1.0);
+    AppliedWindowSize {
+        width: content_width,
+        height,
+    }
+}
+
+fn docked_hash_fit(
+    preferred: PreferredWindowSize,
+    available: AppliedWindowSize,
+) -> AppliedWindowSize {
+    preferred.apply_within(available.width, available.height)
+}
+
+fn docked_hash_resize_accessibility_label(
+    preferred: PreferredWindowSize,
+    current_visible: AppliedWindowSize,
+    preview: PreferredWindowSize,
+    preview_visible: AppliedWindowSize,
+    preview_active: bool,
+) -> String {
+    let current_preferred = format!("{:.0} by {:.0}", preferred.width, preferred.height);
+    let current_visible = format!(
+        "{:.0} by {:.0}",
+        current_visible.width, current_visible.height
+    );
+    if preview_active {
+        format!(
+            "Resize docked Hash Generator. Current preferred size: {current_preferred} logical points, displayed {current_visible}. Preview size: {:.0} by {:.0} logical points, displayed {:.0} by {:.0}. Use arrow keys to preview, Enter to save, Escape to discard.",
+            preview.width, preview.height, preview_visible.width, preview_visible.height,
+        )
+    } else {
+        format!(
+            "Resize docked Hash Generator. Current preferred size: {current_preferred} logical points, displayed {current_visible}. Use arrow keys to preview, Enter to save, Escape to discard."
+        )
+    }
+}
+
+fn docked_hash_resize_identity_matches(
+    active_mount_generation: u64,
+    mount_generation: u64,
+    active_session_epoch: u64,
+    session_epoch: u64,
+    docked_mount_is_current: bool,
+) -> bool {
+    mount_generation != 0
+        && active_mount_generation == mount_generation
+        && active_session_epoch == session_epoch
+        && docked_mount_is_current
+}
+
+fn pointer_docked_resize_preview(
+    start: PreferredWindowSize,
+    visible_at_start: AppliedWindowSize,
+    delta_x: f32,
+    delta_y: f32,
+) -> (PreferredWindowSize, bool, bool) {
+    let changed_width = delta_x.abs() > 1.0;
+    let changed_height = delta_y.abs() > 1.0;
+    let width = if changed_width {
+        (visible_at_start.width + delta_x).clamp(HASH_DOCK_MIN_WIDTH, HASH_DOCK_MAX_DIMENSION)
+    } else {
+        start.width
+    };
+    let height = if changed_height {
+        (visible_at_start.height + delta_y).clamp(HASH_DOCK_MIN_HEIGHT, HASH_DOCK_MAX_DIMENSION)
+    } else {
+        start.height
+    };
+    (
+        PreferredWindowSize::new(width, height).unwrap_or(start),
+        changed_width,
+        changed_height,
+    )
+}
+
+fn keyboard_docked_resize_preview(
+    current: PreferredWindowSize,
+    delta_x: f32,
+    delta_y: f32,
+) -> PreferredWindowSize {
+    PreferredWindowSize::new(
+        if delta_x == 0.0 {
+            current.width
+        } else {
+            (current.width + delta_x).clamp(HASH_DOCK_MIN_WIDTH, HASH_DOCK_MAX_DIMENSION)
+        },
+        if delta_y == 0.0 {
+            current.height
+        } else {
+            (current.height + delta_y).clamp(HASH_DOCK_MIN_HEIGHT, HASH_DOCK_MAX_DIMENSION)
+        },
+    )
+    .unwrap_or(current)
+}
+
+fn docked_resize_commit_size(resize: DockedHashResize) -> Option<PreferredWindowSize> {
+    if matches!(resize.origin, DockedHashResizeOrigin::Pointer { .. }) && !resize.drag_started {
+        return None;
+    }
+    let applied_preview = docked_hash_fit(resize.preview_size, resize.available_at_start);
+    let visible_at_start = match resize.origin {
+        DockedHashResizeOrigin::Pointer { visible_size, .. } => visible_size,
+        DockedHashResizeOrigin::Keyboard => {
+            docked_hash_fit(resize.start_size, resize.available_at_start)
+        }
+    };
+    let width = if resize.changed_width
+        && (applied_preview.width - visible_at_start.width).abs() > 1.0
+        && (resize.preview_size.width - resize.start_size.width).abs() > 1.0
+    {
+        resize.preview_size.width
+    } else {
+        resize.start_size.width
+    };
+    let height = if resize.changed_height
+        && (applied_preview.height - visible_at_start.height).abs() > 1.0
+        && (resize.preview_size.height - resize.start_size.height).abs() > 1.0
+    {
+        resize.preview_size.height
+    } else {
+        resize.start_size.height
+    };
+    if (width - resize.start_size.width).abs() <= 1.0
+        && (height - resize.start_size.height).abs() <= 1.0
+    {
+        return None;
+    }
+    PreferredWindowSize::new(width, height).ok()
 }
 
 impl HashPresentationMode {
@@ -1309,6 +1517,378 @@ fn restart_blocker_message(blocker: RestartBlocker) -> String {
 }
 
 impl RootWindow {
+    fn focus_docked_hash_resize_handle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hash_window.mode() != Some(HashPresentationMode::Docked)
+            || self.hash_rehost_pending.load(Ordering::Acquire)
+            || self.restart_admission.is_fenced()
+        {
+            return;
+        }
+        self.root_scroll.scroll_to_bottom();
+        self.resize_focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn forward_docked_hash_action(
+        &mut self,
+        action: DockedHashAction,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.resize_focus_handle.is_focused(window)
+            || self.hash_window.mode() != Some(HashPresentationMode::Docked)
+            || self.hash_rehost_pending.load(Ordering::Acquire)
+            || self.restart_admission.is_fenced()
+        {
+            return false;
+        }
+        let HashWindowState::Docked {
+            mount_generation,
+            view,
+        } = &self.hash_window
+        else {
+            return false;
+        };
+        let mount_generation = *mount_generation;
+        let session_epoch = self
+            .hash_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .epoch();
+        if self.hash_mount_generation.load(Ordering::Acquire) != mount_generation {
+            return false;
+        }
+
+        view.update(cx, |tool, cx| {
+            if tool.mount_generation != mount_generation
+                || tool.session_epoch != session_epoch
+                || !tool.is_current_mount()
+            {
+                return false;
+            }
+            match action {
+                DockedHashAction::Calculate => tool.calculate_hash(cx),
+                DockedHashAction::Dock => tool.request_rehost(HashPresentationMode::Docked, cx),
+                DockedHashAction::Popout => tool.request_rehost(HashPresentationMode::Popout, cx),
+                DockedHashAction::Close => tool.request_close(cx),
+            }
+            true
+        })
+    }
+
+    fn docked_hash_resize_is_current(&self, payload: &DockedHashResizePayload) -> bool {
+        let docked_mount_is_current = self.hash_window.mode() == Some(HashPresentationMode::Docked)
+            && self.hash_window.mount_generation() == Some(payload.mount_generation);
+        let active_session_epoch = self
+            .hash_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .epoch();
+        Arc::ptr_eq(&self.hash_docked_resize, &payload.preview_extent)
+            && docked_hash_resize_identity_matches(
+                self.hash_mount_generation.load(Ordering::Acquire),
+                payload.mount_generation,
+                active_session_epoch,
+                payload.session_epoch,
+                docked_mount_is_current,
+            )
+            && self.hash_docked_preferred_size == payload.start_size
+            && !self.hash_rehost_pending.load(Ordering::Acquire)
+            && !self.restart_admission.is_fenced()
+    }
+
+    fn begin_docked_hash_pointer_resize(
+        &mut self,
+        payload: &DockedHashResizePayload,
+        position: Point<Pixels>,
+        window: &Window,
+        window_padding: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.docked_hash_resize_is_current(payload) {
+            return;
+        }
+        let available = docked_hash_available_size(
+            window.bounds().size.width.as_f32(),
+            window.bounds().size.height.as_f32(),
+            window_padding,
+        );
+        let visible_size = docked_hash_fit(payload.start_size, available);
+        let mut preview = payload
+            .preview_extent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *preview = Some(DockedHashResize {
+            mount_generation: payload.mount_generation,
+            session_epoch: payload.session_epoch,
+            start_size: payload.start_size,
+            available_at_start: available,
+            preview_size: payload.start_size,
+            changed_width: false,
+            changed_height: false,
+            drag_started: false,
+            origin: DockedHashResizeOrigin::Pointer {
+                position,
+                visible_size,
+            },
+        });
+        drop(preview);
+        cx.notify();
+    }
+
+    fn update_docked_hash_pointer_resize(
+        &mut self,
+        payload: &DockedHashResizePayload,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.docked_hash_resize_is_current(payload) {
+            return;
+        }
+        let mut preview = payload
+            .preview_extent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(resize) = preview.as_mut().filter(|resize| {
+            resize.mount_generation == payload.mount_generation
+                && resize.session_epoch == payload.session_epoch
+                && resize.start_size == payload.start_size
+                && resize.drag_started
+        }) else {
+            return;
+        };
+        let DockedHashResizeOrigin::Pointer {
+            position: origin,
+            visible_size,
+        } = resize.origin
+        else {
+            return;
+        };
+        let delta_x = position.x.as_f32() - origin.x.as_f32();
+        let delta_y = position.y.as_f32() - origin.y.as_f32();
+        let (preview_size, changed_width, changed_height) =
+            pointer_docked_resize_preview(resize.start_size, visible_size, delta_x, delta_y);
+        if resize.preview_size != preview_size
+            || resize.changed_width != changed_width
+            || resize.changed_height != changed_height
+        {
+            resize.preview_size = preview_size;
+            resize.changed_width = changed_width;
+            resize.changed_height = changed_height;
+            drop(preview);
+            cx.notify();
+        }
+    }
+
+    fn preview_docked_hash_keyboard_resize(
+        &mut self,
+        payload: &DockedHashResizePayload,
+        delta_x: f32,
+        delta_y: f32,
+        available: AppliedWindowSize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.docked_hash_resize_is_current(payload) {
+            return false;
+        }
+        let mut preview = payload
+            .preview_extent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match preview.as_mut() {
+            Some(resize)
+                if resize.mount_generation == payload.mount_generation
+                    && resize.session_epoch == payload.session_epoch
+                    && resize.start_size == payload.start_size
+                    && matches!(resize.origin, DockedHashResizeOrigin::Keyboard) =>
+            {
+                resize.preview_size =
+                    keyboard_docked_resize_preview(resize.preview_size, delta_x, delta_y);
+                resize.changed_width |= delta_x != 0.0;
+                resize.changed_height |= delta_y != 0.0;
+            }
+            Some(_) => return false,
+            None => {
+                let preview_size =
+                    keyboard_docked_resize_preview(payload.start_size, delta_x, delta_y);
+                *preview = Some(DockedHashResize {
+                    mount_generation: payload.mount_generation,
+                    session_epoch: payload.session_epoch,
+                    start_size: payload.start_size,
+                    available_at_start: available,
+                    preview_size,
+                    changed_width: delta_x != 0.0,
+                    changed_height: delta_y != 0.0,
+                    drag_started: false,
+                    origin: DockedHashResizeOrigin::Keyboard,
+                });
+            }
+        }
+        drop(preview);
+        cx.notify();
+        true
+    }
+
+    fn cancel_docked_hash_resize(&mut self, payload: &DockedHashResizePayload) -> bool {
+        if !Arc::ptr_eq(&self.hash_docked_resize, &payload.preview_extent) {
+            return false;
+        }
+        let mut preview = payload
+            .preview_extent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let matches = preview.as_ref().is_some_and(|resize| {
+            resize.mount_generation == payload.mount_generation
+                && resize.session_epoch == payload.session_epoch
+                && resize.start_size == payload.start_size
+        });
+        if matches {
+            preview.take();
+        }
+        matches
+    }
+
+    fn cancel_docked_hash_preview(&mut self) -> bool {
+        let mut preview = self
+            .hash_docked_resize
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        preview.take().is_some()
+    }
+
+    fn cancel_docked_hash_resize_for_mount(&mut self, mount_generation: u64, session_epoch: u64) {
+        let mut preview = self
+            .hash_docked_resize
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if preview.as_ref().is_some_and(|resize| {
+            resize.mount_generation == mount_generation && resize.session_epoch == session_epoch
+        }) {
+            preview.take();
+        }
+    }
+
+    fn commit_docked_hash_resize(
+        &mut self,
+        payload: &DockedHashResizePayload,
+        keyboard: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.docked_hash_resize_is_current(payload) {
+            return false;
+        }
+        let resize = {
+            let mut preview = payload
+                .preview_extent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let matches = preview.as_ref().is_some_and(|resize| {
+                resize.mount_generation == payload.mount_generation
+                    && resize.session_epoch == payload.session_epoch
+                    && resize.start_size == payload.start_size
+                    && matches!(
+                        (keyboard, resize.origin),
+                        (true, DockedHashResizeOrigin::Keyboard)
+                            | (false, DockedHashResizeOrigin::Pointer { .. })
+                    )
+            });
+            matches.then(|| preview.take()).flatten()
+        };
+        let Some(resize) = resize else {
+            return false;
+        };
+        let Some(size) = docked_resize_commit_size(resize) else {
+            cx.notify();
+            return true;
+        };
+        let accepted = self
+            .utility_size_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_preferred_size(self.hash_tool_key, size);
+        match accepted {
+            Ok(_revision) => {
+                self.hash_docked_preferred_size = size;
+                self.start_utility_size_ack_poll(cx);
+            }
+            Err(error) => {
+                self.set_hash_size_write_error(
+                    Some(format!(
+                        "Could not save the Hash Generator docked size. Resize it again to retry. {error}"
+                    )),
+                    cx,
+                );
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn handle_docked_hash_resize_key(
+        &mut self,
+        payload: &DockedHashResizePayload,
+        key: &str,
+        available: AppliedWindowSize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match key {
+            "left" => self.preview_docked_hash_keyboard_resize(
+                payload,
+                -HASH_DOCK_KEYBOARD_RESIZE_STEP,
+                0.0,
+                available,
+                cx,
+            ),
+            "right" => self.preview_docked_hash_keyboard_resize(
+                payload,
+                HASH_DOCK_KEYBOARD_RESIZE_STEP,
+                0.0,
+                available,
+                cx,
+            ),
+            "up" => self.preview_docked_hash_keyboard_resize(
+                payload,
+                0.0,
+                -HASH_DOCK_KEYBOARD_RESIZE_STEP,
+                available,
+                cx,
+            ),
+            "down" => self.preview_docked_hash_keyboard_resize(
+                payload,
+                0.0,
+                HASH_DOCK_KEYBOARD_RESIZE_STEP,
+                available,
+                cx,
+            ),
+            "enter" | "return" => self.commit_docked_hash_resize(payload, true, cx),
+            "escape" => {
+                let cancelled = self.cancel_docked_hash_resize(payload);
+                if cancelled {
+                    cx.notify();
+                }
+                cancelled
+            }
+            _ => false,
+        }
+    }
+
+    fn docked_hash_resize_preview(
+        &self,
+        mount_generation: u64,
+        session_epoch: u64,
+    ) -> Option<PreferredWindowSize> {
+        self.hash_docked_resize
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|resize| {
+                resize.mount_generation == mount_generation
+                    && resize.session_epoch == session_epoch
+                    && self.hash_docked_preferred_size == resize.start_size
+            })
+            .map(|resize| resize.preview_size)
+    }
+
     fn drain_hash_native_geometry(&mut self, cx: &mut Context<Self>, retire_binding: bool) {
         let Some(view) = self.hash_window.view().cloned() else {
             return;
@@ -1529,6 +2109,28 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if self
+            .hash_docked_resize
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|resize| {
+                self.hash_window.mode() == Some(HashPresentationMode::Docked)
+                    && self.hash_window.mount_generation() == Some(resize.mount_generation)
+                    && self.hash_mount_generation.load(Ordering::Acquire) == resize.mount_generation
+                    && self
+                        .hash_session
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .epoch()
+                        == resize.session_epoch
+            })
+        {
+            return Err(
+                "A docked Hash Generator resize is being previewed. Press Enter to save the size or Escape to discard it, then retry the egui restart."
+                    .to_owned(),
+            );
+        }
         self.drain_hash_native_geometry(cx, false);
         let _ = self.poll_utility_size_writer(cx);
         let size_status = self
@@ -2353,6 +2955,7 @@ impl RootWindow {
             );
             return;
         }
+        self.cancel_docked_hash_resize_for_mount(source_mount_generation, session_epoch);
         let source_mode = self.hash_window.mode();
         if source_mode == Some(target) {
             self.hash_rehost_pending.store(false, Ordering::Release);
@@ -2917,6 +3520,7 @@ impl RootWindow {
             );
             return;
         }
+        self.cancel_docked_hash_resize_for_mount(mount_generation, session_epoch);
         self.drain_hash_native_geometry(cx, true);
         let retiring = match &self.hash_window {
             HashWindowState::Popout { window, view, .. } => Some(RetiringHashWindow {
@@ -3525,25 +4129,182 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        self.hash_docked_resize
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         self.drain_hash_native_geometry(cx, true);
         cx.quit();
     }
 }
 
 impl Render for RootWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let resolved = appearance::current(cx);
         let metrics = resolved.metrics;
         let palette = resolved.palette;
         let docked_hash = match &self.hash_window {
-            HashWindowState::Docked { view, .. } => Some(view.clone()),
+            HashWindowState::Docked {
+                mount_generation,
+                view,
+            } => Some((view.clone(), *mount_generation)),
             _ => None,
         };
+        let root_controls_width = if docked_hash.is_some() {
+            docked_hash_available_size(
+                window.bounds().size.width.as_f32(),
+                window.bounds().size.height.as_f32(),
+                metrics.window_padding,
+            )
+            .width
+            .min(HASH_ROOT_CONTROLS_WIDTH)
+        } else {
+            HASH_ROOT_CONTROLS_WIDTH
+        };
+        let docked_hash_frame = docked_hash.as_ref().map(|(view, mount_generation)| {
+            let session_epoch = self
+                .hash_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .epoch();
+            let payload = DockedHashResizePayload {
+                mount_generation: *mount_generation,
+                session_epoch,
+                start_size: self.hash_docked_preferred_size,
+                preview_extent: Arc::clone(&self.hash_docked_resize),
+            };
+            let resize_preview = self.docked_hash_resize_preview(*mount_generation, session_epoch);
+            let requested_size = resize_preview.unwrap_or(self.hash_docked_preferred_size);
+            let available_size = docked_hash_available_size(
+                window.bounds().size.width.as_f32(),
+                window.bounds().size.height.as_f32(),
+                metrics.window_padding,
+            );
+            let current_visible_size =
+                docked_hash_fit(self.hash_docked_preferred_size, available_size);
+            let displayed_size = docked_hash_fit(requested_size, available_size);
+            let resize_accessibility_label = docked_hash_resize_accessibility_label(
+                self.hash_docked_preferred_size,
+                current_visible_size,
+                requested_size,
+                displayed_size,
+                resize_preview.is_some(),
+            );
+            let handle_size = HASH_DOCK_RESIZE_HANDLE_SIZE
+                .min(displayed_size.width)
+                .min(displayed_size.height)
+                .max(1.0);
+
+            let pointer_payload = payload.clone();
+            let key_payload = payload.clone();
+            let drag_started_payload = payload.clone();
+            let key_available_size = available_size;
+            let resize_handle = div()
+                .id("hash-generator-docked-resize-handle")
+                .absolute()
+                .right_0()
+                .bottom_0()
+                .size(px(handle_size))
+                .cursor(CursorStyle::ResizeUpLeftDownRight)
+                .role(Role::Button)
+                .aria_label(resize_accessibility_label)
+                .key_context("HashGeneratorWindow")
+                .track_focus(&self.resize_focus_handle)
+                .tab_index(0)
+                .focus_visible(|style| {
+                    style
+                        .border_1()
+                        .border_color(appearance::to_hsla(palette.focus))
+                })
+                .bg(appearance::to_hsla(palette.panel_surface))
+                .text_color(appearance::to_hsla(palette.accent))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |root, event: &MouseDownEvent, window, cx| {
+                        root.resize_focus_handle.focus(window, cx);
+                        cx.stop_propagation();
+                        root.begin_docked_hash_pointer_resize(
+                            &pointer_payload,
+                            event.position,
+                            window,
+                            metrics.window_padding,
+                            cx,
+                        );
+                    }),
+                )
+                .on_drag(payload.clone(), move |_, _, _, cx| {
+                    drag_started_payload.mark_drag_started();
+                    cx.new(|_| Empty)
+                })
+                .on_key_down(cx.listener(move |root, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.modifiers != Modifiers::default() {
+                        return;
+                    }
+                    if root.handle_docked_hash_resize_key(
+                        &key_payload,
+                        event.keystroke.key.as_str(),
+                        key_available_size,
+                        cx,
+                    ) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(Label::new("↘").text_size(px(metrics.heading_text_size)));
+
+            let release_payload = payload.clone();
+            let outside_release_payload = payload.clone();
+            div()
+                .id("hash-generator-docked-frame")
+                .relative()
+                .flex_shrink_0()
+                .w(px(displayed_size.width))
+                .h(px(displayed_size.height))
+                .on_drag_move(cx.listener(
+                    move |root, event: &DragMoveEvent<DockedHashResizePayload>, _, cx| {
+                        let drag_payload = event.drag(cx).clone();
+                        root.update_docked_hash_pointer_resize(
+                            &drag_payload,
+                            event.event.position,
+                            cx,
+                        );
+                    },
+                ))
+                .capture_any_mouse_up(cx.listener(move |root, event: &MouseUpEvent, _, cx| {
+                    if event.button == MouseButton::Left {
+                        root.update_docked_hash_pointer_resize(
+                            &release_payload,
+                            event.position,
+                            cx,
+                        );
+                        root.commit_docked_hash_resize(&release_payload, false, cx);
+                    }
+                }))
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(move |root, event: &MouseUpEvent, _, cx| {
+                        root.update_docked_hash_pointer_resize(
+                            &outside_release_payload,
+                            event.position,
+                            cx,
+                        );
+                        root.commit_docked_hash_resize(&outside_release_payload, false, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .id("hash-generator-docked-scroll-viewport")
+                        .size_full()
+                        .pr(px(handle_size))
+                        .pb(px(handle_size))
+                        .child(view.clone()),
+                )
+                .child(resize_handle)
+        });
         let root_controls = div()
             .flex()
             .flex_col()
             .gap_y(px(metrics.item_spacing_y))
-            .w(px(520.))
+            .w(px(root_controls_width))
             .p(px(metrics.panel_padding))
             .bg(appearance::to_hsla(palette.panel_surface))
             .rounded(px(metrics.corner_radius))
@@ -3589,6 +4350,13 @@ impl Render for RootWindow {
                         this.run_hash_generator_open(window, cx);
                     })),
             )
+            .children(docked_hash.is_some().then(|| {
+                Label::new(
+                    "Ctrl+Shift+R: focus docked resize grip · arrows preview · Enter saves · Escape discards",
+                )
+                .text_size(px(metrics.small_text_size))
+                .line_height(px(metrics.line_height))
+            }))
             .child(
                 Button::new("restart-egui")
                     .label("Restart in egui (Ctrl+Shift+E)")
@@ -3650,13 +4418,13 @@ impl Render for RootWindow {
             .flex()
             .flex_col()
             .gap_y(px(metrics.section_spacing))
-            .w(px(520.))
+            .w(px(root_controls_width))
             .child(root_controls);
-        if let Some(docked_hash) = docked_hash {
-            body = body.child(docked_hash);
+        if let Some(docked_hash_frame) = docked_hash_frame {
+            body = body.child(docked_hash_frame);
         }
 
-        div()
+        let mut root_scroll = div()
             .id("multi-launcher-root-scroll")
             .flex()
             .size_full()
@@ -3664,8 +4432,35 @@ impl Render for RootWindow {
             .overflow_y_scroll()
             .items_center()
             .justify_center()
+            .track_scroll(&self.root_scroll)
+            .when(docked_hash.is_some(), |this| {
+                this.justify_start().items_start()
+            })
             .track_focus(&self.focus_handle)
             .key_context("RootWindow")
+            .on_action(cx.listener(|this, _: &FocusDockedHashResize, window, cx| {
+                this.focus_docked_hash_resize_handle(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CalculateHash, window, cx| {
+                if this.forward_docked_hash_action(DockedHashAction::Calculate, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DockHashGenerator, window, cx| {
+                if this.forward_docked_hash_action(DockedHashAction::Dock, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PopoutHashGenerator, window, cx| {
+                if this.forward_docked_hash_action(DockedHashAction::Popout, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseHashGenerator, window, cx| {
+                if this.forward_docked_hash_action(DockedHashAction::Close, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleSecondaryWindow, _, cx| {
                 this.open_or_toggle_secondary(cx);
             }))
@@ -3678,7 +4473,15 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &RestartWithEgui, window, cx| {
                 this.open_restart_confirmation(window, cx);
             }))
-            .child(body)
+            .child(body);
+        if docked_hash.is_some() {
+            root_scroll = root_scroll.capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if this.cancel_docked_hash_preview() {
+                    cx.notify();
+                }
+            }));
+        }
+        root_scroll
     }
 }
 
@@ -5061,6 +5864,11 @@ pub(crate) fn run_foundation_window(
         saved_utility_sizes,
     );
     utility_sizes.track_key(hash_tool_key);
+    let hash_docked_preferred_size = match utility_sizes.preference(hash_tool_key) {
+        multi_launcher::settings::UtilitySizePreference::Preferred(size) => size,
+        _ => HASH_DOCK_FACTORY_SIZE,
+    };
+    let hash_docked_preferred_size_for_root = hash_docked_preferred_size;
     let utility_size_store = Arc::new(Mutex::new(utility_sizes));
     let utility_size_store_after_run = Arc::clone(&utility_size_store);
     let utility_size_polling = Arc::new(AtomicBool::new(false));
@@ -5143,6 +5951,7 @@ pub(crate) fn run_foundation_window(
             KeyBinding::new("ctrl-enter", ToggleSecondaryWindow, Some("RootWindow")),
             KeyBinding::new("f6", ToggleCoordinateHudProbe, Some("RootWindow")),
             KeyBinding::new("ctrl-g", OpenHashGenerator, Some("RootWindow")),
+            KeyBinding::new("ctrl-shift-r", FocusDockedHashResize, Some("RootWindow")),
             KeyBinding::new("ctrl-shift-e", RestartWithEgui, Some("RootWindow")),
             KeyBinding::new("ctrl-enter", CalculateHash, Some("HashGeneratorWindow")),
             KeyBinding::new(
@@ -5229,6 +6038,7 @@ pub(crate) fn run_foundation_window(
             query.focus_handle(cx).focus(window, cx);
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window, cx);
+            let resize_focus_handle = cx.focus_handle();
             let root = cx.new(|_| RootWindow {
                 root_window: None,
                 listener_slot: Arc::clone(&listener_slot_for_root),
@@ -5236,9 +6046,13 @@ pub(crate) fn run_foundation_window(
                 query,
                 native_window: None,
                 focus_handle,
+                resize_focus_handle,
+                root_scroll: ScrollHandle::new(),
                 utility_presentations: utility_presentations.clone(),
                 utility_size_store: Arc::clone(&utility_sizes_for_root),
                 utility_size_polling: Arc::clone(&utility_size_polling_for_root),
+                hash_docked_preferred_size: hash_docked_preferred_size_for_root,
+                hash_docked_resize: Arc::new(Mutex::new(None)),
                 hash_geometry_sequence: Arc::clone(&hash_geometry_sequence_for_root),
                 hash_tool_key,
                 hash_session: session_for_root,
@@ -5276,6 +6090,17 @@ pub(crate) fn run_foundation_window(
                 restart_exit: restart_exit_for_root,
                 restart_failure: restart_failure_for_root,
             });
+            let subscription = root.update(cx, |root, cx| {
+                let resize_focus_handle = root.resize_focus_handle.clone();
+                cx.on_blur(&resize_focus_handle, window, |root, _, cx| {
+                    if root.cancel_docked_hash_preview() {
+                        cx.notify();
+                    }
+                })
+            });
+            appearance_subscription_sink
+                .borrow_mut()
+                .push(subscription);
             let root_for_window_close = root.downgrade();
             window.on_window_should_close(cx, move |_, app| {
                 let clipboard_message =
@@ -5503,6 +6328,8 @@ pub(crate) fn run_foundation_window(
                                 } else {
                                     root.query.focus_handle(cx).focus(window, cx);
                                 }
+                            } else {
+                                root.cancel_docked_hash_preview();
                             }
                             root.native_window
                         },
@@ -5672,14 +6499,18 @@ pub(crate) fn run_foundation_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        Frontend, FrontendSelection, FutureContext, HashClipboardPendingKind,
-        HashClipboardPendingState, HashClipboardRequest, HashDraft, HashPickerOutcome,
-        HashPresentationMode, HashWakeSignal, Poll, classify_hash_picker_result,
-        docked_hash_focus_is_current, duplicate_instance_message, hash_clipboard_copy_admissible,
-        hash_clipboard_request_is_current, hash_file_picker_admissible,
-        hash_mount_identity_matches, hash_picker_result_is_current, root_search_focus_is_current,
-        selection_from_args,
+        AppliedWindowSize, DockedHashResize, DockedHashResizeOrigin, Frontend, FrontendSelection,
+        FutureContext, HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest,
+        HashDraft, HashPickerOutcome, HashPresentationMode, HashWakeSignal, Poll,
+        PreferredWindowSize, classify_hash_picker_result, docked_hash_available_size,
+        docked_hash_fit, docked_hash_focus_is_current, docked_hash_resize_accessibility_label,
+        docked_hash_resize_identity_matches, docked_resize_commit_size, duplicate_instance_message,
+        hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
+        hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
+        keyboard_docked_resize_preview, pointer_docked_resize_preview,
+        root_search_focus_is_current, selection_from_args,
     };
+    use gpui_kit::{point, px};
     use multi_launcher::{
         hash_generator::{HashAlgorithm, parse_expected_digest},
         settings::RememberedPresentation,
@@ -5768,6 +6599,176 @@ mod tests {
             HashPresentationMode::from_saved(Some(RememberedPresentation::Docked)),
             HashPresentationMode::Docked
         );
+    }
+
+    #[test]
+    fn docked_hash_fit_is_transient_and_handles_viewports_below_settings_limits() {
+        let preferred = PreferredWindowSize::new(620.0, 440.0).unwrap();
+        let available = docked_hash_available_size(40.0, 30.0, 12.0);
+        assert_eq!(
+            available,
+            AppliedWindowSize {
+                width: 16.0,
+                height: 6.0
+            }
+        );
+        assert_eq!(
+            docked_hash_fit(preferred, available),
+            AppliedWindowSize {
+                width: 16.0,
+                height: 6.0
+            }
+        );
+        assert_eq!(preferred.width, 620.0);
+        assert_eq!(preferred.height, 440.0);
+    }
+
+    #[test]
+    fn docked_hash_resize_callbacks_require_the_active_docked_mount_and_session() {
+        assert!(docked_hash_resize_identity_matches(7, 7, 3, 3, true));
+        assert!(!docked_hash_resize_identity_matches(8, 7, 3, 3, true));
+        assert!(!docked_hash_resize_identity_matches(7, 7, 4, 3, true));
+        assert!(!docked_hash_resize_identity_matches(7, 7, 3, 3, false));
+        assert!(!docked_hash_resize_identity_matches(0, 0, 3, 3, true));
+    }
+
+    #[test]
+    fn docked_pointer_resize_commits_one_changed_axis_and_respects_applied_fit() {
+        let preferred = PreferredWindowSize::new(620.0, 440.0).unwrap();
+        let visible = AppliedWindowSize {
+            width: 430.0,
+            height: 300.0,
+        };
+        let (preview, changed_width, changed_height) =
+            pointer_docked_resize_preview(preferred, visible, 2.0, 0.0);
+        assert_eq!(preview, PreferredWindowSize::new(432.0, 440.0).unwrap());
+        assert!(changed_width);
+        assert!(!changed_height);
+
+        let constrained = DockedHashResize {
+            mount_generation: 7,
+            session_epoch: 3,
+            start_size: preferred,
+            available_at_start: visible,
+            preview_size: preview,
+            changed_width,
+            changed_height,
+            drag_started: true,
+            origin: DockedHashResizeOrigin::Pointer {
+                position: point(px(0.0), px(0.0)),
+                visible_size: visible,
+            },
+        };
+        assert_eq!(docked_resize_commit_size(constrained), None);
+
+        let click_without_drag = DockedHashResize {
+            mount_generation: 7,
+            session_epoch: 3,
+            start_size: preferred,
+            available_at_start: visible,
+            preview_size: preferred,
+            changed_width: false,
+            changed_height: false,
+            drag_started: false,
+            origin: DockedHashResizeOrigin::Pointer {
+                position: point(px(0.0), px(0.0)),
+                visible_size: visible,
+            },
+        };
+        assert_eq!(docked_resize_commit_size(click_without_drag), None);
+
+        let room = AppliedWindowSize {
+            width: 900.0,
+            height: 700.0,
+        };
+        let visible = docked_hash_fit(preferred, room);
+        let (preview, changed_width, changed_height) =
+            pointer_docked_resize_preview(preferred, visible, 32.0, 0.0);
+        let committed = docked_resize_commit_size(DockedHashResize {
+            mount_generation: 7,
+            session_epoch: 3,
+            start_size: preferred,
+            available_at_start: room,
+            preview_size: preview,
+            changed_width,
+            changed_height,
+            drag_started: true,
+            origin: DockedHashResizeOrigin::Pointer {
+                position: point(px(0.0), px(0.0)),
+                visible_size: visible,
+            },
+        });
+        assert_eq!(
+            committed,
+            Some(PreferredWindowSize::new(652.0, 440.0).unwrap())
+        );
+    }
+
+    #[test]
+    fn docked_keyboard_resize_keeps_the_untouched_legacy_axis() {
+        let preferred = PreferredWindowSize::new(400.0, 440.0).unwrap();
+        let preview = keyboard_docked_resize_preview(preferred, 0.0, 16.0);
+        assert_eq!(preview, PreferredWindowSize::new(400.0, 456.0).unwrap());
+        let available = AppliedWindowSize {
+            width: 8192.0,
+            height: 8192.0,
+        };
+        assert_eq!(
+            docked_resize_commit_size(DockedHashResize {
+                mount_generation: 9,
+                session_epoch: 2,
+                start_size: preferred,
+                available_at_start: available,
+                preview_size: preview,
+                changed_width: false,
+                changed_height: true,
+                drag_started: false,
+                origin: DockedHashResizeOrigin::Keyboard,
+            }),
+            Some(PreferredWindowSize::new(400.0, 456.0).unwrap())
+        );
+
+        let clipped = AppliedWindowSize {
+            width: 430.0,
+            height: 300.0,
+        };
+        let clipped_preference = PreferredWindowSize::new(620.0, 440.0).unwrap();
+        assert_eq!(
+            docked_resize_commit_size(DockedHashResize {
+                mount_generation: 9,
+                session_epoch: 2,
+                start_size: clipped_preference,
+                available_at_start: clipped,
+                preview_size: keyboard_docked_resize_preview(clipped_preference, 16.0, 0.0),
+                changed_width: true,
+                changed_height: false,
+                drag_started: false,
+                origin: DockedHashResizeOrigin::Keyboard,
+            }),
+            None,
+            "a keyboard preview that remains clamped to the same root-fit width must not persist"
+        );
+    }
+
+    #[test]
+    fn docked_resize_accessibility_label_reports_current_and_preview_dimensions() {
+        let label = docked_hash_resize_accessibility_label(
+            PreferredWindowSize::new(620.0, 440.0).unwrap(),
+            AppliedWindowSize {
+                width: 430.0,
+                height: 300.0,
+            },
+            PreferredWindowSize::new(636.0, 456.0).unwrap(),
+            AppliedWindowSize {
+                width: 430.0,
+                height: 300.0,
+            },
+            true,
+        );
+        assert!(label.contains("Current preferred size: 620 by 440 logical points"));
+        assert!(label.contains("displayed 430 by 300"));
+        assert!(label.contains("Preview size: 636 by 456 logical points"));
+        assert!(label.contains("Enter to save, Escape to discard"));
     }
 
     #[test]
