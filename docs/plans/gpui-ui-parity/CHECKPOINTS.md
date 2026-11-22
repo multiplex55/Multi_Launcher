@@ -79,3 +79,9 @@ Source checkpoint and pushed upstream `e73bb09c1` contain the verified G01-C2 ad
 The cumulative read-only review found no new blocking source defect in the C1 guard and C2 runtime owner. The existing controller creates its worker only on user action, and it retires before the canonical mutex releases. The native 96 × 96 sample supports actual DPI sampling. Pointer pass-through, the HUD frame and scaled/mixed placement remain pending.
 
 The owned build finished successfully in 17 min 22 s. See `G01-D-RELEASE` and `G01-D-FALLBACK` for exact artifact identity, resource inspection, all three selected launches, native GPUI editing and fallback. The scratch fixture has no running process. G01 remains Validation pending for the C1 global hotkey, root-hidden utility and restoration checks, and C2 native passive-window visuals, hit testing and display placement. The next independent code checkpoint is **G02-B**, extracting Hash Generator session ownership into the existing hash domain while preserving the real egui adapter. Preserve this G01 release evidence unless a later build or startup change affects it.
+
+## G02-B — Shared Hash Generator session verified through egui
+
+`HashSession` now owns the draft, exact source, generation, worker and result lifecycle. The egui adapter still owns presentation, file picker plumbing, focus and effect admission. The scoped Nextest run passed 34 tests, including Hash, native-host File Search handoff, Jump Mode focus and size acknowledgement. The independent [review](reviews/G02-B-hash-session.md) found no remaining blocking finding. See `G02-B-HASH-SESSION` for the test receipt.
+
+Next, establish the coalesced Hash worker wake path and a real typed GPUI Hash open and Calculate route. The general launcher query and full Hash panel parity remain with G05 and G04. The G03 baseline confirms that an explicit duplicate selector still exits silently in a same-desktop test. No fixture process is running.

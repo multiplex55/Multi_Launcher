@@ -14,6 +14,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
+mod session;
+
+pub use session::HashSession;
+
 pub const HASH_BUFFER_SIZE: usize = 256 * 1024;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
