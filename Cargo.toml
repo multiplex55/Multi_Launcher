@@ -67,6 +67,7 @@ path = "dev/jump_mode/fixture_generator/src/main.rs"
 required-features = ["dev-smoke-binaries"]
 
 [dependencies]
+gpui-kit = { version = "=0.10.0" }
 eframe = {
     version = "0.36.2",
     default-features = false,

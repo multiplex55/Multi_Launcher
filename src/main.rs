@@ -69,6 +69,7 @@ const RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE_ENV: &str =
 
 #[path = "startup_catalog.rs"]
 mod startup_catalog;
+mod gpui_frontend;
 
 fn startup_index_coordinator_for_owner() -> Result<
     multi_launcher::indexer::coordinator::IndexCoordinator,
@@ -4619,6 +4620,13 @@ fn main() -> anyhow::Result<()> {
     {
         std::process::exit(exit_code);
     }
+    let frontend = match gpui_frontend::selection_from_args(std::env::args_os().skip(1)) {
+        Ok(frontend) => frontend,
+        Err(error) => {
+            gpui_frontend::show_startup_error(&error);
+            return Err(anyhow::anyhow!(error));
+        }
+    };
     multi_launcher::performance::init_process_timer();
     // This ownership boundary must stay ahead of every persistent read,
     // migration, watcher, worker, plugin, and GUI initialization.
@@ -4650,6 +4658,13 @@ fn main() -> anyhow::Result<()> {
             error = %diagnostic.error(),
             "settings startup used temporary defaults without replacing the persisted file"
         );
+    }
+    if frontend == gpui_frontend::Frontend::Gpui {
+        if let Err(error) = gpui_frontend::run_foundation_window() {
+            gpui_frontend::show_startup_error(&error);
+            return Err(anyhow::anyhow!(error));
+        }
+        return Ok(());
     }
     multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
         settings.enabled_plugins.as_ref(),

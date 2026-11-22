@@ -8,13 +8,14 @@
 | Execution goals started / accepted | 2 / 0 |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
+| Provisional source inventory | 217 IDs across 161 product routes and children, 17 built-in plugin settings overrides and 39 dashboard widgets. Includes one dynamic-library capability slot. |
 | GPUI GUIs implemented / accepted | 0 / 0 |
 | Shared-engine migration requirements accepted | 0 |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
-| Known migration-caused regressions | Not yet assessable; no migration code written |
+| Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Pending execution |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | G00-B source reconciliation and G01-A same-binary build in progress |
+| Current next action | Prove retained input in G01-B and complete the G00-C baseline flows. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 

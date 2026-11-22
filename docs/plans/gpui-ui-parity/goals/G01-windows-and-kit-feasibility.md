@@ -1,6 +1,6 @@
 # G01 — Prove the actual Windows frontend foundation
 
-**Status: In implementation.** G01-A is active. See the [validation log](../VALIDATION_LOG.md) for completed evidence.
+**Status: In implementation.** G01-A linked, passed focused selector tests and was independently reviewed. G01-B editable input and G01-C/D acceptance remain in progress. See the [validation log](../VALIDATION_LOG.md).
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
@@ -40,6 +40,13 @@ Exercise a real global hotkey with repeated summon/hide, editable text and keybo
 Do not require a finished radial designer/Screen Draw studio now. Prove the shared capability or identify a specific unsupported seam and narrow adaptation. Native failures must not be hidden by arbitrary sleeps, duplicate hooks, permanent polling or synthetic focus tricks.
 
 **Evidence:** short actual native scenarios with expected/observed results, cleanup and display environment. **Investigation complete when:** every high-risk capability used by later goals is proven or has a concrete unresolved blocker/dependency. **Accept this checkpoint only when its required capabilities are proven.** Unresolved required capabilities remain Validation pending or blocked and prevent the affected G01 acceptance; continue independent work without implying the blocked capability passed.
+
+#### Pinned Windows backend findings for the implementation
+
+- In `gpui-pre-windows` 0.3.12, app hide and activate are no-ops, and `Window::activate_window` can send synthetic Alt. Use a small HWND adapter and the existing foreground policy. Resolve HWND from the current GPUI window handle, validate ownership and use `SW_HIDE` or `SW_SHOWNOACTIVATE` on the GUI thread after leaving the app/window update. `WM_SHOWWINDOW` can synchronously draw on reveal.
+- Retain the root and its input across visibility transitions. Give GPUI the event loop on process main. Keep a separately owned Kit utility window while the root is hidden. Check actual close and process lifetime independently from hide.
+- Use the existing `HotkeyTrigger::prepare_listener` and wake channel. Keep receives and bounded native foreground retries off the GUI thread. Validate the current request and external foreground identity before restoring focus. Shut down owned listeners and pending wake work on exit.
+- GPUI Windows Popup uses toolwindow/topmost styles, and `focus: false` at creation does not add persistent no-activate behavior. Use the existing native Coordinate Tool HUD adapter for a passive/topmost/pass-through and DPI probe. Keep its enable/shutdown work off the GUI thread and record actual native behavior.
 
 ## G01-D — Production packaging and fallback foundation
 
