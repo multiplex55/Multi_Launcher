@@ -1,6 +1,6 @@
 # Stopwatch Plugin Settings
 
-G23 owns the `stopwatch` built-in Settings override. Settings search or Plugins → Stopwatch exposes the built-in callback. The dashboard Stopwatch widget and launcher result commands have distinct owners.
+G23 owns `plugin-settings-stopwatch`. Settings search or Plugins → Stopwatch exposes the built-in callback. The dashboard Stopwatch widget and launcher result commands have distinct owners.
 
 | Criterion | Source-backed behavior |
 | --- | --- |

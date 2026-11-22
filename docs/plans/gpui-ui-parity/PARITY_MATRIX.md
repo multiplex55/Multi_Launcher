@@ -173,7 +173,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Notification Inbox](gui/notification-inbox.md) | INBOX-01–INBOX-02 | G23 | Specified | Source local facts, retained host and exact Windows consent mapped. Native and GPUI remain pending. |
 | [Activity Center](gui/activity-center.md) | ACTIVITY-01–ACTIVITY-02 | G23 | Specified | Source refresh, diagnostics and operation handoff mapped. Native and GPUI remain pending. |
 | [Toast History](gui/toast-history.md) | TOAST-HISTORY-01 | G23 | Specified | Source read-only last-20 viewer and explicit refresh mapped. Native and GPUI remain pending. |
-| [Stopwatch Plugin Settings](gui/stopwatch.md) | STOPWATCH-SETTINGS-01 | G23 | Specified | Source built-in callback, live application and persistence mapped. Native and GPUI remain pending. |
+| [Stopwatch Plugin Settings](gui/plugin-settings-stopwatch.md) | STOPWATCH-SETTINGS-01 | G23 | Specified | Source built-in callback, live application and persistence mapped. Native and GPUI remain pending. |
 | [Weather](gui/dashboard-widget-weather_site.md) | DASH-WEATHER-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
 | [Pinned Commands](gui/dashboard-widget-pinned_commands.md) | DASH-PINNED-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
 | [Todo Widget](gui/dashboard-widget-todo.md) | DASH-TODO-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
@@ -213,3 +213,13 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Temporary Files Widget](gui/dashboard-widget-tempfiles.md) | DASH-TEMPFILES-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
 | [Volume Widget](gui/dashboard-widget-volume.md) | DASH-VOLUME-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
 | [Stopwatch Widget](gui/dashboard-widget-stopwatch.md) | DASH-STOPWATCH-01 | G23 | Specified | Source registered widget, settings and action scope mapped. Native and GPUI remain pending. |
+| [Volume](gui/volume.md) | VOLUME-01–VOLUME-02 | G24 | Specified | Source independent master/session state and explicit actions mapped. Native and GPUI remain pending. |
+| [Brightness](gui/brightness.md) | BRIGHTNESS-01–BRIGHTNESS-02 | G24 | Specified | Source exact target, helper refresh and cleanup mapped. Native and GPUI remain pending. |
+| [CPU Usage List](gui/cpu-list.md) | CPU-LIST-01 | G24 | Specified | Source read-only ranked process list mapped. Native and GPUI remain pending. |
+| [Browser Tabs Plugin Settings](gui/plugin-settings-browser-tabs.md) | BROWSER-TABS-SETTINGS-01 | G24 | Specified | Source cache option and common Settings owner mapped. Native and GPUI remain pending. |
+| [Network Plugin Settings](gui/plugin-settings-network.md) | NETWORK-SETTINGS-01 | G24 | Specified | Source refresh, units and live application mapped. Native and GPUI remain pending. |
+| [Shell Plugin Settings](gui/plugin-settings-shell.md) | SHELL-SETTINGS-01 | G24 | Specified | Source WezTerm preference and launch construction mapped. Native and GPUI remain pending. |
+| [MultiManager](gui/multi-manager.md) | MULTIMANAGER-01–MULTIMANAGER-03 | G24 | Specified | Native inactive manager route passed. Editing, external effects and GPUI remain pending. |
+| [MultiManager Settings](gui/multi-manager-settings.md) | MULTIMANAGER-SETTINGS-01 | G24 | Specified | Native distinct Settings route and current scratch paths passed. Save and GPUI remain pending. |
+| [Hotkey Directory](gui/hotkey-directory.md) | HOTKEY-DIR-01–HOTKEY-DIR-02 | G24 | Specified | Source exact current acknowledged entry and typed navigation mapped. Native and GPUI remain pending. |
+| [Virtual Desktop Plugin Settings](gui/plugin-settings-virtual-desktop.md) | VD-SETTINGS-01–VD-SETTINGS-02 | G24 | Specified | Source current desktop GUID and rule runtime mapped. Native and GPUI remain pending. |
