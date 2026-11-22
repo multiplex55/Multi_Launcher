@@ -8,4 +8,4 @@ G06 owns `data-recovery-confirmation`. The Data and Recovery host opens a distin
 
 Select `confirmation_cancel_has_no_command_and_confirm_mints_one_typed_command`, `data_recovery_confirmation_jump_requires_retained_fresh_cancel` and `typed_recovery_request_is_staged_by_the_owned_worker`.
 
-Native and GPUI remain pending.
+`G06-EGUI-DATA-RECOVERY-CANCEL` verifies the actual Bookmarks review and Cancel without an emitted pending descriptor. Confirm, next-start processing and GPUI remain pending.

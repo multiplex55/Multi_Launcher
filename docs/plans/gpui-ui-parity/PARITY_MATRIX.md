@@ -243,8 +243,8 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Temporary File Alias](gui/tempfile-alias-editor.md) | TEMPFILE-ALIAS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
 | [Favorites Editor](gui/favorites-editor.md) | FAVORITES-EDITOR-01 | G06 | Specified | Actual egui authoring draft and Cancel passed. Save and GPUI remain pending. |
 | [Shell Commands Editor](gui/shell-command-editor.md) | SHELL-EDITOR-01 | G06 | Specified | Actual egui authoring draft and Cancel passed. Save and GPUI remain pending. |
-| [Data and Recovery](gui/data-recovery.md) | RECOVERY-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
-| [Data Recovery Confirmation](gui/data-recovery-confirmation.md) | RECOVERY-CONFIRM-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Data and Recovery](gui/data-recovery.md) | RECOVERY-01 | G06 | Specified | Actual Health and Recovery routes passed. Backup, staging and GPUI remain pending. |
+| [Data Recovery Confirmation](gui/data-recovery-confirmation.md) | RECOVERY-CONFIRM-01 | G06 | Specified | Actual exact Bookmarks review and Cancel passed. Confirm and GPUI remain pending. |
 | [Dynamic Library Settings](gui/plugin-settings-dynamic-library.md) | DYNAMIC-SETTINGS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
 | [File Search Preview](gui/file-preview.md) | FILE-PREVIEW-01 | G07 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
 | [Launcher Result Context Menu](gui/launcher-result-context-menu.md) | CONTEXT-MENU-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
