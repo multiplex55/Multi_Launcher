@@ -537,25 +537,17 @@ impl LauncherApp {
     }
 
     fn alias_matches_lc(&self, action: &str, query_lc: &str) -> bool {
-        self.folder_aliases_lc
-            .get(action)
-            .or_else(|| self.bookmark_aliases_lc.get(action))
-            .and_then(|v| v.as_ref())
-            .map(|s| s.contains(query_lc))
-            .unwrap_or(false)
+        crate::actions::search::alias_matches_lc(
+            action,
+            query_lc,
+            &self.folder_aliases_lc,
+            &self.bookmark_aliases_lc,
+        )
     }
 
     fn is_exact_match_mode(&self) -> bool {
         // `match_exact` is a strict override: if enabled, we always bypass fuzzy scoring.
         self.match_exact || self.fuzzy_weight <= 0.0
-    }
-
-    pub(super) fn matches_exact_display_text(cached: &CachedSearchEntry, query_lc: &str) -> bool {
-        let query_lc = query_lc.trim();
-        if query_lc.is_empty() {
-            return true;
-        }
-        cached.label_lc.contains(query_lc)
     }
 
     fn should_bypass_exact_post_filter(query: &str, action: &str) -> bool {
@@ -1054,41 +1046,27 @@ impl LauncherApp {
                     candidates_scored = candidates_scored.saturating_add(1);
                 }
                 let cached = &self.action_cache[i];
-                if self.is_exact_match_mode() {
-                    let alias_match = self.alias_matches_lc(&a.action, query_lc);
-                    let label_match = Self::matches_exact_display_text(cached, query_lc);
-                    // Prefer displayed label text, but keep `desc`/aliases as supplemental
-                    // filters for compatibility with existing query behavior.
-                    let desc_match = cached.desc_lc.contains(query_lc);
-                    let action_match = cached.action_lc.contains(query_lc);
-                    if label_match || desc_match || action_match || alias_match {
-                        let score = if alias_match { 1.0 } else { 0.0 };
-                        #[cfg(test)]
-                        if c2a_observer_active {
-                            c2a_clone_count = c2a_clone_count.saturating_add(1);
-                            c2a_clone_bytes = c2a_clone_bytes
-                                .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                            c2a_clone_strings = c2a_clone_strings
-                                .saturating_add(c2a_search_observer::action_payload_strings(a));
-                        }
-                        let cloned = a.clone();
-                        res.push((cloned, score));
+                let exact_match_mode = self.is_exact_match_mode();
+                let alias_match = exact_match_mode && self.alias_matches_lc(&a.action, query_lc);
+                if let Some(score) = cached.score_candidate(
+                    a,
+                    query,
+                    query_lc,
+                    exact_match_mode,
+                    alias_match,
+                    &self.matcher,
+                    self.fuzzy_weight,
+                ) {
+                    #[cfg(test)]
+                    if c2a_observer_active {
+                        c2a_clone_count = c2a_clone_count.saturating_add(1);
+                        c2a_clone_bytes = c2a_clone_bytes
+                            .saturating_add(c2a_search_observer::action_payload_bytes(a));
+                        c2a_clone_strings = c2a_clone_strings
+                            .saturating_add(c2a_search_observer::action_payload_strings(a));
                     }
-                } else {
-                    let s1 = self.matcher.fuzzy_match(&a.label, query);
-                    let s2 = self.matcher.fuzzy_match(&a.desc, query);
-                    if let Some(score) = s1.max(s2) {
-                        #[cfg(test)]
-                        if c2a_observer_active {
-                            c2a_clone_count = c2a_clone_count.saturating_add(1);
-                            c2a_clone_bytes = c2a_clone_bytes
-                                .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                            c2a_clone_strings = c2a_clone_strings
-                                .saturating_add(c2a_search_observer::action_payload_strings(a));
-                        }
-                        let cloned = a.clone();
-                        res.push((cloned, score as f32 * self.fuzzy_weight));
-                    }
+                    let cloned = a.clone();
+                    res.push((cloned, score));
                 }
             }
         }
@@ -1203,7 +1181,7 @@ impl LauncherApp {
                         res.push((a, 0.0));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, query_term);
-                        let label_match = Self::matches_exact_display_text(&cached, query_term);
+                        let label_match = cached.matches_exact_display_text(query_term);
                         let desc_match = cached.desc_lc.contains(query_term);
                         let action_match = cached.action_lc.contains(query_term);
                         if label_match || desc_match || action_match || alias_match {
@@ -1257,41 +1235,28 @@ impl LauncherApp {
                     c2a_command_fallback_actions_visited =
                         c2a_command_fallback_actions_visited.saturating_add(1);
                 }
-                if self.is_exact_match_mode() {
-                    let alias_match = self.alias_matches_lc(&a.action, trimmed_lc);
-                    let label_match = Self::matches_exact_display_text(cached, trimmed_lc);
-                    let desc_match = cached.desc_lc.contains(trimmed_lc);
-                    let action_match = cached.action_lc.contains(trimmed_lc);
-                    if label_match || desc_match || action_match || alias_match {
-                        let score = if alias_match { 1.0 } else { 0.0 };
-                        #[cfg(test)]
-                        if c2a_observer.is_some() {
-                            c2a_command_fallback_hits_cloned =
-                                c2a_command_fallback_hits_cloned.saturating_add(1);
-                            c2a_command_fallback_clone_logical_bytes =
-                                c2a_command_fallback_clone_logical_bytes
-                                    .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                            c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
-                                .saturating_add(c2a_search_observer::action_payload_strings(a));
-                        }
-                        res.push((a.clone(), score));
+                let exact_match_mode = self.is_exact_match_mode();
+                let alias_match = exact_match_mode && self.alias_matches_lc(&a.action, trimmed_lc);
+                if let Some(score) = cached.score_candidate(
+                    a,
+                    trimmed,
+                    trimmed_lc,
+                    exact_match_mode,
+                    alias_match,
+                    &self.matcher,
+                    self.fuzzy_weight,
+                ) {
+                    #[cfg(test)]
+                    if c2a_observer.is_some() {
+                        c2a_command_fallback_hits_cloned =
+                            c2a_command_fallback_hits_cloned.saturating_add(1);
+                        c2a_command_fallback_clone_logical_bytes =
+                            c2a_command_fallback_clone_logical_bytes
+                                .saturating_add(c2a_search_observer::action_payload_bytes(a));
+                        c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
+                            .saturating_add(c2a_search_observer::action_payload_strings(a));
                     }
-                } else {
-                    let s1 = self.matcher.fuzzy_match(&a.label, trimmed);
-                    let s2 = self.matcher.fuzzy_match(&a.desc, trimmed);
-                    if let Some(score) = s1.max(s2) {
-                        #[cfg(test)]
-                        if c2a_observer.is_some() {
-                            c2a_command_fallback_hits_cloned =
-                                c2a_command_fallback_hits_cloned.saturating_add(1);
-                            c2a_command_fallback_clone_logical_bytes =
-                                c2a_command_fallback_clone_logical_bytes
-                                    .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                            c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
-                                .saturating_add(c2a_search_observer::action_payload_strings(a));
-                        }
-                        res.push((a.clone(), score as f32 * self.fuzzy_weight));
-                    }
+                    res.push((a.clone(), score));
                 }
             }
         } else {
@@ -1329,7 +1294,7 @@ impl LauncherApp {
                         res.push((a, 0.0));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, &query_term_lc);
-                        let label_match = Self::matches_exact_display_text(&cached, &query_term_lc);
+                        let label_match = cached.matches_exact_display_text(&query_term_lc);
                         let desc_match = cached.desc_lc.contains(&query_term_lc);
                         let action_match = cached.action_lc.contains(&query_term_lc);
                         if label_match || desc_match || action_match || alias_match {
@@ -1695,6 +1660,9 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -1702,7 +1670,7 @@ mod tests {
             PluginManager::new(),
             "actions.json".into(),
             "settings.json".into(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -4335,14 +4303,8 @@ mod tests {
         assert_eq!(app.action_cache[0].label_lc, "mixed label");
         assert_eq!(app.action_cache[0].desc_lc, "mixed desc");
         assert_eq!(app.action_cache[0].action_lc, "action:id");
-        assert!(LauncherApp::matches_exact_display_text(
-            &app.action_cache[0],
-            " mixed "
-        ));
-        assert!(!LauncherApp::matches_exact_display_text(
-            &app.action_cache[0],
-            "nomatch"
-        ));
+        assert!(app.action_cache[0].matches_exact_display_text(" mixed "));
+        assert!(!app.action_cache[0].matches_exact_display_text("nomatch"));
 
         app.query = "app mxd lbl".into();
         app.match_exact = false;

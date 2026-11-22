@@ -1,3 +1,5 @@
+pub(crate) mod search;
+
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};

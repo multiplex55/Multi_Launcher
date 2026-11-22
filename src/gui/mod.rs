@@ -265,6 +265,7 @@ struct ScreenshotCaptureParking {
 }
 
 use crate::actions::folders;
+use crate::actions::search::CachedSearchEntry;
 use crate::actions::{Action, ActionIdLookup, load_actions_typed};
 use crate::actions_editor::ActionsEditor;
 use crate::clipboard_modify::coordinator::{
@@ -1635,23 +1636,6 @@ enum QueryFocusOrigin {
         notes_instance: u64,
         notes_generation: jump_mode::TargetGeneration,
     },
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct CachedSearchEntry {
-    label_lc: String,
-    desc_lc: String,
-    action_lc: String,
-}
-
-impl CachedSearchEntry {
-    fn from_action(action: &Action) -> Self {
-        Self {
-            label_lc: action.label.to_lowercase(),
-            desc_lc: action.desc.to_lowercase(),
-            action_lc: action.action.to_lowercase(),
-        }
-    }
 }
 
 impl LauncherApp {
@@ -11620,12 +11604,9 @@ mod tests {
             desc_lc: String::new(),
             action_lc: String::new(),
         };
-        assert!(LauncherApp::matches_exact_display_text(
-            &cached,
-            &"Eve".to_lowercase()
-        ));
-        assert!(LauncherApp::matches_exact_display_text(&cached, "eve"));
-        assert!(!LauncherApp::matches_exact_display_text(&cached, "night"));
+        assert!(cached.matches_exact_display_text(&"Eve".to_lowercase()));
+        assert!(cached.matches_exact_display_text("eve"));
+        assert!(!cached.matches_exact_display_text("night"));
     }
 
     #[test]

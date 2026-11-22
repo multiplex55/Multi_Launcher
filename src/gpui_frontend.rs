@@ -2737,7 +2737,9 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results(&mut self, query: String) {
-        let actions = multi_launcher::plugin::search_hash_generator_filtered(
+        let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
+        let actions = multi_launcher::plugin::search_filtered_plugins(
+            [&hash_generator as &dyn multi_launcher::plugin::Plugin],
             &query,
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
@@ -6909,10 +6911,16 @@ mod tests {
     }
 
     fn hash_action() -> multi_launcher::actions::Action {
-        multi_launcher::plugin::search_hash_generator_filtered("hash", None, None)
-            .into_iter()
-            .next()
-            .expect("the built-in Hash Generator route is installed")
+        let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
+        multi_launcher::plugin::search_filtered_plugins(
+            [&hash_generator as &dyn multi_launcher::plugin::Plugin],
+            "hash",
+            None,
+            None,
+        )
+        .into_iter()
+        .next()
+        .expect("the built-in Hash Generator route is installed")
     }
 
     #[test]

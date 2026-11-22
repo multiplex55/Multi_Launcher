@@ -1378,26 +1378,7 @@ impl PluginManager {
     }
 }
 
-/// Search the installed built-in Hash Generator route using the same enablement
-/// and capability filters as launcher plugin search.
-///
-/// The GPUI shell uses this narrow adapter before it owns the full plugin
-/// catalog. Keep filtering at the shared provider boundary so disabled plugins
-/// and disabled search capability have the same meaning in either frontend.
-pub fn search_hash_generator_filtered(
-    query: &str,
-    enabled_plugins: Option<&HashSet<String>>,
-    enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
-) -> Vec<Action> {
-    search_filtered_plugins(
-        [&HashGeneratorPlugin as &dyn Plugin],
-        query,
-        enabled_plugins,
-        enabled_caps,
-    )
-}
-
-fn search_filtered_plugins<'a>(
+pub fn search_filtered_plugins<'a>(
     plugins: impl IntoIterator<Item = &'a dyn Plugin>,
     query: &str,
     enabled_plugins: Option<&HashSet<String>>,
@@ -1762,24 +1743,24 @@ mod tests {
 
     #[test]
     fn hash_generator_search_uses_committed_enablement_and_capability_filters() {
-        let default = search_hash_generator_filtered("hash", None, None);
+        let plugin = HashGeneratorPlugin;
+        let provider = [&plugin as &dyn Plugin];
+        let default = search_filtered_plugins(provider, "hash", None, None);
         assert_eq!(default.len(), 1);
         assert_eq!(default[0].action, "hash:open");
 
-        assert!(search_hash_generator_filtered("hash", Some(&HashSet::new()), None).is_empty());
+        assert!(search_filtered_plugins(provider, "hash", Some(&HashSet::new()), None).is_empty());
 
         let enabled = HashSet::from(["hash_generator".to_owned()]);
         let disabled_search =
             HashMap::from([("hash_generator".to_owned(), vec!["clipboard".to_owned()])]);
-        assert!(
-            search_hash_generator_filtered("hash", Some(&enabled), Some(&disabled_search))
-                .is_empty()
-        );
+        assert!(search_filtered_plugins(provider, "hash", Some(&enabled), Some(&disabled_search))
+            .is_empty());
 
         let search_enabled =
             HashMap::from([("hash_generator".to_owned(), vec!["search".to_owned()])]);
         let filtered =
-            search_hash_generator_filtered("hash", Some(&enabled), Some(&search_enabled));
+            search_filtered_plugins(provider, "hash", Some(&enabled), Some(&search_enabled));
         assert_eq!(filtered, default);
     }
 
