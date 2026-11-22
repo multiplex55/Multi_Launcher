@@ -5,6 +5,7 @@ mod appearance;
 
 use std::{
     cell::RefCell,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     future::Future,
     path::PathBuf,
@@ -20,7 +21,7 @@ use std::{
 use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::IndexPath;
-use gpui_kit::component::input::InputEvent;
+use gpui_kit::component::input::{InputEvent, MoveDown};
 use gpui_kit::component::{
     WindowExt as _,
     button::Button,
@@ -42,8 +43,11 @@ use multi_launcher::SettingsSaveWorkerRegistry;
 use multi_launcher::clipboard_modify::clipboard::{
     ArboardClipboardBackend, ClipboardBackend, ClipboardError,
 };
-use multi_launcher::commands::HashGeneratorCommand;
 use multi_launcher::commands::handlers::handle_hash_generator;
+use multi_launcher::commands::{
+    ActivationSource, Command, CommandInvocation, CommandOutcome, HashGeneratorCommand,
+    parse_command,
+};
 use multi_launcher::coordinate_tool::{
     CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
 };
@@ -224,6 +228,10 @@ struct RootWindow {
     listener_slot: Arc<Mutex<Option<HotkeyListener>>>,
     root_visibility: RootVisibility,
     query: Entity<InputState>,
+    enabled_plugins: Option<HashSet<String>>,
+    enabled_capabilities: Option<HashMap<String, Vec<String>>>,
+    launcher_results: LauncherSearchResults,
+    fresh_search_enter: Option<FreshSearchEnter>,
     native_window: Option<NativeWindow>,
     focus_handle: FocusHandle,
     resize_focus_handle: FocusHandle,
@@ -269,6 +277,121 @@ struct RootWindow {
     restart_status: Option<String>,
     restart_exit: Rc<RefCell<Option<(RestartContext, Vec<NativeWindow>)>>>,
     restart_failure: Rc<RefCell<Option<String>>>,
+}
+
+#[derive(Default)]
+struct LauncherSearchResults {
+    generation: u64,
+    query: String,
+    actions: Vec<multi_launcher::actions::Action>,
+    selected: Option<usize>,
+}
+
+impl LauncherSearchResults {
+    fn replace(&mut self, query: String, actions: Vec<multi_launcher::actions::Action>) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.query = query;
+        self.actions = actions;
+        self.selected = None;
+    }
+
+    fn select_down(&mut self) -> bool {
+        if self.actions.is_empty() {
+            return false;
+        }
+        let next = match self.selected {
+            Some(index) if index < self.actions.len() => {
+                Some((index + 1).min(self.actions.len() - 1))
+            }
+            _ => Some(0),
+        };
+        let changed = self.selected != next;
+        self.selected = next;
+        changed
+    }
+
+    fn enter_target(&self, current_query: &str) -> Option<(u64, usize)> {
+        if self.query != current_query {
+            return None;
+        }
+        let index = self
+            .selected
+            .filter(|index| *index < self.actions.len())
+            .or_else(|| (self.actions.len() == 1).then_some(0))?;
+        Some((self.generation, index))
+    }
+
+    fn resolve_action(
+        &self,
+        generation: u64,
+        index: usize,
+        current_query: &str,
+    ) -> Option<multi_launcher::actions::Action> {
+        if generation != self.generation || self.query != current_query {
+            return None;
+        }
+        self.actions.get(index).cloned()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FreshSearchEnter {
+    generation: u64,
+    query: String,
+}
+
+fn is_fresh_plain_search_enter(
+    focused: bool,
+    key: &str,
+    modifiers: Modifiers,
+    is_held: bool,
+) -> bool {
+    focused && key == "enter" && modifiers == Modifiers::default() && !is_held
+}
+
+fn fresh_search_enter_marker(
+    focused: bool,
+    key: &str,
+    modifiers: Modifiers,
+    is_held: bool,
+    generation: u64,
+    query: String,
+) -> Option<FreshSearchEnter> {
+    is_fresh_plain_search_enter(focused, key, modifiers, is_held)
+        .then_some(FreshSearchEnter { generation, query })
+}
+
+fn parse_hash_search_invocation(
+    action: multi_launcher::actions::Action,
+    source: ActivationSource,
+) -> Result<CommandInvocation, String> {
+    let invocation = parse_command(action, None, source).map_err(|error| error.to_string())?;
+    if matches!(
+        &invocation.command,
+        Command::HashGenerator(HashGeneratorCommand::Open)
+    ) {
+        Ok(invocation)
+    } else {
+        Err("The selected launcher action is not an installed Hash Generator route.".to_owned())
+    }
+}
+
+fn dispatch_hash_search_invocation(
+    invocation: CommandInvocation,
+    open: impl FnOnce() -> Result<(), String>,
+) -> Result<CommandOutcome, String> {
+    match invocation.command {
+        Command::HashGenerator(command) => handle_hash_generator(&command, open),
+        _ => Err("The selected launcher action is not an installed Hash Generator route.".into()),
+    }
+}
+
+fn result_click_source(is_keyboard: bool) -> ActivationSource {
+    if is_keyboard {
+        ActivationSource::Enter
+    } else {
+        ActivationSource::Click
+    }
 }
 
 enum HashWindowState {
@@ -2607,6 +2730,87 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn refresh_launcher_results(&mut self, query: String) {
+        let actions = multi_launcher::plugin::search_hash_generator_filtered(
+            &query,
+            self.enabled_plugins.as_ref(),
+            self.enabled_capabilities.as_ref(),
+        );
+        self.launcher_results.replace(query, actions);
+        self.fresh_search_enter = None;
+    }
+
+    fn record_search_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fresh_search_enter = fresh_search_enter_marker(
+            self.query.focus_handle(cx).is_focused(window),
+            event.keystroke.key.as_str(),
+            event.keystroke.modifiers,
+            event.is_held,
+            self.launcher_results.generation,
+            self.query.read(cx).value().to_string(),
+        );
+    }
+
+    fn record_search_key_up(&mut self, event: &KeyUpEvent) {
+        if event.keystroke.key == "enter" {
+            self.fresh_search_enter = None;
+        }
+    }
+
+    fn move_search_selection_down(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        if !self.query.focus_handle(cx).is_focused(window) {
+            return false;
+        }
+        self.launcher_results.select_down();
+        cx.notify();
+        true
+    }
+
+    fn activate_launcher_result(
+        &mut self,
+        generation: u64,
+        index: usize,
+        source: ActivationSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query = self.query.read(cx).value().to_string();
+        let Some(action) = self
+            .launcher_results
+            .resolve_action(generation, index, &query)
+        else {
+            return;
+        };
+        let invocation = match parse_hash_search_invocation(action, source) {
+            Ok(invocation) => invocation,
+            Err(error) => {
+                self.hash_open_error = Some(format!("Could not open Hash Generator: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(operation) = self.restart_admission.admit() else {
+            self.hash_open_error =
+                Some("GPUI is closing; new utility operations are disabled.".to_owned());
+            cx.notify();
+            return;
+        };
+        let outcome = dispatch_hash_search_invocation(invocation, || {
+            self.open_hash_generator_window(operation, window, cx)
+        });
+        self.hash_open_error = outcome
+            .err()
+            .map(|error| format!("Could not open Hash Generator: {error}"));
+        // Hash Open currently returns Keep/Skip policies. Preserve the existing
+        // launcher query, results, visibility and history for this route.
+        cx.notify();
+    }
+
     fn next_hash_mount_generation(&mut self) -> u64 {
         self.hash_mount_counter = self.hash_mount_counter.wrapping_add(1).max(1);
         self.hash_mount_counter
@@ -4317,10 +4521,69 @@ impl Render for RootWindow {
                     .line_height(px(metrics.line_height)),
             )
             .child(
-                Input::new(&self.query)
-                    .aria_label("Search")
-                    .readonly(self.restart_admission.is_fenced()),
+                div()
+                    .id("launcher-search-input")
+                    .capture_action(cx.listener(|root, _: &MoveDown, window, cx| {
+                        if root.move_search_selection_down(window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_key_down(cx.listener(|root, event, window, cx| {
+                        root.record_search_key_down(event, window, cx);
+                    }))
+                    .on_key_up(cx.listener(|root, event, _, _| {
+                        root.record_search_key_up(event);
+                    }))
+                    .child(
+                        Input::new(&self.query)
+                            .aria_label("Search")
+                            .readonly(self.restart_admission.is_fenced()),
+                    ),
             )
+            .children(self.launcher_results.actions.iter().enumerate().map(
+                |(index, action)| {
+                    let generation = self.launcher_results.generation;
+                    let selected = self.launcher_results.selected == Some(index);
+                    div()
+                        .id("launcher-search-result-row")
+                        .flex()
+                        .flex_col()
+                        .gap_y(px(metrics.item_spacing_y))
+                        .w_full()
+                        .p(px(metrics.panel_padding))
+                        .rounded(px(metrics.corner_radius))
+                        .bg(appearance::to_hsla(if selected {
+                            palette.selection_fill
+                        } else {
+                            palette.panel_surface
+                        }))
+                        .text_color(appearance::to_hsla(palette.primary_text))
+                        .role(Role::Button)
+                        .aria_label(format!("{}: {}", action.label, action.desc))
+                        .tab_stop(false)
+                        .on_click(cx.listener(move |root, event: &ClickEvent, window, cx| {
+                            root.activate_launcher_result(
+                                generation,
+                                index,
+                                result_click_source(event.is_keyboard()),
+                                window,
+                                cx,
+                            );
+                        }))
+                        .child(
+                            Label::new(action.label.clone())
+                                .id("launcher-search-result-label")
+                                .text_size(px(metrics.body_text_size))
+                                .line_height(px(metrics.line_height)),
+                        )
+                        .child(
+                            Label::new(action.desc.clone())
+                                .id("launcher-search-result-description")
+                                .text_size(px(metrics.small_text_size))
+                                .line_height(px(metrics.line_height)),
+                        )
+                },
+            ))
             .child(
                 Label::new("Ctrl+Enter: open or dismiss the retained window")
                     .text_size(px(metrics.small_text_size))
@@ -5844,6 +6107,8 @@ fn activate_for_secondary_window(
 
 pub(crate) fn run_foundation_window(
     hotkey: multi_launcher::hotkey::Hotkey,
+    enabled_plugins: Option<HashSet<String>>,
+    enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     coordinate_tool_preferences: CoordinateToolPreferences,
     theme_settings: multi_launcher::settings::ThemeSettings,
     settings_path: String,
@@ -6044,6 +6309,10 @@ pub(crate) fn run_foundation_window(
                 listener_slot: Arc::clone(&listener_slot_for_root),
                 root_visibility: visibility_for_root.clone(),
                 query,
+                enabled_plugins: enabled_plugins.clone(),
+                enabled_capabilities: enabled_capabilities.clone(),
+                launcher_results: LauncherSearchResults::default(),
+                fresh_search_enter: None,
                 native_window: None,
                 focus_handle,
                 resize_focus_handle,
@@ -6090,6 +6359,89 @@ pub(crate) fn run_foundation_window(
                 restart_exit: restart_exit_for_root,
                 restart_failure: restart_failure_for_root,
             });
+            let search_subscription = root.update(cx, |root, cx| {
+                let query = root.query.clone();
+                cx.subscribe(
+                    &query,
+                    |root: &mut RootWindow,
+                     query: Entity<InputState>,
+                     event: &InputEvent,
+                     cx: &mut Context<RootWindow>| {
+                        match event {
+                            InputEvent::Change => {
+                                root.refresh_launcher_results(
+                                    query.read(cx).value().to_string(),
+                                );
+                                cx.notify();
+                            }
+                            InputEvent::PressEnter { secondary, shift } => {
+                                let marker = root.fresh_search_enter.take();
+                                if *secondary || *shift {
+                                    return;
+                                }
+                                let query_text = query.read(cx).value().to_string();
+                                let Some(marker) = marker.filter(|marker| {
+                                    marker.generation == root.launcher_results.generation
+                                        && marker.query == query_text
+                                }) else {
+                                    return;
+                                };
+                                let Some((generation, index)) =
+                                    root.launcher_results.enter_target(&query_text)
+                                else {
+                                    return;
+                                };
+                                if generation != marker.generation {
+                                    return;
+                                }
+                                let Some(root_window) = root.root_window else {
+                                    return;
+                                };
+                                let root_view = cx.entity();
+                                cx.spawn(async move |_, cx| {
+                                    let _ = cx.update(|app| {
+                                        let _ = update_kit_window_content(
+                                            root_window,
+                                            &root_view,
+                                            app,
+                                            |root, window, cx| {
+                                                let query_is_current = root
+                                                    .query
+                                                    .read(cx)
+                                                    .value()
+                                                    .as_ref()
+                                                    == query_text;
+                                                if query_is_current
+                                                    && root.launcher_results.generation
+                                                        == generation
+                                                    && root
+                                                        .query
+                                                        .focus_handle(cx)
+                                                        .is_focused(window)
+                                                {
+                                                    root.activate_launcher_result(
+                                                        generation,
+                                                        index,
+                                                        ActivationSource::Enter,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                        );
+                                    });
+                                })
+                                .detach();
+                            }
+                            InputEvent::Blur => root.fresh_search_enter = None,
+                            _ => {}
+                        }
+                    },
+                )
+            });
+            appearance_subscription_sink
+                .borrow_mut()
+                .push(search_subscription);
             let subscription = root.update(cx, |root, cx| {
                 let resize_focus_handle = root.resize_focus_handle.clone();
                 cx.on_blur(&resize_focus_handle, window, |root, _, cx| {
@@ -6499,16 +6851,19 @@ pub(crate) fn run_foundation_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppliedWindowSize, DockedHashResize, DockedHashResizeOrigin, Frontend, FrontendSelection,
-        FutureContext, HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest,
-        HashDraft, HashPickerOutcome, HashPresentationMode, HashWakeSignal, Poll,
-        PreferredWindowSize, classify_hash_picker_result, docked_hash_available_size,
-        docked_hash_fit, docked_hash_focus_is_current, docked_hash_resize_accessibility_label,
-        docked_hash_resize_identity_matches, docked_resize_commit_size, duplicate_instance_message,
+        ActivationSource, AppliedWindowSize, CommandOutcome, DockedHashResize,
+        DockedHashResizeOrigin, Frontend, FrontendSelection, FutureContext,
+        HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest, HashDraft,
+        HashPickerOutcome, HashPresentationMode, HashWakeSignal, LauncherSearchResults, Modifiers,
+        Poll, PreferredWindowSize, classify_hash_picker_result, dispatch_hash_search_invocation,
+        docked_hash_available_size, docked_hash_fit, docked_hash_focus_is_current,
+        docked_hash_resize_accessibility_label, docked_hash_resize_identity_matches,
+        docked_resize_commit_size, duplicate_instance_message, fresh_search_enter_marker,
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
-        keyboard_docked_resize_preview, pointer_docked_resize_preview,
-        root_search_focus_is_current, selection_from_args,
+        is_fresh_plain_search_enter, keyboard_docked_resize_preview, parse_hash_search_invocation,
+        pointer_docked_resize_preview, result_click_source, root_search_focus_is_current,
+        selection_from_args,
     };
     use gpui_kit::{point, px};
     use multi_launcher::{
@@ -6535,6 +6890,117 @@ mod tests {
 
     fn args(args: &[&str]) -> Vec<OsString> {
         args.iter().map(|arg| OsString::from(*arg)).collect()
+    }
+
+    fn hash_action() -> multi_launcher::actions::Action {
+        multi_launcher::plugin::search_hash_generator_filtered("hash", None, None)
+            .into_iter()
+            .next()
+            .expect("the built-in Hash Generator route is installed")
+    }
+
+    #[test]
+    fn launcher_results_follow_egui_enter_selection_and_reject_stale_rows() {
+        let first = hash_action();
+        let second = multi_launcher::actions::Action {
+            label: "Second installed route".into(),
+            desc: "Fixture row".into(),
+            action: "hash:open".into(),
+            args: None,
+        };
+        let mut results = LauncherSearchResults::default();
+        results.replace("hash".into(), vec![first.clone()]);
+        let sole_generation = results.generation;
+        assert_eq!(results.enter_target("hash"), Some((sole_generation, 0)));
+
+        results.replace("hash".into(), vec![first.clone(), second]);
+        let rendered_generation = results.generation;
+        assert_eq!(results.enter_target("hash"), None);
+        assert!(results.select_down());
+        assert_eq!(results.enter_target("hash"), Some((rendered_generation, 0)));
+        assert_eq!(
+            results.resolve_action(rendered_generation, 0, "hash"),
+            Some(first.clone())
+        );
+
+        results.replace("hash changed".into(), vec![first]);
+        assert_eq!(results.selected, None);
+        assert_eq!(
+            results.resolve_action(rendered_generation, 0, "hash changed"),
+            None,
+            "a row rendered for an older result generation must not activate"
+        );
+        assert_eq!(results.enter_target("hash"), None);
+    }
+
+    #[test]
+    fn search_enter_accepts_only_fresh_plain_keydown() {
+        assert!(is_fresh_plain_search_enter(
+            true,
+            "enter",
+            Modifiers::default(),
+            false,
+        ));
+        assert!(!is_fresh_plain_search_enter(
+            true,
+            "enter",
+            Modifiers::default(),
+            true,
+        ));
+        assert!(!is_fresh_plain_search_enter(
+            true,
+            "enter",
+            Modifiers::control(),
+            false,
+        ));
+        assert!(!is_fresh_plain_search_enter(
+            false,
+            "enter",
+            Modifiers::default(),
+            false,
+        ));
+        assert!(!is_fresh_plain_search_enter(
+            true,
+            "down",
+            Modifiers::default(),
+            false,
+        ));
+
+        let marker =
+            fresh_search_enter_marker(true, "enter", Modifiers::default(), false, 7, "hash".into())
+                .unwrap();
+        assert_eq!(marker.generation, 7);
+        assert_eq!(marker.query, "hash");
+    }
+
+    #[test]
+    fn search_activation_preserves_source_and_dispatches_hash_open_once() {
+        let action = hash_action();
+        assert_eq!(result_click_source(true), ActivationSource::Enter);
+        assert_eq!(result_click_source(false), ActivationSource::Click);
+        for source in [ActivationSource::Enter, ActivationSource::Click] {
+            let invocation = parse_hash_search_invocation(action.clone(), source).unwrap();
+            assert_eq!(invocation.original_action, action);
+            assert_eq!(invocation.query_override, None);
+            assert_eq!(invocation.source, source);
+
+            let mut opened = 0;
+            let outcome = dispatch_hash_search_invocation(invocation, || {
+                opened += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(opened, 1);
+            assert_eq!(outcome, CommandOutcome::default());
+        }
+
+        let invalid = multi_launcher::actions::Action {
+            label: "Not Hash".into(),
+            desc: "Other route".into(),
+            action: "query:settings".into(),
+            args: None,
+        };
+        assert!(parse_hash_search_invocation(invalid, ActivationSource::Click).is_err());
     }
 
     #[test]

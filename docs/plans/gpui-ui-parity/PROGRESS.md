@@ -16,7 +16,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | Implement the first G05 launcher result activation through the shared Hash route. Windows docked keyboard resize, passive fit, prior Hash behavior and popout geometry passed their scoped observations. Native docked pointer, mixed DPI, visual acceptance, reverse restart, G01 global invocation and additional overlay checks remain pending. |
+| Current next action | Implement G03-C2a checked egui worker outcomes and typed relaunch. The first G05 Search result now opens Hash through the shared typed route and passed focused tests and actual Windows keyboard/gating checks. Native pointer, mixed DPI, broader Search/GUI parity, reverse restart and G01 global invocation remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 

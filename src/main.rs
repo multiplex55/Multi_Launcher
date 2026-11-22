@@ -4671,6 +4671,8 @@ fn main() -> anyhow::Result<()> {
     if frontend == gpui_frontend::Frontend::Gpui {
         let restart_plan = match gpui_frontend::run_foundation_window(
             settings.hotkey(),
+            settings.enabled_plugins.clone(),
+            settings.enabled_capabilities.clone(),
             settings.coordinate_tool.clone(),
             settings.theme.clone(),
             "settings.json".to_owned(),

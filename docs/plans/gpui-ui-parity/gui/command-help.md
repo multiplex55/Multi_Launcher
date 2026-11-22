@@ -8,4 +8,4 @@ G05 owns `command-help`. Help → Command List and Linking Guide, or the typed `
 
 Select `command_help_filters_real_plugin_commands_without_static_tutorials` and `bounded_help_scroll_keeps_controls_and_full_content_reachable`.
 
-Native and GPUI remain pending.
+`G05-EGUI-ACTION-SHEET-HELP` verifies the typed panel opens. The observed accessibility tree truncated its body. Filter, persistence and GPUI remain pending.

@@ -37,7 +37,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | GUI | Criteria | Owner | Stage | Remaining evidence |
 | --- | --- | --- | --- | --- |
 | [Hash Generator](gui/hash-generator.md) | HASH-01–HASH-08 | G04 | In implementation | Actual Text/File, comparison, pickers, streamed cancel, Clipboard Load/Copy, popout geometry, docked keyboard resize and passive fit exercised. Pointer grip, mixed DPI, hidden-root lifecycle, egui native clipboard and full visual/accessibility acceptance remain pending. |
-| [Launcher](gui/launcher.md) | LAUNCH-01–LAUNCH-09 | G05 | Specified | Scoped egui keyboard baseline observed. GPUI product view, typed routing, global invocation, native keyboard and visual evidence remain pending. |
+| [Launcher](gui/launcher.md) | LAUNCH-01–LAUNCH-09 | G05 | In implementation | Actual GPUI Hash result, typed route, capability gate and scoped keyboard focus passed. Full catalog, ranking, pointer, global invocation and visuals remain pending. |
 | [Coordinate overlay](gui/coordinate-overlay.md) | COORD-01–COORD-05 | G22 | Specified | Existing controller start, stop and DPI sampling observed from GPUI. Production command routes, visible HUD, pointer pass-through, capture behavior and mixed DPI remain pending. |
 | [Main Settings](gui/settings-main.md) | SETTINGS-01–SETTINGS-06 | G06 | Specified | The egui toolbar, search result and footer were exposed on Windows. Destination focus, save/cancel round trip, nested ownership and the GPUI view remain pending. |
 | [Theme Settings](gui/theme-settings.md) | THEME-01–THEME-05 | G06 | Specified | Native egui direct open, committed appearance, Apply, Save and Cancel observed. Main Settings child delivery, palette cases, GPUI editor and visual acceptance remain pending. |
@@ -249,7 +249,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [File Search Preview](gui/file-preview.md) | FILE-PREVIEW-01 | G07 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
 | [Launcher Result Context Menu](gui/launcher-result-context-menu.md) | CONTEXT-MENU-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
 | [Launcher Action Confirmation](gui/launcher-action-confirmation.md) | LAUNCH-CONFIRM-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
-| [Universal Action Sheet](gui/universal-action-sheet.md) | ACTION-SHEET-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
+| [Universal Action Sheet](gui/universal-action-sheet.md) | ACTION-SHEET-01 | G05 | Specified | Actual egui exact Ctrl+Enter, independent filter and Escape passed. Confirm and GPUI remain pending. |
 | [Quick Help](gui/quick-help.md) | QUICK-HELP-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
-| [Command Help](gui/command-help.md) | COMMAND-HELP-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
+| [Command Help](gui/command-help.md) | COMMAND-HELP-01 | G05 | Specified | Actual typed egui entry opened. Body controls and GPUI remain pending. |
 | [Jump Mode Overlay](gui/jump-mode-overlay.md) | JUMP-OVERLAY-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
