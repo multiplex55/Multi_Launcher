@@ -159,3 +159,12 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [OCR Region Selection](gui/ocr-selection.md) | OCR-SELECTION-01–OCR-SELECTION-02 | G22 | Specified | Source shared selector and exact capture lifecycle mapped. Native and GPUI remain pending. |
 | [OCR Results](gui/ocr-results.md) | OCR-RESULT-01–OCR-RESULT-02 | G22 | Specified | Source editor, explicit Copy and generation cancellation mapped. Native and GPUI remain pending. |
 | [Mouse Settings](gui/mouse-settings.md) | MOUSE-SETTINGS-01–MOUSE-SETTINGS-02 | G22 | Specified | Source retained appearance form and independent session effect controls mapped. Native and GPUI remain pending. |
+| [Dashboard](gui/dashboard.md) | DASHBOARD-01–DASHBOARD-02 | G23 | Specified | Blank-query launcher composition and shared widget registry mapped. Native and GPUI remain pending. |
+| [Dashboard Editor](gui/dashboard-editor.md) | DASHBOARD-EDITOR-01–DASHBOARD-EDITOR-02 | G23 | Specified | Source layout, saved draft ownership and rehost mapped. Native and GPUI remain pending. |
+| [Dashboard Remove Slot](gui/dashboard-remove-slot-confirmation.md) | DASHBOARD-REMOVE-01 | G23 | Specified | Source exact current slot confirmation mapped. Native and GPUI remain pending. |
+| [Dashboard Reset Widget](gui/dashboard-reset-widget-confirmation.md) | DASHBOARD-RESET-01 | G23 | Specified | Source selected descriptor defaults and separate confirmation mapped. Native and GPUI remain pending. |
+| [Calendar](gui/calendar.md) | CALENDAR-01–CALENDAR-02 | G23 | Specified | Source view state, agenda and retained children mapped. Native and GPUI remain pending. |
+| [Calendar Event Editor](gui/calendar-event-editor.md) | CALENDAR-EDITOR-01–CALENDAR-EDITOR-02 | G23 | Specified | Source draft, exact occurrence and recurrence publication mapped. Native and GPUI remain pending. |
+| [Calendar Event Details](gui/calendar-event-details.md) | CALENDAR-DETAILS-01–CALENDAR-DETAILS-02 | G23 | Specified | Source retained occurrence and current mutation receipts mapped. Native and GPUI remain pending. |
+| [Todo List](gui/todo-list.md) | TODO-LIST-01–TODO-LIST-02 | G23 | Specified | Source list, owned drafts and clear confirmation mapped. Native and GPUI remain pending. |
+| [View Todos](gui/todo-view.md) | TODO-VIEW-01–TODO-VIEW-02 | G23 | Specified | Source stable target, optimistic edit and note handoff mapped. Native and GPUI remain pending. |
