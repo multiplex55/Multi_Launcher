@@ -8,4 +8,4 @@ G06 owns `data-recovery`. The typed `data` dialog and `data health` reach the re
 
 Select `health_scan_is_requested_on_open_transition_not_while_already_open`, `action_enablement_requires_owned_eligible_included_store` and `copied_diagnostics_include_required_metadata_without_reading_store_contents`.
 
-`G06-EGUI-DATA-RECOVERY-CANCEL` verifies the actual Health and Recovery route and disabled Restore without a backup. Backups, staging and GPUI remain pending.
+`G06-EGUI-DATA-RECOVERY-CANCEL` verifies the actual Health and Recovery route and disabled Restore without a backup. `G06-EGUI-RESET-GPUI-STARTUP` verifies egui staging and GPUI startup processing of the same owned Bookmarks action. Backup creation, Restore, Diagnostics and a GPUI Data & Recovery control surface remain pending.
