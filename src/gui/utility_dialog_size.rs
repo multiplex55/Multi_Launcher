@@ -2479,6 +2479,57 @@ mod tests {
     }
 
     #[test]
+    fn utility_dialog_sizes_shutdown_receipt_reports_failed_final_enqueue() {
+        let (_directory, _path, mut settings, ctx, workers, manager) =
+            setup(Some(PreferredWindowSize::new(400.0, 300.0).unwrap()));
+        let id = Id::new("utility-size-shutdown-release-enqueue-failure");
+        for _ in 0..3 {
+            render_window(
+                &ctx,
+                &manager,
+                &mut settings,
+                id,
+                egui::vec2(1000.0, 800.0),
+                vec![],
+                1.0,
+                true,
+                1,
+                false,
+            );
+        }
+        let before = outer_rect(&ctx, id);
+        let mut observed_grip_ids = Vec::new();
+        for events in pointer_press_and_drag(before, egui::vec2(75.0, 55.0)) {
+            observed_grip_ids.extend(render_window(
+                &ctx,
+                &manager,
+                &mut settings,
+                id,
+                egui::vec2(1000.0, 800.0),
+                events,
+                1.0,
+                true,
+                1,
+                false,
+            ));
+        }
+        assert_actual_resize_grip_was_dragged(id, &observed_grip_ids);
+        assert!(manager.lock().instances[&id].resize_release.is_some());
+
+        // Force the same admission error the shutdown adapter records if the
+        // final size queue cannot accept a released resize.
+        workers.begin_shutdown();
+        let failures = manager.flush_released_resizes_for_shutdown();
+        assert_eq!(failures.len(), 1);
+        crate::settings_save::report_final_utility_size_enqueue_failures(&workers, failures);
+
+        let receipt = workers.join_all_checked();
+        let summary = receipt.failure_summary().unwrap();
+        assert!(summary.contains("hash-generator final size enqueue"));
+        assert!(summary.contains("updates are closed"));
+    }
+
+    #[test]
     fn completed_resize_survives_immediate_close_and_omission() {
         let preferred = PreferredWindowSize::new(400.0, 300.0).unwrap();
         for omitted in [false, true] {

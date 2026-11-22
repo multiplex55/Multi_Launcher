@@ -11,6 +11,7 @@ use crate::settings::utility_dialog_sizes::{
 };
 use crate::settings::utility_presentations::{RememberedPresentation, persist_presentation};
 use eframe::egui;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -303,7 +304,9 @@ impl SettingsSaveIntent {
         }
     }
 
-    pub(crate) fn calculation_pad_display(preferences: crate::settings::CalculationPadDisplayPreferences) -> Self {
+    pub(crate) fn calculation_pad_display(
+        preferences: crate::settings::CalculationPadDisplayPreferences,
+    ) -> Self {
         let mut desired = Settings::default();
         desired.calculation_pad_display = preferences;
         Self {
@@ -673,6 +676,9 @@ struct ShutdownPreferencesSlot {
 struct WorkerRegistryState {
     accepting: bool,
     workers: Vec<JoinHandle<()>>,
+    shutdown_worker_panics: Vec<String>,
+    shutdown_close_preference_failures: Vec<String>,
+    shutdown_final_utility_size_enqueue_failures: Vec<(UtilityToolKey, String)>,
     utility_sizes_path: Option<String>,
     utility_sizes_next_revision: HashMap<UtilityToolKey, u64>,
     utility_sizes_latest_revision: HashMap<UtilityToolKey, UtilitySizeRevision>,
@@ -711,6 +717,69 @@ pub(crate) struct UtilitySizeShutdownFailure {
     pub error: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsSaveShutdownReceipt {
+    utility_size_failures: Vec<UtilitySizeShutdownFailure>,
+    utility_presentation_failures: Vec<(UtilityToolKey, u64, String)>,
+    worker_panics: Vec<String>,
+    close_preference_failures: Vec<String>,
+    final_utility_size_enqueue_failures: Vec<(UtilityToolKey, String)>,
+}
+
+impl SettingsSaveShutdownReceipt {
+    pub fn is_clean(&self) -> bool {
+        self.utility_size_failures.is_empty()
+            && self.utility_presentation_failures.is_empty()
+            && self.worker_panics.is_empty()
+            && self.close_preference_failures.is_empty()
+            && self.final_utility_size_enqueue_failures.is_empty()
+    }
+
+    pub fn failure_summary(&self) -> Option<String> {
+        let mut failures = Vec::new();
+        for failure in &self.utility_size_failures {
+            failures.push(format!(
+                "{} size revision {}: {}",
+                failure.key.as_str(),
+                failure.revision.0,
+                failure.error
+            ));
+        }
+        for (key, revision, error) in &self.utility_presentation_failures {
+            failures.push(format!(
+                "{} presentation revision {revision}: {error}",
+                key.as_str()
+            ));
+        }
+        for error in &self.close_preference_failures {
+            failures.push(error.clone());
+        }
+        for (key, error) in &self.final_utility_size_enqueue_failures {
+            failures.push(format!("{} final size enqueue: {error}", key.as_str()));
+        }
+        for panic in &self.worker_panics {
+            failures.push(format!("settings save worker panicked: {panic}"));
+        }
+        (!failures.is_empty()).then(|| failures.join("; "))
+    }
+
+    pub fn ensure_clean(&self) -> Result<(), String> {
+        self.failure_summary().map_or(Ok(()), Err)
+    }
+}
+
+fn worker_panic_message(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&'static str>()
+                .map(|message| (*message).to_owned())
+        })
+        .unwrap_or_else(|| "non-string panic payload".to_owned())
+}
+
 fn bind_utility_settings_path(
     state: &mut WorkerRegistryState,
     settings_path: &str,
@@ -741,36 +810,42 @@ fn next_utility_size_revision(
 }
 
 #[derive(Clone)]
-pub struct SettingsSaveWorkerRegistry(Arc<Mutex<WorkerRegistryState>>);
+pub struct SettingsSaveWorkerRegistry(Arc<Mutex<WorkerRegistryState>>, Arc<Mutex<()>>);
 
 impl Default for SettingsSaveWorkerRegistry {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(WorkerRegistryState {
-            accepting: true,
-            workers: Vec::new(),
-            utility_sizes_path: None,
-            utility_sizes_next_revision: HashMap::new(),
-            utility_sizes_latest_revision: HashMap::new(),
-            utility_sizes_pending: HashMap::new(),
-            utility_sizes_failed: HashMap::new(),
-            utility_sizes_errors: HashMap::new(),
-            utility_sizes_acknowledgements: HashMap::new(),
-            utility_sizes_shutdown_failures: Vec::new(),
-            utility_sizes_worker_active: false,
-            utility_presentations_path: None,
-            utility_presentations_next_revision: HashMap::new(),
-            utility_presentations_latest: HashMap::new(),
-            utility_presentations_pending: HashMap::new(),
-            utility_presentations_failed: HashMap::new(),
-            utility_presentations_errors: HashMap::new(),
-            utility_presentations_acks: HashMap::new(),
-            utility_presentations_shutdown_failures: Vec::new(),
-            utility_presentations_worker_active: false,
-            #[cfg(test)]
-            utility_presentation_before_write_hook: None,
-            #[cfg(test)]
-            utility_size_before_write_hook: None,
-        })))
+        Self(
+            Arc::new(Mutex::new(WorkerRegistryState {
+                accepting: true,
+                workers: Vec::new(),
+                shutdown_worker_panics: Vec::new(),
+                shutdown_close_preference_failures: Vec::new(),
+                shutdown_final_utility_size_enqueue_failures: Vec::new(),
+                utility_sizes_path: None,
+                utility_sizes_next_revision: HashMap::new(),
+                utility_sizes_latest_revision: HashMap::new(),
+                utility_sizes_pending: HashMap::new(),
+                utility_sizes_failed: HashMap::new(),
+                utility_sizes_errors: HashMap::new(),
+                utility_sizes_acknowledgements: HashMap::new(),
+                utility_sizes_shutdown_failures: Vec::new(),
+                utility_sizes_worker_active: false,
+                utility_presentations_path: None,
+                utility_presentations_next_revision: HashMap::new(),
+                utility_presentations_latest: HashMap::new(),
+                utility_presentations_pending: HashMap::new(),
+                utility_presentations_failed: HashMap::new(),
+                utility_presentations_errors: HashMap::new(),
+                utility_presentations_acks: HashMap::new(),
+                utility_presentations_shutdown_failures: Vec::new(),
+                utility_presentations_worker_active: false,
+                #[cfg(test)]
+                utility_presentation_before_write_hook: None,
+                #[cfg(test)]
+                utility_size_before_write_hook: None,
+            })),
+            Arc::new(Mutex::new(())),
+        )
     }
 }
 
@@ -1235,27 +1310,58 @@ impl SettingsSaveWorkerRegistry {
     }
 
     fn reap_finished(&self) {
-        let finished = {
+        let mut panics = Vec::new();
+        let mut panic_payloads = Vec::new();
+        {
             let mut state = self
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut finished = Vec::new();
             let mut index = 0;
             while index < state.workers.len() {
                 if state.workers[index].is_finished() {
-                    finished.push(state.workers.swap_remove(index));
+                    // Join only completed workers while holding the registry
+                    // lock so checked shutdown cannot miss a panic between
+                    // handle removal and receipt publication.
+                    let worker = state.workers.swap_remove(index);
+                    if let Err(payload) = worker.join() {
+                        let message = worker_panic_message(payload.as_ref());
+                        state.shutdown_worker_panics.push(message.clone());
+                        panics.push(message);
+                        // Panic payloads are arbitrary user values. Keep them
+                        // alive until after the registry lock is released, so
+                        // their destructors can safely re-enter this registry.
+                        panic_payloads.push(payload);
+                    }
                 } else {
                     index += 1;
                 }
             }
-            finished
-        };
-        for worker in finished {
-            if let Err(payload) = worker.join() {
-                tracing::error!(?payload, "settings save worker panicked");
-            }
         }
+        drop(panic_payloads);
+        for message in panics {
+            tracing::error!(panic = %message, "settings save worker panicked");
+        }
+    }
+
+    fn record_close_preference_failure(&self, error: impl Into<String>) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown_close_preference_failures
+            .push(error.into());
+    }
+
+    fn record_final_utility_size_enqueue_failure(
+        &self,
+        key: UtilityToolKey,
+        error: impl Into<String>,
+    ) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown_final_utility_size_enqueue_failures
+            .push((key, error.into()));
     }
 
     pub fn begin_shutdown(&self) {
@@ -1266,6 +1372,17 @@ impl SettingsSaveWorkerRegistry {
     }
 
     pub fn join_all(&self) {
+        let _ = self.join_all_checked();
+    }
+
+    pub fn join_all_checked(&self) -> SettingsSaveShutdownReceipt {
+        // Cloned registries can request final drain concurrently. Keep a
+        // second caller from observing an empty handle list while the first
+        // caller is still joining the removed workers.
+        let serialized_join = self
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.begin_shutdown();
         let workers = {
             let mut state = self
@@ -1274,9 +1391,21 @@ impl SettingsSaveWorkerRegistry {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             std::mem::take(&mut state.workers)
         };
+        let mut panic_payloads = Vec::new();
+        let mut panics = Vec::new();
         for worker in workers {
             if let Err(payload) = worker.join() {
-                tracing::error!(?payload, "settings save worker panicked during shutdown");
+                let message = worker_panic_message(payload.as_ref());
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .shutdown_worker_panics
+                    .push(message.clone());
+                panics.push(message);
+                // Defer arbitrary payload destruction until both registry
+                // locks are released. The failure string is already visible
+                // to any concurrent checked-join caller.
+                panic_payloads.push(payload);
             }
         }
 
@@ -1364,6 +1493,40 @@ impl SettingsSaveWorkerRegistry {
         for (key, revision, error) in presentation_failures {
             tracing::error!(tool = key.as_str(), revision, %error, "utility presentation remains unsaved at shutdown");
         }
+
+        let receipt = {
+            let state = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            SettingsSaveShutdownReceipt {
+                utility_size_failures: state.utility_sizes_shutdown_failures.clone(),
+                utility_presentation_failures: state
+                    .utility_presentations_shutdown_failures
+                    .clone(),
+                worker_panics: state.shutdown_worker_panics.clone(),
+                close_preference_failures: state.shutdown_close_preference_failures.clone(),
+                final_utility_size_enqueue_failures: state
+                    .shutdown_final_utility_size_enqueue_failures
+                    .clone(),
+            }
+        };
+        drop(serialized_join);
+        for message in panics {
+            tracing::error!(panic = %message, "settings save worker panicked during shutdown");
+        }
+        drop(panic_payloads);
+        receipt
+    }
+}
+
+pub(crate) fn report_final_utility_size_enqueue_failures(
+    workers: &SettingsSaveWorkerRegistry,
+    failures: Vec<(UtilityToolKey, String)>,
+) {
+    for (key, error) in failures {
+        tracing::error!(tool = key.as_str(), %error, "could not queue final utility window size before shutdown");
+        workers.record_final_utility_size_enqueue_failure(key, error);
     }
 }
 
@@ -1475,8 +1638,16 @@ impl LauncherApp {
         let Some(preferences) = self.pending_calculation_pad_display_preference.take() else {
             return;
         };
-        if self.settings_editor.baseline_settings.calculation_pad_display != preferences {
-            self.begin_settings_save(context, SettingsSaveIntent::calculation_pad_display(preferences));
+        if self
+            .settings_editor
+            .baseline_settings
+            .calculation_pad_display
+            != preferences
+        {
+            self.begin_settings_save(
+                context,
+                SettingsSaveIntent::calculation_pad_display(preferences),
+            );
         } else {
             self.calculation_pad_display_unacknowledged = false;
         }
@@ -1546,6 +1717,7 @@ impl LauncherApp {
         let worker_cancel_requested = Arc::clone(&cancel_requested);
         let reconciliation_required = Arc::new(AtomicBool::new(false));
         let worker_reconciliation_required = Arc::clone(&reconciliation_required);
+        let worker_settings_save_workers = self.settings_save_workers.clone();
         let worker = self.settings_save_workers.spawn(move || {
             let result = run_settings_save(
                 &path,
@@ -1571,6 +1743,9 @@ impl LauncherApp {
                 && let Err(error) = persist_launcher_close_preferences(&path, &preferences)
             {
                 tracing::error!(%error, "failed to persist launcher preferences during settings-save shutdown");
+                worker_settings_save_workers.record_close_preference_failure(format!(
+                    "failed to persist launcher preferences during settings-save shutdown: {error:#}"
+                ));
             }
             let _ = sender.send(SettingsSaveWorkerMessage::Completed(Box::new(
                 SettingsSaveWorkerResult {
@@ -1604,7 +1779,9 @@ impl LauncherApp {
                         SettingsSaveSource::CalculationPadRecovery => {
                             "calculation_pad.recovery.preference"
                         }
-                        SettingsSaveSource::CalculationPadDisplay => "calculation_pad.display.preference",
+                        SettingsSaveSource::CalculationPadDisplay => {
+                            "calculation_pad.display.preference"
+                        }
                         SettingsSaveSource::ProgrammerInspector => {
                             "programmer_inspector.preferences"
                         }
@@ -1648,7 +1825,9 @@ impl LauncherApp {
                         SettingsSaveSource::CalculationPadRecovery => {
                             "calculation_pad.recovery.preference"
                         }
-                        SettingsSaveSource::CalculationPadDisplay => "calculation_pad.display.preference",
+                        SettingsSaveSource::CalculationPadDisplay => {
+                            "calculation_pad.display.preference"
+                        }
                         SettingsSaveSource::ProgrammerInspector => {
                             "programmer_inspector.preferences"
                         }
@@ -1691,7 +1870,9 @@ impl LauncherApp {
                             SettingsSaveSource::CalculationPadRecovery => {
                                 "calculation_pad.recovery.preference"
                             }
-                            SettingsSaveSource::CalculationPadDisplay => "calculation_pad.display.preference",
+                            SettingsSaveSource::CalculationPadDisplay => {
+                                "calculation_pad.display.preference"
+                            }
                             SettingsSaveSource::ProgrammerInspector => {
                                 "programmer_inspector.preferences"
                             }
@@ -1712,7 +1893,9 @@ impl LauncherApp {
                         SettingsSaveSource::CalculationPadRecovery => {
                             "calculation_pad.recovery.preference"
                         }
-                        SettingsSaveSource::CalculationPadDisplay => "calculation_pad.display.preference",
+                        SettingsSaveSource::CalculationPadDisplay => {
+                            "calculation_pad.display.preference"
+                        }
                         SettingsSaveSource::ProgrammerInspector => {
                             "programmer_inspector.preferences"
                         }
@@ -1728,12 +1911,11 @@ impl LauncherApp {
 
     pub(crate) fn prepare_settings_save_shutdown(&mut self) {
         let preferences = self.settings_save_close_preferences();
-        for (key, error) in self
-            .utility_dialog_size_manager
-            .flush_released_resizes_for_shutdown()
-        {
-            tracing::error!(tool = key.as_str(), %error, "could not queue final utility window size before shutdown");
-        }
+        report_final_utility_size_enqueue_failures(
+            &self.settings_save_workers,
+            self.utility_dialog_size_manager
+                .flush_released_resizes_for_shutdown(),
+        );
         self.settings_save_workers.begin_shutdown();
         if let Some(pending) = self.pending_settings_save.as_ref() {
             pending.request_cancel();
@@ -1743,6 +1925,10 @@ impl LauncherApp {
         }
         if let Err(error) = persist_launcher_close_preferences(&self.settings_path, &preferences) {
             tracing::error!(%error, "failed to persist launcher close preferences");
+            self.settings_save_workers
+                .record_close_preference_failure(format!(
+                    "failed to persist launcher close preferences: {error:#}"
+                ));
         }
     }
 }
@@ -2196,7 +2382,9 @@ fn persist_launcher_close_preferences(
         preferences.window_size,
         preferences.pinned_panels.clone(),
     )?;
-    if preferences.file_search_ui_preferences.is_some() || preferences.calculation_pad_display.is_some() {
+    if preferences.file_search_ui_preferences.is_some()
+        || preferences.calculation_pad_display.is_some()
+    {
         Settings::update(path, |settings| {
             if let Some(ui_preferences) = &preferences.file_search_ui_preferences {
                 let mut file_search: crate::file_search::settings::FileSearchSettings = settings
@@ -2230,6 +2418,25 @@ mod tests {
     use std::time::Instant;
 
     type TestSaveResult = (Result<SettingsSaveCompletion, String>, bool);
+
+    struct PanicDropGate {
+        workers: SettingsSaveWorkerRegistry,
+        entered: mpsc::Sender<()>,
+        release: Receiver<()>,
+        registry_locks_free: mpsc::Sender<bool>,
+    }
+
+    impl Drop for PanicDropGate {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+            let serialized_available = self.workers.1.try_lock().is_ok();
+            let state_available = self.workers.0.try_lock().is_ok();
+            let _ = self
+                .registry_locks_free
+                .send(serialized_available && state_available);
+        }
+    }
 
     fn spawn_save<F>(
         path: String,
@@ -2378,8 +2585,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (_ctx, mut app) = test_app(directory.path(), Settings::default());
         let initial = crate::settings::CalculationPadDisplayPreferences::default();
-        let older = crate::settings::CalculationPadDisplayPreferences { word_wrap: true, ..initial };
-        let newer = crate::settings::CalculationPadDisplayPreferences { line_numbers: false, ..older };
+        let older = crate::settings::CalculationPadDisplayPreferences {
+            word_wrap: true,
+            ..initial
+        };
+        let newer = crate::settings::CalculationPadDisplayPreferences {
+            line_numbers: false,
+            ..older
+        };
         let baseline = app.settings_editor.baseline_settings.clone();
         let general = SettingsSaveIntent::general(baseline.clone(), &baseline);
         let mut latest = baseline.clone();
@@ -2392,11 +2605,19 @@ mod tests {
         assert_eq!(latest.calculation_pad_display, newer);
         assert_eq!(latest.theme.mode, crate::settings::ThemeMode::Light);
         app.settings_editor.hotkey = "draft shortcut".into();
-        app.calculation_pad_dialog.initialize_display_preferences(newer);
+        app.calculation_pad_dialog
+            .initialize_display_preferences(newer);
         app.pending_calculation_pad_display_preference = Some(newer);
-        crate::settings_editor::SettingsEditor::apply_committed_calculation_pad_display_preference(&mut app, older);
+        crate::settings_editor::SettingsEditor::apply_committed_calculation_pad_display_preference(
+            &mut app, older,
+        );
         assert_eq!(app.settings_editor.hotkey, "draft shortcut");
-        assert_eq!(app.settings_editor.baseline_settings.calculation_pad_display, older);
+        assert_eq!(
+            app.settings_editor
+                .baseline_settings
+                .calculation_pad_display,
+            older
+        );
         assert_eq!(app.calculation_pad_dialog.test_display_preferences(), newer);
         assert_eq!(app.pending_calculation_pad_display_preference, Some(newer));
     }
@@ -3813,13 +4034,15 @@ mod tests {
                 client_for_worker.prepare(settings)
             },
         );
-        app.calculation_pad_dialog.initialize_display_preferences(original);
+        app.calculation_pad_dialog
+            .initialize_display_preferences(original);
         app.calculation_pad_display_unacknowledged = true;
         app.pending_calculation_pad_display_preference = Some(original);
         Settings::update(&path, |settings| {
             settings.calculation_pad_display = old_choice;
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         app.window_size = (777, 555);
         app.prepare_settings_save_shutdown();
         drop(owner);
@@ -3854,9 +4077,10 @@ mod tests {
         app.prepare_settings_save_shutdown();
         drop(owner);
         continue_prepare.send(()).unwrap();
-        app.settings_save_workers.join_all();
+        let receipt = app.settings_save_workers.join_all_checked();
         app.drain_settings_save(&context);
 
+        assert!(receipt.is_clean());
         let saved = Settings::load(&path).unwrap();
         assert_eq!(saved.window_size, Some((777, 555)));
         assert_eq!(saved.hotkey, baseline.hotkey);
@@ -3865,6 +4089,244 @@ mod tests {
             app.settings_save_workers.spawn(|| {}).is_err(),
             "shutdown must reject new save workers"
         );
+    }
+
+    #[test]
+    fn shutdown_receipt_keeps_panics_seen_by_early_reap_and_final_join() {
+        for early_reap in [false, true] {
+            let workers = SettingsSaveWorkerRegistry::default();
+            let (entered, entered_rx) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            workers
+                .spawn(move || {
+                    entered.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    panic!("injected settings worker panic");
+                })
+                .unwrap();
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            release.send(()).unwrap();
+
+            if early_reap {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let finished = workers
+                        .0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .workers
+                        .iter()
+                        .any(JoinHandle::is_finished);
+                    if finished {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "worker did not finish");
+                    thread::yield_now();
+                }
+                workers.reap_finished();
+            }
+
+            let receipt = workers.join_all_checked();
+            assert_eq!(
+                receipt.worker_panics,
+                vec!["injected settings worker panic".to_owned()]
+            );
+            assert!(
+                receipt
+                    .failure_summary()
+                    .unwrap()
+                    .contains("settings save worker panicked: injected settings worker panic")
+            );
+        }
+    }
+
+    #[test]
+    fn checked_shutdown_sees_early_reaped_panic_while_payload_drop_is_blocked() {
+        let workers = SettingsSaveWorkerRegistry::default();
+        let (worker_entered, worker_entered_rx) = mpsc::channel();
+        let (panic_now, panic_now_rx) = mpsc::channel();
+        let (payload_drop_entered, payload_drop_entered_rx) = mpsc::channel();
+        let (release_payload_drop, release_payload_drop_rx) = mpsc::channel();
+        let (registry_locks_free, registry_locks_free_rx) = mpsc::channel();
+        let payload_workers = workers.clone();
+        workers
+            .spawn(move || {
+                worker_entered.send(()).unwrap();
+                panic_now_rx.recv().unwrap();
+                std::panic::panic_any(PanicDropGate {
+                    workers: payload_workers,
+                    entered: payload_drop_entered,
+                    release: release_payload_drop_rx,
+                    registry_locks_free,
+                });
+            })
+            .unwrap();
+        worker_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        panic_now.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let finished = workers
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .workers
+                .iter()
+                .any(JoinHandle::is_finished);
+            if finished {
+                break;
+            }
+            assert!(Instant::now() < deadline, "worker did not finish");
+            thread::yield_now();
+        }
+
+        let reaper_workers = workers.clone();
+        let reaper = thread::spawn(move || reaper_workers.reap_finished());
+        payload_drop_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        let (join_started, join_started_rx) = mpsc::channel();
+        let (join_completed, join_completed_rx) = mpsc::channel();
+        let join_workers = workers.clone();
+        let checked_join = thread::spawn(move || {
+            join_started.send(()).unwrap();
+            join_completed
+                .send(join_workers.join_all_checked())
+                .unwrap();
+        });
+        join_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let receipt_while_drop_is_blocked = join_completed_rx.recv_timeout(Duration::from_secs(5));
+
+        release_payload_drop.send(()).unwrap();
+        let payload_locks_were_free = registry_locks_free_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        reaper.join().unwrap();
+        checked_join.join().unwrap();
+        let receipt = receipt_while_drop_is_blocked.unwrap_or_else(|_| {
+            panic!("checked shutdown did not publish the early reaper's panic before payload drop")
+        });
+        assert_eq!(receipt.worker_panics, vec!["non-string panic payload"]);
+        assert!(!receipt.is_clean());
+        assert!(
+            payload_locks_were_free,
+            "panic payload destructor ran while a registry lock was held"
+        );
+    }
+
+    #[test]
+    fn final_join_releases_registry_locks_before_dropping_panic_payload() {
+        let workers = SettingsSaveWorkerRegistry::default();
+        let (payload_drop_entered, payload_drop_entered_rx) = mpsc::channel();
+        let (release_payload_drop, release_payload_drop_rx) = mpsc::channel();
+        let (registry_locks_free, registry_locks_free_rx) = mpsc::channel();
+        let payload_workers = workers.clone();
+        workers
+            .spawn(move || {
+                std::panic::panic_any(PanicDropGate {
+                    workers: payload_workers,
+                    entered: payload_drop_entered,
+                    release: release_payload_drop_rx,
+                    registry_locks_free,
+                });
+            })
+            .unwrap();
+
+        let first_workers = workers.clone();
+        let first_join = thread::spawn(move || first_workers.join_all_checked());
+        payload_drop_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        let second_workers = workers.clone();
+        let (second_completed, second_completed_rx) = mpsc::channel();
+        let second_join = thread::spawn(move || {
+            second_completed
+                .send(second_workers.join_all_checked())
+                .unwrap();
+        });
+        let second_receipt_while_drop_is_blocked =
+            second_completed_rx.recv_timeout(Duration::from_secs(5));
+
+        release_payload_drop.send(()).unwrap();
+        let payload_locks_were_free = registry_locks_free_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let first_receipt = first_join.join().unwrap();
+        second_join.join().unwrap();
+        let second_receipt = second_receipt_while_drop_is_blocked.unwrap_or_else(|_| {
+            panic!("concurrent checked join waited for arbitrary panic payload destruction")
+        });
+        assert_eq!(
+            first_receipt.worker_panics,
+            vec!["non-string panic payload"]
+        );
+        assert_eq!(second_receipt.worker_panics, first_receipt.worker_panics);
+        assert!(
+            payload_locks_were_free,
+            "panic payload destructor ran while a registry lock was held"
+        );
+    }
+
+    #[test]
+    fn direct_close_preference_failure_is_in_checked_shutdown_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        Settings::default().save(&path).unwrap();
+        let (_context, mut app) = test_app(directory.path(), Settings::default());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        app.prepare_settings_save_shutdown();
+
+        let receipt = app.settings_save_workers.join_all_checked();
+        let summary = receipt.failure_summary().unwrap();
+        assert!(summary.contains("failed to persist launcher close preferences"));
+        assert!(receipt.ensure_clean().is_err());
+    }
+
+    #[test]
+    fn deferred_close_preference_failure_is_in_checked_shutdown_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let baseline = Settings::default();
+        baseline.save(&path).unwrap();
+        let (context, mut app) = test_app(directory.path(), baseline.clone());
+        let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
+        let client_for_worker = client.clone();
+        let (prepare_entered, prepare_entered_rx) = mpsc::channel();
+        let (continue_prepare, wait_for_prepare) = mpsc::channel();
+        app.begin_settings_save_with_prepare(
+            &context,
+            intent_with_hotkey(&baseline, "F8"),
+            move |settings| {
+                prepare_entered.send(()).unwrap();
+                wait_for_prepare.recv().unwrap();
+                client_for_worker.prepare(settings)
+            },
+        );
+        prepare_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        app.prepare_settings_save_shutdown();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        drop(owner);
+        continue_prepare.send(()).unwrap();
+
+        let receipt = app.settings_save_workers.join_all_checked();
+        let summary = receipt.failure_summary().unwrap();
+        assert!(
+            summary
+                .contains("failed to persist launcher preferences during settings-save shutdown")
+        );
+        assert!(receipt.ensure_clean().is_err());
     }
 
     #[test]
@@ -4264,12 +4726,18 @@ mod tests {
             )
             .unwrap();
 
-        workers.join_all();
+        let receipt = workers.join_all_checked();
         let failures = workers.utility_size_shutdown_failures();
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].key, key);
         assert_eq!(failures[0].revision, UtilitySizeRevision(1));
         assert!(failures[0].error.contains("failed to persist"));
+        assert!(
+            receipt
+                .failure_summary()
+                .unwrap()
+                .contains("diff size revision 1")
+        );
         assert_eq!(workers.utility_size_shutdown_failures(), failures);
         assert!(workers.drain_utility_size_acknowledgements().is_empty());
     }
@@ -4418,11 +4886,17 @@ mod tests {
         workers
             .queue_utility_presentation(path.clone(), key, RememberedPresentation::Popout)
             .unwrap();
-        workers.join_all();
+        let receipt = workers.join_all_checked();
         let failures = workers.utility_presentation_shutdown_failures();
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, key);
         assert!(failures[0].2.contains("unsupported"));
+        assert!(
+            receipt
+                .failure_summary()
+                .unwrap()
+                .contains("batch-rename presentation revision 1")
+        );
         let after: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(after, original);

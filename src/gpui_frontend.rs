@@ -6786,8 +6786,7 @@ pub(crate) fn run_foundation_window(
         listener.stop();
     }
 
-    settings_save_workers.begin_shutdown();
-    settings_save_workers.join_all();
+    let settings_save_receipt = settings_save_workers.join_all_checked();
     let (utility_size_failures, utility_size_pending) = {
         let mut store = utility_size_store_after_run
             .lock()
@@ -6829,6 +6828,11 @@ pub(crate) fn run_foundation_window(
         if let Some((_, error)) = status.failure {
             return Err(format!(
                 "The Hash Generator geometry save failed before restart. No egui process was started: {error}"
+            ));
+        }
+        if let Err(error) = settings_save_receipt.ensure_clean() {
+            return Err(format!(
+                "The final Settings drain did not complete: {error}. No egui process was started. Resolve the reported persistence problem and rerun Multi Launcher from the same working directory."
             ));
         }
     }
