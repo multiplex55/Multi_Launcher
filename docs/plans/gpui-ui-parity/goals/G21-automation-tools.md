@@ -43,6 +43,14 @@ Hot Folder includes rule list, new/edit forms, root/destination pickers, filters
 
 **Done:** three GPUI hosts can inspect the existing state without changing it.
 
+#### A1 — Share the passive saved-sequence catalog
+
+Project the existing `SequenceSnapshot` revision and ordered rows of stable `SequenceId`, name and step count in `src/paste_sequence.rs`. Preserve empty and load-error states. Keep `SequenceStore` as persistence owner. The projection excludes step bodies, protected clipboard content, prepared runs and shortcut state. In the existing egui `PasteSequenceDialog::saved_sequence_list`, render the lightweight rows and resolve an accepted ID against the owner snapshot before selecting it. Preserve directory reveal, native widget and Jump Mode identities, drafts and playback state.
+
+The real Open route captures the foreground origin and protected clipboard context before focusing the editor. The current GPUI startup returns before common plugin, invocation and playback owner construction. The first production GPUI host depends on shared routing and an owned protected capture boundary. Runtime status comes from actual playback and main's acknowledged `SequenceRoutePresentation`.
+
+Verify exact order, IDs, counts and exclusion of synthetic body data, then select `paste_saved_row_native_identity_survives_removal_of_an_earlier_row` and `search_actions_contain_only_stable_ids_and_command_opens_editor`. Use only a temporary data store and synthetic context with both Paste Sequence shortcut settings disabled before application construction. A1 ends when the actual egui list uses the projection, selection leaves playback idle and fixture bytes stay unchanged. G21-A still requires the three actual GPUI inspection hosts.
+
 ### G21-B — Complete Paste Sequences
 
 **Status: not started.** **Owner:** GPUI sequence editor/pickers; shared playback remains authoritative.
