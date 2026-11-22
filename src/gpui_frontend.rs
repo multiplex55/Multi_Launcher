@@ -1,6 +1,8 @@
 use std::pin::Pin;
 #[cfg(windows)]
 use std::sync::mpsc::{Receiver, Sender, channel};
+mod appearance;
+
 use std::{
     cell::RefCell,
     ffi::{OsStr, OsString},
@@ -2727,6 +2729,9 @@ impl RootWindow {
 
 impl Render for RootWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let resolved = appearance::current(cx);
+        let metrics = resolved.metrics;
+        let palette = resolved.palette;
         let docked_hash = match &self.hash_window {
             HashWindowState::Docked { view, .. } => Some(view.clone()),
             _ => None,
@@ -2734,17 +2739,29 @@ impl Render for RootWindow {
         let root_controls = div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_y(px(metrics.item_spacing_y))
             .w(px(520.))
-            .child(Label::new("Search"))
+            .p(px(metrics.panel_padding))
+            .bg(appearance::to_hsla(palette.panel_surface))
+            .rounded(px(metrics.corner_radius))
+            .text_color(appearance::to_hsla(palette.primary_text))
+            .text_size(px(metrics.body_text_size))
+            .line_height(px(metrics.line_height))
+            .child(
+                Label::new("Search")
+                    .text_size(px(metrics.heading_text_size))
+                    .line_height(px(metrics.line_height)),
+            )
             .child(
                 Input::new(&self.query)
                     .aria_label("Search")
                     .readonly(self.restart_admission.is_fenced()),
             )
-            .child(Label::new(
-                "Ctrl+Enter: open or dismiss the retained window",
-            ))
+            .child(
+                Label::new("Ctrl+Enter: open or dismiss the retained window")
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height)),
+            )
             .child(
                 Button::new("retained-window")
                     .label("Open or dismiss retained window")
@@ -2777,37 +2794,45 @@ impl Render for RootWindow {
                         this.open_restart_confirmation(window, cx);
                     })),
             )
-            .child(Label::new(self.coordinate_hud_probe_status.clone()))
-            .children(
-                self.restart_status
-                    .as_ref()
-                    .map(|status| Label::new(status.clone())),
+            .child(
+                Label::new(self.coordinate_hud_probe_status.clone())
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height)),
             )
+            .children(self.restart_status.as_ref().map(|status| {
+                Label::new(status.clone())
+                    .text_color(appearance::to_hsla(palette.warning))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
             .child(
                 Button::new("quit-gpui")
                     .label("Quit Multi Launcher")
                     .tab_stop(true)
                     .on_click(cx.listener(|this, _, _, cx| this.request_quit(cx))),
             )
-            .children(
-                self.secondary_error
-                    .as_ref()
-                    .map(|error| Label::new(error.clone())),
-            )
-            .children(
-                self.hash_open_error
-                    .as_ref()
-                    .map(|error| Label::new(error.clone())),
-            )
-            .children(
-                self.hash_presentation_error
-                    .as_ref()
-                    .map(|error| Label::new(error.clone())),
-            );
+            .children(self.secondary_error.as_ref().map(|error| {
+                Label::new(error.clone())
+                    .text_color(appearance::to_hsla(palette.error))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
+            .children(self.hash_open_error.as_ref().map(|error| {
+                Label::new(error.clone())
+                    .text_color(appearance::to_hsla(palette.error))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
+            .children(self.hash_presentation_error.as_ref().map(|error| {
+                Label::new(error.clone())
+                    .text_color(appearance::to_hsla(palette.error))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }));
         let mut body = div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_y(px(metrics.section_spacing))
             .w(px(520.))
             .child(root_controls);
         if let Some(docked_hash) = docked_hash {
@@ -2818,6 +2843,7 @@ impl Render for RootWindow {
             .id("multi-launcher-root-scroll")
             .flex()
             .size_full()
+            .p(px(metrics.window_padding))
             .overflow_y_scroll()
             .items_center()
             .justify_center()
@@ -3188,6 +3214,9 @@ impl HashGeneratorWindow {
 
 impl Render for HashGeneratorWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let resolved = appearance::current(cx);
+        let metrics = resolved.metrics;
+        let palette = resolved.palette;
         let (
             has_job,
             is_running,
@@ -3253,10 +3282,15 @@ impl Render for HashGeneratorWindow {
             ),
         });
         let comparison_label = comparison.map(|comparison| match comparison {
-            Ok(HashComparison::NotRequested) => "Enter an expected digest to compare".to_owned(),
-            Ok(HashComparison::Match) => "Expected digest matches".to_owned(),
-            Ok(HashComparison::Mismatch) => "Expected digest does not match".to_owned(),
-            Err(error) => format!("Expected digest: {error}"),
+            Ok(HashComparison::NotRequested) => (
+                "Enter an expected digest to compare".to_owned(),
+                palette.primary_text,
+            ),
+            Ok(HashComparison::Match) => ("Expected digest matches".to_owned(), palette.success),
+            Ok(HashComparison::Mismatch) => {
+                ("Expected digest does not match".to_owned(), palette.warning)
+            }
+            Err(error) => (format!("Expected digest: {error}"), palette.error),
         });
         let source_name = match mode {
             HashInputMode::Text => "Text",
@@ -3269,6 +3303,7 @@ impl Render for HashGeneratorWindow {
             .id("hash-generator-tool-scroll")
             .flex()
             .size_full()
+            .p(px(metrics.window_padding))
             .overflow_y_scroll()
             .track_focus(&self.focus_handle)
             .key_context("HashGeneratorWindow")
@@ -3288,9 +3323,19 @@ impl Render for HashGeneratorWindow {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_y(px(metrics.item_spacing_y))
                     .w_full()
-                    .child(Label::new(format!("{source_name} · {algorithm_name}")))
+                    .p(px(metrics.panel_padding))
+                    .bg(appearance::to_hsla(palette.panel_surface))
+                    .rounded(px(metrics.corner_radius))
+                    .text_color(appearance::to_hsla(palette.primary_text))
+                    .text_size(px(metrics.body_text_size))
+                    .line_height(px(metrics.line_height))
+                    .child(
+                        Label::new(format!("{source_name} · {algorithm_name}"))
+                            .text_size(px(metrics.heading_text_size))
+                            .line_height(px(metrics.line_height)),
+                    )
                     .child(
                         Select::new(&self.source)
                             .accessibility_label("Hash input source")
@@ -3309,7 +3354,11 @@ impl Render for HashGeneratorWindow {
                         let selected_path = path
                             .clone()
                             .unwrap_or_else(|| "No file selected".to_owned());
-                        this.child(Label::new(format!("File: {selected_path}")))
+                        this.child(
+                            Label::new(format!("File: {selected_path}"))
+                                .text_size(px(metrics.small_text_size))
+                                .line_height(px(metrics.line_height)),
+                        )
                             .child(
                                 Button::new("choose-hash-file")
                                     .label("Choose File")
@@ -3327,8 +3376,13 @@ impl Render for HashGeneratorWindow {
                             .readonly(!can_interact),
                     )
                     .children(
-                        comparison_label
-                            .map(|label| Label::new(label).id("hash-comparison-status")),
+                        comparison_label.map(|(label, color)| {
+                            Label::new(label)
+                                .id("hash-comparison-status")
+                                .text_color(appearance::to_hsla(color))
+                                .text_size(px(metrics.small_text_size))
+                                .line_height(px(metrics.line_height))
+                        }),
                     )
                     .child(
                         Select::new(&self.algorithm)
@@ -3336,12 +3390,24 @@ impl Render for HashGeneratorWindow {
                             .disabled(!can_interact),
                     )
                     .children(
-                        algorithm
-                            .security_notice()
-                            .map(|notice| Label::new(notice).id("hash-algorithm-warning")),
+                        algorithm.security_notice().map(|notice| {
+                            Label::new(notice)
+                                .id("hash-algorithm-warning")
+                                .text_color(appearance::to_hsla(palette.warning))
+                                .text_size(px(metrics.small_text_size))
+                                .line_height(px(metrics.line_height))
+                        }),
                     )
-                    .child(Label::new("Tab moves through controls · Space or Enter opens a selector"))
-                    .child(Label::new("Ctrl+Enter: calculate · Ctrl+Shift+D: dock · Ctrl+Shift+P: pop out · Ctrl+W: close"))
+                    .child(
+                        Label::new("Tab moves through controls · Space or Enter opens a selector")
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height)),
+                    )
+                    .child(
+                        Label::new("Ctrl+Enter: calculate · Ctrl+Shift+D: dock · Ctrl+Shift+P: pop out · Ctrl+W: close")
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height)),
+                    )
                     .child(
                         Button::new("calculate-hash")
                             .label("Calculate")
@@ -3378,26 +3444,45 @@ impl Render for HashGeneratorWindow {
                                 this.request_close(cx);
                             })),
                     )
-                    .children(
-                        progress_label
-                            .map(|label| Label::new(label).id("hash-progress-status")),
-                    )
+                    .children(progress_label.map(|label| {
+                        Label::new(label)
+                            .id("hash-progress-status")
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    }))
                     .children(is_stopping.then(|| {
                         Label::new("Stopping the previous calculation…")
                             .id("hash-stopping-status")
+                            .text_color(appearance::to_hsla(palette.warning))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
                     }))
                     .children(digest.map(|(algorithm, digest)| {
                         Label::new(format!("{}: {digest}", algorithm.name()))
                             .id("hash-digest-result")
+                            .text_color(appearance::to_hsla(palette.success))
+                            .text_size(px(metrics.body_text_size))
+                            .line_height(px(metrics.line_height))
                     }))
-                    .children(error.map(|error| Label::new(error).id("hash-error-status")))
-                    .children(
-                        picker_feedback
-                            .map(|feedback| Label::new(feedback).id("hash-picker-status")),
-                    )
+                    .children(error.map(|error| {
+                        Label::new(error)
+                            .id("hash-error-status")
+                            .text_color(appearance::to_hsla(palette.error))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    }))
+                    .children(picker_feedback.map(|feedback| {
+                        Label::new(feedback)
+                            .id("hash-picker-status")
+                            .text_color(appearance::to_hsla(palette.warning))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    }))
                     .children(
                         presentation_feedback.map(|feedback| {
                             Label::new(feedback).id("hash-presentation-status")
+                                .text_size(px(metrics.small_text_size))
+                                .line_height(px(metrics.line_height))
                         }),
                     )
                     .children(is_running.then(|| {
@@ -3865,6 +3950,7 @@ fn activate_for_secondary_window(
 pub(crate) fn run_foundation_window(
     hotkey: multi_launcher::hotkey::Hotkey,
     coordinate_tool_preferences: CoordinateToolPreferences,
+    theme_settings: multi_launcher::settings::ThemeSettings,
     settings_path: String,
     saved_utility_presentations: UtilityPresentations,
     settings_save_workers: SettingsSaveWorkerRegistry,
@@ -3935,8 +4021,15 @@ pub(crate) fn run_foundation_window(
     let closing_for_app = Arc::clone(&coordinate_hud_probe_closing);
     let utility_presentations_after_run = utility_presentations.clone();
 
+    let appearance_settings_for_run = theme_settings.clone();
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
+        let initial_appearance = appearance::system_appearance(cx.window_appearance());
+        appearance::apply_saved_theme(
+            &appearance_settings_for_run,
+            initial_appearance,
+            cx,
+        );
         cx.bind_keys([
             KeyBinding::new("ctrl-enter", ToggleSecondaryWindow, Some("RootWindow")),
             KeyBinding::new("f6", ToggleCoordinateHudProbe, Some("RootWindow")),
@@ -3998,7 +4091,22 @@ pub(crate) fn run_foundation_window(
         let restart_exit_for_root = Rc::clone(&restart_exit);
         let restart_failure_for_root = Rc::clone(&restart_failure);
         let restart_context_for_root = restart_context.clone();
+        let theme_settings_for_root = theme_settings.clone();
+        let appearance_subscription_sink = Rc::clone(&subscription_sink);
         let (root_window, root_view) = match open_window(options, cx, move |window, cx| {
+            if appearance::should_observe_system(&theme_settings_for_root) {
+                let settings = theme_settings_for_root.clone();
+                let appearance_subscription = window.observe_window_appearance(move |window, cx| {
+                    appearance::apply_saved_theme(
+                        &settings,
+                        appearance::system_appearance(window.appearance()),
+                        cx,
+                    );
+                });
+                appearance_subscription_sink
+                    .borrow_mut()
+                    .push(appearance_subscription);
+            }
             let query = cx.new(|cx| InputState::new(window, cx).placeholder("Type a query"));
             query.focus_handle(cx).focus(window, cx);
             let focus_handle = cx.focus_handle();

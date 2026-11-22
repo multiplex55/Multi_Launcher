@@ -166,4 +166,10 @@ The verified source parent is `47f19b43d`, pushed to `origin/feat/gpui-ui-parity
 
 Native `G04-C3-NATIVE-PROGRESS-CANCEL` verified the 3 GiB sparse File job advanced to 3%, canceled, re-enabled Calculate and published no digest. The sparse file was removed and the restored fixture has no owned processes. No production source changes were needed for that result.
 
+## G04-A — Saved appearance verified
+
+The shared resolver now maps the canonical settings into one Kit theme for the root and Hash. Independent review verified the corrected single window-surface painter. The final `3B00C1EA…` build verified the default and actual egui-saved larger profile through docked Hash, calculation, Pop Out and clean exit. All seven focused cases passed, followed by the exact mapping test after test-only cleanup. See `G04-A-FOCUSED` and `G04-A-NATIVE`. The scratch fixture has no running processes and its settings were restored.
+
+Continue G04-C4 with protected Clipboard Load and digest Copy. The [Hash checkpoint handoff](gui/hash-generator.md#pending-clipboard-checkpoint) specifies the shared backend, effect and restart boundaries. Native Clipboard proof requires an isolated Windows clipboard session. Geometry, screenshot comparison and global hidden-root reveal remain open. The full Hash GUI has zero accepted parity rows.
+
 That source snapshot passed all 38 selected Nextest cases in two binaries with 8,690 skipped. The source writer is now applying the targeted focus return correction. Reuse the same Docked seed and the final linked executable only after the correction is built. The existing first-run evidence still covers unaffected draft/result retention and the canonical worker path.

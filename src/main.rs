@@ -4672,6 +4672,7 @@ fn main() -> anyhow::Result<()> {
         let restart_plan = match gpui_frontend::run_foundation_window(
             settings.hotkey(),
             settings.coordinate_tool.clone(),
+            settings.theme.clone(),
             "settings.json".to_owned(),
             settings.utility_presentations.clone(),
             multi_launcher::SettingsSaveWorkerRegistry::default(),

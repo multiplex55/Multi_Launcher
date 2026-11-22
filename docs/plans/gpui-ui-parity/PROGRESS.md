@@ -15,7 +15,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Pending execution |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | Apply the saved appearance to Kit and add protected Clipboard Load and digest Copy. G04-C3 verified Text/File controls, all three algorithms, Expected comparison, both native picker owners, retained rehost, and streamed byte progress and cancellation. Geometry, visual acceptance, reverse restart, G01 global invocation and additional overlay checks remain pending. |
+| Current next action | Add protected Clipboard Load and digest Copy. G04 verified Text/File calculation, retained mounting, both picker owners, streamed cancel and the saved appearance adapter on default and larger profiles. Geometry, visual acceptance, reverse restart, G01 global invocation and additional overlay checks remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 

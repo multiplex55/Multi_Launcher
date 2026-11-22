@@ -39,6 +39,14 @@ Use the already-borrowed Kit root `Window` for a docked view and the independent
 
 The first native round trip exercised Dock and Pop Out with the root visible and retained the draft and digest across both mounts. The confirmed GPUI-to-egui restart reopened the saved Popout presentation from the same root. See `G04-C2-INITIAL-HOSTING` and `G04-C2-FOCUS-RESTART`. The G01 global hotkey injection remains unverified. Hidden-root behavior requires a separate successful visibility action or physical input.
 
+## Pending Clipboard checkpoint
+
+Use `ArboardClipboardBackend` for explicit Load and Copy. The read reaches the existing protected reader and its timeout policy. Run the accepted operations outside the UI thread and `HashSession` lock, with one root-owned in-flight operation. Put load and copy outcome application in `HashSession` so egui and GPUI share snapshot, error and digest feedback. Load keeps a prior snapshot on failure and invalidates the earlier result only on a changed source. An empty string is a valid loaded snapshot. GPUI shows the byte count and current feedback.
+
+Fence a late Load by mount, session and source generation. Bind an accepted Copy to the current result request and hold its admission until the OS write and feedback settle. Prevent a conflicting result change, host move or close during that short accepted write and keep Quit/restart blocked with feedback. Include opaque clipboard snapshot presence and revision in restart draft checks without carrying contents in the restart, settings or diagnostics. Keep the adapter's control entities and rendering in a focused Hash view module if the move leaves root mount and effect ownership clear.
+
+Exercise the existing session and clipboard-backend tests, exact UTF-8 snapshot handling, private refusal, stale load and accepted write/restart fencing. Native Load/Copy verification requires a disposable Windows session with an isolated clipboard. A separate application settings directory shares the desktop clipboard.
+
 ## Pending geometry checkpoint
 
 Reuse the canonical `Settings.utility_dialog_sizes` component merge and `SettingsSaveWorkerRegistry`. Keep docked logical `size` and popped-out `native` outer placement independent. Extract the existing acknowledgement and accepted-intent ownership from `UtilityDialogSizeManager`. Keep egui viewport and widget discovery in its adapter. Load and place the popout on initial open and rehost through the existing nearest monitor/work-area policy. GPUI's reported bounds and resize operation describe the client area, so sample actual checked outer bounds and monitor DPI for the saved placement.
