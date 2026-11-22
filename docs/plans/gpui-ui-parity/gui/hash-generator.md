@@ -37,7 +37,7 @@ Use closed, docked and popout host states with a stable mount generation separat
 
 Use the already-borrowed Kit root `Window` for a docked view and the independent window/content handle for a popout. Defer child rehost effects until its current update returns. Replace the mount before closing the old HWND so its close observer cannot end the retained session. Keep accepted rehost work in the G03 restart admission gate until the old HWND retires and the current save revision is acknowledged. Report an unresolved write and retain any unretired HWND in restart preflight.
 
-For the first native round trip, exercise Dock and Pop Out with the root visible. Compare the draft and digest across both mounts, then open the same saved mode from egui in the same scratch directory. The G01 global hotkey injection remains unverified. Hidden-root behavior requires a separate successful visibility action or physical input.
+The first native round trip exercised Dock and Pop Out with the root visible and retained the draft and digest across both mounts. The confirmed GPUI-to-egui restart reopened the saved Popout presentation from the same root. See `G04-C2-INITIAL-HOSTING` and `G04-C2-FOCUS-RESTART`. The G01 global hotkey injection remains unverified. Hidden-root behavior requires a separate successful visibility action or physical input.
 
 ## Verification
 

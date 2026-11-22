@@ -123,3 +123,21 @@ The verified C1 source checkpoint is `1cd3dc9f1`, pushed to `origin/feat/gpui-ui
 Next, G04-C2 mounts the retained Hash preview in the root or an independent Kit window according to the shared preference. Keep the session across rehost, serialize the accepted save, and retire old native windows and writes before restart. The remaining controls and full parity stay with G04-B/D. No native fixture processes are running.
 
 The G04-C1 source checkpoint is `25d1e5fc6`, pushed to `origin/feat/gpui-ui-parity`. The checkout was clean before G04-C2. The sole implementer now owns the Kit mount and save integration source, and the parent owns the Windows round trip and checkpoint.
+
+## G04-C2 — Kit hosting draft in progress
+
+HEAD `7f736690a` adds the scoped File Search baseline to the verified C1 source. The unstaged C2 draft is in `src/gpui_frontend.rs` and `src/main.rs`. It mounts the shared preview in the root or a native Kit popout and uses the existing settings writer through `UtilityPresentationStore`. The first locked application build is in flight. Review identified stale retirement records after a late HWND close and a hidden-root Dock focus issue. The implementer owns both corrections and the focused build/tests. No C2 app artifact or native acceptance has been recorded yet.
+
+The disposable Windows fixture is idle. Its `settings-g04-hosting-seed.json` includes a Docked Hash preference, a separate Settings preference, and valid nonempty docked and native Hash geometry records. Apply it only to the scratch profile before testing the linked artifact. Verify a GPUI mode save, preserved text and digest, checked native retirement, then egui reopening the saved presentation. Restore the scratch settings after the fixture exits. Global F2 and visible layout evidence remain separately pending.
+
+The first dev artifact `45C9712B…` proved retained rehost in both directions and canonical preference with unchanged geometry through both frontend readers. Closing the final popout revealed a root keyboard-focus regression despite the Search focus line in UI Automation. See `G04-C2-INITIAL-HOSTING`.
+
+## G04-C2 — Kit hosting verified
+
+Artifact `6F994C9B…` restored logical Search focus when Hash left the dock and after native popout close. Real Windows keyboard input reached Search while the popout was live and after close. Ctrl+G reopened a fresh session in the saved Popout mode. A confirmed restart with a Hash popout open retired GPUI, and egui took the same root and opened Hash in its own native popout. Both geometry records and the unrelated Settings preference matched the seed. The isolated settings were restored byte for byte and all fixture processes exited. See `G04-C2-HOSTING-FOCUSED` and `G04-C2-FOCUS-RESTART`.
+
+Final review found the explicit Close button and Ctrl+W use a separate path from native window close. The final `A092C17E…` artifact restores logical Search focus through both paths. Ctrl+W closed and allowed Search input and fresh reopen in both verified mounts. The same final build repeated the confirmed restart. See `G04-C2-EXPLICIT-CLOSE`.
+
+Next, G04-C3 delivers multiline Text, File selection, all algorithms, Expected digest, comparison and byte progress in both mounts. Use the actual originating Windows owner for the asynchronous picker and gate stale responses by mount, session and source. Verify real keyboard control traversal. Protected Clipboard load and digest copy follow in a separate checkpoint. Hidden-root reveal, visible layout and the accessibility focus discrepancy still require evidence. The Hash preview has zero accepted GUI parity rows. The scratch profile is restored and idle.
+
+That source snapshot passed all 38 selected Nextest cases in two binaries with 8,690 skipped. The source writer is now applying the targeted focus return correction. Reuse the same Docked seed and the final linked executable only after the correction is built. The existing first-run evidence still covers unaffected draft/result retention and the canonical worker path.

@@ -15,7 +15,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Pending execution |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | G04-C2 real Kit dock and popout for the Hash preview. G04-C1 shared preference and worker acknowledgements are verified through egui. The reverse switch, G01 global invocation, foreground restoration and additional passive overlay checks remain pending. |
+| Current next action | Implement the complete Hash controls and operating-system source actions. G04-C2 verified real Kit Docked and Popout hosting, fresh reopen, keyboard focus recovery, canonical mode persistence and the same-root egui restart. The reverse switch, G01 global invocation, foreground restoration and additional passive overlay checks remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 
