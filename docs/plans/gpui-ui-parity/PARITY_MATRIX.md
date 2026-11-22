@@ -234,9 +234,9 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Color Picker Plugin Settings](gui/plugin-settings-color-picker.md) | COLOR-PICKER-SETTINGS-01 | G18 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
 | [MkMacro Plugin Settings](gui/plugin-settings-mkmacro.md) | MKMACRO-SETTINGS-01 | G19 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
 | [Mouse Gestures Plugin Settings](gui/plugin-settings-mouse-gestures.md) | MOUSE-GESTURE-PLUGIN-01 | G21 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
-| [Plugin Editor](gui/plugin-editor.md) | PLUGIN-EDITOR-01 | G06 | Specified | Native File menu route and editor creation observed. Editing, filter and GPUI remain pending. |
-| [App Editor](gui/actions-editor.md) | APP-EDITOR-01 | G06 | Specified | Native File menu route and owned child passed. Persisted edits and GPUI remain pending. |
-| [Add or Edit App](gui/add-action.md) | APP-FORM-01 | G06 | Specified | Native Add App draft and Cancel passed. Save, Repair and GPUI remain pending. |
+| [Plugin Editor](gui/plugin-editor.md) | PLUGIN-EDITOR-01 | G06 | Specified | Native Settings navigation, filter, plugin and capability saves passed for Hash. GPUI Search used the saved selection. A GPUI editor remains pending. |
+| [App Editor](gui/actions-editor.md) | APP-EDITOR-01 | G06 | Specified | Native entry and custom action save/reopen passed. Edit, Remove, Repair and GPUI remain pending. |
+| [Add or Edit App](gui/add-action.md) | APP-FORM-01 | G06 | Specified | Native Add App Cancel, path validation and Save passed. Picker, Edit, Repair and GPUI remain pending. |
 | [Add Bookmark](gui/add-bookmark.md) | BOOKMARK-FORM-01 | G06 | Specified | Native egui draft and Cancel verified in G06-EGUI-BOOKMARK-DRAFTS. Validation, Save and GPUI remain pending. |
 | [Folder Alias](gui/alias-editor.md) | FOLDER-ALIAS-01 | G06 | Specified | Native egui Set Alias prefill and Cancel verified in G06-EGUI-FOLDER-TEMPFILE-ALIAS-DRAFTS. Save and GPUI remain pending. |
 | [Bookmark Alias](gui/bookmark-alias-editor.md) | BOOKMARK-ALIAS-01 | G06 | Specified | Native egui Set Alias prefill and Cancel verified in G06-EGUI-BOOKMARK-DRAFTS. Save, stale-record handling and GPUI remain pending. |

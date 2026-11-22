@@ -1,6 +1,6 @@
 # Hash Generator
 
-G04 owns `hash-generator`. Source confirmed at the execution parent. Native egui evidence covers the keyboard route, independent popout, Text calculation, comparison edits, all algorithm options, SHA-1 warnings and Unicode multiline comparison, plus native picker dismissal and empty-path validation. Selecting a file, clipboard actions and remaining native baseline checks are pending. See the [validation log](../VALIDATION_LOG.md).
+G04 owns `hash-generator`. Native egui evidence covers the keyboard route, independent popout, Text calculation, comparison edits, all algorithm options, SHA-1 warnings, Unicode multiline comparison, picker dismissal and empty-path validation. Partial GPUI evidence covers Text, Clipboard and File calculation, both picker owners, and retained docking. `G03-C2B-CLEAN-DRAIN-WINDOWS` also verifies that egui reopened the GPUI-saved popout. Native live job cancellation and the remaining visual, pointer and mixed-DPI checks still need evidence. [Validation log](../VALIDATION_LOG.md)
 
 ## Routes and host
 

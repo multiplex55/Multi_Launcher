@@ -1,10 +1,10 @@
 # Launcher
 
-G05 owns `launcher`, the root query and result workflow. The source baseline is `98bbc0ccc22a297e8eafae7e844c2f7e45854856`. G00-C exercised one egui route on an identified artifact. The launcher remains unimplemented in GPUI.
+G05 owns `launcher`, the root query and result workflow. The source baseline is `98bbc0ccc22a297e8eafae7e844c2f7e45854856`. GPUI implements one installed Hash Generator Search result and its typed activation. The full launcher remains in implementation. Native egui evidence also covers the scoped `app` query for a reopened custom action. [Validation log](../VALIDATION_LOG.md)
 
 ## Routes and ownership
 
-`src/main.rs::spawn_gui` creates the egui root and binds it to the native invocation and foreground services. `gui/render.rs` owns the root query, result activation, dashboard admission and menu controls. `gui/search.rs` owns query and result state transitions. Reuse the typed command bus, existing ranking and plugin operations, and the command outcome contract. The GPUI shell from G01 proves event-loop and input feasibility. It has no result model or action dispatch.
+`src/main.rs::spawn_gui` creates the egui root and binds it to the native invocation and foreground services. `gui/render.rs` owns the root query, result activation, dashboard admission and menu controls. `gui/search.rs` owns query and result state transitions. The GPUI shell owns the current Hash result and validates fresh activation before using the existing typed command bus. Share ranking and configured provider discovery through the next checkpoint. The remaining result sources, navigation, context menus and Jump Mode still require implementation.
 
 `launcher-result-context-menu`, `launcher-action-confirmation`, `universal-action-sheet`, `jump-mode-overlay`, `quick-help` and `command-help` are connected surfaces. G05 owns the route, payload, focus and dismissal contract for each. Utility targets, the Dashboard and authorship/settings destinations use the surface owners in [GUI inventory](../GUI_INVENTORY.md).
 

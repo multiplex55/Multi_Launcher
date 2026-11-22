@@ -1,6 +1,6 @@
 # Goal register
 
-G00 execution has begun. Read the master Goal for shared contracts and the packet for concrete checkpoints.
+G00–G05 execution is underway. The matrix and individual GUI records contain source specifications and scoped native baselines. The current stages below cover the goal implementation and acceptance work. Read the master Goal for shared contracts and the packets for concrete checkpoints.
 
 The initial program has 27 goals. All remain on **one migration branch**, with one active source writer. Ordering below is a default, not a requirement to block independent work behind an unavailable unrelated native check. Record any resequencing and preserve dependency/evidence ownership.
 
