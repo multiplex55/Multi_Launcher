@@ -1,0 +1,13 @@
+# Calculation Pad
+
+G15 owns `calculation-pad`. Exact `calc pad` emits `calc:pad` and opens `DialogCommand::CalculationPad`. The retained dialog owns the editor, layout and native host. `CalculationPadSession` owns the document incarnation, stable line IDs, source revisions, evaluation basis, current results and document options. The existing calculation engine remains authoritative.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| CALC-PAD-01 | Preserve source editing, caret/selection/scroll, undo/redo, syntax, completion, folding, navigation and exact current Find/Replace and rename decisions. Render results, diagnostics and dependencies against the correct physical lines. |
+| CALC-PAD-02 | Preserve automatic evaluation, explicit manual Calculate and exact Cancel. Keep current/cached, pending and stale results distinct. Retain numeric and language semantics, bounded evaluation and explicit current-basis copy/navigation. |
+| CALC-PAD-03 | Preserve independent wide/stacked split preferences and per-pane view, source/results configuration, validated literal input controls and stable output watches. Input mutation uses the same source and undo path. |
+| CALC-PAD-04 | New/Open/Save/Save As, document chooser, dirty and conflict decisions use current identity and versioned atomic storage. Existing optional recovery stays incarnation/revision-fenced. Host moves retain the document and pending decision. |
+| CALC-PAD-05 | Tools open owned [Examples & Reference](calculation-pad-reference.md), [Dependency Explorer](calculation-pad-dependencies.md), [Programmer Inspector](programmer-inspector.md), Charts and Sensitivity using exact current receipts and host rules. |
+
+Select `calc_pad_is_an_exact_opener_and_inline_calculator_behavior_is_preserved`, `calculation_pad_opener_has_one_exact_typed_route`, `studio_usability_calculation_host_migration_preserves_cached_session_and_pending_decision`, `editor_updates_dependencies_errors_and_session_owned_keyboard_undo_redo`, `retained_manual_actions_keep_stale_results_read_only_and_resume_automatic`, `splitters_drag_in_both_layouts_and_save_once_on_release`, `configured_input_retained_manual_apply_and_stale_settings` and `saved_document_reopens_and_dirty_close_write_conflict_keeps_the_draft`. `G15-EGUI-PAD-DEPENDENCY` proves native two-line evaluation, current companion receipt, accepted navigation and dirty Discard. Remaining editor, persistence, host and GPUI evidence are pending.
