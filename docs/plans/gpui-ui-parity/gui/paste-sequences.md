@@ -1,0 +1,12 @@
+# Paste Sequences
+
+G21 owns `paste-sequences`. The `paste_sequence` plugin exposes `paste`, `paste open` and `paste:open` for the editor. A named saved result carries stable `paste:run:<id>`. The editor owns the draft and picker state. `SequencePlayback` owns the active run and eligible target.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| PASTE-SEQUENCE-01 | Show ordered saved sequences, exact selection, New and the inline Remove/Keep decision. Preserve Name, optional start shortcut, Automatic, Manual and Paste-to-Advance modes and their existing delay behavior. Playback Settings opens the current Settings section while retaining the draft. |
+| PASTE-SEQUENCE-02 | Add Snippet, Clipboard Item or Temporary Text with ordered rows, edit/reorder/remove and the exact current persisted picker identity. Snippets persist aliases. Clipboard references expire and never embed the payload. Literal text has the existing persistence behavior and hidden previews remain masked. |
+| PASTE-SEQUENCE-03 | Preview preflights and may stage a parameter prompt or Ready state. It performs no paste. Start is admitted only when Ready, Next when awaiting advance, and Cancel Run for current active/preparing work. Run and Run Once retain preflight and current-target checks. Run Once is memory-only. Show frozen run preview, status and progress and preserve external clipboard ownership. |
+| PASTE-SEQUENCE-04 | Save and asynchronous shortcut commit report content and route outcomes. Keep one playback owner, exact retained host and session, pending completion and current store revisions. Preserve remembered Dock/Pop Out, draft suspension during playback and stale picker/operation rejection when ownership retires. |
+
+Select `search_actions_contain_only_stable_ids_and_command_opens_editor`, `paste_settings_toolbar_opens_main_section_without_losing_an_open_draft`, `paste_sequence_editor_third_mode_preserves_delay_and_run_once_stays_prompted_memory_only`, `paste_sequence_editor_preview_masks_hidden_text_and_distinguishes_context_from_target`, `paste_source_picker_integration_revalidates_history_by_payload_across_reordering`, `paste_sequence_stale_content_and_binding_updates_never_overwrite_concurrent_writes` and `paste_sequences_detached_run_and_next_preserve_the_same_playback`. Production Open captures protected clipboard context. No-clipboard test uses synthetic context and fake playback or the existing QA empty-context route. Native and GPUI evidence are pending.
