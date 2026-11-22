@@ -63,6 +63,16 @@ Carry a one-shot typed restart result through `GuiStartupServices` and the `GuiW
 
 Use focused Settings host action, `gui_worker_` and `gpui_restart` cases. Native proof needs dirty Settings to defer restart, a resolved draft, a canceled confirmation, one accepted same-root child, and retained bare-launch egui selection. Source inspection at `848c6756d` established these ownership boundaries. No reverse switch is currently implemented.
 
+#### First idle egui restart checkpoint
+
+Reconcile the preceding boundaries with the current `aeb726d5a` source. Use a dedicated Settings-owned confirmation and defer preflight until both `SettingsWindowHost` and `SettingsEditor` are restored to `LauncherApp`. Validate saved projection, current plugin drafts and invalid raw input, pending settings saves and retained document/live-work owners. An owner without a current idle receipt leaves restart unavailable with an actionable reason.
+
+Once confirmed, use one reversible prepare/ack through `GuiStartupServices` and the existing wake. Main processes preparation before further route dispatch, gates current hotkey/radial/session transitions and freezes MkMacro through the existing `SharedOperationGuard`. The GUI rechecks its current state after the ack. Denial or loss of the exact owner restores admission and egui interaction before any effective close.
+
+The first bounded profile requires verified absence of invocation service and live native radial/preview hosts that may defer retirement. `invocation_service_needed` also checks the Paste Sequences plugin. Separately retire the always-started Radial Gallery worker with a checked join, since its current Drop signals stop. MkMacro pollers may start with the plugin hidden. Use the existing order to stop them and retire the coordinator/runtime/recorder with checked outcomes. Exclude an active Hot Folder driver until it has a checked retirement path. Preserve legacy hotkey stop, required native window retirement and final settings drain.
+
+Make `GuiWorker` return the typed disposition after successful eframe return and expose required `on_exit` receipts. Main must join the worker, confirm actual owner retirement and drain final writes before returning the existing relaunch plan. Parameterize that plan with the requested frontend. After the outgoing runtime scope and canonical lock have ended, launch the captured exact binary once with `--ui=gpui` and original working directory. Record discard/cancel, empty and busy admission, native teardown/persistence failure and accepted-ack races in focused tests and one eligible Windows round-trip.
+
 ## Acceptance scenarios
 
 Selection tests cover every table row; native scenarios cover the same release artifact with each frontend, clean shutdown/reopen, saved-GPUI plus bare launch selecting egui, current GPUI owner plus explicit egui, and manual fallback after GPUI initialization failure.
