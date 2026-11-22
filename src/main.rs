@@ -4348,8 +4348,8 @@ fn complete_hotkey_route_step(
     false
 }
 
-struct GuiWorker {
-    handle: thread::JoinHandle<()>,
+struct GuiWorker<T = ()> {
+    handle: thread::JoinHandle<T>,
     completed: Arc<AtomicBool>,
 }
 
@@ -4380,8 +4380,11 @@ enum GuiWorkerEvent {
     ChannelClosed(RecvError),
 }
 
-impl GuiWorker {
-    fn spawn(wake: Sender<()>, run: impl FnOnce(GuiWorkerCompletion) + Send + 'static) -> Self {
+impl<T: Send + 'static> GuiWorker<T> {
+    fn spawn(
+        wake: Sender<()>,
+        run: impl FnOnce(GuiWorkerCompletion) -> T + Send + 'static,
+    ) -> Self {
         let completed = Arc::new(AtomicBool::new(false));
         let completion = GuiWorkerCompletion {
             completed: Arc::clone(&completed),
@@ -4399,8 +4402,35 @@ impl GuiWorker {
         }
     }
 
-    fn join(self) -> thread::Result<()> {
+    fn join(self) -> thread::Result<T> {
         self.handle.join()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GuiWorkerOutcome {
+    Returned,
+    EguiError(String),
+    ThreadPanicked,
+}
+
+fn classify_gui_worker_join(joined: thread::Result<Result<(), String>>) -> GuiWorkerOutcome {
+    match joined {
+        Ok(Ok(())) => GuiWorkerOutcome::Returned,
+        Ok(Err(error)) => GuiWorkerOutcome::EguiError(error),
+        Err(_) => GuiWorkerOutcome::ThreadPanicked,
+    }
+}
+
+fn report_gui_worker_outcome(joined: thread::Result<Result<(), String>>) {
+    match classify_gui_worker_join(joined) {
+        GuiWorkerOutcome::Returned => {}
+        GuiWorkerOutcome::EguiError(error) => {
+            tracing::error!(%error, "egui frontend returned with an error");
+        }
+        GuiWorkerOutcome::ThreadPanicked => {
+            tracing::error!("egui frontend worker panicked");
+        }
     }
 }
 
@@ -4435,7 +4465,7 @@ fn spawn_gui(
     mut plugins: PluginManager,
     startup_services: GuiStartupServices,
 ) -> (
-    GuiWorker,
+    GuiWorker<Result<(), String>>,
     Arc<AtomicBool>,
     Arc<AtomicBool>,
     Arc<AtomicBool>,
@@ -4537,7 +4567,7 @@ fn spawn_gui(
         let initial_snippet_origin =
             multi_launcher::active_window::capture_external_foreground_window();
 
-        let _ = eframe::run_native(
+        let run_result = eframe::run_native(
             "Multi Lnchr",
             native_options,
             Box::new(move |cc| {
@@ -4604,6 +4634,7 @@ fn spawn_gui(
             }),
         );
         completion.complete();
+        run_result.map_err(|error| error.to_string())
     });
 
     (
@@ -4697,7 +4728,8 @@ fn main() -> anyhow::Result<()> {
                 });
             if let Err(error) = spawn_result {
                 let message = format!(
-                    "Could not start the egui fallback automatically: {error}\n\nRun this command manually:\n{}",
+                    "Could not start the {} frontend automatically: {error}\n\nRun this command manually:\n{}",
+                    plan.target.display_name(),
                     plan.manual_command()
                 );
                 gpui_frontend::show_startup_error(&message);
@@ -5155,10 +5187,11 @@ fn main() -> anyhow::Result<()> {
                 service.stop();
             }
             listener.stop();
-            let _ = gui_worker.join();
+            let gui_worker_join = gui_worker.join();
             // Let LauncherApp::on_exit queue its final utility-size write
             // before join_all closes worker admission.
             settings_save_workers.join_all();
+            report_gui_worker_outcome(gui_worker_join);
             break Ok(());
         }
 
@@ -6769,10 +6802,11 @@ fn main() -> anyhow::Result<()> {
                 c.send_viewport_cmd(egui::ViewportCommand::Close);
                 c.request_repaint();
             }
-            let _ = gui_worker.join();
+            let gui_worker_join = gui_worker.join();
             // Let LauncherApp::on_exit queue its final utility-size write
             // before join_all closes worker admission.
             settings_save_workers.join_all();
+            report_gui_worker_outcome(gui_worker_join);
             break Ok(());
         }
 
@@ -8310,19 +8344,15 @@ mod tests {
     #[test]
     fn gui_worker_gui_error_return_publishes_completion() {
         let (wake, events) = channel();
-        let (gui_result, gui_result_rx) = channel();
-        let worker = GuiWorker::spawn(wake, move |completion| {
-            let result: Result<(), &str> = Err("GUI startup failed");
-            gui_result.send(result).unwrap();
-            completion.complete();
+        let worker = GuiWorker::spawn(wake, move |_completion| {
+            Err::<(), _>("GUI startup failed".to_owned())
         });
 
-        assert_eq!(
-            gui_result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Err("GUI startup failed")
-        );
         assert_eq!(worker.wait_for_event(&events), GuiWorkerEvent::Completed);
-        worker.join().unwrap();
+        assert_eq!(
+            classify_gui_worker_join(worker.join()),
+            GuiWorkerOutcome::EguiError("GUI startup failed".to_owned())
+        );
         assert_eq!(
             events.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Disconnected)
@@ -8332,12 +8362,15 @@ mod tests {
     #[test]
     fn gui_worker_gui_panic_publishes_completion_and_retains_join_error() {
         let (wake, events) = channel();
-        let worker = GuiWorker::spawn(wake, move |_completion| {
+        let worker = GuiWorker::<Result<(), String>>::spawn(wake, move |_completion| {
             panic!("GUI worker test panic");
         });
 
         assert_eq!(worker.wait_for_event(&events), GuiWorkerEvent::Completed);
-        assert!(worker.join().is_err());
+        assert_eq!(
+            classify_gui_worker_join(worker.join()),
+            GuiWorkerOutcome::ThreadPanicked
+        );
         assert_eq!(
             events.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Disconnected)
@@ -8379,11 +8412,15 @@ mod tests {
         let worker = GuiWorker::spawn(wake, move |_completion| {
             close_gui_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             closed_by_gui.store(true, Ordering::Release);
+            Ok::<(), String>(())
         });
 
         assert!(!closed.load(Ordering::Acquire));
         close_gui.send(()).unwrap();
-        worker.join().unwrap();
+        assert_eq!(
+            classify_gui_worker_join(worker.join()),
+            GuiWorkerOutcome::Returned
+        );
         assert!(closed.load(Ordering::Acquire));
         assert_eq!(events.try_recv(), Ok(()));
         assert_eq!(

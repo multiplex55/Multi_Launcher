@@ -36,6 +36,7 @@ use gpui_kit::*;
 #[cfg(windows)]
 use std::ffi::c_void;
 
+pub(crate) use crate::gpui_restart::Frontend;
 use crate::gpui_restart::{
     EffectPermit, HashWork, RestartAdmission, RestartBlocker, RestartContext, RestartPlan,
 };
@@ -83,13 +84,6 @@ gpui_kit::actions!([
     RestartWithEgui
 ]);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Frontend {
-    #[default]
-    Egui,
-    Gpui,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrontendSelection {
     DefaultEgui,
@@ -104,13 +98,20 @@ impl FrontendSelection {
         }
     }
 
-    const fn requested_selector(self) -> Option<&'static str> {
+    const fn requested_frontend(self) -> Option<Frontend> {
         match self {
             Self::DefaultEgui => None,
-            Self::Explicit(Frontend::Egui) => Some("--ui=egui"),
-            Self::Explicit(Frontend::Gpui) => Some("--ui=gpui"),
+            Self::Explicit(frontend) => Some(frontend),
         }
     }
+}
+
+fn selector_choice_message() -> String {
+    format!(
+        "Choose {} or {}.",
+        Frontend::Egui.selector_argument(),
+        Frontend::Gpui.selector_argument()
+    )
 }
 
 pub(crate) fn selection_from_args(
@@ -120,23 +121,23 @@ pub(crate) fn selection_from_args(
 
     for arg in args {
         match arg.as_os_str() {
-            value if value == OsStr::new("--ui=egui") => {
+            value if value == OsStr::new(Frontend::Egui.selector_argument()) => {
                 if matches!(selection, FrontendSelection::Explicit(_)) {
                     return Err("Specify only one --ui selector.".to_owned());
                 }
                 selection = FrontendSelection::Explicit(Frontend::Egui);
             }
-            value if value == OsStr::new("--ui=gpui") => {
+            value if value == OsStr::new(Frontend::Gpui.selector_argument()) => {
                 if matches!(selection, FrontendSelection::Explicit(_)) {
                     return Err("Specify only one --ui selector.".to_owned());
                 }
                 selection = FrontendSelection::Explicit(Frontend::Gpui);
             }
             value if value == OsStr::new("--ui") => {
-                return Err("Choose --ui=egui or --ui=gpui.".to_owned());
+                return Err(selector_choice_message());
             }
             value if value.to_string_lossy().starts_with("--ui=") => {
-                return Err("Choose --ui=egui or --ui=gpui.".to_owned());
+                return Err(selector_choice_message());
             }
             _ => {}
         }
@@ -146,7 +147,7 @@ pub(crate) fn selection_from_args(
 }
 
 pub(crate) fn duplicate_instance_message(selection: FrontendSelection) -> Option<String> {
-    let selector = selection.requested_selector()?;
+    let selector = selection.requested_frontend()?.selector_argument();
     Some(format!(
         "The data directory is already owned by another Multi Launcher instance. Close that instance, then rerun with {selector} from the same working directory."
     ))
@@ -2416,10 +2417,10 @@ impl RootWindow {
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(context) = self.restart_context.clone() else {
-            self.restart_status = Some(
-                "Could not capture the executable path and working directory before restart. Close and relaunch manually with --ui=egui."
-                    .to_owned(),
-            );
+            self.restart_status = Some(format!(
+                "Could not capture the executable path and working directory before restart. Close and relaunch manually with {}.",
+                Frontend::Egui.selector_argument()
+            ));
             cx.notify();
             return;
         };
@@ -2629,7 +2630,8 @@ impl RootWindow {
         if let Err(error) = teardown {
             let _ = root.update(cx, |root, cx| {
                 root.restart_status = Some(format!(
-                    "Egui restart stopped because GPUI teardown failed: {error}. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with --ui=egui."
+                    "Egui restart stopped because GPUI teardown failed: {error}. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with {}.",
+                    Frontend::Egui.selector_argument()
                 ));
                 cx.notify();
             });
@@ -2658,7 +2660,8 @@ impl RootWindow {
         if let Err(error) = close_children {
             let _ = root.update(cx, |root, cx| {
                 root.restart_status = Some(format!(
-                    "Egui restart stopped because a GPUI utility window could not be closed: {error}. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with --ui=egui."
+                    "Egui restart stopped because a GPUI utility window could not be closed: {error}. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with {}.",
+                    Frontend::Egui.selector_argument()
                 ));
                 cx.notify();
             });
@@ -2666,9 +2669,10 @@ impl RootWindow {
         }
         if !wait_for_native_retirement(cx, &child_native_windows).await {
             let _ = root.update(cx, |root, cx| {
-                root.restart_status = Some(
-                    "Egui restart stopped because a utility window did not retire. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with --ui=egui.".to_owned(),
-                );
+                root.restart_status = Some(format!(
+                    "Egui restart stopped because a utility window did not retire. No new process was started. GPUI remains open; copy any unsaved text, then close and rerun with {}.",
+                    Frontend::Egui.selector_argument()
+                ));
                 cx.notify();
             });
             return;
@@ -2688,7 +2692,8 @@ impl RootWindow {
         let close_root = close_root_error.into_inner().map_or(Ok(()), Err);
         if let Err(error) = close_root {
             accepted.restart_failure.borrow_mut().replace(format!(
-                "The GPUI root window could not be closed during restart: {error}. No egui process was started; manually close Multi Launcher and rerun with --ui=egui."
+                "The GPUI root window could not be closed during restart: {error}. No egui process was started; manually close Multi Launcher and rerun with {}.",
+                Frontend::Egui.selector_argument()
             ));
             let _ = cx.update(|app| app.quit());
             return;
@@ -2700,9 +2705,10 @@ impl RootWindow {
             None => true,
         };
         if !root_retired {
-            accepted.restart_failure.borrow_mut().replace(
-                "The GPUI root window did not retire before restart. No egui process was started; manually close Multi Launcher and rerun with --ui=egui.".to_owned(),
-            );
+            accepted.restart_failure.borrow_mut().replace(format!(
+                "The GPUI root window did not retire before restart. No egui process was started; manually close Multi Launcher and rerun with {}.",
+                Frontend::Egui.selector_argument()
+            ));
             let _ = cx.update(|app| app.quit());
             return;
         }
@@ -6801,7 +6807,8 @@ pub(crate) fn run_foundation_window(
 
     if let Some(error) = startup_error.borrow_mut().take() {
         return Err(format!(
-            "GPUI could not open its window: {error}. Restart with --ui=egui to use the fallback frontend."
+            "GPUI could not open its window: {error}. Restart with {} to use the fallback frontend.",
+            Frontend::Egui.selector_argument()
         ));
     }
     if let Some(error) = restart_failure_after_run.borrow_mut().take() {
@@ -6844,8 +6851,13 @@ pub(crate) fn run_foundation_window(
         true
     };
 
-    crate::gpui_restart::plan_after_teardown(context, coordinate_shutdown_result, windows_retired)
-        .map(Some)
+    crate::gpui_restart::plan_after_teardown(
+        context,
+        Frontend::Egui,
+        coordinate_shutdown_result,
+        windows_retired,
+    )
+    .map(Some)
 }
 
 #[cfg(test)]

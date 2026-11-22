@@ -1,6 +1,29 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Frontend {
+    #[default]
+    Egui,
+    Gpui,
+}
+
+impl Frontend {
+    pub(crate) const fn selector_argument(self) -> &'static str {
+        match self {
+            Self::Egui => "--ui=egui",
+            Self::Gpui => "--ui=gpui",
+        }
+    }
+
+    pub(crate) const fn display_name(self) -> &'static str {
+        match self {
+            Self::Egui => "egui",
+            Self::Gpui => "GPUI",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RestartContext {
     executable: PathBuf,
@@ -23,10 +46,11 @@ impl RestartContext {
         }
     }
 
-    pub(crate) fn into_plan(self) -> RestartPlan {
+    pub(crate) fn into_plan(self, target: Frontend) -> RestartPlan {
         RestartPlan {
             executable: self.executable,
             working_directory: self.working_directory,
+            target,
         }
     }
 }
@@ -35,17 +59,19 @@ impl RestartContext {
 pub(crate) struct RestartPlan {
     pub(crate) executable: PathBuf,
     pub(crate) working_directory: PathBuf,
+    pub(crate) target: Frontend,
 }
 
 impl RestartPlan {
     pub(crate) fn selector_args(&self) -> [std::ffi::OsString; 1] {
-        [std::ffi::OsString::from("--ui=egui")]
+        [std::ffi::OsString::from(self.target.selector_argument())]
     }
 
     pub(crate) fn manual_command(&self) -> String {
         format!(
-            "Command: \"{}\" --ui=egui\nWorking directory: \"{}\"",
+            "Command: \"{}\" {}\nWorking directory: \"{}\"",
             self.executable.display(),
+            self.target.selector_argument(),
             self.working_directory.display()
         )
     }
@@ -185,6 +211,7 @@ pub(crate) fn after_guard_release<G, T, E>(
 
 pub(crate) fn plan_after_teardown(
     context: RestartContext,
+    target: Frontend,
     teardown: Result<(), String>,
     windows_retired: bool,
 ) -> Result<RestartPlan, String> {
@@ -192,13 +219,13 @@ pub(crate) fn plan_after_teardown(
     if !windows_retired {
         return Err("one or more owned GPUI windows remain alive".to_owned());
     }
-    Ok(context.into_plan())
+    Ok(context.into_plan(target))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        HashWork, RestartAdmission, RestartBlocker, RestartContext, after_guard_release,
+        Frontend, HashWork, RestartAdmission, RestartBlocker, RestartContext, after_guard_release,
         plan_after_teardown,
     };
     use multi_launcher::platform::{
@@ -262,37 +289,47 @@ mod tests {
             PathBuf::from(r"C:\Apps\Multi Launcher\multi_launcher.exe"),
             PathBuf::from(r"D:\Workspace\session"),
         );
-        let plan = context.into_plan();
-        assert_eq!(
-            plan.executable,
-            PathBuf::from(r"C:\Apps\Multi Launcher\multi_launcher.exe")
-        );
-        assert_eq!(
-            plan.working_directory,
-            PathBuf::from(r"D:\Workspace\session")
-        );
-        assert_eq!(
-            plan.selector_args(),
-            [std::ffi::OsString::from("--ui=egui")]
-        );
-        assert_eq!(
-            plan.manual_command(),
-            "Command: \"C:\\Apps\\Multi Launcher\\multi_launcher.exe\" --ui=egui\nWorking directory: \"D:\\Workspace\\session\""
-        );
+        for (target, selector) in [(Frontend::Egui, "--ui=egui"), (Frontend::Gpui, "--ui=gpui")] {
+            let plan = context.clone().into_plan(target);
+            assert_eq!(
+                plan.executable,
+                PathBuf::from(r"C:\Apps\Multi Launcher\multi_launcher.exe")
+            );
+            assert_eq!(
+                plan.working_directory,
+                PathBuf::from(r"D:\Workspace\session")
+            );
+            assert_eq!(plan.target, target,);
+            assert_eq!(target.selector_argument(), selector);
+            assert_eq!(plan.selector_args(), [std::ffi::OsString::from(selector)]);
+            assert_eq!(
+                plan.manual_command(),
+                format!(
+                    "Command: \"C:\\Apps\\Multi Launcher\\multi_launcher.exe\" {}\nWorking directory: \"D:\\Workspace\\session\"",
+                    selector
+                )
+            );
+        }
     }
 
     #[test]
     fn teardown_failure_does_not_produce_a_restart_plan() {
         let context = RestartContext::from_paths(PathBuf::from("app.exe"), PathBuf::from("."));
         assert!(
-            plan_after_teardown(context, Err("native cleanup failed".to_owned()), true).is_err()
+            plan_after_teardown(
+                context,
+                Frontend::Egui,
+                Err("native cleanup failed".to_owned()),
+                true
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn live_owned_window_does_not_produce_a_restart_plan() {
         let context = RestartContext::from_paths(PathBuf::from("app.exe"), PathBuf::from("."));
-        assert!(plan_after_teardown(context, Ok(()), false).is_err());
+        assert!(plan_after_teardown(context, Frontend::Egui, Ok(()), false).is_err());
     }
 
     #[test]
@@ -301,8 +338,8 @@ mod tests {
         let data_root =
             AppDataRoot::from_settings_path(directory.path().join("settings.json")).unwrap();
         let guard = acquired(SingleInstanceGuard::acquire(&data_root).unwrap());
-        let plan =
-            RestartContext::from_paths(PathBuf::from("app.exe"), PathBuf::from(".")).into_plan();
+        let plan = RestartContext::from_paths(PathBuf::from("app.exe"), PathBuf::from("."))
+            .into_plan(Frontend::Egui);
         let (_, result): (_, Result<(), &str>) =
             after_guard_release(plan, guard, |_| Err("spawn failed"));
         assert_eq!(result, Err("spawn failed"));
@@ -317,33 +354,42 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let data_root =
             AppDataRoot::from_settings_path(directory.path().join("settings.json")).unwrap();
-        let guard = acquired(SingleInstanceGuard::acquire(&data_root).unwrap());
         let context = RestartContext::from_paths(
             PathBuf::from(r"C:\Apps\multi_launcher.exe"),
             directory.path().to_path_buf(),
         );
-        let plan = context.into_plan();
-        let (released_plan, observed) = after_guard_release(plan, guard, |plan| {
-            let next_owner = SingleInstanceGuard::acquire(&data_root).unwrap();
-            assert!(matches!(next_owner, SingleInstanceAcquire::Acquired(_)));
-            Ok::<_, String>((
-                plan.executable.clone(),
-                plan.working_directory.clone(),
-                plan.selector_args(),
-            ))
-        });
-        let observed = observed.unwrap();
-        assert_eq!(
-            released_plan.executable,
-            PathBuf::from(r"C:\Apps\multi_launcher.exe")
-        );
-        assert_eq!(released_plan.working_directory, directory.path());
-        assert_eq!(
-            released_plan.selector_args(),
-            [std::ffi::OsString::from("--ui=egui")]
-        );
-        assert_eq!(observed.0, PathBuf::from(r"C:\Apps\multi_launcher.exe"));
-        assert_eq!(observed.1, directory.path());
-        assert_eq!(observed.2, [std::ffi::OsString::from("--ui=egui")]);
+        for (target, selector) in [(Frontend::Egui, "--ui=egui"), (Frontend::Gpui, "--ui=gpui")] {
+            let guard = acquired(SingleInstanceGuard::acquire(&data_root).unwrap());
+            let plan = context.clone().into_plan(target);
+            let spawn_count = std::cell::Cell::new(0);
+            let (released_plan, observed) = after_guard_release(plan, guard, |plan| {
+                spawn_count.set(spawn_count.get() + 1);
+                let next_owner = SingleInstanceGuard::acquire(&data_root).unwrap();
+                assert!(matches!(next_owner, SingleInstanceAcquire::Acquired(_)));
+                Ok::<_, String>((
+                    plan.executable.clone(),
+                    plan.working_directory.clone(),
+                    plan.target,
+                    plan.selector_args(),
+                ))
+            });
+            let observed = observed.unwrap();
+            assert_eq!(spawn_count.get(), 1);
+            assert_eq!(
+                released_plan.executable,
+                PathBuf::from(r"C:\Apps\multi_launcher.exe")
+            );
+            assert_eq!(released_plan.working_directory, directory.path());
+            assert_eq!(released_plan.target, target);
+            assert_eq!(target.selector_argument(), selector);
+            assert_eq!(
+                released_plan.selector_args(),
+                [std::ffi::OsString::from(selector)]
+            );
+            assert_eq!(observed.0, PathBuf::from(r"C:\Apps\multi_launcher.exe"));
+            assert_eq!(observed.1, directory.path());
+            assert_eq!(observed.2, target);
+            assert_eq!(observed.3, [std::ffi::OsString::from(selector)]);
+        }
     }
 }

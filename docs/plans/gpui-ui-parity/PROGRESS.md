@@ -16,7 +16,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | Implement G03-C2a checked egui worker outcomes and typed relaunch. The first G05 Search result now opens Hash through the shared typed route and passed focused tests and actual Windows keyboard/gating checks. Native pointer, mixed DPI, broader Search/GUI parity, reverse restart and G01 global invocation remain pending. |
+| Current next action | Check the final Settings writer outcome on the live relaunch path, then implement the idle egui-to-GPUI admission and switch. C2a worker outcomes and typed forward restart passed 15 focused tests and Windows replay. Broader Search/GUI parity, native pointer, mixed DPI and G01 global invocation remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 
