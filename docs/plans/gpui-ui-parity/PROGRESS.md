@@ -16,7 +16,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | Bind GPUI Hash popout geometry to the checked HWND and the verified shared store. Text/File, comparison, streamed cancel, saved appearance and the native GPUI clipboard round-trip are verified. Native GPUI geometry, visual acceptance, reverse restart, G01 global invocation and additional overlay checks remain pending. |
+| Current next action | Implement C5-C docked geometry. Text/File, comparison, streamed cancel, saved appearance, native GPUI clipboard round-trip and Windows popout geometry/restart passed their scoped observations. Docked geometry, mixed DPI, visual acceptance, reverse restart, G01 global invocation and additional overlay checks remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 

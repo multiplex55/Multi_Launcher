@@ -53,8 +53,19 @@ use multi_launcher::hash_generator::{
 use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
-use multi_launcher::settings::{RememberedPresentation, UtilityPresentations, UtilityToolKey};
+use multi_launcher::settings::{
+    NativeWindowGeometry, PreferredWindowSize, RememberedPresentation, UtilityDialogSizes,
+    UtilityPresentations, UtilityToolKey,
+};
+use multi_launcher::utility_geometry_binding::{
+    CheckedNativeWindow, NativeGeometryBinding, NativeGeometrySlot, NativeGeometryStamp,
+    NativeWindowMetrics, NativeWindowRect, native_window_metrics, new_native_geometry_slot,
+    restore_native_window_geometry, take_native_geometry,
+};
 use multi_launcher::utility_presentation::{UtilityPresentationStore, UtilityPresentationUpdate};
+use multi_launcher::utility_size::{
+    PhysicalWindowRect, UtilityNativeGeometrySample, UtilitySizeStore,
+};
 
 gpui_kit::actions!([
     ToggleSecondaryWindow,
@@ -215,6 +226,9 @@ struct RootWindow {
     native_window: Option<NativeWindow>,
     focus_handle: FocusHandle,
     utility_presentations: UtilityPresentationStore,
+    utility_size_store: Arc<Mutex<UtilitySizeStore>>,
+    utility_size_polling: Arc<AtomicBool>,
+    hash_geometry_sequence: Arc<AtomicU64>,
     hash_tool_key: UtilityToolKey,
     hash_session: Arc<Mutex<HashSession>>,
     hash_wake_signal: Arc<HashWakeSignal>,
@@ -233,6 +247,8 @@ struct RootWindow {
     hash_presentation_feedback: Arc<Mutex<Option<String>>>,
     hash_open_error: Option<String>,
     hash_presentation_error: Option<String>,
+    hash_native_geometry_error: Option<String>,
+    hash_size_write_error: Option<String>,
     secondary: SecondaryWindowState,
     secondary_revision: Arc<AtomicU64>,
     secondary_close_subscription: Option<Subscription>,
@@ -382,6 +398,9 @@ struct HashMountConfig {
     rehost_pending: Arc<AtomicBool>,
     rehost_revision: Arc<AtomicU64>,
     presentation_feedback: Arc<Mutex<Option<String>>>,
+    native_geometry_sequence: Arc<AtomicU64>,
+    hash_tool_key: UtilityToolKey,
+    size_write_error: Option<String>,
     root: WeakEntity<RootWindow>,
     mode: HashPresentationMode,
 }
@@ -710,6 +729,9 @@ fn create_hash_generator_view(
         rehost_pending,
         rehost_revision,
         presentation_feedback,
+        native_geometry_sequence,
+        hash_tool_key,
+        size_write_error,
         root,
         mode,
     } = config;
@@ -781,6 +803,24 @@ fn create_hash_generator_view(
         source.update(cx, |state, cx| state.focus(window, cx));
     }
 
+    let native_geometry_slot = new_native_geometry_slot();
+    let native_geometry_stamp = NativeGeometryStamp {
+        session_epoch,
+        mount_generation,
+    };
+    let mut native_geometry_error = None;
+    let factory_outer_size = native_window
+        .and_then(|window| checked_geometry_target(window))
+        .and_then(|target| match native_window_metrics(target, 1.0) {
+            Ok(Some(metrics)) => outer_size_in_points(metrics),
+            Ok(None) => None,
+            Err(error) => {
+                native_geometry_error = Some(format!(
+                    "Could not inspect the Hash Generator window geometry: {error}"
+                ));
+                None
+            }
+        });
     let text_for_subscription = text.clone();
     let expected_for_subscription = expected.clone();
     let source_for_subscription = source.clone();
@@ -925,6 +965,14 @@ fn create_hash_generator_view(
             file_picker_pending,
             clipboard_pending,
             native_window,
+            native_geometry_slot,
+            native_geometry_stamp,
+            hash_tool_key,
+            native_geometry_sequence,
+            native_geometry_binding: None,
+            native_geometry_error,
+            size_write_error,
+            factory_outer_size,
             restart_admission,
             mount_generation,
             session_epoch,
@@ -1261,10 +1309,245 @@ fn restart_blocker_message(blocker: RestartBlocker) -> String {
 }
 
 impl RootWindow {
+    fn drain_hash_native_geometry(&mut self, cx: &mut Context<Self>, retire_binding: bool) {
+        let Some(view) = self.hash_window.view().cloned() else {
+            return;
+        };
+        let sample = view.update(cx, |tool, _| {
+            let sample = tool.take_native_geometry();
+            if retire_binding {
+                tool.detach_native_geometry();
+            }
+            sample
+        });
+        let Some((sample, factory_size)) = sample else {
+            return;
+        };
+        let key = self.hash_tool_key;
+        let mut store = self
+            .utility_size_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let factory_size = store
+            .effective_native_geometry(key)
+            .is_none()
+            .then_some(factory_size)
+            .flatten();
+        match store.observe_native_geometry(key, sample, factory_size) {
+            Ok(Some(_revision)) => {
+                drop(store);
+                self.start_utility_size_ack_poll(cx);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                drop(store);
+                self.set_hash_size_write_error(
+                    Some(format!(
+                        "Could not save Hash Generator window geometry. Move or resize it again to retry. {error}"
+                    )),
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn poll_utility_size_writer(&mut self, cx: &mut Context<Self>) -> bool {
+        let (pending, poll_error, write_failure, acknowledged) = {
+            let mut store = self
+                .utility_size_store
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let poll = store.poll();
+            let poll_error = poll.as_ref().err().cloned();
+            let acknowledged = poll.as_ref().is_ok_and(|poll| !poll.accepted.is_empty());
+            let write_failure = store
+                .take_new_write_failures()
+                .into_iter()
+                .find(|failure| failure.key == self.hash_tool_key)
+                .map(|failure| failure.message);
+            (
+                store.has_pending_acknowledgement(),
+                poll_error,
+                write_failure,
+                acknowledged,
+            )
+        };
+        if let Some(error) = poll_error {
+            self.set_hash_size_write_error(
+                Some(format!(
+                    "Could not publish the Hash Generator geometry save: {error}"
+                )),
+                cx,
+            );
+        } else if let Some(error) = write_failure {
+            self.set_hash_size_write_error(
+                Some(format!(
+                    "Could not save Hash Generator window geometry. Move or resize it again to retry. {error}"
+                )),
+                cx,
+            );
+        } else if acknowledged {
+            self.set_hash_size_write_error(None, cx);
+        }
+        if !pending {
+            self.utility_size_polling.store(false, Ordering::Release);
+        }
+        pending
+    }
+
+    fn set_hash_size_write_error(&mut self, message: Option<String>, cx: &mut Context<Self>) {
+        self.hash_size_write_error = message.clone();
+        if let Some(view) = self.hash_window.view().cloned() {
+            view.update(cx, |tool, cx| {
+                tool.size_write_error = message;
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
+    fn start_utility_size_ack_poll(&self, cx: &mut Context<Self>) {
+        if !self
+            .utility_size_polling
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return;
+        }
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(35))
+                    .await;
+                let pending = root.update(cx, |root, cx| root.poll_utility_size_writer(cx));
+                match pending {
+                    Ok(true) => {}
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn restored_hash_geometry(&self) -> Option<NativeWindowGeometry> {
+        self.utility_size_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .effective_native_geometry(self.hash_tool_key)
+    }
+
+    fn schedule_hash_popout_setup(
+        &self,
+        native_window: NativeWindow,
+        view: Entity<HashGeneratorWindow>,
+        mount_generation: u64,
+        session_epoch: u64,
+        operation: EffectPermit,
+        cx: &mut Context<Self>,
+    ) {
+        let target = checked_geometry_target(native_window);
+        let geometry = self.restored_hash_geometry();
+        let active_mount_generation = Arc::clone(&self.hash_mount_generation);
+        let session = Arc::clone(&self.hash_session);
+        let restart_admission = Arc::clone(&self.restart_admission);
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let _operation = operation;
+            let current = || {
+                active_mount_generation.load(Ordering::Acquire) == mount_generation
+                    && session
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .epoch()
+                        == session_epoch
+                    && !restart_admission.is_fenced()
+            };
+            if !current() {
+                return;
+            }
+
+            // This foreground task runs on GPUI's owner thread. Do not wrap
+            // SetWindowPos in AsyncApp::update: WM_DPICHANGED may synchronously
+            // call back into GPUI while the App RefCell is borrowed.
+            let placement_error = target
+                .ok_or_else(|| "the Hash Generator HWND could not be checked".to_owned())
+                .and_then(|target| {
+                    restore_native_window_geometry(target, geometry, (420, 320), 1.0).map(|_| ())
+                })
+                .err()
+                .map(|error| {
+                    format!("Could not restore the Hash Generator popout position: {error}")
+                });
+            if !current() {
+                return;
+            }
+
+            let view_error = view.update(cx, |tool, cx| {
+                if !tool.is_current_mount() || !current() {
+                    return None;
+                }
+                let attach_error = tool
+                    .attach_native_geometry()
+                    .err()
+                    .map(|error| format!("Native move/resize persistence is unavailable: {error}"));
+                let mut errors = Vec::new();
+                if let Some(error) = tool.native_geometry_error.take() {
+                    errors.push(error);
+                }
+                if let Some(error) = placement_error.clone() {
+                    errors.push(error);
+                }
+                if let Some(error) = attach_error {
+                    errors.push(error);
+                }
+                let message = (!errors.is_empty()).then(|| errors.join(" "));
+                tool.native_geometry_error = message.clone();
+                cx.notify();
+                message
+            });
+            if let Some(error) = view_error {
+                let _ = root.update(cx, |root, cx| {
+                    if root.hash_window.mount_generation() == Some(mount_generation)
+                        && root
+                            .hash_session
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .epoch()
+                            == session_epoch
+                    {
+                        root.hash_native_geometry_error = Some(error);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     fn capture_restart_snapshot(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        self.drain_hash_native_geometry(cx, false);
+        let _ = self.poll_utility_size_writer(cx);
+        let size_status = self
+            .utility_size_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .status(self.hash_tool_key);
+        if size_status.pending_revision.is_some() {
+            self.start_utility_size_ack_poll(cx);
+            return Err(
+                "The Hash Generator window geometry is still being saved. Wait for the settings write to finish, then retry the egui restart."
+                    .to_owned(),
+            );
+        }
+        if let Some((_, error)) = size_status.failure {
+            return Err(format!(
+                "The Hash Generator window geometry could not be saved: {error}. Move or resize the popout to retry the save before restarting."
+            ));
+        }
         if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
             return Err(format!("{message} Then retry the egui restart."));
         }
@@ -1530,6 +1813,7 @@ impl RootWindow {
         self.restart_admission
             .try_accept(snapshot.hash_work)
             .map_err(restart_blocker_message)?;
+        self.drain_hash_native_geometry(cx, true);
 
         self.query
             .update(cx, |input, cx| input.set_readonly(true, cx));
@@ -1772,6 +2056,9 @@ impl RootWindow {
                         && window.window_id() == closed
                         && active_mount_generation.load(Ordering::Acquire) == mount_generation
                 );
+                if is_active_mount {
+                    root.drain_hash_native_geometry(cx, true);
+                }
                 let mut session = session
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1881,6 +2168,7 @@ impl RootWindow {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .begin(None);
+        self.hash_native_geometry_error = None;
         let session_epoch = self
             .hash_session
             .lock()
@@ -1910,9 +2198,13 @@ impl RootWindow {
             rehost_pending: Arc::clone(&self.hash_rehost_pending),
             rehost_revision: Arc::clone(&self.hash_rehost_revision),
             presentation_feedback: Arc::clone(&self.hash_presentation_feedback),
+            native_geometry_sequence: Arc::clone(&self.hash_geometry_sequence),
+            hash_tool_key: self.hash_tool_key,
+            size_write_error: self.hash_size_write_error.clone(),
             root,
             mode,
         };
+        let mut popout_setup = None;
         match mode {
             HashPresentationMode::Docked => {
                 self.hash_mount_generation
@@ -1963,6 +2255,8 @@ impl RootWindow {
                             .to_owned(),
                     );
                 }
+                let geometry_error = view.read(cx).native_geometry_error.clone();
+                self.hash_native_geometry_error = geometry_error;
                 self.hash_mount_generation
                     .store(mount_generation, Ordering::Release);
                 let close_subscription = self.observe_hash_popout_close(
@@ -1972,6 +2266,7 @@ impl RootWindow {
                     session_epoch,
                     cx,
                 );
+                let view_for_setup = view.clone();
                 self.hash_window = HashWindowState::Popout {
                     mount_generation,
                     window,
@@ -1979,9 +2274,23 @@ impl RootWindow {
                 };
                 self.hash_window_close_subscriptions
                     .push((window, close_subscription));
+                popout_setup = native_window.map(|native_window| (native_window, view_for_setup));
             }
         }
+        self.hash_wake_signal.notify();
         self.hash_open_error = None;
+        if let Some((native_window, view)) = popout_setup {
+            self.schedule_hash_popout_setup(
+                native_window,
+                view,
+                mount_generation,
+                session_epoch,
+                operation,
+                cx,
+            );
+        } else {
+            drop(operation);
+        }
         Ok(())
     }
 
@@ -2027,6 +2336,7 @@ impl RootWindow {
         operation: EffectPermit,
         cx: &mut Context<Self>,
     ) {
+        self.drain_hash_native_geometry(cx, false);
         if self.hash_rehost_revision.load(Ordering::Acquire) != revision {
             return;
         }
@@ -2102,9 +2412,15 @@ impl RootWindow {
         let rehost_pending = Arc::clone(&self.hash_rehost_pending);
         let rehost_revision = Arc::clone(&self.hash_rehost_revision);
         let presentation_feedback = Arc::clone(&self.hash_presentation_feedback);
-        let utility_presentations = self.utility_presentations.clone();
+        let native_geometry_sequence = Arc::clone(&self.hash_geometry_sequence);
         let hash_tool_key = self.hash_tool_key;
+        let restore_geometry = self.restored_hash_geometry();
+        let size_write_error = self.hash_size_write_error.clone();
+        let utility_presentations = self.utility_presentations.clone();
         let root_visibility = self.root_visibility.clone();
+        let setup_session = Arc::clone(&session);
+        let setup_active_mount_generation = Arc::clone(&active_mount_generation);
+        let setup_restart_admission = Arc::clone(&restart_admission);
         cx.notify();
 
         cx.spawn(async move |_, cx| {
@@ -2121,6 +2437,9 @@ impl RootWindow {
                 rehost_pending: Arc::clone(&rehost_pending),
                 rehost_revision,
                 presentation_feedback: Arc::clone(&presentation_feedback),
+                native_geometry_sequence,
+                hash_tool_key,
+                size_write_error,
                 root: root.clone(),
                 mode: target,
             };
@@ -2162,6 +2481,10 @@ impl RootWindow {
                         Ok((window, view)) => {
                             let native_window = cx.update(|app| view.read(app).native_window);
                             if cfg!(windows) && native_window.is_none() {
+                                let _ = view.update(cx, |tool, _| {
+                                    let _ = tool.take_native_geometry();
+                                    tool.detach_native_geometry();
+                                });
                                 let candidate = RetiringHashWindow {
                                     window,
                                     native_window,
@@ -2190,6 +2513,10 @@ impl RootWindow {
                                         close_subscription,
                                     }),
                                     Err(error) => {
+                                        let _ = view.update(cx, |tool, _| {
+                                            let _ = tool.take_native_geometry();
+                                            tool.detach_native_geometry();
+                                        });
                                         let candidate = RetiringHashWindow {
                                             window,
                                             native_window,
@@ -2246,6 +2573,7 @@ impl RootWindow {
                     native_window: *native_window,
                 }),
             };
+            let candidate_native_window = candidate_popout.and_then(|candidate| candidate.native_window);
             let (new_state, new_popout_subscription) = match built {
                 BuiltHashMount::Docked { view } => (
                     HashWindowState::Docked {
@@ -2284,7 +2612,10 @@ impl RootWindow {
                     return Err("The active Hash Generator mount changed before rehosting completed.".to_owned());
                 }
 
+                root.drain_hash_native_geometry(cx, true);
                 let old_state = std::mem::replace(&mut root.hash_window, new_state);
+                let new_geometry_error = new_view.read(cx).native_geometry_error.clone();
+                root.hash_native_geometry_error = new_geometry_error;
                 let retiring = match old_state {
                     HashWindowState::Popout { window, view, .. } => {
                         let retiring = RetiringHashWindow {
@@ -2336,12 +2667,17 @@ impl RootWindow {
                 let show_root = target == HashPresentationMode::Docked
                     && !root.root_visibility.visible.load(Ordering::Acquire);
                 root.notify_hash_mount(cx);
+                root.hash_wake_signal.notify();
                 Ok((retiring, preference_update, show_root))
             });
 
             let (retiring, preference_update, show_root) = match commit {
                 Ok(Ok(committed)) => committed,
                 Ok(Err(error)) => {
+                    let _ = new_view.update(cx, |tool, _| {
+                        let _ = tool.take_native_geometry();
+                        tool.detach_native_geometry();
+                    });
                     if let Some(candidate) = candidate_popout {
                         let retired = remove_and_wait_for_hash_window(cx, candidate).await;
                         if !retired {
@@ -2375,6 +2711,74 @@ impl RootWindow {
                     return;
                 }
             };
+
+            if let Some(native_window) = candidate_native_window {
+                let still_current = || {
+                    setup_active_mount_generation.load(Ordering::Acquire)
+                        == destination_mount_generation
+                        && setup_session
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .epoch()
+                            == destination_session_epoch
+                        && !setup_restart_admission.is_fenced()
+                };
+                if still_current() {
+                    // Native placement can synchronously deliver WM_DPICHANGED,
+                    // so it must run after the root commit and outside every
+                    // App, Window, and entity update closure.
+                    let placement_error = checked_geometry_target(native_window)
+                        .ok_or_else(|| {
+                            "the Hash Generator HWND could not be checked".to_owned()
+                        })
+                        .and_then(|target| {
+                            restore_native_window_geometry(
+                                target,
+                                restore_geometry,
+                                (420, 320),
+                                1.0,
+                            )
+                            .map(|_| ())
+                        })
+                        .err()
+                        .map(|error| {
+                            format!("Could not restore the Hash Generator popout position: {error}")
+                        });
+                    if still_current() {
+                        let setup_error = new_view.update(cx, |tool, cx| {
+                            if !tool.is_current_mount() || !still_current() {
+                                return None;
+                            }
+                            let mut errors = Vec::new();
+                            if let Some(error) = tool.native_geometry_error.take() {
+                                errors.push(error);
+                            }
+                            if let Some(error) = placement_error.clone() {
+                                errors.push(error);
+                            }
+                            if let Err(error) = tool.attach_native_geometry() {
+                                errors.push(format!(
+                                    "Native move/resize persistence is unavailable: {error}"
+                                ));
+                            }
+                            let message = (!errors.is_empty()).then(|| errors.join(" "));
+                            tool.native_geometry_error = message.clone();
+                            cx.notify();
+                            message
+                        });
+                        if let Some(error) = setup_error {
+                            let _ = root.update(cx, |root, cx| {
+                                if root.hash_window.mount_generation()
+                                    == Some(destination_mount_generation)
+                                {
+                                    root.hash_native_geometry_error = Some(error);
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
+                }
+            }
 
             if show_root && !root_visibility.request_hash_visible(destination_mount_generation) {
                 let _ = root.update(cx, |root, cx| {
@@ -2513,6 +2917,7 @@ impl RootWindow {
             );
             return;
         }
+        self.drain_hash_native_geometry(cx, true);
         let retiring = match &self.hash_window {
             HashWindowState::Popout { window, view, .. } => Some(RetiringHashWindow {
                 window: *window,
@@ -3120,6 +3525,7 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        self.drain_hash_native_geometry(cx, true);
         cx.quit();
     }
 }
@@ -3225,6 +3631,20 @@ impl Render for RootWindow {
                     .text_color(appearance::to_hsla(palette.error))
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
+            }))
+            .children(self.hash_native_geometry_error.as_ref().map(|error| {
+                Label::new(error.clone())
+                    .id("hash-native-geometry-error")
+                    .text_color(appearance::to_hsla(palette.warning))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
+            .children(self.hash_size_write_error.as_ref().map(|error| {
+                Label::new(error.clone())
+                    .id("hash-size-write-error")
+                    .text_color(appearance::to_hsla(palette.error))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
             }));
         let mut body = div()
             .flex()
@@ -3273,6 +3693,14 @@ struct HashGeneratorWindow {
     file_picker_pending: Arc<AtomicBool>,
     clipboard_pending: Arc<HashClipboardPendingState>,
     native_window: Option<NativeWindow>,
+    native_geometry_slot: NativeGeometrySlot,
+    native_geometry_stamp: NativeGeometryStamp,
+    hash_tool_key: UtilityToolKey,
+    native_geometry_sequence: Arc<AtomicU64>,
+    native_geometry_binding: Option<NativeGeometryBinding>,
+    native_geometry_error: Option<String>,
+    size_write_error: Option<String>,
+    factory_outer_size: Option<PreferredWindowSize>,
     restart_admission: Arc<RestartAdmission>,
     mount_generation: u64,
     session_epoch: u64,
@@ -3287,6 +3715,66 @@ struct HashGeneratorWindow {
 }
 
 impl HashGeneratorWindow {
+    fn attach_native_geometry(&mut self) -> Result<(), String> {
+        if self.native_geometry_binding.is_some() || self.mode != HashPresentationMode::Popout {
+            return Ok(());
+        }
+        if !self.is_current_mount() {
+            return Err("the Hash Generator mount is no longer active".to_owned());
+        }
+        let Some(native_window) = self.native_window else {
+            return if cfg!(windows) {
+                Err("the Hash Generator popout has no checked HWND".to_owned())
+            } else {
+                Ok(())
+            };
+        };
+        let target = checked_geometry_target(native_window)
+            .ok_or_else(|| "the Hash Generator HWND could not be checked".to_owned())?;
+        let wake_signal = Arc::clone(&self.wake_signal);
+        let binding = NativeGeometryBinding::attach_checked(
+            target,
+            self.hash_tool_key,
+            self.native_geometry_stamp,
+            Arc::clone(&self.native_geometry_slot),
+            1.0,
+            Arc::clone(&self.native_geometry_sequence),
+            Arc::new(move |_| wake_signal.notify()),
+        )?;
+        self.native_geometry_binding = Some(binding);
+        Ok(())
+    }
+
+    fn take_native_geometry(
+        &self,
+    ) -> Option<(UtilityNativeGeometrySample, Option<PreferredWindowSize>)> {
+        let sample = take_native_geometry(
+            &self.native_geometry_slot,
+            self.hash_tool_key,
+            self.native_geometry_stamp,
+        )?;
+        let convert = |rect: NativeWindowRect| PhysicalWindowRect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+        Some((
+            UtilityNativeGeometrySample {
+                position: convert(sample.position),
+                position_scale: sample.position_scale,
+                position_sequence: sample.position_sequence,
+                size: sample.size.map(convert),
+                size_sequence: sample.size_sequence,
+            },
+            self.factory_outer_size,
+        ))
+    }
+
+    fn detach_native_geometry(&mut self) {
+        self.native_geometry_binding.take();
+    }
+
     fn is_current_mount(&self) -> bool {
         if self.active_mount_generation.load(Ordering::Acquire) != self.mount_generation
             || self.rehost_pending.load(Ordering::Acquire)
@@ -4056,6 +4544,20 @@ impl Render for HashGeneratorWindow {
                                 .line_height(px(metrics.line_height))
                         }),
                     )
+                    .children(self.native_geometry_error.as_ref().map(|error| {
+                        Label::new(error.clone())
+                            .id("hash-native-geometry-status")
+                            .text_color(appearance::to_hsla(palette.warning))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    }))
+                    .children(self.size_write_error.as_ref().map(|error| {
+                        Label::new(error.clone())
+                            .id("hash-size-write-status")
+                            .text_color(appearance::to_hsla(palette.error))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    }))
                     .children(is_running.then(|| {
                         Button::new("cancel-hash")
                             .label("Cancel")
@@ -4135,6 +4637,25 @@ struct ForegroundIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NativeWindow {
     identity: ForegroundIdentity,
+}
+
+fn checked_geometry_target(window: NativeWindow) -> Option<CheckedNativeWindow> {
+    Some(CheckedNativeWindow {
+        hwnd: window.identity.hwnd,
+        process_id: window.identity.process_id,
+        thread_id: window.identity.thread_id,
+    })
+}
+
+fn outer_size_in_points(metrics: NativeWindowMetrics) -> Option<PreferredWindowSize> {
+    if !metrics.scale_factor.is_finite() || metrics.scale_factor <= 0.0 {
+        return None;
+    }
+    PreferredWindowSize::new(
+        metrics.outer.width() as f32 / metrics.scale_factor,
+        metrics.outer.height() as f32 / metrics.scale_factor,
+    )
+    .ok()
 }
 
 #[cfg(windows)]
@@ -4524,15 +5045,28 @@ pub(crate) fn run_foundation_window(
     theme_settings: multi_launcher::settings::ThemeSettings,
     settings_path: String,
     saved_utility_presentations: UtilityPresentations,
+    saved_utility_sizes: UtilityDialogSizes,
     settings_save_workers: SettingsSaveWorkerRegistry,
 ) -> Result<Option<RestartPlan>, String> {
     let hash_tool_key = UtilityToolKey::parse("hash-generator")
         .map_err(|error| format!("Hash Generator has no stable presentation key: {error}"))?;
     let utility_presentations = UtilityPresentationStore::new(
-        settings_path,
+        settings_path.clone(),
         settings_save_workers.clone(),
         saved_utility_presentations,
     );
+    let mut utility_sizes = UtilitySizeStore::new(
+        settings_path,
+        settings_save_workers.clone(),
+        saved_utility_sizes,
+    );
+    utility_sizes.track_key(hash_tool_key);
+    let utility_size_store = Arc::new(Mutex::new(utility_sizes));
+    let utility_size_store_after_run = Arc::clone(&utility_size_store);
+    let utility_size_polling = Arc::new(AtomicBool::new(false));
+    let utility_size_polling_for_root = Arc::clone(&utility_size_polling);
+    let hash_geometry_sequence = Arc::new(AtomicU64::new(0));
+    let hash_geometry_sequence_for_root = Arc::clone(&hash_geometry_sequence);
     let restart_context = RestartContext::capture().ok();
     let restart_exit = Rc::new(RefCell::new(None));
     let restart_exit_after_run = Rc::clone(&restart_exit);
@@ -4540,6 +5074,8 @@ pub(crate) fn run_foundation_window(
     let startup_error_sink = Rc::clone(&startup_error);
     let subscriptions = Rc::new(RefCell::new(Vec::new()));
     let subscription_sink = Rc::clone(&subscriptions);
+    let root_for_quit = Rc::new(RefCell::new(None::<WeakEntity<RootWindow>>));
+    let root_for_quit_callback = Rc::clone(&root_for_quit);
     let listener_slot = Arc::new(Mutex::new(None::<HotkeyListener>));
     let listener_slot_for_run = Arc::clone(&listener_slot);
     let listener_slot_for_quit = Arc::clone(&listener_slot);
@@ -4626,7 +5162,12 @@ pub(crate) fn run_foundation_window(
         let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal_for_quit);
         let hash_window_revision_for_quit = Arc::clone(&hash_window_revision_for_app);
         let restart_admission_for_quit = Arc::clone(&restart_admission_for_quit);
-        let quit_subscription = cx.on_app_quit(move |_| {
+        let quit_subscription = cx.on_app_quit(move |app| {
+            if let Some(root) = root_for_quit_callback.borrow().clone() {
+                let _ = root.update(app, |root, cx| {
+                    root.drain_hash_native_geometry(cx, true);
+                });
+            }
             visibility_for_quit.active.store(false, Ordering::Release);
             restart_admission_for_quit.fence();
             coordinate_hud_probe_closing_for_quit.store(true, Ordering::Release);
@@ -4657,6 +5198,9 @@ pub(crate) fn run_foundation_window(
         };
         let controller_for_root = Arc::clone(&controller_for_app);
         let closing_for_root = Arc::clone(&closing_for_app);
+        let utility_sizes_for_root = Arc::clone(&utility_size_store);
+        let utility_size_polling_for_root = Arc::clone(&utility_size_polling_for_root);
+        let hash_geometry_sequence_for_root = Arc::clone(&hash_geometry_sequence_for_root);
         let session_for_root = Arc::clone(&hash_session_for_root);
         let wake_signal_for_root = Arc::clone(&hash_wake_signal_for_root);
         let picker_pending_for_root_close = Arc::clone(&hash_file_picker_pending_for_root);
@@ -4693,6 +5237,9 @@ pub(crate) fn run_foundation_window(
                 native_window: None,
                 focus_handle,
                 utility_presentations: utility_presentations.clone(),
+                utility_size_store: Arc::clone(&utility_sizes_for_root),
+                utility_size_polling: Arc::clone(&utility_size_polling_for_root),
+                hash_geometry_sequence: Arc::clone(&hash_geometry_sequence_for_root),
                 hash_tool_key,
                 hash_session: session_for_root,
                 hash_wake_signal: wake_signal_for_root,
@@ -4711,6 +5258,8 @@ pub(crate) fn run_foundation_window(
                 hash_presentation_feedback: hash_presentation_feedback_for_root,
                 hash_open_error: None,
                 hash_presentation_error: None,
+                hash_native_geometry_error: None,
+                hash_size_write_error: None,
                 secondary: SecondaryWindowState::Closed,
                 secondary_revision: Arc::new(AtomicU64::new(0)),
                 secondary_close_subscription: None,
@@ -4753,6 +5302,7 @@ pub(crate) fn run_foundation_window(
                 return;
             }
         };
+        *root_for_quit.borrow_mut() = Some(root_view.downgrade());
 
         let native_window =
             match update_kit_window_content(root_window, &root_view, cx, |root, window, cx| {
@@ -4786,6 +5336,7 @@ pub(crate) fn run_foundation_window(
             };
 
         let root_id = root_window.window_id();
+        let root_for_window_close = root_view.downgrade();
         let hash_window_revision_for_root_close = Arc::clone(&hash_window_revision_for_app);
         let hash_mount_generation_for_root_close = Arc::clone(&hash_mount_generation);
         let hash_rehost_pending_for_root_close = Arc::clone(&hash_rehost_pending);
@@ -4794,6 +5345,9 @@ pub(crate) fn run_foundation_window(
             .borrow_mut()
             .push(cx.on_window_closed(move |cx, closed| {
                 if closed == root_id {
+                    let _ = root_for_window_close.update(cx, |root, cx| {
+                        root.drain_hash_native_geometry(cx, true);
+                    });
                     hash_wake_signal_for_root_close.close();
                     hash_window_revision_for_root_close.fetch_add(1, Ordering::AcqRel);
                     hash_mount_generation_for_root_close.store(0, Ordering::Release);
@@ -4809,7 +5363,8 @@ pub(crate) fn run_foundation_window(
         cx.spawn(async move |cx| {
             while hash_wake_signal_for_task.wait().await {
                 let _ = cx.update(|cx| {
-                    let live_window = hash_root_view.update(cx, |root, _| {
+                    let live_window = hash_root_view.update(cx, |root, cx| {
+                        root.drain_hash_native_geometry(cx, false);
                         root.hash_session
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5048,6 +5603,19 @@ pub(crate) fn run_foundation_window(
 
     settings_save_workers.begin_shutdown();
     settings_save_workers.join_all();
+    let (utility_size_failures, utility_size_pending) = {
+        let mut store = utility_size_store_after_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = store.poll();
+        (
+            store.take_new_write_failures(),
+            store.has_pending_acknowledgement(),
+        )
+    };
+    for failure in utility_size_failures {
+        tracing::error!(tool = failure.key.as_str(), error = %failure.message, "could not save utility window geometry during GPUI shutdown");
+    }
     for (key, error) in utility_presentations_after_run.poll() {
         tracing::error!(tool = key.as_str(), %error, "could not save utility presentation preference during GPUI shutdown");
     }
@@ -5059,6 +5627,24 @@ pub(crate) fn run_foundation_window(
     }
     if let Some(error) = restart_failure_after_run.borrow_mut().take() {
         return Err(error);
+    }
+
+    if restart_exit.is_some() {
+        let status = utility_size_store_after_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .status(hash_tool_key);
+        if utility_size_pending || status.pending_revision.is_some() {
+            return Err(
+                "The Hash Generator geometry save did not settle before restart. No egui process was started; reopen GPUI and retry after the save finishes."
+                    .to_owned(),
+            );
+        }
+        if let Some((_, error)) = status.failure {
+            return Err(format!(
+                "The Hash Generator geometry save failed before restart. No egui process was started: {error}"
+            ));
+        }
     }
 
     let Some((context, native_windows)) = restart_exit else {

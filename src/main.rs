@@ -4675,6 +4675,7 @@ fn main() -> anyhow::Result<()> {
             settings.theme.clone(),
             "settings.json".to_owned(),
             settings.utility_presentations.clone(),
+            settings.utility_dialog_sizes.clone(),
             multi_launcher::SettingsSaveWorkerRegistry::default(),
         ) {
             Ok(restart_plan) => restart_plan,

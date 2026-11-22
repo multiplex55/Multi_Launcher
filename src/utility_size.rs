@@ -238,6 +238,15 @@ impl UtilitySizeStore {
         self.committed.native_geometry(key)
     }
 
+    /// Return the latest accepted in-session native intent, including a write
+    /// that has not reached the canonical settings acknowledgement yet.
+    pub fn effective_native_geometry(&self, key: UtilityToolKey) -> Option<NativeWindowGeometry> {
+        self.native_geometry_intents
+            .get(&key)
+            .map(|intent| intent.geometry())
+            .unwrap_or_else(|| self.committed.native_geometry(key))
+    }
+
     pub fn committed_sizes(&self) -> &UtilityDialogSizes {
         &self.committed
     }
@@ -579,5 +588,58 @@ mod tests {
         assert_eq!(store.committed_sizes().preferred(key), Some(size));
         assert_eq!(store.status(key).acknowledged_revision, Some(revision));
         assert_eq!(store.status(key).pending_revision, None);
+    }
+
+    #[test]
+    fn effective_native_geometry_uses_pending_intent_before_acknowledgement() {
+        use crate::settings::SavedWindowPosition;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let path = path_string(&path);
+        Settings::default().save(&path).unwrap();
+        let key = UtilityToolKey::parse("hash-generator").unwrap();
+        let committed_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(40.0, 60.0).unwrap(),
+            PreferredWindowSize::new(620.0, 440.0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+        let mut committed = UtilityDialogSizes::default();
+        committed
+            .set_native_geometry(key, committed_geometry)
+            .unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let mut store = UtilitySizeStore::new(path, workers.clone(), committed);
+        let moved = PhysicalWindowRect {
+            left: -900,
+            top: 140,
+            right: -120,
+            bottom: 700,
+        };
+
+        store
+            .observe_native_geometry(
+                key,
+                UtilityNativeGeometrySample {
+                    position: moved,
+                    position_scale: 1.5,
+                    position_sequence: 1,
+                    size: Some(moved),
+                    size_sequence: Some(1),
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(store.native_geometry(key), Some(committed_geometry));
+        let effective = store.effective_native_geometry(key).unwrap();
+        assert_eq!(effective.position.x, -600.0);
+        assert_eq!(effective.position.y, 140.0 / 1.5);
+        assert_eq!(
+            effective.size,
+            PreferredWindowSize::new(780.0 / 1.5, 560.0 / 1.5).unwrap()
+        );
+        workers.join_all();
     }
 }
