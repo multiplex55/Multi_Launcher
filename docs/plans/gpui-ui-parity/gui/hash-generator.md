@@ -45,7 +45,7 @@ Explicit Load and Copy use `ArboardClipboardBackend`. The read reaches the exist
 
 Late Load checks mount, session, source generation and whether a rehost was accepted. An accepted Copy binds the current result and holds admission until the OS write and completion settle. Conflicting result changes, host moves, the native picker and close/restart are gated. Restart draft checks use opaque clipboard snapshot presence and revision. Clipboard contents remain transient data in the shared Hash session.
 
-`G04-C4-FOCUSED` covers the shared session and clipboard-backend outcomes, exact snapshot handling, private refusal, stale Load and Copy admission. Both native control checks opened the actual utility without accessing the system clipboard. Native Load/Copy verification requires a disposable Windows session with an isolated clipboard. A separate application settings directory shares the desktop clipboard.
+`G04-C4-FOCUSED` covers the shared session and clipboard-backend outcomes, exact snapshot handling, private refusal, stale Load and Copy admission. `G04-C4-NATIVE-CLIPBOARD` verifies explicit Windows Load of the user-prepared disposable `abc`, the known digest, retained Pop Out, Copy Digest, exact round-trip through a second Load and calculation, and a fresh session after true close. The egui native clipboard baseline remains pending.
 
 ## Pending geometry checkpoint
 

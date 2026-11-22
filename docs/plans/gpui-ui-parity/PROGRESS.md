@@ -16,7 +16,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | Extract the shared geometry persistence owner for GPUI Hash. Text/File, comparison, streamed cancel and saved appearance are verified. Clipboard Load/Copy implementation, focused tests and native controls passed. Actual clipboard I/O, geometry, visual acceptance, reverse restart, G01 global invocation and additional overlay checks remain pending. |
+| Current next action | Verify the shared geometry persistence extraction for GPUI Hash. Text/File, comparison, streamed cancel, saved appearance and the native GPUI clipboard round-trip are verified. Geometry, visual acceptance, reverse restart, G01 global invocation and additional overlay checks remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 
