@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 mod session;
 
-pub use session::HashSession;
+pub use session::{HashClipboardCopy, HashSession};
 
 pub const HASH_BUFFER_SIZE: usize = 256 * 1024;
 

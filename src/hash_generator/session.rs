@@ -6,7 +6,7 @@ use crate::activity::{
     ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
     ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
 };
-use crate::clipboard_modify::clipboard::ClipboardBackend;
+use crate::clipboard_modify::clipboard::{ClipboardBackend, ClipboardError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,6 +19,7 @@ pub struct HashSession {
     algorithm: HashAlgorithm,
     text: String,
     clipboard_text: Option<String>,
+    clipboard_snapshot_revision: u64,
     file_path: Option<PathBuf>,
     expected: String,
     generation: u64,
@@ -38,6 +39,7 @@ impl Default for HashSession {
             algorithm: HashAlgorithm::Sha256,
             text: String::new(),
             clipboard_text: None,
+            clipboard_snapshot_revision: 0,
             file_path: None,
             expected: String::new(),
             generation: 0,
@@ -73,7 +75,7 @@ impl HashSession {
         };
         self.algorithm = HashAlgorithm::Sha256;
         self.text.clear();
-        self.clipboard_text = None;
+        self.clear_clipboard_snapshot();
         self.file_path = path;
         self.expected.clear();
         self.error = None;
@@ -88,7 +90,7 @@ impl HashSession {
         self.mode = HashInputMode::Text;
         self.algorithm = HashAlgorithm::Sha256;
         self.text.clear();
-        self.clipboard_text = None;
+        self.clear_clipboard_snapshot();
         self.file_path = None;
         self.expected.clear();
         self.error = None;
@@ -123,6 +125,14 @@ impl HashSession {
 
     pub fn clipboard_byte_len(&self) -> Option<usize> {
         self.clipboard_text.as_ref().map(String::len)
+    }
+
+    /// Opaque in-session identity for the currently retained clipboard snapshot.
+    /// It contains no clipboard data and changes when the snapshot changes.
+    pub fn clipboard_snapshot_revision(&self) -> Option<u64> {
+        self.clipboard_text
+            .as_ref()
+            .map(|_| self.clipboard_snapshot_revision)
     }
 
     pub fn file_path(&self) -> Option<&Path> {
@@ -233,7 +243,14 @@ impl HashSession {
     }
 
     pub fn load_clipboard(&mut self, clipboard: &dyn ClipboardBackend) {
-        match clipboard.read_text() {
+        self.apply_clipboard_load(clipboard.read_text());
+    }
+
+    /// Apply a clipboard read performed by a frontend worker. Keeping this
+    /// transition in the session ensures both frontends preserve identical
+    /// snapshot, request invalidation, and feedback semantics.
+    pub fn apply_clipboard_load(&mut self, result: Result<String, ClipboardError>) {
+        match result {
             Ok(text) => {
                 if self.mode != HashInputMode::Clipboard
                     || self.clipboard_text.as_deref() != Some(&text)
@@ -241,6 +258,7 @@ impl HashSession {
                     self.invalidate_current();
                     self.mode = HashInputMode::Clipboard;
                     self.clipboard_text = Some(text);
+                    self.advance_clipboard_snapshot_revision();
                 }
                 self.error = None;
                 self.clipboard_feedback = Some("Clipboard snapshot loaded for hashing".into());
@@ -325,11 +343,36 @@ impl HashSession {
         }
     }
 
-    pub fn copy_digest(&mut self, clipboard: &dyn ClipboardBackend) -> bool {
-        let Some(result) = self.result.as_ref().filter(|_| self.can_copy_digest()) else {
+    /// Capture the current result as an immutable clipboard write request.
+    /// The caller can perform the write asynchronously and later apply its
+    /// outcome only if this request is still current.
+    pub fn clipboard_copy_request(&self) -> Option<HashClipboardCopy> {
+        let result = self.result.as_ref().filter(|_| self.can_copy_digest())?;
+        Some(HashClipboardCopy {
+            request_id: result.request_id,
+            digest: result.digest.clone(),
+        })
+    }
+
+    pub fn is_clipboard_copy_current(&self, request: &HashClipboardCopy) -> bool {
+        self.can_copy_digest()
+            && self.result.as_ref().is_some_and(|result| {
+                result.request_id == request.request_id && result.digest == request.digest
+            })
+    }
+
+    /// Apply a clipboard write result only to the exact current digest request.
+    /// Failed writes preserve the digest so the user can retry or copy it by
+    /// another route.
+    pub fn apply_clipboard_copy(
+        &mut self,
+        request: &HashClipboardCopy,
+        outcome: Result<(), ClipboardError>,
+    ) -> bool {
+        if !self.is_clipboard_copy_current(request) {
             return false;
-        };
-        match clipboard.write_text(&result.digest) {
+        }
+        match outcome {
             Ok(()) => {
                 self.clipboard_feedback = Some("Digest copied".into());
                 self.error = None;
@@ -341,6 +384,13 @@ impl HashSession {
                 false
             }
         }
+    }
+
+    pub fn copy_digest(&mut self, clipboard: &dyn ClipboardBackend) -> bool {
+        let Some(request) = self.clipboard_copy_request() else {
+            return false;
+        };
+        self.apply_clipboard_copy(&request, clipboard.write_text(&request.digest))
     }
 
     /// Polling is nonblocking. A terminal event always releases the retained
@@ -389,12 +439,41 @@ impl HashSession {
         self.error = None;
         self.clipboard_feedback = None;
     }
+
+    fn advance_clipboard_snapshot_revision(&mut self) {
+        self.clipboard_snapshot_revision = self.clipboard_snapshot_revision.wrapping_add(1);
+    }
+
+    fn clear_clipboard_snapshot(&mut self) {
+        if self.clipboard_text.take().is_some() {
+            self.advance_clipboard_snapshot_revision();
+        }
+    }
+}
+
+/// An immutable, request-bound digest ready for one clipboard write. It does
+/// not implement Debug so ordinary operation logging cannot expose the value.
+#[derive(Clone)]
+pub struct HashClipboardCopy {
+    request_id: HashRequestId,
+    digest: String,
+}
+
+impl HashClipboardCopy {
+    pub const fn request_id(&self) -> HashRequestId {
+        self.request_id
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clipboard_modify::clipboard::ClipboardError;
+    use sha2::Digest;
     use std::sync::Mutex;
     use std::thread;
     use std::time::Instant;
@@ -532,6 +611,98 @@ mod tests {
         );
         assert!(session.error().unwrap().contains("unavailable"));
         assert!(clipboard.writes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hash_generator_clipboard_outcomes_preserve_private_snapshots_and_exact_utf8() {
+        let mut session = HashSession::new();
+        session.set_mode(HashInputMode::Clipboard);
+        let snapshot = "line one\r\nline two · λ 🐙".to_owned();
+        session.apply_clipboard_load(Ok(snapshot.clone()));
+        let revision = session.clipboard_snapshot_revision();
+        let generation = session.generation();
+        assert_eq!(session.clipboard_byte_len(), Some(snapshot.len()));
+        session
+            .calculate(Arc::new(|| {}))
+            .expect("UTF-8 clipboard snapshot is calculable");
+        wait_for_terminal(&mut session);
+        let result_id = session.result().unwrap().request_id;
+        assert_eq!(
+            session.result().unwrap().bytes_processed,
+            snapshot.len() as u64
+        );
+        let expected_digest = format!("{:x}", sha2::Sha256::digest(snapshot.as_bytes()));
+        assert_eq!(session.result().unwrap().digest, expected_digest);
+
+        session.apply_clipboard_load(Err(ClipboardError::ProtectedItem));
+        assert_eq!(session.clipboard_byte_len(), Some(snapshot.len()));
+        assert_eq!(session.clipboard_snapshot_revision(), revision);
+        assert_eq!(session.generation(), generation);
+        assert!(session.error().unwrap().contains("privately"));
+        assert_eq!(session.result().unwrap().request_id, result_id);
+
+        session.apply_clipboard_load(Ok(snapshot.clone()));
+        assert_eq!(session.clipboard_snapshot_revision(), revision);
+        assert_eq!(session.generation(), generation);
+        assert_eq!(session.result().unwrap().request_id, result_id);
+    }
+
+    #[test]
+    fn hash_generator_empty_clipboard_snapshot_is_a_valid_hash_input() {
+        let mut session = HashSession::new();
+        session.set_mode(HashInputMode::Clipboard);
+        session.apply_clipboard_load(Ok(String::new()));
+        assert_eq!(session.clipboard_byte_len(), Some(0));
+        assert!(session.clipboard_snapshot_revision().is_some());
+
+        session
+            .calculate(Arc::new(|| {}))
+            .expect("empty clipboard snapshot is calculable");
+        wait_for_terminal(&mut session);
+        let result = session
+            .result()
+            .expect("empty clipboard digest is published");
+        assert_eq!(result.input_mode, HashInputMode::Clipboard);
+        assert_eq!(result.bytes_processed, 0);
+    }
+
+    #[test]
+    fn hash_generator_clipboard_same_length_replacement_invalidates_result_identity() {
+        let mut session = HashSession::new();
+        session.set_mode(HashInputMode::Clipboard);
+        session.apply_clipboard_load(Ok("first".to_owned()));
+        let first_revision = session.clipboard_snapshot_revision().unwrap();
+        session
+            .calculate(Arc::new(|| {}))
+            .expect("first clipboard request starts");
+        wait_for_terminal(&mut session);
+        assert!(session.can_copy_digest());
+
+        session.apply_clipboard_load(Ok("other".to_owned()));
+        assert_eq!(session.clipboard_byte_len(), Some(5));
+        assert_ne!(session.clipboard_snapshot_revision(), Some(first_revision));
+        assert!(session.result().is_none());
+        assert!(!session.can_copy_digest());
+    }
+
+    #[test]
+    fn hash_generator_async_copy_outcome_is_bound_to_the_current_digest() {
+        let mut session = HashSession::new();
+        session.set_text("abc".into());
+        session.calculate(Arc::new(|| {})).unwrap();
+        wait_for_terminal(&mut session);
+        let request = session
+            .clipboard_copy_request()
+            .expect("current digest can be copied");
+        assert_eq!(
+            request.digest(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        session.set_text("changed".into());
+        assert!(!session.apply_clipboard_copy(&request, Ok(())));
+        assert!(session.clipboard_feedback().is_none());
+        assert!(session.result().is_none());
     }
 
     #[test]

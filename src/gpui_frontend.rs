@@ -11,7 +11,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     task::{Context as FutureContext, Poll, Waker},
     time::Duration,
@@ -39,12 +39,17 @@ use crate::gpui_restart::{
     EffectPermit, HashWork, RestartAdmission, RestartBlocker, RestartContext, RestartPlan,
 };
 use multi_launcher::SettingsSaveWorkerRegistry;
+use multi_launcher::clipboard_modify::clipboard::{
+    ArboardClipboardBackend, ClipboardBackend, ClipboardError,
+};
 use multi_launcher::commands::HashGeneratorCommand;
 use multi_launcher::commands::handlers::handle_hash_generator;
 use multi_launcher::coordinate_tool::{
     CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
 };
-use multi_launcher::hash_generator::{HashAlgorithm, HashComparison, HashInputMode, HashSession};
+use multi_launcher::hash_generator::{
+    HashAlgorithm, HashClipboardCopy, HashComparison, HashInputMode, HashSession,
+};
 use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
@@ -214,6 +219,9 @@ struct RootWindow {
     hash_session: Arc<Mutex<HashSession>>,
     hash_wake_signal: Arc<HashWakeSignal>,
     hash_file_picker_pending: Arc<AtomicBool>,
+    hash_clipboard_pending: Arc<HashClipboardPendingState>,
+    hash_clipboard_operation: Option<HashClipboardOperation>,
+    hash_clipboard_operation_counter: u64,
     hash_window: HashWindowState,
     hash_window_revision: Arc<AtomicU64>,
     hash_mount_generation: Arc<AtomicU64>,
@@ -366,6 +374,7 @@ struct HashMountConfig {
     session: Arc<Mutex<HashSession>>,
     wake_signal: Arc<HashWakeSignal>,
     file_picker_pending: Arc<AtomicBool>,
+    clipboard_pending: Arc<HashClipboardPendingState>,
     restart_admission: Arc<RestartAdmission>,
     mount_generation: u64,
     session_epoch: u64,
@@ -388,6 +397,121 @@ struct HashPickerTarget {
     mode: HashPresentationMode,
     window: AnyWindowHandle,
     view: Entity<HashGeneratorWindow>,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HashClipboardPendingKind {
+    Idle = 0,
+    Load = 1,
+    Copy = 2,
+}
+
+#[derive(Default)]
+struct HashClipboardPendingState(AtomicU8);
+
+impl HashClipboardPendingState {
+    fn begin(&self, kind: HashClipboardPendingKind) -> bool {
+        debug_assert_ne!(kind, HashClipboardPendingKind::Idle);
+        self.0
+            .compare_exchange(
+                HashClipboardPendingKind::Idle as u8,
+                kind as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn finish(&self) {
+        self.0
+            .store(HashClipboardPendingKind::Idle as u8, Ordering::Release);
+    }
+
+    fn kind(&self) -> HashClipboardPendingKind {
+        match self.0.load(Ordering::Acquire) {
+            1 => HashClipboardPendingKind::Load,
+            2 => HashClipboardPendingKind::Copy,
+            _ => HashClipboardPendingKind::Idle,
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        self.kind() != HashClipboardPendingKind::Idle
+    }
+
+    fn is_copying(&self) -> bool {
+        self.kind() == HashClipboardPendingKind::Copy
+    }
+}
+
+fn hash_clipboard_pending_feedback(kind: HashClipboardPendingKind) -> Option<&'static str> {
+    match kind {
+        HashClipboardPendingKind::Idle => None,
+        HashClipboardPendingKind::Load => Some(
+            "Loading Clipboard… Wait for it to finish before closing. A source change discards this load.",
+        ),
+        HashClipboardPendingKind::Copy => Some(
+            "Copying digest… Editing, Calculate, rehosting, and closing are paused until the clipboard write finishes.",
+        ),
+    }
+}
+
+fn hash_clipboard_close_message(kind: HashClipboardPendingKind) -> Option<&'static str> {
+    match kind {
+        HashClipboardPendingKind::Idle => None,
+        HashClipboardPendingKind::Load => {
+            Some("Wait for the Clipboard load to finish before closing Multi Launcher.")
+        }
+        HashClipboardPendingKind::Copy => {
+            Some("Wait for the digest clipboard write to finish before closing Multi Launcher.")
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HashClipboardRequest {
+    mount_generation: u64,
+    session_epoch: u64,
+    source_generation: u64,
+}
+
+#[derive(Clone)]
+enum HashClipboardOperationKind {
+    Load,
+    Copy(HashClipboardCopy),
+}
+
+struct HashClipboardOperation {
+    id: u64,
+    request: HashClipboardRequest,
+    kind: HashClipboardOperationKind,
+}
+
+enum HashClipboardOutcome {
+    Load(Result<String, ClipboardError>),
+    Copy(Result<(), ClipboardError>),
+}
+
+struct HashClipboardTarget {
+    window: AnyWindowHandle,
+    mount_generation: u64,
+    session_epoch: u64,
+    view: Entity<HashGeneratorWindow>,
+}
+
+fn hash_clipboard_copy_admissible(
+    pending: HashClipboardPendingKind,
+    file_picker_pending: bool,
+) -> bool {
+    pending == HashClipboardPendingKind::Idle && !file_picker_pending
+}
+
+fn hash_file_picker_admissible(
+    pending: HashClipboardPendingKind,
+    file_picker_pending: bool,
+) -> bool {
+    !file_picker_pending && pending != HashClipboardPendingKind::Copy
 }
 
 enum HashPickerOutcome {
@@ -452,6 +576,7 @@ struct HashDraft {
     mode: HashInputMode,
     algorithm: HashAlgorithm,
     file_path: Option<PathBuf>,
+    clipboard_snapshot_revision: Option<u64>,
 }
 
 impl HashDraft {
@@ -462,6 +587,7 @@ impl HashDraft {
             mode: session.mode(),
             algorithm: session.algorithm(),
             file_path: session.file_path().map(PathBuf::from),
+            clipboard_snapshot_revision: session.clipboard_snapshot_revision(),
         }
     }
 }
@@ -469,6 +595,7 @@ impl HashDraft {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HashSourceChoice {
     Text,
+    Clipboard,
     File,
 }
 
@@ -476,6 +603,7 @@ impl HashSourceChoice {
     const fn mode(self) -> HashInputMode {
         match self {
             Self::Text => HashInputMode::Text,
+            Self::Clipboard => HashInputMode::Clipboard,
             Self::File => HashInputMode::File,
         }
     }
@@ -483,8 +611,8 @@ impl HashSourceChoice {
     const fn from_mode(mode: HashInputMode) -> Option<Self> {
         match mode {
             HashInputMode::Text => Some(Self::Text),
+            HashInputMode::Clipboard => Some(Self::Clipboard),
             HashInputMode::File => Some(Self::File),
-            HashInputMode::Clipboard => None,
         }
     }
 }
@@ -495,6 +623,7 @@ impl SearchableListItem for HashSourceChoice {
     fn title(&self) -> SharedString {
         match self {
             Self::Text => "Text",
+            Self::Clipboard => "Clipboard",
             Self::File => "File",
         }
         .into()
@@ -544,6 +673,24 @@ fn hash_picker_result_is_current(
     ) && active_source_generation == source_generation
 }
 
+fn hash_clipboard_request_is_current(
+    active_mount_generation: u64,
+    active_session_epoch: u64,
+    active_source_generation: u64,
+    request: HashClipboardRequest,
+    rehost_pending: bool,
+) -> bool {
+    !rehost_pending
+        && hash_picker_result_is_current(
+            active_mount_generation,
+            request.mount_generation,
+            active_session_epoch,
+            request.session_epoch,
+            active_source_generation,
+            request.source_generation,
+        )
+}
+
 fn create_hash_generator_view(
     window: &mut Window,
     cx: &mut App,
@@ -555,6 +702,7 @@ fn create_hash_generator_view(
         session,
         wake_signal,
         file_picker_pending,
+        clipboard_pending,
         restart_admission,
         mount_generation,
         session_epoch,
@@ -565,6 +713,20 @@ fn create_hash_generator_view(
         root,
         mode,
     } = config;
+    if mode == HashPresentationMode::Popout {
+        let pending = Arc::clone(&clipboard_pending);
+        let root_for_close = root.clone();
+        window.on_window_should_close(cx, move |_, app| {
+            let Some(message) = hash_clipboard_close_message(pending.kind()) else {
+                return true;
+            };
+            let _ = root_for_close.update(app, |root, cx| {
+                root.restart_status = Some(message.to_owned());
+                cx.notify();
+            });
+            false
+        });
+    }
     let text = cx.new(|cx| {
         TextareaState::new(window, cx)
             .default_value(initial_draft.text.clone())
@@ -580,11 +742,16 @@ fn create_hash_generator_view(
 
     let source_index = HashSourceChoice::from_mode(initial_draft.mode).map(|source| match source {
         HashSourceChoice::Text => 0,
-        HashSourceChoice::File => 1,
+        HashSourceChoice::Clipboard => 1,
+        HashSourceChoice::File => 2,
     });
     let source = cx.new(|cx| {
         SelectState::new(
-            vec![HashSourceChoice::Text, HashSourceChoice::File],
+            vec![
+                HashSourceChoice::Text,
+                HashSourceChoice::Clipboard,
+                HashSourceChoice::File,
+            ],
             source_index.map(|index| IndexPath::new(index)),
             window,
             cx,
@@ -627,6 +794,7 @@ fn create_hash_generator_view(
              cx: &mut Context<HashGeneratorWindow>| {
                 if !matches!(event, InputEvent::Change)
                     || this.rehost_pending.load(Ordering::Acquire)
+                    || this.clipboard_pending.is_copying()
                     || !this.is_current_mount()
                 {
                     return;
@@ -663,6 +831,7 @@ fn create_hash_generator_view(
              cx: &mut Context<HashGeneratorWindow>| {
                 if !matches!(event, InputEvent::Change)
                     || this.rehost_pending.load(Ordering::Acquire)
+                    || this.clipboard_pending.is_copying()
                     || !this.is_current_mount()
                 {
                     return;
@@ -688,7 +857,7 @@ fn create_hash_generator_view(
              source: Entity<SelectState<Vec<HashSourceChoice>>>,
              event: &SelectEvent<Vec<HashSourceChoice>>,
              cx: &mut Context<HashGeneratorWindow>| {
-                if !this.is_current_mount() {
+                if this.clipboard_pending.is_copying() || !this.is_current_mount() {
                     return;
                 }
                 let SelectEvent::Confirm(Some(choice)) = event else {
@@ -720,7 +889,7 @@ fn create_hash_generator_view(
              algorithm: Entity<SelectState<Vec<HashAlgorithmChoice>>>,
              event: &SelectEvent<Vec<HashAlgorithmChoice>>,
              cx: &mut Context<HashGeneratorWindow>| {
-                if !this.is_current_mount() {
+                if this.clipboard_pending.is_copying() || !this.is_current_mount() {
                     return;
                 }
                 let SelectEvent::Confirm(Some(choice)) = event else {
@@ -754,6 +923,7 @@ fn create_hash_generator_view(
             session,
             wake_signal,
             file_picker_pending,
+            clipboard_pending,
             native_window,
             restart_admission,
             mount_generation,
@@ -1050,6 +1220,9 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.hash.file_path.is_some() {
         names.push("selected Hash Generator file");
     }
+    if drafts.hash.clipboard_snapshot_revision.is_some() {
+        names.push("loaded Clipboard snapshot");
+    }
     if drafts.hash.mode != HashInputMode::Text {
         names.push("Hash Generator source selection");
     }
@@ -1092,6 +1265,9 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
+            return Err(format!("{message} Then retry the egui restart."));
+        }
         self.hash_retiring_windows
             .retain(|retiring| retiring.native_window.is_none_or(native_window_is_valid));
         if self.hash_rehost_pending.load(Ordering::Acquire) {
@@ -1726,6 +1902,7 @@ impl RootWindow {
             session: Arc::clone(&self.hash_session),
             wake_signal: Arc::clone(&self.hash_wake_signal),
             file_picker_pending: Arc::clone(&self.hash_file_picker_pending),
+            clipboard_pending: Arc::clone(&self.hash_clipboard_pending),
             restart_admission: Arc::clone(&self.restart_admission),
             mount_generation,
             session_epoch,
@@ -1919,6 +2096,7 @@ impl RootWindow {
         let session = Arc::clone(&self.hash_session);
         let wake_signal = Arc::clone(&self.hash_wake_signal);
         let file_picker_pending = Arc::clone(&self.hash_file_picker_pending);
+        let clipboard_pending = Arc::clone(&self.hash_clipboard_pending);
         let restart_admission = Arc::clone(&self.restart_admission);
         let active_mount_generation = Arc::clone(&self.hash_mount_generation);
         let rehost_pending = Arc::clone(&self.hash_rehost_pending);
@@ -1935,6 +2113,7 @@ impl RootWindow {
                 session,
                 wake_signal,
                 file_picker_pending,
+                clipboard_pending,
                 restart_admission,
                 mount_generation: destination_mount_generation,
                 session_epoch: destination_session_epoch,
@@ -2604,6 +2783,217 @@ impl RootWindow {
         .detach();
     }
 
+    fn hash_clipboard_request_is_current(&self, request: HashClipboardRequest) -> bool {
+        if self.restart_admission.is_fenced()
+            || self.hash_window.mount_generation() != Some(request.mount_generation)
+        {
+            return false;
+        }
+        let session = self
+            .hash_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        hash_clipboard_request_is_current(
+            self.hash_mount_generation.load(Ordering::Acquire),
+            session.epoch(),
+            session.generation(),
+            request,
+            self.hash_rehost_pending.load(Ordering::Acquire),
+        )
+    }
+
+    fn current_hash_clipboard_target(&self) -> Option<HashClipboardTarget> {
+        let session_epoch = self
+            .hash_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .epoch();
+        match &self.hash_window {
+            HashWindowState::Closed => None,
+            HashWindowState::Docked {
+                mount_generation,
+                view,
+            } => Some(HashClipboardTarget {
+                window: self.root_window?,
+                mount_generation: *mount_generation,
+                session_epoch,
+                view: view.clone(),
+            }),
+            HashWindowState::Popout {
+                mount_generation,
+                window,
+                view,
+            } => Some(HashClipboardTarget {
+                window: *window,
+                mount_generation: *mount_generation,
+                session_epoch,
+                view: view.clone(),
+            }),
+        }
+    }
+
+    fn start_hash_clipboard_operation(
+        &mut self,
+        request: HashClipboardRequest,
+        kind: HashClipboardOperationKind,
+        operation: EffectPermit,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.hash_clipboard_operation.is_some() || self.hash_clipboard_pending.is_pending() {
+            return Err(
+                "Another Hash Generator clipboard operation is already in progress.".into(),
+            );
+        }
+        if !self.hash_clipboard_request_is_current(request) {
+            return Err(
+                "Hash Generator changed before the clipboard operation could start. Try again."
+                    .into(),
+            );
+        }
+        if let HashClipboardOperationKind::Copy(copy) = &kind {
+            if !hash_clipboard_copy_admissible(
+                self.hash_clipboard_pending.kind(),
+                self.hash_file_picker_pending.load(Ordering::Acquire),
+            ) {
+                return Err(
+                    "Finish the file picker or other Clipboard operation before copying the digest."
+                        .into(),
+                );
+            }
+            let session = self
+                .hash_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !session.is_clipboard_copy_current(copy) {
+                return Err(
+                    "The current digest changed before it could be copied. Calculate again and retry."
+                        .into(),
+                );
+            }
+        }
+
+        let pending_kind = match &kind {
+            HashClipboardOperationKind::Load => HashClipboardPendingKind::Load,
+            HashClipboardOperationKind::Copy(_) => HashClipboardPendingKind::Copy,
+        };
+        if !self.hash_clipboard_pending.begin(pending_kind) {
+            return Err(
+                "Another Hash Generator clipboard operation is already in progress.".into(),
+            );
+        }
+        self.hash_clipboard_operation_counter =
+            self.hash_clipboard_operation_counter.wrapping_add(1).max(1);
+        let operation_id = self.hash_clipboard_operation_counter;
+        let worker_kind = kind.clone();
+        self.hash_clipboard_operation = Some(HashClipboardOperation {
+            id: operation_id,
+            request,
+            kind,
+        });
+        let pending = Arc::clone(&self.hash_clipboard_pending);
+        cx.spawn(async move |this, cx| {
+            let _operation = operation;
+            let outcome = match worker_kind {
+                HashClipboardOperationKind::Load => {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async { ArboardClipboardBackend.read_text() })
+                        .await;
+                    HashClipboardOutcome::Load(result)
+                }
+                HashClipboardOperationKind::Copy(copy) => {
+                    let digest = copy.digest().to_owned();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { ArboardClipboardBackend.write_text(&digest) })
+                        .await;
+                    HashClipboardOutcome::Copy(result)
+                }
+            };
+            if this
+                .update(cx, |root, cx| {
+                    root.finish_hash_clipboard_operation(operation_id, outcome, cx);
+                })
+                .is_err()
+            {
+                pending.finish();
+            }
+        })
+        .detach();
+        Ok(())
+    }
+
+    fn finish_hash_clipboard_operation(
+        &mut self,
+        operation_id: u64,
+        outcome: HashClipboardOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .hash_clipboard_operation
+            .as_ref()
+            .is_some_and(|operation| operation.id == operation_id)
+        {
+            return;
+        }
+        let Some(operation) = self.hash_clipboard_operation.take() else {
+            return;
+        };
+        let request_is_current = self.hash_clipboard_request_is_current(operation.request);
+        let is_copy = matches!(&operation.kind, HashClipboardOperationKind::Copy(_));
+        let restore_copy_editors = is_copy
+            && self.hash_window.mount_generation() == Some(operation.request.mount_generation)
+            && self
+                .hash_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .epoch()
+                == operation.request.session_epoch;
+        let load_was_applied = request_is_current
+            && matches!(&operation.kind, HashClipboardOperationKind::Load)
+            && matches!(&outcome, HashClipboardOutcome::Load(Ok(_)));
+
+        if request_is_current {
+            let mut session = self
+                .hash_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match (operation.kind, outcome) {
+                (HashClipboardOperationKind::Load, HashClipboardOutcome::Load(result)) => {
+                    session.apply_clipboard_load(result);
+                }
+                (HashClipboardOperationKind::Copy(request), HashClipboardOutcome::Copy(result))
+                    if session.is_clipboard_copy_current(&request) =>
+                {
+                    session.apply_clipboard_copy(&request, result);
+                }
+                _ => {}
+            }
+        }
+
+        self.hash_clipboard_pending.finish();
+        if let Some(target) = self.current_hash_clipboard_target() {
+            let same_mount = target.mount_generation == operation.request.mount_generation
+                && target.session_epoch == operation.request.session_epoch;
+            if let Err(error) =
+                update_kit_window_content(target.window, &target.view, cx, |tool, window, cx| {
+                    if restore_copy_editors && same_mount {
+                        tool.set_editors_readonly(false, cx);
+                    }
+                    if load_was_applied && same_mount {
+                        tool.source.update(cx, |source, cx| {
+                            source.set_selected_value(&HashSourceChoice::Clipboard, window, cx)
+                        });
+                    }
+                    cx.notify();
+                })
+            {
+                tracing::debug!(%error, "could not notify the current Hash view after clipboard work");
+            }
+        }
+        cx.notify();
+    }
+
     fn hash_picker_target(&self, request: HashPickerRequest) -> Option<HashPickerTarget> {
         if self.hash_rehost_pending.load(Ordering::Acquire)
             || self.restart_admission.is_fenced()
@@ -2668,14 +3058,15 @@ impl RootWindow {
                 .update(cx, |root, _| root.hash_picker_target(request))
                 .ok()
                 .flatten();
-            picker_pending.clear_and_notify(&this, cx);
             let Some(target) = target else {
+                picker_pending.clear_and_notify(&this, cx);
                 return;
             };
 
             let update_result = match target.mode {
                 HashPresentationMode::Docked => {
                     let Some(root_view) = this.upgrade() else {
+                        picker_pending.clear_and_notify(&this, cx);
                         return;
                     };
                     cx.update(|app| {
@@ -2707,6 +3098,7 @@ impl RootWindow {
                     )
                 }),
             };
+            picker_pending.clear_and_notify(&this, cx);
             if let Err(error) = update_result {
                 tracing::debug!(%error, "could not apply Hash Generator file picker result");
             }
@@ -2715,6 +3107,11 @@ impl RootWindow {
     }
 
     fn request_quit(&mut self, cx: &mut Context<Self>) {
+        if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
+            self.restart_status = Some(message.to_owned());
+            cx.notify();
+            return;
+        }
         if self.hash_file_picker_pending.load(Ordering::Acquire) {
             self.restart_status = Some(
                 "Finish or cancel the Hash Generator file picker before quitting Multi Launcher."
@@ -2874,6 +3271,7 @@ struct HashGeneratorWindow {
     session: Arc<Mutex<HashSession>>,
     wake_signal: Arc<HashWakeSignal>,
     file_picker_pending: Arc<AtomicBool>,
+    clipboard_pending: Arc<HashClipboardPendingState>,
     native_window: Option<NativeWindow>,
     restart_admission: Arc<RestartAdmission>,
     mount_generation: u64,
@@ -2932,6 +3330,7 @@ impl HashGeneratorWindow {
             mode: mode.unwrap_or_else(|| session.mode()),
             algorithm: algorithm.unwrap_or_else(|| session.algorithm()),
             file_path: session.file_path().map(PathBuf::from),
+            clipboard_snapshot_revision: session.clipboard_snapshot_revision(),
         }
     }
 
@@ -3033,7 +3432,7 @@ impl HashGeneratorWindow {
     }
 
     fn calculate_hash(&mut self, cx: &mut Context<Self>) {
-        if !self.is_current_mount() {
+        if !self.is_current_mount() || self.clipboard_pending.is_copying() {
             return;
         }
         let Some(_operation) = self.restart_admission.admit() else {
@@ -3057,7 +3456,7 @@ impl HashGeneratorWindow {
     }
 
     fn cancel_hash(&mut self, cx: &mut Context<Self>) {
-        if !self.is_current_mount() {
+        if !self.is_current_mount() || self.clipboard_pending.is_copying() {
             return;
         }
         let Some(_operation) = self.restart_admission.admit() else {
@@ -3073,8 +3472,124 @@ impl HashGeneratorWindow {
         cx.notify();
     }
 
-    fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn clipboard_request(&self) -> Option<HashClipboardRequest> {
         if !self.is_current_mount() {
+            return None;
+        }
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (session.epoch() == self.session_epoch).then_some(HashClipboardRequest {
+            mount_generation: self.mount_generation,
+            session_epoch: self.session_epoch,
+            source_generation: session.generation(),
+        })
+    }
+
+    fn load_clipboard(&mut self, cx: &mut Context<Self>) {
+        if !self.is_current_mount() || self.clipboard_pending.is_pending() {
+            return;
+        }
+        let Some(operation) = self.restart_admission.admit() else {
+            return;
+        };
+        if self.sync_session_draft(cx).is_none() {
+            return;
+        }
+        let Some(request) = self.clipboard_request() else {
+            return;
+        };
+        match self.root.update(cx, |root, cx| {
+            root.start_hash_clipboard_operation(
+                request,
+                HashClipboardOperationKind::Load,
+                operation,
+                cx,
+            )
+        }) {
+            Ok(Ok(())) => self.file_picker_feedback = None,
+            Ok(Err(error)) => self
+                .set_clipboard_start_error(format!("Could not start Clipboard Load: {error}"), cx),
+            Err(error) => self
+                .set_clipboard_start_error(format!("Could not start Clipboard Load: {error}"), cx),
+        }
+        cx.notify();
+    }
+
+    fn copy_digest(&mut self, cx: &mut Context<Self>) {
+        if !self.is_current_mount()
+            || !hash_clipboard_copy_admissible(
+                self.clipboard_pending.kind(),
+                self.file_picker_pending.load(Ordering::Acquire),
+            )
+        {
+            return;
+        }
+        let Some(operation) = self.restart_admission.admit() else {
+            return;
+        };
+        if self.sync_session_draft(cx).is_none() {
+            return;
+        }
+        let (request, copy) = {
+            let session = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if session.epoch() != self.session_epoch {
+                return;
+            }
+            let Some(copy) = session.clipboard_copy_request() else {
+                return;
+            };
+            (
+                HashClipboardRequest {
+                    mount_generation: self.mount_generation,
+                    session_epoch: self.session_epoch,
+                    source_generation: session.generation(),
+                },
+                copy,
+            )
+        };
+
+        self.set_editors_readonly(true, cx);
+        match self.root.update(cx, |root, cx| {
+            root.start_hash_clipboard_operation(
+                request,
+                HashClipboardOperationKind::Copy(copy),
+                operation,
+                cx,
+            )
+        }) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.set_editors_readonly(false, cx);
+                self.set_clipboard_start_error(format!("Could not start Copy Digest: {error}"), cx);
+            }
+            Err(error) => {
+                self.set_editors_readonly(false, cx);
+                self.set_clipboard_start_error(format!("Could not start Copy Digest: {error}"), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn set_clipboard_start_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_error(message);
+        cx.notify();
+    }
+
+    fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_current_mount()
+            || !hash_file_picker_admissible(
+                self.clipboard_pending.kind(),
+                self.file_picker_pending.load(Ordering::Acquire),
+            )
+        {
             return;
         }
         if let Err(error) = checked_active_dialog_owner(window) {
@@ -3134,6 +3649,7 @@ impl HashGeneratorWindow {
     fn request_rehost(&mut self, target: HashPresentationMode, cx: &mut Context<Self>) {
         if target == self.mode
             || !self.is_current_mount()
+            || self.clipboard_pending.is_copying()
             || self.file_picker_pending.load(Ordering::Acquire)
         {
             return;
@@ -3179,7 +3695,7 @@ impl HashGeneratorWindow {
     }
 
     fn request_close(&mut self, cx: &mut Context<Self>) {
-        if !self.is_current_mount() {
+        if !self.is_current_mount() || self.clipboard_pending.is_pending() {
             return;
         }
         if self
@@ -3228,6 +3744,9 @@ impl Render for HashGeneratorWindow {
             mode,
             algorithm,
             path,
+            clipboard_byte_len,
+            clipboard_feedback,
+            can_copy_digest,
         ) = {
             let session = self
                 .session
@@ -3246,10 +3765,17 @@ impl Render for HashGeneratorWindow {
                 session.mode(),
                 session.algorithm(),
                 session.file_path().map(|path| path.display().to_string()),
+                session.clipboard_byte_len(),
+                session.clipboard_feedback().map(str::to_owned),
+                session.can_copy_digest(),
             )
         };
         let can_interact = self.is_current_mount();
         let file_picker_pending = self.file_picker_pending.load(Ordering::Acquire);
+        let clipboard_pending_kind = self.clipboard_pending.kind();
+        let clipboard_copy_pending = clipboard_pending_kind == HashClipboardPendingKind::Copy;
+        let clipboard_pending = clipboard_pending_kind != HashClipboardPendingKind::Idle;
+        let clipboard_pending_status = hash_clipboard_pending_feedback(clipboard_pending_kind);
         let picker_feedback = if file_picker_pending {
             Some("Choose a file to hash…".to_owned())
         } else {
@@ -3340,14 +3866,35 @@ impl Render for HashGeneratorWindow {
                         Select::new(&self.source)
                             .accessibility_label("Hash input source")
                             .placeholder("Choose source")
-                            .disabled(!can_interact || file_picker_pending),
+                            .disabled(!can_interact || file_picker_pending || clipboard_copy_pending),
+                    )
+                    .child(
+                        Button::new("load-hash-clipboard")
+                            .label("Load Clipboard")
+                            .tab_stop(true)
+                            .disabled(!can_interact || clipboard_pending)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.load_clipboard(cx);
+                            })),
                     )
                     .when(mode == HashInputMode::Text, |this| {
                         this.child(
                             Textarea::new(&self.text)
                                 .aria_label("Text to hash")
                                 .tab_index(0)
-                                .readonly(!can_interact),
+                                .readonly(!can_interact || clipboard_copy_pending),
+                        )
+                    })
+                    .when(mode == HashInputMode::Clipboard, |this| {
+                        let snapshot_status = clipboard_byte_len.map_or_else(
+                            || "No Clipboard snapshot loaded".to_owned(),
+                            |bytes| format!("Loaded Clipboard snapshot · {bytes} bytes"),
+                        );
+                        this.child(
+                            Label::new(snapshot_status)
+                                .id("hash-clipboard-snapshot-status")
+                                .text_size(px(metrics.small_text_size))
+                                .line_height(px(metrics.line_height)),
                         )
                     })
                     .when(mode == HashInputMode::File, |this| {
@@ -3363,7 +3910,7 @@ impl Render for HashGeneratorWindow {
                                 Button::new("choose-hash-file")
                                     .label("Choose File")
                                     .tab_stop(true)
-                                    .disabled(!can_interact || file_picker_pending)
+                                    .disabled(!can_interact || file_picker_pending || clipboard_copy_pending)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.choose_file(window, cx);
                                     })),
@@ -3373,7 +3920,7 @@ impl Render for HashGeneratorWindow {
                         Textarea::new(&self.expected)
                             .aria_label("Expected digest")
                             .tab_index(0)
-                            .readonly(!can_interact),
+                            .readonly(!can_interact || clipboard_copy_pending),
                     )
                     .children(
                         comparison_label.map(|(label, color)| {
@@ -3387,7 +3934,7 @@ impl Render for HashGeneratorWindow {
                     .child(
                         Select::new(&self.algorithm)
                             .accessibility_label("Hash algorithm")
-                            .disabled(!can_interact),
+                            .disabled(!can_interact || clipboard_copy_pending),
                     )
                     .children(
                         algorithm.security_notice().map(|notice| {
@@ -3412,7 +3959,7 @@ impl Render for HashGeneratorWindow {
                         Button::new("calculate-hash")
                             .label("Calculate")
                             .tab_stop(true)
-                            .disabled(has_job || !can_interact)
+                            .disabled(has_job || !can_interact || clipboard_copy_pending)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.calculate_hash(cx);
                             })),
@@ -3421,7 +3968,7 @@ impl Render for HashGeneratorWindow {
                         Button::new("dock-hash-generator")
                             .label("Dock (Ctrl+Shift+D)")
                             .tab_stop(true)
-                            .disabled(!can_interact || self.mode == HashPresentationMode::Docked)
+                            .disabled(!can_interact || clipboard_copy_pending || self.mode == HashPresentationMode::Docked)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.request_rehost(HashPresentationMode::Docked, cx);
                             })),
@@ -3430,7 +3977,7 @@ impl Render for HashGeneratorWindow {
                         Button::new("popout-hash-generator")
                             .label("Pop Out (Ctrl+Shift+P)")
                             .tab_stop(true)
-                            .disabled(!can_interact || self.mode == HashPresentationMode::Popout)
+                            .disabled(!can_interact || clipboard_copy_pending || self.mode == HashPresentationMode::Popout)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.request_rehost(HashPresentationMode::Popout, cx);
                             })),
@@ -3439,7 +3986,7 @@ impl Render for HashGeneratorWindow {
                         Button::new("close-hash-generator")
                             .label("Close Hash Generator")
                             .tab_stop(true)
-                            .disabled(!can_interact)
+                            .disabled(!can_interact || clipboard_pending)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.request_close(cx);
                             })),
@@ -3457,13 +4004,24 @@ impl Render for HashGeneratorWindow {
                             .text_size(px(metrics.small_text_size))
                             .line_height(px(metrics.line_height))
                     }))
-                    .children(digest.map(|(algorithm, digest)| {
+                    .children(digest.clone().map(|(algorithm, digest)| {
                         Label::new(format!("{}: {digest}", algorithm.name()))
                             .id("hash-digest-result")
                             .text_color(appearance::to_hsla(palette.success))
                             .text_size(px(metrics.body_text_size))
                             .line_height(px(metrics.line_height))
                     }))
+                    .when(can_copy_digest && digest.is_some(), |this| {
+                        this.child(
+                            Button::new("copy-hash-digest")
+                                .label("Copy Digest")
+                                .tab_stop(true)
+                                .disabled(!can_interact || clipboard_pending || file_picker_pending)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.copy_digest(cx);
+                                })),
+                        )
+                    })
                     .children(error.map(|error| {
                         Label::new(error)
                             .id("hash-error-status")
@@ -3478,6 +4036,19 @@ impl Render for HashGeneratorWindow {
                             .text_size(px(metrics.small_text_size))
                             .line_height(px(metrics.line_height))
                     }))
+                    .children(clipboard_pending_status.map(|feedback| {
+                        Label::new(feedback)
+                            .id("hash-clipboard-operation-status")
+                            .text_color(appearance::to_hsla(palette.warning))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    }))
+                    .children(clipboard_feedback.map(|feedback| {
+                        Label::new(feedback)
+                            .id("hash-clipboard-feedback-status")
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    }))
                     .children(
                         presentation_feedback.map(|feedback| {
                             Label::new(feedback).id("hash-presentation-status")
@@ -3489,7 +4060,7 @@ impl Render for HashGeneratorWindow {
                         Button::new("cancel-hash")
                             .label("Cancel")
                             .tab_stop(true)
-                            .disabled(!can_interact)
+                            .disabled(!can_interact || clipboard_copy_pending)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.cancel_hash(cx);
                             }))
@@ -4004,6 +4575,8 @@ pub(crate) fn run_foundation_window(
     let hash_file_picker_pending = Arc::new(AtomicBool::new(false));
     let hash_file_picker_pending_for_quit = Arc::clone(&hash_file_picker_pending);
     let hash_file_picker_pending_for_root = Arc::clone(&hash_file_picker_pending);
+    let hash_clipboard_pending = Arc::new(HashClipboardPendingState::default());
+    let hash_clipboard_pending_for_root = Arc::clone(&hash_clipboard_pending);
     let hash_wake_signal = Arc::new(HashWakeSignal::default());
     let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal);
     let hash_wake_signal_for_root = Arc::clone(&hash_wake_signal);
@@ -4087,6 +4660,7 @@ pub(crate) fn run_foundation_window(
         let session_for_root = Arc::clone(&hash_session_for_root);
         let wake_signal_for_root = Arc::clone(&hash_wake_signal_for_root);
         let picker_pending_for_root_close = Arc::clone(&hash_file_picker_pending_for_root);
+        let clipboard_pending_for_root_close = Arc::clone(&hash_clipboard_pending_for_root);
         let window_revision_for_root = Arc::clone(&hash_window_revision_for_app);
         let restart_exit_for_root = Rc::clone(&restart_exit);
         let restart_failure_for_root = Rc::clone(&restart_failure);
@@ -4123,6 +4697,9 @@ pub(crate) fn run_foundation_window(
                 hash_session: session_for_root,
                 hash_wake_signal: wake_signal_for_root,
                 hash_file_picker_pending: hash_file_picker_pending_for_root,
+                hash_clipboard_pending: hash_clipboard_pending_for_root,
+                hash_clipboard_operation: None,
+                hash_clipboard_operation_counter: 0,
                 hash_window: HashWindowState::Closed,
                 hash_window_revision: window_revision_for_root,
                 hash_mount_generation: hash_mount_generation_for_root,
@@ -4152,14 +4729,17 @@ pub(crate) fn run_foundation_window(
             });
             let root_for_window_close = root.downgrade();
             window.on_window_should_close(cx, move |_, app| {
-                if !picker_pending_for_root_close.load(Ordering::Acquire) {
+                let clipboard_message =
+                    hash_clipboard_close_message(clipboard_pending_for_root_close.kind());
+                let picker_pending = picker_pending_for_root_close.load(Ordering::Acquire);
+                if clipboard_message.is_none() && !picker_pending {
                     return true;
                 }
                 let _ = root_for_window_close.update(app, |root, cx| {
-                    root.restart_status = Some(
-                        "Finish or cancel the Hash Generator file picker before closing Multi Launcher."
-                            .to_owned(),
-                    );
+                    root.restart_status = Some(clipboard_message.map_or_else(
+                        || "Finish or cancel the Hash Generator file picker before closing Multi Launcher.".to_owned(),
+                        str::to_owned,
+                    ));
                     cx.notify();
                 });
                 false
@@ -4506,10 +5086,13 @@ pub(crate) fn run_foundation_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        Frontend, FrontendSelection, FutureContext, HashPickerOutcome, HashPresentationMode,
-        HashWakeSignal, Poll, classify_hash_picker_result, docked_hash_focus_is_current,
-        duplicate_instance_message, hash_mount_identity_matches, hash_picker_result_is_current,
-        root_search_focus_is_current, selection_from_args,
+        Frontend, FrontendSelection, FutureContext, HashClipboardPendingKind,
+        HashClipboardPendingState, HashClipboardRequest, HashDraft, HashPickerOutcome,
+        HashPresentationMode, HashWakeSignal, Poll, classify_hash_picker_result,
+        docked_hash_focus_is_current, duplicate_instance_message, hash_clipboard_copy_admissible,
+        hash_clipboard_request_is_current, hash_file_picker_admissible,
+        hash_mount_identity_matches, hash_picker_result_is_current, root_search_focus_is_current,
+        selection_from_args,
     };
     use multi_launcher::{
         hash_generator::{HashAlgorithm, parse_expected_digest},
@@ -4615,6 +5198,78 @@ mod tests {
         assert!(!hash_picker_result_is_current(5, 4, 7, 7, 11, 11));
         assert!(!hash_picker_result_is_current(4, 4, 8, 7, 11, 11));
         assert!(!hash_picker_result_is_current(4, 4, 7, 7, 12, 11));
+    }
+
+    #[test]
+    fn hash_clipboard_completion_requires_mount_session_and_source_generation() {
+        let request = HashClipboardRequest {
+            mount_generation: 4,
+            session_epoch: 7,
+            source_generation: 11,
+        };
+        assert!(hash_clipboard_request_is_current(4, 7, 11, request, false));
+        assert!(!hash_clipboard_request_is_current(5, 7, 11, request, false));
+        assert!(!hash_clipboard_request_is_current(4, 8, 11, request, false));
+        assert!(!hash_clipboard_request_is_current(4, 7, 12, request, false));
+        assert!(!hash_clipboard_request_is_current(4, 7, 11, request, true));
+    }
+
+    #[test]
+    fn hash_clipboard_slot_coalesces_and_copy_excludes_picker_in_both_orders() {
+        let pending = HashClipboardPendingState::default();
+        assert!(pending.begin(HashClipboardPendingKind::Load));
+        assert!(!pending.begin(HashClipboardPendingKind::Copy));
+        pending.finish();
+        assert!(pending.begin(HashClipboardPendingKind::Copy));
+        assert!(!pending.begin(HashClipboardPendingKind::Load));
+        pending.finish();
+
+        assert!(hash_clipboard_copy_admissible(
+            HashClipboardPendingKind::Idle,
+            false,
+        ));
+        assert!(!hash_clipboard_copy_admissible(
+            HashClipboardPendingKind::Idle,
+            true,
+        ));
+        assert!(!hash_clipboard_copy_admissible(
+            HashClipboardPendingKind::Load,
+            false,
+        ));
+        assert!(!hash_clipboard_copy_admissible(
+            HashClipboardPendingKind::Copy,
+            false,
+        ));
+        assert!(hash_file_picker_admissible(
+            HashClipboardPendingKind::Idle,
+            false,
+        ));
+        assert!(!hash_file_picker_admissible(
+            HashClipboardPendingKind::Copy,
+            false,
+        ));
+        assert!(!hash_file_picker_admissible(
+            HashClipboardPendingKind::Idle,
+            true,
+        ));
+    }
+
+    #[test]
+    fn restart_draft_keeps_only_opaque_clipboard_snapshot_identity() {
+        let mut session = multi_launcher::hash_generator::HashSession::new();
+        session.apply_clipboard_load(Ok("secret".to_owned()));
+        let first = HashDraft::from_session(&session);
+        session.apply_clipboard_load(Ok("public".to_owned()));
+        let replacement = HashDraft::from_session(&session);
+
+        assert_ne!(first, replacement);
+        assert_ne!(
+            first.clipboard_snapshot_revision,
+            replacement.clipboard_snapshot_revision
+        );
+        let serialized_for_diagnostics = format!("{first:?}");
+        assert!(!serialized_for_diagnostics.contains("secret"));
+        assert!(!serialized_for_diagnostics.contains("public"));
     }
 
     #[test]

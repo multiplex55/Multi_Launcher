@@ -36,7 +36,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 
 | GUI | Criteria | Owner | Stage | Remaining evidence |
 | --- | --- | --- | --- | --- |
-| [Hash Generator](gui/hash-generator.md) | HASH-01–HASH-08 | G04 | In implementation | GPUI Text/File, algorithms, comparison, keyboard routes, owned pickers, retained rehost, streamed progress/cancel and default/larger profiles observed. Clipboard, copy, geometry, hidden-root lifecycle and full visual/accessibility acceptance remain pending. |
+| [Hash Generator](gui/hash-generator.md) | HASH-01–HASH-08 | G04 | In implementation | GPUI Text/File, algorithms, comparison, keyboard routes, owned pickers, retained rehost, streamed cancel and default/larger profiles observed. Clipboard controls and scoped tests passed. Isolated native Load/Copy, geometry, hidden-root lifecycle and full visual/accessibility acceptance remain pending. |
 | [Launcher](gui/launcher.md) | LAUNCH-01–LAUNCH-09 | G05 | Specified | Scoped egui keyboard baseline observed. GPUI product view, typed routing, global invocation, native keyboard and visual evidence remain pending. |
 | [Coordinate overlay](gui/coordinate-overlay.md) | COORD-01–COORD-05 | G22 | Specified | Existing controller start, stop and DPI sampling observed from GPUI. Production command routes, visible HUD, pointer pass-through, capture behavior and mixed DPI remain pending. |
 | [Main Settings](gui/settings-main.md) | SETTINGS-01–SETTINGS-06 | G06 | Specified | The egui toolbar, search result and footer were exposed on Windows. Destination focus, save/cancel round trip, nested ownership and the GPUI view remain pending. |
