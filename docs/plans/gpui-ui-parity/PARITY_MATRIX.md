@@ -42,3 +42,8 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Main Settings](gui/settings-main.md) | SETTINGS-01–SETTINGS-06 | G06 | Specified | The egui toolbar, search result and footer were exposed on Windows. Destination focus, save/cancel round trip, nested ownership and the GPUI view remain pending. |
 | [File Search](gui/file-search.md) | FILE-SEARCH-01–FILE-SEARCH-06 | G07 | Specified | Native egui scoped filename search and result refinement observed. Pointer Hash handoff, content results, other state transitions and the GPUI view remain pending. |
 | [Diff workbench](gui/diff.md) | DIFF-01–DIFF-08 | G08 | Specified | Native egui two-file Text comparison, first changed hunk and in-pane Find observed. Binary, Folder, child forms, watcher and operation behavior, native hosting and the GPUI view remain pending. |
+| [Diff Comparison Rules](gui/diff-comparison-rules.md) | DIFF-RULES-01–DIFF-RULES-03 | G08 | Specified | GPUI form and native Apply, error and host behavior pending. |
+| [Diff Folder Rules](gui/diff-folder-rules.md) | DIFF-FRULES-01–DIFF-FRULES-03 | G08 | Specified | GPUI form and native rescan, validation and host behavior pending. |
+| [Diff Text Inputs](gui/diff-text-input.md) | DIFF-INPUT-01–DIFF-INPUT-03 | G08 | Specified | GPUI form and native Compare, Apply, Cancel and retained rehost pending. |
+| [Diff Folder Operation Preview](gui/diff-folder-operation-preview.md) | DIFF-OP-01–DIFF-OP-03 | G08 | Specified | GPUI modal, reviewed plan retention and disposable mutation evidence pending. |
+| [Diff Unsaved Comparison](gui/diff-unsaved-comparison.md) | DIFF-DIRTY-01–DIFF-DIRTY-03 | G08 | Specified | GPUI modal and native dirty-owner Save, Discard and Cancel pending. |

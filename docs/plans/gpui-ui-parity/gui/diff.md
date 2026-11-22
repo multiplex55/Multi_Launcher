@@ -2,6 +2,8 @@
 
 G08 owns `diff`. This source record covers the workbench and the relationship to its children. Each child has its own inventory ID and needs an accepted GUI record. `G08-EGUI-TEXT-BASELINE` records the actual two-file Text comparison, hunk movement and Find. The source criteria remain pending in GPUI.
 
+Child records cover [Comparison Rules](diff-comparison-rules.md), [Folder Rules](diff-folder-rules.md), [Text Inputs](diff-text-input.md), [Folder Operation Preview](diff-folder-operation-preview.md) and [Unsaved Comparison](diff-unsaved-comparison.md).
+
 ## Routes and ownership
 
 `diff` opens the workbench and focuses the left input. One path prefills the left input. Two paths compare immediately. The `diff` plugin parses case-insensitive shell-style input and emits an existing typed open payload. The visible input and canonical source identity remain separate. Activity Center can bring an existing Folder Compare view forward. The inspected File Search menus have no current Diff action. Confirm any future cross-feature route through G25 before adding it as a baseline requirement.
