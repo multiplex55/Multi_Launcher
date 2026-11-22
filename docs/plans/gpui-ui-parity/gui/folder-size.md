@@ -1,0 +1,13 @@
+# Folder Size
+
+G10 owns `folder-size`. The `folder_size` plugin matches `foldersize` and emits a payload-free typed action. A File Search directory result can stage its path through Analyze folder size and bring Folder Size forward. Both routes leave the tool idle until explicit Scan. `src/gui/folder_size_dialog.rs` owns the current host and projection. `src/folder_size/session.rs` owns generation-fenced scan, refresh queue, cancellation and activity. The existing scan, model and treemap modules supply the measurements and visualization data.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| FOLDER-SIZE-01 | Open with the remembered dock/popout presentation. Support the native owner-bound folder picker and the File Search directory prefill. Choose folder, Scan, Refresh and Cancel preserve exact current root and generation. Include subfolders starts on and changes the next scan request. |
+| FOLDER-SIZE-02 | Count logical bytes by file name, including separate hard-link names, and preserve empty, skipped, partial, inaccessible and terminal states. Cancellation freezes the verified partial subtotal. Show scan progress and details while the shared worker stays off the UI thread. |
+| FOLDER-SIZE-03 | Keep Name, Type, Logical size, Share and Status projections, default size-descending order, and All/Files/Folders filtering. Zero total has no share. Table, Treemap and Both share row identity and selection. Sort, filter, layout and view changes reuse the current results. |
+| FOLDER-SIZE-04 | Directory drill, Open in Folder Size and Up operate within the accepted projection. Copy Path and Reveal in Explorer use the correct current physical target. The row context menu owns its exact selected item and revalidates actions. |
+| FOLDER-SIZE-05 | Dock and Pop Out retain current results, selection, and in-flight or queued work. Preserve native geometry and independent hidden-root completion. Close requests cancellation and retires the host. Late scan events and stale menu actions cannot publish into a replacement session. |
+
+Use `folder_size_dialog_open_does_not_scan_and_retained_choose_starts_only_on_scan`, `file_search_folder_size_retained_prefill_focuses_without_scanning`, `folder_size_actual_prefill_held_scan_refresh_cancel_survives_host_moves`, `folder_size_treemap_links_selection_drill_and_view_modes`, and the affected cancellation or logical-byte tests. A Windows fixture can search for one directory with a 3-byte file and a nested 5-byte file, open Folder Size through the actual result action and verify an idle prefill followed by an explicit 8-byte scan. Native result-menu delivery depends on pointer or an equivalent verified route. This is a source record with GPUI and native verification pending.
