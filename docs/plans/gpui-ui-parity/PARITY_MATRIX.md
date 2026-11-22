@@ -99,5 +99,5 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Diagram Viewer](gui/diagram-viewer.md) | DIAGRAM-VIEW-01–DIAGRAM-VIEW-03 | G17 | Specified | Native independent zoom, canceled parent decision and scoped close observed. Canvas, detached host and GPUI remain pending. |
 | [Crop Image](gui/image-crop-editor.md) | CROP-IMAGE-01–CROP-IMAGE-04 | G18 | Specified | Native generated PNG picker, dimensions and exact overwrite Cancel observed. Handle/pointer, output, screenshot and GPUI remain pending. |
 | [Image Comparison](gui/image-comparison.md) | IMAGE-DIFF-01–IMAGE-DIFF-03 | G18 | Specified | Native open, owned A picker Cancel and popout chrome observed. Pair load/evaluation, data-bearing host and GPUI remain pending. |
-| [Image Viewer](gui/image-viewer.md) | IMAGE-VIEW-01–IMAGE-VIEW-03 | G18 | Specified | Source per-file session, exact Note attachment and host ownership mapped. Native and GPUI remain pending. |
+| [Image Viewer](gui/image-viewer.md) | IMAGE-VIEW-01–IMAGE-VIEW-03 | G18 | Specified | Native Note attachment opened the exact scratch PNG. Active viewer controls, detached lifecycle and GPUI remain pending. |
 | [Paste Sequences](gui/paste-sequences.md) | PASTE-SEQUENCE-01–PASTE-SEQUENCE-04 | G21 | Specified | Source editor, preflight, playback and retained host mapped. Native and GPUI remain pending. |
