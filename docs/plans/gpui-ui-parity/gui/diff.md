@@ -1,0 +1,26 @@
+# Diff workbench
+
+G08 owns `diff`. This source record covers the workbench and the relationship to its children. Each child has its own inventory ID and needs an accepted GUI record. `G08-EGUI-TEXT-BASELINE` records the actual two-file Text comparison, hunk movement and Find. The source criteria remain pending in GPUI.
+
+## Routes and ownership
+
+`diff` opens the workbench and focuses the left input. One path prefills the left input. Two paths compare immediately. The `diff` plugin parses case-insensitive shell-style input and emits an existing typed open payload. The visible input and canonical source identity remain separate. Activity Center can bring an existing Folder Compare view forward. The inspected File Search menus have no current Diff action. Confirm any future cross-feature route through G25 before adding it as a baseline requirement.
+
+`src/diff/model.rs::DiffWorkspace` chooses Text, Binary or Folder for each current view and keeps a stack for nested comparisons. `src/gui/diff_dialog/mod.rs` and `host.rs` mount the current view in the root or an independent native window. `child_hosts.rs` owns workspace-bound form windows. Shared comparison workers, watcher state, approved file plans and history stay with the existing Diff domain owners.
+
+## Parity criteria
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| DIFF-01 | Left and Right inputs support Browse File and Browse Folder, confirmation by Compare or Ctrl+O, explicit Compare Text and in-memory Edit Inputs. More offers Swap, Reload, Recompare and Refresh Folder when applicable. Recent pairs reflect successful path comparisons. Missing sources and mixed kinds get actionable errors. |
+| DIFF-02 | Maintain the current Text/Binary/Folder view and its workspace identity through dock and independent popout, then restore the remembered `diff` presentation on reopen. Back and Alt+Left restore the parent view and its selection/scroll after a folder drilldown. Retain preview, worker, watcher and draft ownership during an accepted host move. |
+| DIFF-03 | Text retains line numbers, hunk and intraline highlighting, annotations, bookmarks, difference navigation, per-pane and projected find, wrap and sync, syntax and comparison controls, filters and context. Expose pending alignment and handling of limits. Preserve bidirectional copy, inline edit, undo/redo, conflict Reload or Keep, Save and Save As. Unified/Summary/HTML exports use the existing owner and source policy. |
+| DIFF-04 | Binary is a read-only synchronized offset/hex/ASCII view with virtualized 16-byte rows and explicit changed/missing cells. Preserve First/Previous/Next/Last difference navigation, file watcher reload and current error behavior. |
+| DIFF-05 | Folder presents a bounded hierarchical table with expansion, drilldown, status/path filtering, projected neighbor and multi-selection behavior, difference navigation, and separate scan/content progress. Apply folder rules through explicit rescan. CSV, HTML and text exports preserve the complete/current-filter scope. Copy and Recycle Bin execute only through their reviewed preview. |
+| DIFF-06 | `diff-comparison-rules` and `diff-folder-rules` own separate dock/popout slots per workspace/view. `diff-text-input` owns one slot per workspace. They can inherit a native parent and preserve source or ordered-root identity. Checks reject a stale rule basis. Text keeps per-side drafts, counters, explicit Paste and original source validation, including empty text and the 8 MiB/100,000 line limits. Compare selected lines with Clipboard opens a private in-memory view in the current workspace history. |
+| DIFF-07 | `diff-folder-operation-preview` and `diff-unsaved-comparison` are modal within the owner's viewport. A preview binds the immutable plan to the ordered roots and active view generation and reports warnings, conflicts, skips and errors. Dirty close offers Save modified, Discard or Cancel. Cancel or save failure keeps the workbench open. Backing out of or replacing dirty memory requires resolution. An owned native picker keeps its originating HWND. |
+| DIFF-08 | Compare and refresh off the UI thread, preserve generation fences, and apply watcher events only to the current owner. Rehosting or leaving the view does not replay an operation. Verify keyboard, focus, resize/scroll, hidden-root operation and accessibility in the actual frontend. |
+
+## Verification
+
+Use the `diff_plugin` filter on `--test plugin_queries` for command routes. Select affected `--lib` cases such as `native_diff_text_child_inherits_and_keeps_retained_draft`, `host_close_keeps_dirty_owner_until_confirmation`, `rendered_rules_apply_requires_retained_child_pass`, `folder_operation_stale_preview_cannot_dispatch_after_root_change`, `m3c_file_folder_child_selection_compares_once_and_back_restores_file_state` and `binary_viewport_never_exceeds_workspace_or_depends_on_row_width` for the changed seam. `diff_sessions`, `diff_watch` and `diff_file_ops` are grouped modules under `--test domain`. Native evidence starts with `diff g08-left.txt g08-right.txt` from the fixture root. Binary, Folder, child forms, file mutations, watchers and native host behavior each need their own fixtures at G08.
