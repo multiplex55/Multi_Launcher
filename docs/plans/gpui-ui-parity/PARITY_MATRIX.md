@@ -237,9 +237,9 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Plugin Editor](gui/plugin-editor.md) | PLUGIN-EDITOR-01 | G06 | Specified | Native File menu route and editor creation observed. Editing, filter and GPUI remain pending. |
 | [App Editor](gui/actions-editor.md) | APP-EDITOR-01 | G06 | Specified | Native File menu route and owned child passed. Persisted edits and GPUI remain pending. |
 | [Add or Edit App](gui/add-action.md) | APP-FORM-01 | G06 | Specified | Native Add App draft and Cancel passed. Save, Repair and GPUI remain pending. |
-| [Add Bookmark](gui/add-bookmark.md) | BOOKMARK-FORM-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Add Bookmark](gui/add-bookmark.md) | BOOKMARK-FORM-01 | G06 | Specified | Native egui draft and Cancel verified in G06-EGUI-BOOKMARK-DRAFTS. Validation, Save and GPUI remain pending. |
 | [Folder Alias](gui/alias-editor.md) | FOLDER-ALIAS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
-| [Bookmark Alias](gui/bookmark-alias-editor.md) | BOOKMARK-ALIAS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Bookmark Alias](gui/bookmark-alias-editor.md) | BOOKMARK-ALIAS-01 | G06 | Specified | Native egui Set Alias prefill and Cancel verified in G06-EGUI-BOOKMARK-DRAFTS. Save, stale-record handling and GPUI remain pending. |
 | [Temporary File Alias](gui/tempfile-alias-editor.md) | TEMPFILE-ALIAS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
 | [Favorites Editor](gui/favorites-editor.md) | FAVORITES-EDITOR-01 | G06 | Specified | Actual egui authoring draft and Cancel passed. Save and GPUI remain pending. |
 | [Shell Commands Editor](gui/shell-command-editor.md) | SHELL-EDITOR-01 | G06 | Specified | Actual egui authoring draft and Cancel passed. Save and GPUI remain pending. |
