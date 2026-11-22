@@ -150,3 +150,12 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Mouse Gesture Hint Overlay](gui/mouse-gesture-hint-overlay.md) | GESTURE-HINT-01–GESTURE-HINT-02 | G21 | Specified | Existing Windows passive host and precise runtime lifecycle mapped. Native and GPUI remain pending. |
 | [Hot Folder Manager](gui/hot-folder-manager.md) | HOT-FOLDER-01–HOT-FOLDER-03 | G21 | Specified | Native empty manager and disabled draft cancellation passed. Save, watches and GPUI remain pending. |
 | [Hot Folder Target Picker](gui/hot-folder-target-picker.md) | HOT-FOLDER-TARGET-01–HOT-FOLDER-TARGET-02 | G21 | Specified | Native registered launcher action picker and Escape passed. Binding/other choices and GPUI remain pending. |
+| [Screenshot Pins](gui/pinboard.md) | PIN-LIST-01–PIN-LIST-02 | G22 | Specified | Source list, pin ownership and recovery mapped. Native and GPUI remain pending. |
+| [Screenshot Image Pin](gui/image-pin.md) | IMAGE-PIN-01–IMAGE-PIN-03 | G22 | Specified | Source signed capture selection, retained host and outputs mapped. Native and GPUI remain pending. |
+| [Pin Capture Feedback](gui/pin-capture-feedback.md) | PIN-FEEDBACK-01 | G22 | Specified | Source deferred native failure surface and exact retirement mapped. Native and GPUI remain pending. |
+| [Coordinate Overlay](gui/coordinate-overlay.md) | COORD-01–COORD-05 | G22 | Specified | G01 passive native HUD probe exercised. Normal routes, pick, effects and mixed DPI remain pending. |
+| [Screen Draw Toolbar](gui/screen-draw-toolbar.md) | SCREEN-DRAW-BAR-01–SCREEN-DRAW-BAR-02 | G22 | Specified | Source independent toolbar, capture admission and tools mapped. Native and GPUI remain pending. |
+| [Screen Draw Canvas](gui/screen-draw-canvas.md) | SCREEN-DRAW-CANVAS-01–SCREEN-DRAW-CANVAS-02 | G22 | Specified | Source signed canvas, input and passive transitions mapped. Native and GPUI remain pending. |
+| [OCR Region Selection](gui/ocr-selection.md) | OCR-SELECTION-01–OCR-SELECTION-02 | G22 | Specified | Source shared selector and exact capture lifecycle mapped. Native and GPUI remain pending. |
+| [OCR Results](gui/ocr-results.md) | OCR-RESULT-01–OCR-RESULT-02 | G22 | Specified | Source editor, explicit Copy and generation cancellation mapped. Native and GPUI remain pending. |
+| [Mouse Settings](gui/mouse-settings.md) | MOUSE-SETTINGS-01–MOUSE-SETTINGS-02 | G22 | Specified | Source retained appearance form and independent session effect controls mapped. Native and GPUI remain pending. |
