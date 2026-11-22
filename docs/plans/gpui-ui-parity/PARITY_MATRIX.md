@@ -171,7 +171,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Timer Completion](gui/timer-completion.md) | TIMER-FINISHED-01 | G23 | Specified | Actual typed silent timer, completion and OK verified. Other modes and GPUI remain pending. |
 | [Notification Inbox](gui/notification-inbox.md) | INBOX-01–INBOX-02 | G23 | Specified | Actual generated timer fact, capture Off and disabled consent verified. Live capture and GPUI remain pending. |
 | [Activity Center](gui/activity-center.md) | ACTIVITY-01–ACTIVITY-02 | G23 | Specified | Source refresh, diagnostics and operation handoff mapped. Native and GPUI remain pending. |
-| [Toast History](gui/toast-history.md) | TOAST-HISTORY-01 | G23 | Specified | Source read-only last-20 viewer and explicit refresh mapped. Native and GPUI remain pending. |
+| [Toast History](gui/toast-history.md) | TOAST-HISTORY-01 | G23 | Specified | Native Help menu entry and internal viewer close observed. Tail, refresh and GPUI remain pending. |
 | [Stopwatch Plugin Settings](gui/plugin-settings-stopwatch.md) | STOPWATCH-SETTINGS-01 | G23 | Specified | Source built-in callback, live application and persistence mapped. Native and GPUI remain pending. |
 | [Weather](gui/dashboard-widget-weather_site.md) | DASH-WEATHER-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
 | [Pinned Commands](gui/dashboard-widget-pinned_commands.md) | DASH-PINNED-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
@@ -250,6 +250,6 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Launcher Result Context Menu](gui/launcher-result-context-menu.md) | CONTEXT-MENU-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
 | [Launcher Action Confirmation](gui/launcher-action-confirmation.md) | LAUNCH-CONFIRM-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
 | [Universal Action Sheet](gui/universal-action-sheet.md) | ACTION-SHEET-01 | G05 | Specified | Actual egui Ctrl+Enter, filter, Escape and keyboard Execute passed. GPUI remains pending. |
-| [Quick Help](gui/quick-help.md) | QUICK-HELP-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
-| [Command Help](gui/command-help.md) | COMMAND-HELP-01 | G05 | Specified | Actual typed egui entry opened. Body controls and GPUI remain pending. |
+| [Quick Help](gui/quick-help.md) | QUICK-HELP-01 | G05 | Specified | Native menu entry, representative help and Escape checked. Shortcut, filter, scroll and GPUI remain pending. |
+| [Command Help](gui/command-help.md) | COMMAND-HELP-01 | G05 | Specified | Native typed entry, Linking Guide default filter and scoped empty state observed. Matching rows, persistence and GPUI remain pending. |
 | [Jump Mode Overlay](gui/jump-mode-overlay.md) | JUMP-OVERLAY-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |

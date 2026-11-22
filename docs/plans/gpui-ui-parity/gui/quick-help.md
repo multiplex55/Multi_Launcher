@@ -8,4 +8,4 @@ G05 owns `quick-help`. The configured help shortcut or Help → Quick Help Overl
 
 Select `bounded_help_scroll_keeps_controls_and_full_content_reachable`.
 
-Native and GPUI remain pending.
+`G05-EGUI-HELP-MENU-ROUTES` verifies the actual menu entry, representative Hotkeys and Jump Mode content, and Escape dismissal. The shortcut, retained filter, scroll behavior and GPUI remain pending. [Validation log](../VALIDATION_LOG.md)
