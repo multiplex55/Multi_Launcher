@@ -1,6 +1,6 @@
 # G05 — Main launcher, query interaction, results, and help
 
-**Status:** First [real Search result activation](../gui/launcher.md#first-gpui-result-activation-checkpoint) in implementation from `9ca6941a8`. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
+**Status:** First [real Search result activation](../gui/launcher.md#first-gpui-result-activation-checkpoint) has scoped Windows and Rust evidence. [Shared scoring](../gui/launcher.md#shared-candidate-scoring-and-provider-discovery) is in implementation from the checked restart commit `ca65042c3`. [Shared result composition](../gui/launcher.md#shared-composition-and-persisted-app-results) follows. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
 
 ## Objective and dependencies
 
