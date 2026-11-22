@@ -8,4 +8,4 @@ G06 owns `actions-editor`. File → Apps → Edit Apps opens the root App Editor
 
 Select `constrained_editor_and_add_form_keep_full_commands_and_footer_reachable_without_publication`, `failed_custom_action_save_retains_published_state_and_version` and `target_repair_transaction_publishes_committed_custom_rows_and_preserves_indexed_tail`.
 
-Native and GPUI remain pending.
+`G06-EGUI-PLUGIN-APP-EDITORS` verifies the native File menu route, child opening and continued parent after Cancel. Persistence and GPUI remain pending.

@@ -8,4 +8,4 @@ G06 owns `plugin-editor`. File → Apps → Edit Plugins and accepted Settings s
 
 Select `newer_committed_plugin_selection_invalidates_staged_candidate`, `plugin_selection_intent_preserves_latest_other_settings_and_plugin_settings` and `hosted_plugin_native_filter_rejects_discarded_input_and_keeps_draft`.
 
-Native and GPUI remain pending.
+`G06-EGUI-PLUGIN-APP-EDITORS` verifies the actual File menu route and retained editor. The menu still owned input. Filter, capability changes and GPUI remain pending.

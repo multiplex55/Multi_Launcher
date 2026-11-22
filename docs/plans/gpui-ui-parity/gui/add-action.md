@@ -8,4 +8,4 @@ G06 owns `add-action`. The App Editor owns the Add App, Edit App and Repair Targ
 
 Select `target_repair_ui_uses_explicit_typed_picker_and_confirm`, `target_repair_ui_folder_rows_only_offer_folder_picker_and_ignore_stale_completion` and `target_repair_ui_editor_close_retires_child_and_rejects_late_completion`.
 
-Native and GPUI remain pending.
+`G06-EGUI-PLUGIN-APP-EDITORS` verifies the actual owned Add App draft label and Cancel. Picker, Save, Repair and GPUI remain pending.
