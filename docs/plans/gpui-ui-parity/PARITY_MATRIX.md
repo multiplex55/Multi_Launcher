@@ -36,10 +36,11 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 
 | GUI | Criteria | Owner | Stage | Remaining evidence |
 | --- | --- | --- | --- | --- |
-| [Hash Generator](gui/hash-generator.md) | HASH-01–HASH-08 | G04 | In implementation | GPUI Text/File, algorithms, Expected comparison, keyboard routes, both owned file pickers and retained rehost observed. Clipboard, copy, appearance, geometry, long-job native checks, hidden-root lifecycle and full visual/accessibility acceptance remain pending. |
+| [Hash Generator](gui/hash-generator.md) | HASH-01–HASH-08 | G04 | In implementation | GPUI Text/File, algorithms, Expected comparison, keyboard routes, both owned file pickers, retained rehost and streamed progress/cancel observed. Clipboard, copy, appearance, geometry, hidden-root lifecycle and full visual/accessibility acceptance remain pending. |
 | [Launcher](gui/launcher.md) | LAUNCH-01–LAUNCH-09 | G05 | Specified | Scoped egui keyboard baseline observed. GPUI product view, typed routing, global invocation, native keyboard and visual evidence remain pending. |
 | [Coordinate overlay](gui/coordinate-overlay.md) | COORD-01–COORD-05 | G22 | Specified | Existing controller start, stop and DPI sampling observed from GPUI. Production command routes, visible HUD, pointer pass-through, capture behavior and mixed DPI remain pending. |
 | [Main Settings](gui/settings-main.md) | SETTINGS-01–SETTINGS-06 | G06 | Specified | The egui toolbar, search result and footer were exposed on Windows. Destination focus, save/cancel round trip, nested ownership and the GPUI view remain pending. |
+| [Theme Settings](gui/theme-settings.md) | THEME-01–THEME-05 | G06 | Specified | Native egui direct open, committed appearance, Apply, Save and Cancel observed. Main Settings child delivery, palette cases, GPUI editor and visual acceptance remain pending. |
 | [File Search](gui/file-search.md) | FILE-SEARCH-01–FILE-SEARCH-06 | G07 | Specified | Native egui scoped filename search and result refinement observed. Pointer Hash handoff, content results, other state transitions and the GPUI view remain pending. |
 | [Diff workbench](gui/diff.md) | DIFF-01–DIFF-08 | G08 | Specified | Native egui two-file Text comparison, first changed hunk and in-pane Find observed. Binary, Folder, child forms, watcher and operation behavior, native hosting and the GPUI view remain pending. |
 | [Diff Comparison Rules](gui/diff-comparison-rules.md) | DIFF-RULES-01–DIFF-RULES-03 | G08 | Specified | GPUI form and native Apply, error and host behavior pending. |

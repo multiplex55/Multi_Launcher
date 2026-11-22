@@ -160,4 +160,10 @@ The final source and `8E7A13C6…` build passed seven selected Nextest cases and
 
 Next, wire the existing appearance resolver to Kit using the [G04 mapping](DESIGN_SYSTEM.md#g04-appearance-mapping), then add protected Clipboard Load and digest Copy through the existing shared backend. The [geometry handoff](gui/hash-generator.md#pending-geometry-checkpoint) follows. Live long-job progress/cancel, global hidden-root reveal, native visual and full pilot acceptance remain pending. No full GUI parity row is accepted.
 
+## G04-A — Saved appearance in implementation
+
+The verified source parent is `47f19b43d`, pushed to `origin/feat/gpui-ui-parity`. The sole implementer owns the scoped Kit appearance adapter and integration. The parent owns Windows and the documentation. The scratch profile is idle and restored. Seed System/Compact/100% from `settings-g04-hosting-seed.json` and use the real egui-saved Light/Comfortable/150% `settings-g04-appearance-egui.json` from `G06-EGUI-THEME-DIRECT-SAVE`. Both disable the Paste Sequence Next and Cancel shortcuts. The older `settings-g04-appearance-large.json` is a synthetic fallback. Main Settings found the Theme text-size result and direct Theme button without an observed child opening. The direct `theme` command opened the child and prepared the verified saved profile. Test actual controls on the linked G04-A build and retain the separate screenshot limitation.
+
+Native `G04-C3-NATIVE-PROGRESS-CANCEL` verified the 3 GiB sparse File job advanced to 3%, canceled, re-enabled Calculate and published no digest. The sparse file was removed and the restored fixture has no owned processes. No production source changes were needed for that result.
+
 That source snapshot passed all 38 selected Nextest cases in two binaries with 8,690 skipped. The source writer is now applying the targeted focus return correction. Reuse the same Docked seed and the final linked executable only after the correction is built. The existing first-run evidence still covers unaffected draft/result retention and the canonical worker path.
