@@ -172,4 +172,8 @@ The shared resolver now maps the canonical settings into one Kit theme for the r
 
 Continue G04-C4 with protected Clipboard Load and digest Copy. The [Hash checkpoint handoff](gui/hash-generator.md#pending-clipboard-checkpoint) specifies the shared backend, effect and restart boundaries. Native Clipboard proof requires an isolated Windows clipboard session. Geometry, screenshot comparison and global hidden-root reveal remain open. The full Hash GUI has zero accepted parity rows.
 
+## G04-C4 — Clipboard actions in implementation
+
+The verified source parent is `84583ed5b`, pushed to `origin/feat/gpui-ui-parity`. The sole implementer owns the Hash view, shared session outcome boundary and checked clipboard admission. Parent owns Windows, documentation and Git. Use existing test doubles for protected reads and writes. Avoid reading or replacing the user's live clipboard to create a fixture. The isolated settings directory is idle and restored. It holds the exact final `3B00C1EA…` appearance artifact and the two appearance profiles.
+
 That source snapshot passed all 38 selected Nextest cases in two binaries with 8,690 skipped. The source writer is now applying the targeted focus return correction. Reuse the same Docked seed and the final linked executable only after the correction is built. The existing first-run evidence still covers unaffected draft/result retention and the canonical worker path.

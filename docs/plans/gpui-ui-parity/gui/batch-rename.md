@@ -1,0 +1,14 @@
+# Batch Renamer
+
+G09 owns `batch-rename`. The built-in `batch_rename` plugin matches the trimmed, case-insensitive `rename` command and emits the typed `rename:open` action. `src/gui/batch_rename_dialog.rs` owns the editor and uses the shared `UtilityWindowHost`. The app-owned `RenameScanCoordinator` and `src/batch_rename_transaction.rs` own jobs, plan verification, durable receipts and recovery. The confirm and undo decisions have separate records.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| RENAME-01 | Open docked by default or use the remembered presentation. Keep draft, current scan, preview and accepted decision ownership through valid Dock/Pop Out. The independent window uses the current session. Ordinary close invalidates pending preview and requests cancellation, and reopening retains the root and rule draft without starting a scan. |
+| RENAME-02 | Choose a root with the originating native folder picker. Recursion starts off. Rescan or a recursion change uses the current explicit root. The folder tree can select a subfolder as root. Surface complete, partial, error and canceled scan status. Only a complete current generation grants preview authority. |
+| RENAME-03 | Provide ordered Prefix, Suffix, Number, literal replacement, regex replacement, lower-case and upper-case rules with the applicable fields, move/remove and extension policy. Start with Protect extension and no rules. Retain stable numbering and source identity across render filtering and sorting. |
+| RENAME-04 | Render Include/Select, original filename and paths, proposed path and status, with bounded rows and name/path/extension filtering. Select and clear visible operate on exact displayed snapshot references. Show selected/actionable/no-op/conflicts/excluded counts and read-only preview. Enabling rules or filtering does not broaden accepted mutation scope. |
+| RENAME-05 | Keep Apply selected renames gated by a complete current preview and eligible journal. Accept the frozen plan through [Confirm Batch Rename](batch-rename-confirm.md). Expose worker phase, progress and cancellation. Terminal work retains its receipt and requires a new scan before another plan. |
+| RENAME-06 | Expose recovery and [Confirm Batch Rename Undo](batch-rename-undo-confirm.md) for the exact eligible durable receipt. Preserve protected paths, partial outcomes and existing operation safeguards. |
+
+`G09-EGUI-RENAME-SCAN-GATE` records the actual launcher route, owned folder picker, cancellation and a Prefix draft with preview and apply disabled until a complete scan. Selecting the directory and generating a name preview in the native tool remain pending. Use `m8c_explicit_root_preview_is_cached_stable_and_read_only`, `m8c_close_and_root_change_revoke_pending_scan_results`, `batch_rename_real_host_buttons_retain_the_same_verified_preview` and the relevant plan/operation cases when implementing. GPUI parity remains pending.
