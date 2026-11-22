@@ -47,9 +47,22 @@ Large `src/gui/render.rs` is about 3.6 MB in the tree and did not return usable 
 
 No missing source response is evidence that a file has no behavior. No historical acceptance log is a current pass. No pre-existing issue is newly reproduced merely because its old ledger remains in the tree.
 
-## Execution baseline fields to fill at G00
+## Execution baseline established at G00-A
 
-Record fetched master SHA/time, task parent and baseline commits, branch/upstream, current instructions/roles, source changes since planning, Rust/Cargo/Nextest versions, Windows build target/tools/SDK, dependency/features/profile, current environment and disposable fixture strategy. Record baseline test/native failures only with provenance.
+| Field | Execution observation |
+| --- | --- |
+| Fetched master and branch parent | `98bbc0ccc22a297e8eafae7e844c2f7e45854856`, fetched the evening of November 21, 2026 America/New_York |
+| Dedicated branch | `feat/gpui-ui-parity`, created directly at the fetched commit in the existing checkout |
+| Baseline checkpoint | The child commit with subject `docs(gpui): [G00-A] establish execution baseline`. See CHECKPOINTS for its receipt. |
+| Initial Git state | `master` tracked `origin/master` at the fetched SHA. Index, worktree and untracked list were clean before branch creation. |
+| Delta from planning SHA | One commit, `98bbc0cc` (`docs`), with 76 paths under `docs/`. No changes to startup, commands, core, UI, persistence, Cargo, tests or agent instructions. The goal package is already tracked. |
+| Windows environment | Build 19045, x64 MSVC Rust host, Windows SDK 10.0.26100.0 installed, Visual Studio VC tools installation 17.14.37301.10 detected |
+| Tool versions | Rust 1.100.0, Cargo 1.100.0, Nextest 0.9.135, PowerShell 7.6.9, Git 2.33.0.windows.2 |
+| Build contract | `multi_launcher` ordinary release profile, no declared default features. GPUI dependency and link feasibility are pending G01. |
+| Instructions | Root AGENTS and `.codex/config.toml` with configured planner and reviewer (GPT-6.2 Sol high) and implementer (GPT-6 Luna max). No nested AGENTS files found. |
+| Nextest | Windows app-package wrapper verified in source with a 4 MiB minimum and target runner inside wrapper. App fixtures disable Paste Sequence Next and Cancel shortcuts before construction. |
+| Fixtures | Use fresh disposable data roots and synthetic data. Run the two frontends sequentially for a shared-root comparison; isolate system clipboard checks. |
+| Verification status | Git and tool inspection only. No compilation, test execution, or native GUI acceptance at this checkpoint. |
 
 Preserve this planning reference separately from the new execution baseline. After kickoff, do not silently change the behavioral reference when master advances. Reconcile any deliberate upstream integration with affected GUI/spec/test records.
 

@@ -1,12 +1,12 @@
 # Goal register
 
-Status: planning package prepared; implementation has not started. All work goals are pending execution and acceptance. Read the master Goal for shared contracts and the packet for concrete checkpoints.
+G00 execution has begun. Read the master Goal for shared contracts and the packet for concrete checkpoints.
 
 The initial program has 27 goals. All remain on **one migration branch**, with one active source writer. Ordering below is a default, not a requirement to block independent work behind an unavailable unrelated native check. Record any resequencing and preserve dependency/evidence ownership.
 
 | Goal | Outcome and packet | Dependencies | Current stage |
 | --- | --- | --- | --- |
-| G00 | [Source baseline, complete discovery, and execution records](goals/G00-baseline-and-inventory.md) | None | Not started |
+| G00 | [Source baseline, complete discovery, and execution records](goals/G00-baseline-and-inventory.md) | None | In implementation |
 | G01 | [Same-executable GPUI Kit and Windows feasibility](goals/G01-windows-and-kit-feasibility.md) | G00 initial source/branch checkpoint | Not started |
 | G02 | [Shared commands, state, services, and adapters](goals/G02-shared-engine-boundaries.md) | G00; use G01 findings | Not started |
 | G03 | [Frontend selection, instance ownership, restart, and data identity](goals/G03-frontend-selection-and-lifecycle.md) | G01, G02 relevant seams | Not started |

@@ -1,12 +1,12 @@
 # Progress
 
-## Preparation checkpoint
+## Execution kickoff
 
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Execution goals started / accepted | 0 / 0 |
-| Migration branch / execution baseline | Not yet created / not yet established |
+| Execution goals started / accepted | 1 / 0 |
+| Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | GPUI GUIs implemented / accepted | 0 / 0 |
 | Shared-engine migration requirements accepted | 0 |
@@ -14,7 +14,7 @@
 | Known migration-caused regressions | Not yet assessable; no migration code written |
 | Required native verification | Pending execution |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | G00-A branch/source/bootstrap |
+| Current next action | G00-B discovery and G01 actual-binary feasibility preparation |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 
