@@ -1,0 +1,15 @@
+# File Lock Inspector
+
+G10 owns `file-lock`. The built-in `file_lock` plugin matches `filelock` and offers Inspect File Users. The typed action can also carry one absolute path. File Search offers Inspect file users for accepted file results and supplies the exact path through its retained host and result revision. A supplied path prefills the owner and waits for Inspect. Downloads Triage currently routes files to Hash Generator and directories to Folder Size.
+
+`src/gui/file_lock_dialog.rs` owns controls, bounds of action authority and the native picker. `src/file_lock/session.rs` owns generation-scoped worker/refresh/cancel state. `src/file_lock/windows.rs` probes file identity, asks Windows Restart Manager for registered users and rechecks the file before publishing. Process metadata uses limited query rights and exact PID plus creation time. This surface reports file users and does not change their processes or file locks.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| FILE-LOCK-01 | Open directly with no implicit inspection or accept the current File Search file prefill. Choose file opens the originating native picker. Inspect/Refresh require a valid current path and idle admission. |
+| FILE-LOCK-02 | Display inspecting, refresh, cancel, empty-success and error outcomes for the exact current path. Cancel, a changed selection or stale generation cannot publish old rows. Present Restart Manager's result as reported use. |
+| FILE-LOCK-03 | Expose bounded, selectable process rows with PID, application/service label, local start time and raw FILETIME, executable path or metadata-unavailable feedback. Keep keyboard selection and scroll. Copy snapshot uses only the current successful inspection. |
+| FILE-LOCK-04 | Reveal executable is available only for the current eligible row. Revalidate the exact live process identity, creation time and local regular image path, then reveal the current path in Explorer. This action never launches the executable. |
+| FILE-LOCK-05 | Retain the inspection and current selection across eligible Dock/Pop Out, with remembered presentation and exact native owner. Retained pass, host epoch, path and generation gates prevent stale picker, worker and reveal effects. Close retires current output and cancels work. |
+
+Use `file_lock_ui_file_search_prefill_requires_a_retained_result_menu_action`, `file_lock_ui_choose_file_is_retained_and_discarded_without_inspection`, `file_lock_host_preserves_held_inspection_selection_and_reveal`, `file_lock_ui_stale_ready_reveal_is_retired_and_failed_check_is_not_actionable` and `file_lock_session_refresh_runs_latest_only_and_rejects_stale_result` for the affected seam. The existing `native_reports_disposable_holder_then_release` is an isolated Windows Restart Manager service fixture. A GUI receipt also needs a verified native file-picker selection or File Search row action followed by actual Inspect. That route and GPUI remain pending.
