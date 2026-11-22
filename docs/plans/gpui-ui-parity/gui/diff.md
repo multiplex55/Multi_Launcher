@@ -1,6 +1,6 @@
 # Diff workbench
 
-G08 owns `diff`. This source record covers the workbench and the relationship to its children. Each child has its own inventory ID and needs an accepted GUI record. `G08-EGUI-TEXT-BASELINE` records the two-file Text comparison, hunk movement and Find. `G08-EGUI-BINARY-NAVIGATION` records actual Binary mode, offset rows and first and last difference navigation. The source criteria remain pending in GPUI.
+G08 owns `diff`. This source record covers the workbench and the relationship to its children. Each child has its own inventory ID and needs an accepted GUI record. `G08-EGUI-TEXT-BASELINE` records the two-file Text comparison, hunk movement and Find. `G08-EGUI-BINARY-NAVIGATION` records Binary offsets and first and last difference navigation. `G08-EGUI-FOLDER-RULES-CANCEL` records completed Directory scans, the Left only projection and the independent Folder Rules draft. The source criteria remain pending in GPUI.
 
 Child records cover [Comparison Rules](diff-comparison-rules.md), [Folder Rules](diff-folder-rules.md), [Text Inputs](diff-text-input.md), [Folder Operation Preview](diff-folder-operation-preview.md) and [Unsaved Comparison](diff-unsaved-comparison.md).
 

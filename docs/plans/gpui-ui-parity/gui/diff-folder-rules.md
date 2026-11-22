@@ -8,4 +8,4 @@ G08 owns `diff-folder-rules`. The Folder workbench opens a separate form in the 
 | DIFF-FRULES-02 | Show invalid input and disable Apply + Rescan. Cancel closes the editor without mutating the active rules. Keep action controls reachable as the body scrolls or wraps. |
 | DIFF-FRULES-03 | Accept one application against the original workspace/view, ordered roots and rule basis, then rescan. Reject stale decisions, preserve the editor on validation errors and keep its draft through a valid host move. |
 
-Use `rendered_folder_cancel_then_apply_changes_live_rules_once` and shared folder rules validation. Native proof needs a small two-directory tree, Cancel, invalid and valid inputs, a confirmed rescan, and one supported host change. GPUI implementation and native evidence are pending.
+Use `rendered_folder_cancel_then_apply_changes_live_rules_once` and shared folder rules validation. `G08-EGUI-FOLDER-RULES-CANCEL` verifies the actual two-directory comparison, Includes draft, explicit Cancel and empty Includes on reopen. Invalid input, Apply + Rescan, rehosting and GPUI remain pending.
