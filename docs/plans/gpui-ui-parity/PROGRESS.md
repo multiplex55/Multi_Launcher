@@ -15,7 +15,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Pending execution |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | G01-C2 passive overlay proof. Global invocation and foreground restoration still need native evidence. |
+| Current next action | G01-D canonical release and fallback proof. Global invocation, foreground restoration and additional passive overlay checks remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 

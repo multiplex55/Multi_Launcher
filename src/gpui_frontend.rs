@@ -20,11 +20,14 @@ use gpui_kit::*;
 #[cfg(windows)]
 use std::ffi::c_void;
 
+use multi_launcher::coordinate_tool::{
+    CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
+};
 use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
 
-gpui_kit::actions!([ToggleSecondaryWindow]);
+gpui_kit::actions!([ToggleSecondaryWindow, ToggleCoordinateHudProbe]);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Frontend {
@@ -97,6 +100,48 @@ pub(crate) fn show_startup_error(message: &str) {
     eprintln!("Multi Launcher: {message}");
 }
 
+fn toggle_coordinate_hud_probe(
+    controller: &mut CoordinateToolController,
+) -> Result<String, String> {
+    let enabled = !controller.runtime_state().hud_enabled();
+    let disabled_sample = if enabled {
+        None
+    } else {
+        controller.sample_for_copy().ok()
+    };
+    controller.set_hud_enabled(enabled)?;
+    if !enabled {
+        let dpi = disabled_sample
+            .as_ref()
+            .and_then(|sample| sample.monitor.as_ref())
+            .and_then(|monitor| monitor.effective_dpi);
+        return Ok(match dpi {
+            Some((horizontal, vertical)) => format!(
+                "Coordinate HUD disabled. Last sample monitor DPI: {horizontal}×{vertical}."
+            ),
+            None => "Coordinate HUD disabled.".to_owned(),
+        });
+    }
+
+    match controller.sample_for_copy() {
+        Ok(sample) => {
+            let point = sample.desktop_point;
+            let mut status = format!("Coordinate HUD enabled at ({}, {}).", point.x, point.y);
+            if let Some((horizontal, vertical)) = sample
+                .monitor
+                .as_ref()
+                .and_then(|monitor| monitor.effective_dpi)
+            {
+                status.push_str(&format!(" Monitor DPI: {horizontal}×{vertical}."));
+            }
+            Ok(status)
+        }
+        Err(error) => Ok(format!(
+            "Coordinate HUD enabled; current sample unavailable: {error}"
+        )),
+    }
+}
+
 struct RootWindow {
     query: Entity<InputState>,
     native_window: Option<NativeWindow>,
@@ -105,6 +150,10 @@ struct RootWindow {
     secondary_revision: Arc<AtomicU64>,
     secondary_close_subscription: Option<Subscription>,
     secondary_error: Option<String>,
+    coordinate_hud_probe_controller: Arc<Mutex<CoordinateToolController>>,
+    coordinate_hud_probe_closing: Arc<AtomicBool>,
+    coordinate_hud_probe_pending: bool,
+    coordinate_hud_probe_status: String,
 }
 
 enum SecondaryWindowState {
@@ -130,6 +179,48 @@ fn update_kit_window_content<T: 'static, C: AppContext, R>(
 }
 
 impl RootWindow {
+    fn toggle_coordinate_hud_probe(&mut self, cx: &mut Context<Self>) {
+        if self.coordinate_hud_probe_pending
+            || self.coordinate_hud_probe_closing.load(Ordering::Acquire)
+        {
+            return;
+        }
+
+        self.coordinate_hud_probe_pending = true;
+        self.coordinate_hud_probe_status = "Updating Coordinate HUD…".to_owned();
+        cx.notify();
+
+        let controller = Arc::clone(&self.coordinate_hud_probe_controller);
+        let closing = Arc::clone(&self.coordinate_hud_probe_closing);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if closing.load(Ordering::Acquire) {
+                        return Err("launcher is closing".to_owned());
+                    }
+                    let mut controller = controller
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if closing.load(Ordering::Acquire) {
+                        return Err("launcher is closing".to_owned());
+                    }
+                    toggle_coordinate_hud_probe(&mut controller)
+                })
+                .await;
+            let status = match result {
+                Ok(status) => status,
+                Err(error) => format!("Coordinate HUD error: {error}"),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.coordinate_hud_probe_pending = false;
+                this.coordinate_hud_probe_status = status;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn open_or_toggle_secondary(&mut self, cx: &mut Context<Self>) {
         let foreground_before_request = current_foreground_identity();
         let (handle, view) = match &self.secondary {
@@ -300,6 +391,9 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &ToggleSecondaryWindow, _, cx| {
                 this.open_or_toggle_secondary(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleCoordinateHudProbe, _, cx| {
+                this.toggle_coordinate_hud_probe(cx);
+            }))
             .child(
                 div()
                     .flex()
@@ -318,6 +412,14 @@ impl Render for RootWindow {
                                 this.open_or_toggle_secondary(cx);
                             })),
                     )
+                    .child(
+                        Button::new("coordinate-hud-probe")
+                            .label("Toggle passive Coordinate HUD (F6)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_coordinate_hud_probe(cx);
+                            })),
+                    )
+                    .child(Label::new(self.coordinate_hud_probe_status.clone()))
                     .child(
                         Button::new("quit-gpui")
                             .label("Quit Multi Launcher")
@@ -661,7 +763,10 @@ fn activate_for_secondary_window(
 ) {
 }
 
-pub(crate) fn run_foundation_window(hotkey: multi_launcher::hotkey::Hotkey) -> Result<(), String> {
+pub(crate) fn run_foundation_window(
+    hotkey: multi_launcher::hotkey::Hotkey,
+    coordinate_tool_preferences: CoordinateToolPreferences,
+) -> Result<(), String> {
     let startup_error = Rc::new(RefCell::new(None));
     let startup_error_sink = Rc::clone(&startup_error);
     let subscriptions = Rc::new(RefCell::new(Vec::new()));
@@ -672,16 +777,25 @@ pub(crate) fn run_foundation_window(hotkey: multi_launcher::hotkey::Hotkey) -> R
     let visibility = RootVisibility::new();
     let visibility_for_quit = visibility.clone();
     let initial_return_target = capture_foreground_identity();
+    let coordinate_hud_probe_controller =
+        Arc::new(Mutex::new(CoordinateToolController::new_with_preferences(
+            Arc::new(NativeCoordinateRuntimeFactory),
+            coordinate_tool_preferences,
+        )));
+    let coordinate_hud_probe_closing = Arc::new(AtomicBool::new(false));
+    let controller_for_app = Arc::clone(&coordinate_hud_probe_controller);
+    let closing_for_app = Arc::clone(&coordinate_hud_probe_closing);
 
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
-        cx.bind_keys([KeyBinding::new(
-            "ctrl-enter",
-            ToggleSecondaryWindow,
-            Some("RootWindow"),
-        )]);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-enter", ToggleSecondaryWindow, Some("RootWindow")),
+            KeyBinding::new("f6", ToggleCoordinateHudProbe, Some("RootWindow")),
+        ]);
+        let coordinate_hud_probe_closing_for_quit = Arc::clone(&closing_for_app);
         let quit_subscription = cx.on_app_quit(move |_| {
             visibility_for_quit.active.store(false, Ordering::Release);
+            coordinate_hud_probe_closing_for_quit.store(true, Ordering::Release);
             if let Ok(mut listener) = listener_slot_for_quit.lock()
                 && let Some(mut listener) = listener.take()
             {
@@ -698,7 +812,9 @@ pub(crate) fn run_foundation_window(hotkey: multi_launcher::hotkey::Hotkey) -> R
             }),
             ..Default::default()
         };
-        let (root_window, root_view) = match open_window(options, cx, |window, cx| {
+        let controller_for_root = Arc::clone(&controller_for_app);
+        let closing_for_root = Arc::clone(&closing_for_app);
+        let (root_window, root_view) = match open_window(options, cx, move |window, cx| {
             let query = cx.new(|cx| InputState::new(window, cx).placeholder("Type a query"));
             query.focus_handle(cx).focus(window, cx);
             let focus_handle = cx.focus_handle();
@@ -711,6 +827,10 @@ pub(crate) fn run_foundation_window(hotkey: multi_launcher::hotkey::Hotkey) -> R
                 secondary_revision: Arc::new(AtomicU64::new(0)),
                 secondary_close_subscription: None,
                 secondary_error: None,
+                coordinate_hud_probe_controller: controller_for_root,
+                coordinate_hud_probe_closing: closing_for_root,
+                coordinate_hud_probe_pending: false,
+                coordinate_hud_probe_status: "Coordinate HUD probe is idle.".to_owned(),
             })
         }) {
             Ok((window, view)) => (window, view),
@@ -911,6 +1031,15 @@ pub(crate) fn run_foundation_window(hotkey: multi_launcher::hotkey::Hotkey) -> R
             let _ = (native_window, hotkey, initial_return_target);
         }
     });
+
+    coordinate_hud_probe_closing.store(true, Ordering::Release);
+    let shutdown_result = coordinate_hud_probe_controller
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .shutdown();
+    if let Err(error) = shutdown_result {
+        tracing::warn!(%error, "could not fully shut down the GPUI Coordinate HUD probe");
+    }
 
     if let Ok(mut listener) = listener_slot.lock()
         && let Some(mut listener) = listener.take()

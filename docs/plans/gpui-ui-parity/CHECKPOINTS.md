@@ -62,4 +62,12 @@ The untyped Kit handle correction linked and native startup/close succeeded. See
 
 The [review](reviews/G01-C1-lifecycle.md) and [validation log](VALIDATION_LOG.md) record the lifecycle fixes, the linked Windows executable and actual utility behavior. The configured listener, checked HWND root adapter and guarded foreground requests are implemented in the proof shell. The exact utility hide/show/close path has Windows evidence. Global F2 produced no recorded accepted wake with the available injected key action. Root-hidden utility and foreground restoration claims remain pending. No test fixture process was left running.
 
+The C1 source checkpoint is `f9839f8b5f294bce5959d796dff47c51afb6b2b2`, pushed to `origin/feat/gpui-ui-parity`. The checkout was clean after the commit and push.
+
 Continue G01-C2 using the existing Coordinate Tool controller and native passive surfaces. Preserve the pending C1 native input receipts and use a known-duration supported key input or a physical key for its next distinct attempt. After the native overlay implementation, build the canonical release and verify fallback and packaging at G01-D. Continue independent Hash extraction and selection work if a specific native capability remains unavailable.
+
+## G01-C2 — Shared native Coordinate HUD adapter
+
+GPUI can start and stop the existing native Coordinate Tool controller. One pending UI operation keeps start/stop off the foreground executor. Runtime teardown waits for the existing controller shutdown before returning to the data-lock owner. The Windows proof started the controller, preserved root keyboard editing and observed an actual 96 × 96 DPI sample. See `G01-C2-HUD`. Visual and pointer behavior and multiple display scales remain pending. No owned fixture process was left running.
+
+Run ordinary `cargo build --release` from the pinned branch next. Verify the same packaged executable with bare, explicit egui and explicit GPUI selection from the disposable non-source directory. Inspect the embedded native icon. A disposable `F13` launcher hotkey can exercise this proof's controlled startup error because the parser accepts it while the legacy polling listener has no mapping. Verify explicit egui recovery from the same root once the error process exits. This is a probe listener limitation and does not waive later configured-hotkey parity.
