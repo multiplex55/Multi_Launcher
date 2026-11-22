@@ -174,3 +174,12 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Activity Center](gui/activity-center.md) | ACTIVITY-01–ACTIVITY-02 | G23 | Specified | Source refresh, diagnostics and operation handoff mapped. Native and GPUI remain pending. |
 | [Toast History](gui/toast-history.md) | TOAST-HISTORY-01 | G23 | Specified | Source read-only last-20 viewer and explicit refresh mapped. Native and GPUI remain pending. |
 | [Stopwatch Plugin Settings](gui/stopwatch.md) | STOPWATCH-SETTINGS-01 | G23 | Specified | Source built-in callback, live application and persistence mapped. Native and GPUI remain pending. |
+| [Weather](gui/dashboard-widget-weather_site.md) | DASH-WEATHER-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Pinned Commands](gui/dashboard-widget-pinned_commands.md) | DASH-PINNED-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Todo Widget](gui/dashboard-widget-todo.md) | DASH-TODO-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Recent Commands](gui/dashboard-widget-recent_commands.md) | DASH-RECENT-CMD-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Frequent Commands](gui/dashboard-widget-frequent_commands.md) | DASH-FREQUENT-CMD-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Recent Notes](gui/dashboard-widget-recent_notes.md) | DASH-RECENT-NOTES-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Active Timers](gui/dashboard-widget-timers.md) | DASH-TIMERS-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Clipboard and Snippets](gui/dashboard-widget-clipboard_snippets.md) | DASH-CLIP-SNIP-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Quick Tools](gui/dashboard-widget-quick_tools.md) | DASH-QUICK-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
