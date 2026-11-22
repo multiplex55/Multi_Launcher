@@ -190,4 +190,10 @@ The final build `11E59FCE…` and all 16 scoped Nextest cases passed. The actual
 
 Continue G04-C5-A with the shared geometry persistence and intent extraction before attaching GPUI to actual native HWND observations. Keep the existing egui host/bounds/repaint behavior and narrow the run to the affected library tests. There are zero accepted full Hash GUI rows. Geometry, native Clipboard I/O, global hidden-root and visual proof remain active obligations.
 
+## G04-C5-A — Shared geometry persistence in implementation
+
+The verified source parent is `a378b407f`, pushed to `origin/feat/gpui-ui-parity`. The sole implementer owns the neutral geometry intent and acknowledgement store, settings queue boundary and egui adapter. The [Hash geometry handoff](gui/hash-generator.md#pending-geometry-checkpoint) defines the extraction. The existing egui placement, observers and retained passes stay in this checkpoint's adapter. Actual GPUI placement and direct HWND gesture binding follow after verification. The parent owns docs and Git. The scratch root is idle with original settings and final Clipboard artifact `11E59FCE…`.
+
+The exact C4 artifact verified Windows keyboard Move and Size using the egui Hash popout. Native X changed `60→82` and width `720→731`. Docked geometry stayed `570×400`. Kit exposes the same system menu commands. Its pre-geometry mode kept the prior entry after Move. The actual egui-saved resulting profile is `settings-g04-geometry-egui-baseline.json`. Use that profile or the original seeded Popout geometry during the C5-B observer and placement smoke. See `G04-C5-EGUI-KEYBOARD-GEOMETRY`.
+
 That source snapshot passed all 38 selected Nextest cases in two binaries with 8,690 skipped. The source writer is now applying the targeted focus return correction. Reuse the same Docked seed and the final linked executable only after the correction is built. The existing first-run evidence still covers unaffected draft/result retention and the canonical worker path.
