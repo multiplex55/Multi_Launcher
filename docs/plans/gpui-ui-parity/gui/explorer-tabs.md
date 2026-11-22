@@ -1,0 +1,13 @@
+# Explorer Tabs
+
+G11 owns `explorer-tabs`. The built-in `explorer_tabs` plugin accepts `explorertabs` and shows the editor plus an action for each current saved folder list. Typed open, run-by-ID and cancel use the retained owner. `src/gui/explorer_tabs_dialog.rs` owns the editor and host. `FolderListStore` owns the versioned authored lists. The Windows Explorer Tabs job and its Shell/UI Automation adapter own native execution and verification.
+
+| Criterion | Source-backed behavior |
+| --- | --- |
+| EXPLORER-TABS-01 | Show saved lists, stable selection and folder rows, name, add/remove/reorder controls, and [saved folders picker](explorer-tabs-saved-folders.md). Preserve ordered duplicates, absolute drive and UNC path validation, bounded list/path sizes and stable saved IDs. Save validates path syntax. |
+| EXPLORER-TABS-02 | New, selecting another list and Delete give Save/Discard/Cancel when the current draft is dirty. Escape cancels the decision. Save, Delete, order and Reload use the current store revision. Reload respects a dirty draft. Accepted changes refresh the command/search projection. |
+| EXPLORER-TABS-03 | Run a clean saved selection through one job. The external typed saved action reloads that ID and freezes the exact ordered list while preserving an unrelated editor draft. Deleted or unavailable store entries fail visibly. Cancel belongs to the exact current job. |
+| EXPLORER-TABS-04 | Target one newly correlated Windows Explorer window and verify ordered tabs and folder identity through the existing platform owner. Report attempted, identified, verified, unverified and unattempted outcomes plus cancellation, timeout, failure and leftover temporary diagnostics. The authored list does not capture existing live tabs. |
+| EXPLORER-TABS-05 | Preserve remembered Dock/Pop Out and geometry, retained draft and run identity, hidden-root completion and accepted command/close ownership. Close retires the inline picker and keeps the retained editor and job according to the existing lifecycle. |
+
+Use `explorer_tabs_plugin_uses_configured_root_and_stable_saved_ids_without_writes`, `explorer_tabs_actual_saved_run_waits_for_owner_and_root_receipts`, `explorer_tabs_run_reloads_saved_id_and_refuses_deleted_or_corrupt_store`, `explorer_tabs_backend_drives_ordered_duplicate_paths_and_final_validation` and the relevant native attribution cases. A read-only editor smoke can open `explorertabs`, draft an absolute scratch folder and cancel the dirty decision. Actual tab creation requires a dedicated fixture and verification of the newly owned window. Native GUI and GPUI evidence are pending.
