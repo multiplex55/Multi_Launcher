@@ -159,10 +159,10 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [OCR Region Selection](gui/ocr-selection.md) | OCR-SELECTION-01–OCR-SELECTION-02 | G22 | Specified | Source shared selector and exact capture lifecycle mapped. Native and GPUI remain pending. |
 | [OCR Results](gui/ocr-results.md) | OCR-RESULT-01–OCR-RESULT-02 | G22 | Specified | Source editor, explicit Copy and generation cancellation mapped. Native and GPUI remain pending. |
 | [Mouse Settings](gui/mouse-settings.md) | MOUSE-SETTINGS-01–MOUSE-SETTINGS-02 | G22 | Specified | Source retained appearance form and independent session effect controls mapped. Native and GPUI remain pending. |
-| [Dashboard](gui/dashboard.md) | DASHBOARD-01–DASHBOARD-02 | G23 | Specified | Blank-query launcher composition and shared widget registry mapped. Native and GPUI remain pending. |
-| [Dashboard Editor](gui/dashboard-editor.md) | DASHBOARD-EDITOR-01–DASHBOARD-EDITOR-02 | G23 | Specified | Source layout, saved draft ownership and rehost mapped. Native and GPUI remain pending. |
-| [Dashboard Remove Slot](gui/dashboard-remove-slot-confirmation.md) | DASHBOARD-REMOVE-01 | G23 | Specified | Source exact current slot confirmation mapped. Native and GPUI remain pending. |
-| [Dashboard Reset Widget](gui/dashboard-reset-widget-confirmation.md) | DASHBOARD-RESET-01 | G23 | Specified | Source selected descriptor defaults and separate confirmation mapped. Native and GPUI remain pending. |
+| [Dashboard](gui/dashboard.md) | DASHBOARD-01–DASHBOARD-02 | G23 | Specified | Native blank-query composition and generated Quick Tools query passed. Remaining widgets and GPUI pending. |
+| [Dashboard Editor](gui/dashboard-editor.md) | DASHBOARD-EDITOR-01–DASHBOARD-EDITOR-02 | G23 | Specified | Native editor route, selected callback and clean close passed. Save, rehost and GPUI remain pending. |
+| [Dashboard Remove Slot](gui/dashboard-remove-slot-confirmation.md) | DASHBOARD-REMOVE-01 | G23 | Specified | Native exact slot review and Cancel passed. Confirm and GPUI remain pending. |
+| [Dashboard Reset Widget](gui/dashboard-reset-widget-confirmation.md) | DASHBOARD-RESET-01 | G23 | Specified | Native exact selected widget review and Cancel passed. Confirm and GPUI remain pending. |
 | [Calendar](gui/calendar.md) | CALENDAR-01–CALENDAR-02 | G23 | Specified | Native Day and exact agenda handoff passed. Other navigation and GPUI remain pending. |
 | [Calendar Event Editor](gui/calendar-event-editor.md) | CALENDAR-EDITOR-01–CALENDAR-EDITOR-02 | G23 | Specified | Native exact draft, title edit and Cancel passed. Save and GPUI remain pending. |
 | [Calendar Event Details](gui/calendar-event-details.md) | CALENDAR-DETAILS-01–CALENDAR-DETAILS-02 | G23 | Specified | Native exact occurrence and Edit handoff passed. Mutation and GPUI remain pending. |
@@ -182,4 +182,20 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Recent Notes](gui/dashboard-widget-recent_notes.md) | DASH-RECENT-NOTES-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
 | [Active Timers](gui/dashboard-widget-timers.md) | DASH-TIMERS-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
 | [Clipboard and Snippets](gui/dashboard-widget-clipboard_snippets.md) | DASH-CLIP-SNIP-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
-| [Quick Tools](gui/dashboard-widget-quick_tools.md) | DASH-QUICK-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Quick Tools](gui/dashboard-widget-quick_tools.md) | DASH-QUICK-01 | G23 | Specified | Native configured manual query and Properties callback passed. Auto submit and GPUI remain pending. |
+| [Plugin Home](gui/dashboard-widget-plugin_home.md) | DASH-PLUGIN-HOME-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Command History](gui/dashboard-widget-command_history.md) | DASH-CMD-HISTORY-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Dashboard Diagnostics](gui/dashboard-widget-diagnostics.md) | DASH-DIAGNOSTICS-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Context Links](gui/dashboard-widget-context_links.md) | DASH-CONTEXT-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Gesture Cheat Sheet](gui/dashboard-widget-gesture_cheat_sheet.md) | DASH-GESTURE-SHEET-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Recent Gestures](gui/dashboard-widget-gesture_recent.md) | DASH-GESTURE-RECENT-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Gesture Health](gui/dashboard-widget-gesture_health.md) | DASH-GESTURE-HEALTH-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Layouts Widget](gui/dashboard-widget-layouts.md) | DASH-LAYOUTS-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Pinned Query Results](gui/dashboard-widget-pinned_query_results.md) | DASH-PINNED-RESULTS-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Query List](gui/dashboard-widget-query_list.md) | DASH-QUERY-LIST-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Recent Clipboard Items](gui/dashboard-widget-clipboard_recent.md) | DASH-CLIP-RECENT-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Browser Tabs Widget](gui/dashboard-widget-browser_tabs.md) | DASH-BROWSER-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Calendar Widget](gui/dashboard-widget-calendar.md) | DASH-CALENDAR-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Processes Widget](gui/dashboard-widget-processes.md) | DASH-PROCESSES-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Windows Widget](gui/dashboard-widget-windows.md) | DASH-WINDOWS-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
+| [Windows Overview](gui/dashboard-widget-windows_overview.md) | DASH-WINDOWS-OVER-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
