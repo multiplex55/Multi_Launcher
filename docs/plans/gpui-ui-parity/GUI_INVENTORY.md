@@ -86,6 +86,8 @@ Assign each real GUI/independent child an owner goal; modes may share a parent r
 
 These IDs have source routes on the execution baseline. Counts remain provisional. Runtime confirmation is pending across these rows. A mode or inline decision shares its parent ID when it uses the same surface and lifetime.
 
+See [source registration crosswalk](GUI_ROUTE_CROSSWALK.md) for `Panel`, Jump Mode and geometry keys. That crosswalk distinguishes registered identities from new GUI IDs.
+
 | Owner | Stable surface IDs | Routes, modes and dependencies |
 | --- | --- | --- |
 | G04 | [`hash-generator`](gui/hash-generator.md) | Typed action from `hash`, and path handoffs from File Search and Downloads Triage. Docked and independent presentation via the common utility host. |
@@ -136,9 +138,27 @@ G23 owns one `dashboard-widget-<key>` for each `src/dashboard/widgets/registry.r
 
 ### Source leads requiring disposition
 
-- Trace `unicode-inspector` from the persisted utility key and pure module before counting it. The source search found no production open route.
-- Reconcile standalone native construction and optional Cargo gates. The launcher invocation message window is infrastructure; passive tooltips and capture feedback have presentation criteria. Developer smoke/performance binaries are verification targets.
-- Reconcile all command-only plugin result controls, dynamic libraries and each per-feature inline menu/confirmation before declaring discovery complete. Cross-check the production registrations in `gui/render.rs` and `gui/mod.rs` against `NavigationDialogKind::ALL` and `STABLE_TOOL_KEYS`.
+- `unicode-inspector` is a persisted geometry key and pure library export without a production GUI route in this checkout. The `DiffCopyConfirmation` helper in `gui/confirmation_modal.rs` similarly has no reachable caller. Keep these out of the active inventory unless a route is found.
+- `unstable_grab` forwards to `rdev`. Framebuffer/performance features and developer smoke binaries are verification tools. Windows gates do create additional production behavior, including transfer/triage hosts and native acquisition/overlay flows. The optional Notification Inbox manifest under `tools/notification-inbox-windows` points to the same application executable.
+- G05 and G24 must reconcile specialized plugin result controls by matching registered plugins to result and action routes. Feature owners inventory each remaining inline menu and confirmation against the assigned GUI before their ports. G06 traces dynamic DLL settings separately.
+- G23 owns Activity row navigation into exact active tool or job identities, including independent Diff focus, transfer job selection and live Screenshot Editor sessions. G25 rechecks those handoffs and the OCR case where root input is suspended while independent tools remain active.
+- G19 and G22 share `SharedVisualOverlayController` for capture shields and passive outlines. Record each caller's ownership, input and nonactivation behavior in its GUI criteria.
+
+### Additional owned children and controls from route reconciliation
+
+| Owner | Surface or criterion | Production route |
+| --- | --- | --- |
+| G05 | `launcher-action-confirmation`, root menus, completion and history | `gui/actions.rs` and `gui/render.rs` present action confirmations. File Apps opens Edit Apps, Plugins and Radial. Menus also route Pin List, Activity, external Toast Log, Toast Log view, pinned-panel toggles, Linking Guide and exit. Query completion is rendered in the root. Tab accepts completion, and query history shortcuts avoid stealing editor input. Settings exposes Jump Mode enablement and activation draft controls. |
+| G06 | Saved-target repair in Add Action | `gui/add_action_dialog.rs` has repair-only file and folder modes, owned picker, explicit confirmation, async cancellation and stale-result checks. G05 owns the `missing` route and Repair Target handoff. |
+| G13 | Snippet and clipboard history deletion | `gui/jump_mode/ui.rs::NavigationOwner`, `snippet_dialog.rs`, and `clipboard_dialog.rs` give removal decisions distinct parent/session identities. |
+| G15 | `programmer-inspector-label-replace` | `programmer_inspector_dialog.rs` owns native label import/export and the replacement confirmation. |
+| G18 | Crop output overwrite | `gui/crop_dialog.rs` owns confirmation and uses the `image_crop_editor` canvas. |
+| G19 | `mkmacro-runtime-prompt`, `mkmacro-reference-save`, `mkmacro-reference-overwrite` | The independent runtime viewport in `gui/render.rs` returns one pending answer via OK, Cancel, Escape or OS close. The pre-run parameter prompt supplies typed input, defaults, validation, file browsing and Run. `mkmacro_dialog/action_editor.rs` owns separate filename-save and replace/save-as modal decisions with distinct confirmation epochs. |
+| G20 | `radial-submenu-placement`, `radial-unsaved-cell-properties`, `radial-scope-change-guard` | `gui/mod.rs::show_radial_placement_failure` creates a topmost window with Open Designer, conditional Switch Parent to Cascade and Dismiss. `radial_editor/mod.rs` owns cell-specific dirty and scope decisions. |
+| G21 | `gesture-ignore-window-picker` and gesture deletion | `plugins/mouse_gestures.rs::settings_ui` owns an inline Windows ignore chooser with immediate application. The dedicated gesture settings picker uses a deferred hosted owner/epoch. Deletion confirms the specific gesture. Native passive hint lifetime is in `mouse_gestures/overlay.rs`. |
+| G22 | Native pin save | `gui/pinboard_windows.rs` uses IFileSaveDialog with a hidden nonactivating cancellation owner. Capture feedback is independently presented. |
+| G23 | `dashboard-reset-widget-confirmation`, Notification Inbox consent | Dashboard reset and slot removal use different owner identities and effects in `dashboard_editor_dialog.rs` and `jump_mode/ui.rs`. The inbox has Windows capture consent status and separate text/session and durable retention preferences. Its sparse MSIX identity remains a G26 packaging criterion. |
+| G24 | Layout handoffs and MultiManager controls | `actions/layout.rs` opens generated reports or the config in external applications. MultiManager preserves HWND snapshot save/restore, title/desktop refresh, recapture/send home, workspace edits, and per-window home/target operations in `multi_manager/ui.rs`. |
 
 ## Discovery completion checklist
 

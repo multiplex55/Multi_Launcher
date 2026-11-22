@@ -16,10 +16,10 @@ The `hash` plugin query emits `hash:open`, which dispatches `HashGeneratorComman
 | HASH-02 | Algorithm dropdown selects SHA-256, SHA-512 or SHA-1. Default is SHA-256. Show the existing SHA-1 warning. |
 | HASH-03 | Load Clipboard explicitly snapshots text, selects Clipboard mode and gives feedback. Show snapshot byte length. Report read failures and preserve the valid prior snapshot. |
 | HASH-04 | File mode shows a read-only path and Choose File opens the originating window’s native picker. Picker dismissal preserves the draft. Report missing source or file errors. |
-| HASH-05 | Expected digest is optional. An edit recomputes the displayed comparison without replacing the result or restarting a worker. Show match, mismatch or validation error. Respect existing hex length/case and ASCII whitespace rules. |
+| HASH-05 | Expected digest is optional. An edit clears prior error and clipboard feedback and recomputes comparison without replacing the result or restarting a worker. Show match, mismatch or validation error. Respect existing hex length/case and ASCII whitespace rules. |
 | HASH-06 | Calculate uses the shared `HashRequest` and `HashJob`, registers the existing Activity Center operation when available, and exposes byte progress. Cancel invalidates the result. While a cancelled worker drains, show stopping state and keep Calculate disabled. Edits that change the selected input, mode or algorithm invalidate earlier results. Close, reopen and late completion cannot publish into a replacement session. |
 | HASH-07 | Show digest and Copy Digest after a successful current request. Clipboard error leaves the digest usable and displays feedback. There is no copy while a request is running. |
-| HASH-08 | Dock, pop out, return to parent, hide root, close and reopen. Respect the shared presentation preference and preserve Jump Mode and ordinary keyboard focus. Draft and results are session data. |
+| HASH-08 | The Close and Dock/Pop Out buttons, native close and keyboard routes retain their respective behavior. Verify return to parent, hidden root and reopen. Respect the shared presentation preference and preserve Jump Mode and ordinary keyboard focus. Draft and results are session data. |
 
 ## Verification
 
