@@ -1,6 +1,6 @@
 # G02 — Extract authoritative operations without changing egui behavior
 
-**Status: Not started.** This is an executable work packet, not a record of implementation or verification.
+**Status: In implementation.** The [source ownership map](../CORE_CONTRACTS.md) specifies the first G02-B extraction. The existing egui behavior remains the baseline. Shared-session verification and GPUI routing are pending.
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
