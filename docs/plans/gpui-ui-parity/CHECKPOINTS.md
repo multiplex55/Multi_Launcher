@@ -113,3 +113,11 @@ The C1 source started at `021681d80`. It captures the executable and original di
 The first full Windows scenario aborted in AccessKit 0.34.0 on a retired HWND. The isolated provider correction is `f9850dd78`, pushed to the same upstream. The patched `4E4F1E4A…` build passed the entire three-window cancellation and restart scenario with the active HUD and reacquisition of the original root. The final build and scoped tests passed. See `G03-C1-INITIAL-WINDOWS`, `G03-C1-UIA-RETIRED-HWND`, `G03-C1-MULTIWINDOW-RESTART` and `G03-C1-FINAL-SOURCE`. No owned fixture process is running. Scratch settings were restored and the trace files remain available.
 
 Continue independently eligible G04 hosting. Establish the shared presentation and save-acknowledgement owner before mounting the Hash tool into docked and popped-out Kit hosts. The new GPUI writer must participate in checked shutdown. G03 still owns the egui-to-GPUI direction and persistence closure.
+
+The verified C1 source checkpoint is `1cd3dc9f1`, pushed to `origin/feat/gpui-ui-parity`. The existing checkout was clean before G04-C1. The single implementer owns the shared presentation store extraction and its scoped egui verification. Real Kit dock/popout comes in G04-C2. This order establishes the save and mount boundaries before adding the complete Hash controls. The scratch fixture is idle with its original settings restored.
+
+## G04-C1 — Shared utility presentation owner verified
+
+`UtilityPresentationStore` now owns accepted local preferences, canonical settings revisions, acknowledgement polling, failed-write reporting and rebind. The egui wrapper owns its context registration and repaint cadence. The scoped test run passed all 8 selected cases, including a real egui tool host which persists only accepted actions and reopens the saved presentation. The read-only review found no blocking issues. See `G04-C1-UTILITY-PREFERENCE`.
+
+Next, G04-C2 mounts the retained Hash preview in the root or an independent Kit window according to the shared preference. Keep the session across rehost, serialize the accepted save, and retire old native windows and writes before restart. The remaining controls and full parity stay with G04-B/D. No native fixture processes are running.

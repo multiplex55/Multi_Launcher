@@ -91,6 +91,7 @@ pub mod search_replace;
 pub mod settings;
 pub mod settings_editor;
 mod settings_save;
+pub use settings_save::SettingsSaveWorkerRegistry;
 pub mod sound;
 pub mod startup;
 pub mod table_utility;
@@ -118,6 +119,7 @@ pub mod windows_layout;
 pub mod workspace;
 pub mod xml_toolkit_engine;
 pub mod xml_toolkit_session;
+pub mod utility_presentation;
 
 // The shared startup owner is compiled into the library only for its
 // deterministic scanner-injection contract. Production library builds expose

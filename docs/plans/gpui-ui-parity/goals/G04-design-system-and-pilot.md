@@ -1,6 +1,6 @@
 # G04 — Create reusable Kit components and one complete real GUI
 
-**Status: Not started.** This is an executable work packet, not a record of implementation or verification.
+**Status: In implementation.** The shared Text/SHA-256 preview is verified. The first hosting checkpoint extracts the existing presentation preference and acknowledgement owner before creating the real Kit mounts. See the [Hash Generator record](../gui/hash-generator.md) and [checkpoints](../CHECKPOINTS.md).
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
@@ -36,6 +36,8 @@ Retain file/source identity, cancellation/stale result protections, result displ
 Implement every supported pilot mode and child dialog. Preserve close/hide/reopen, resize/scroll, keyboard/pointer operation, relevant geometry and focus return. Confirm an independent utility works while the main/root window is hidden if supported.
 
 Use common hosting semantics without copying egui pass APIs into core. Document exact save/apply/cancel/tool-option persistence if present; preserve any intentional non-persistence of input/results. Perform relevant cross-frontend round trips.
+
+G04-C1 moves effective preference, accepted changes and worker acknowledgements into one frontend-neutral owner with the existing egui context and repaint adapter. G04-C2 uses it for the retained Hash preview in real docked and popped-out Kit hosts. Land this boundary before the complete controls so window-bound entities and subscriptions need one mount path. The first round trip uses the canonical `hash-generator` key and the existing settings writer. The GPUI writer must settle before the G03 restart admits another owner.
 
 **Evidence:** actual Windows tool interactions and comparable screenshots with same synthetic fixture. **Accept when:** controls, data, input and host lifetime satisfy the per-GUI record, not merely appearance.
 

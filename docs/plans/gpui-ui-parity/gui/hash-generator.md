@@ -35,6 +35,10 @@ Move the preference state and write acknowledgement handling out of `UtilityPres
 
 Use closed, docked and popout host states with a stable mount generation separate from the reactivation revision. Create the destination before retiring the source. Seed its controls from the retained session and reject callbacks from a retired mount. If Dock returns to a hidden root, request show through the root visibility owner. Persist only the accepted mode change. Preserve saved geometry fields in this first round trip. A later geometry adapter needs Windows outer coordinates and scale because the Kit window bounds describe the client area.
 
+Use the already-borrowed Kit root `Window` for a docked view and the independent window/content handle for a popout. Defer child rehost effects until its current update returns. Replace the mount before closing the old HWND so its close observer cannot end the retained session. Keep accepted rehost work in the G03 restart admission gate until the old HWND retires and the current save revision is acknowledged. Report an unresolved write and retain any unretired HWND in restart preflight.
+
+For the first native round trip, exercise Dock and Pop Out with the root visible. Compare the draft and digest across both mounts, then open the same saved mode from egui in the same scratch directory. The G01 global hotkey injection remains unverified. Hidden-root behavior requires a separate successful visibility action or physical input.
+
 ## Verification
 
 Use the existing Hash Generator unit tests for exact byte vectors, request lifecycle and errors, and the typed dispatch and file-origin tests for the entry paths. Select the `multi_launcher` library target before the `hash_generator` filter. Compare both actual frontend adapters with synthetic text and a disposable file. Run a scoped native test with isolated clipboard data for snapshot/read/write feedback. Exercise mutation while a job is active, popout with hidden root, cancellation and reopen, and compare docked and narrow popout presentation, focus and accessible control names. Establish result and lifecycle parity before accepting any row.
