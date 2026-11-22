@@ -5,6 +5,7 @@ use std::{
     cell::RefCell,
     ffi::{OsStr, OsString},
     future::Future,
+    path::PathBuf,
     rc::Rc,
     sync::{
         Arc, Mutex,
@@ -16,13 +17,17 @@ use std::{
 
 use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::base::Disableable;
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::InputEvent;
 use gpui_kit::component::{
     WindowExt as _,
     button::Button,
-    input::{Input, InputState},
+    input::{Input, InputState, Textarea, TextareaState},
     label::Label,
+    searchable_list::SearchableListItem,
+    select::{Select, SelectEvent, SelectState},
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 #[cfg(windows)]
@@ -37,7 +42,7 @@ use multi_launcher::commands::handlers::handle_hash_generator;
 use multi_launcher::coordinate_tool::{
     CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
 };
-use multi_launcher::hash_generator::HashSession;
+use multi_launcher::hash_generator::{HashAlgorithm, HashComparison, HashInputMode, HashSession};
 use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
@@ -206,6 +211,7 @@ struct RootWindow {
     hash_tool_key: UtilityToolKey,
     hash_session: Arc<Mutex<HashSession>>,
     hash_wake_signal: Arc<HashWakeSignal>,
+    hash_file_picker_pending: Arc<AtomicBool>,
     hash_window: HashWindowState,
     hash_window_revision: Arc<AtomicU64>,
     hash_mount_generation: Arc<AtomicU64>,
@@ -357,6 +363,7 @@ struct RetiringHashWindow {
 struct HashMountConfig {
     session: Arc<Mutex<HashSession>>,
     wake_signal: Arc<HashWakeSignal>,
+    file_picker_pending: Arc<AtomicBool>,
     restart_admission: Arc<RestartAdmission>,
     mount_generation: u64,
     session_epoch: u64,
@@ -368,16 +375,184 @@ struct HashMountConfig {
     mode: HashPresentationMode,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HashPickerRequest {
+    mount_generation: u64,
+    session_epoch: u64,
+    source_generation: u64,
+}
+
+struct HashPickerTarget {
+    mode: HashPresentationMode,
+    window: AnyWindowHandle,
+    view: Entity<HashGeneratorWindow>,
+}
+
+enum HashPickerOutcome {
+    Selected(PathBuf),
+    Cancelled,
+    Failed(String),
+}
+
+fn classify_hash_picker_result<E>(
+    result: Result<anyhow::Result<Option<Vec<PathBuf>>>, E>,
+) -> HashPickerOutcome {
+    match result {
+        Ok(Ok(Some(mut paths))) => paths.drain(..).next().map_or_else(
+            || HashPickerOutcome::Failed("The file picker returned no file".to_owned()),
+            HashPickerOutcome::Selected,
+        ),
+        Ok(Ok(None)) => HashPickerOutcome::Cancelled,
+        Ok(Err(error)) => HashPickerOutcome::Failed(error.to_string()),
+        Err(_) => HashPickerOutcome::Failed(
+            "The file picker did not return a selection result".to_owned(),
+        ),
+    }
+}
+
+struct HashPickerPendingGuard {
+    pending: Arc<AtomicBool>,
+    cleared: bool,
+}
+
+impl HashPickerPendingGuard {
+    fn new(pending: Arc<AtomicBool>) -> Self {
+        Self {
+            pending,
+            cleared: false,
+        }
+    }
+
+    fn clear_and_notify(&mut self, root: &WeakEntity<RootWindow>, cx: &mut AsyncApp) {
+        self.pending.store(false, Ordering::Release);
+        self.cleared = true;
+        let _ = root.update(cx, |root, cx| {
+            if let Some(view) = root.hash_window.view().cloned() {
+                view.update(cx, |_, cx| cx.notify());
+            }
+            cx.notify();
+        });
+    }
+}
+
+impl Drop for HashPickerPendingGuard {
+    fn drop(&mut self) {
+        if !self.cleared {
+            self.pending.store(false, Ordering::Release);
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HashDraft {
+    text: String,
+    expected: String,
+    mode: HashInputMode,
+    algorithm: HashAlgorithm,
+    file_path: Option<PathBuf>,
+}
+
+impl HashDraft {
+    fn from_session(session: &HashSession) -> Self {
+        Self {
+            text: session.text().to_owned(),
+            expected: session.expected().to_owned(),
+            mode: session.mode(),
+            algorithm: session.algorithm(),
+            file_path: session.file_path().map(PathBuf::from),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HashSourceChoice {
+    Text,
+    File,
+}
+
+impl HashSourceChoice {
+    const fn mode(self) -> HashInputMode {
+        match self {
+            Self::Text => HashInputMode::Text,
+            Self::File => HashInputMode::File,
+        }
+    }
+
+    const fn from_mode(mode: HashInputMode) -> Option<Self> {
+        match mode {
+            HashInputMode::Text => Some(Self::Text),
+            HashInputMode::File => Some(Self::File),
+            HashInputMode::Clipboard => None,
+        }
+    }
+}
+
+impl SearchableListItem for HashSourceChoice {
+    type Value = Self;
+
+    fn title(&self) -> SharedString {
+        match self {
+            Self::Text => "Text",
+            Self::File => "File",
+        }
+        .into()
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        Label::new(self.title())
+    }
+
+    fn value(&self) -> &Self::Value {
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HashAlgorithmChoice(HashAlgorithm);
+
+impl SearchableListItem for HashAlgorithmChoice {
+    type Value = Self;
+
+    fn title(&self) -> SharedString {
+        self.0.name().into()
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        Label::new(self.title())
+    }
+
+    fn value(&self) -> &Self::Value {
+        self
+    }
+}
+
+fn hash_picker_result_is_current(
+    active_mount_generation: u64,
+    mount_generation: u64,
+    active_session_epoch: u64,
+    session_epoch: u64,
+    active_source_generation: u64,
+    source_generation: u64,
+) -> bool {
+    hash_mount_identity_matches(
+        active_mount_generation,
+        mount_generation,
+        active_session_epoch,
+        session_epoch,
+    ) && active_source_generation == source_generation
+}
+
 fn create_hash_generator_view(
     window: &mut Window,
     cx: &mut App,
-    initial_text: String,
+    initial_draft: HashDraft,
     native_window: Option<NativeWindow>,
     config: HashMountConfig,
 ) -> Entity<HashGeneratorWindow> {
     let HashMountConfig {
         session,
         wake_signal,
+        file_picker_pending,
         restart_admission,
         mount_generation,
         session_epoch,
@@ -388,31 +563,83 @@ fn create_hash_generator_view(
         root,
         mode,
     } = config;
-    let input = cx.new(|cx| InputState::new(window, cx).placeholder("Enter text to hash"));
-    input.update(cx, |input, cx| input.set_value(initial_text, window, cx));
-    input.focus_handle(cx).focus(window, cx);
+    let text = cx.new(|cx| {
+        TextareaState::new(window, cx)
+            .default_value(initial_draft.text.clone())
+            .auto_grow(4, 10)
+            .placeholder("Enter text to hash")
+    });
+    let expected = cx.new(|cx| {
+        TextareaState::new(window, cx)
+            .default_value(initial_draft.expected.clone())
+            .auto_grow(1, 2)
+            .placeholder("Optional expected digest")
+    });
 
-    let input_for_subscription = input.clone();
+    let source_index = HashSourceChoice::from_mode(initial_draft.mode).map(|source| match source {
+        HashSourceChoice::Text => 0,
+        HashSourceChoice::File => 1,
+    });
+    let source = cx.new(|cx| {
+        SelectState::new(
+            vec![HashSourceChoice::Text, HashSourceChoice::File],
+            source_index.map(|index| IndexPath::new(index)),
+            window,
+            cx,
+        )
+    });
+    let algorithm_index = match initial_draft.algorithm {
+        HashAlgorithm::Sha256 => 0,
+        HashAlgorithm::Sha512 => 1,
+        HashAlgorithm::Sha1 => 2,
+    };
+    let algorithm = cx.new(|cx| {
+        SelectState::new(
+            vec![
+                HashAlgorithmChoice(HashAlgorithm::Sha256),
+                HashAlgorithmChoice(HashAlgorithm::Sha512),
+                HashAlgorithmChoice(HashAlgorithm::Sha1),
+            ],
+            Some(IndexPath::new(algorithm_index)),
+            window,
+            cx,
+        )
+    });
+
+    if initial_draft.mode == HashInputMode::Text {
+        text.focus_handle(cx).focus(window, cx);
+    } else {
+        source.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    let text_for_subscription = text.clone();
+    let expected_for_subscription = expected.clone();
+    let source_for_subscription = source.clone();
+    let algorithm_for_subscription = algorithm.clone();
     cx.new(move |cx| {
-        let input_subscription = cx.subscribe(
-            &input_for_subscription,
+        let text_subscription = cx.subscribe(
+            &text_for_subscription,
             |this: &mut HashGeneratorWindow,
-             input: Entity<InputState>,
+             text: Entity<TextareaState>,
              event: &InputEvent,
              cx: &mut Context<HashGeneratorWindow>| {
                 if !matches!(event, InputEvent::Change)
                     || this.rehost_pending.load(Ordering::Acquire)
+                    || !this.is_current_mount()
                 {
                     return;
                 }
                 let Some(_operation) = this.restart_admission.admit() else {
                     return;
                 };
-                let text = input.read(cx).value().to_string();
+                let text = text.read(cx).value().to_string();
                 let mut session = this
                     .session
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if session.mode() != HashInputMode::Text {
+                    return;
+                }
                 if !hash_mount_identity_matches(
                     this.active_mount_generation.load(Ordering::Acquire),
                     this.mount_generation,
@@ -426,11 +653,105 @@ fn create_hash_generator_view(
             },
         );
 
+        let expected_subscription = cx.subscribe(
+            &expected_for_subscription,
+            |this: &mut HashGeneratorWindow,
+             expected: Entity<TextareaState>,
+             event: &InputEvent,
+             cx: &mut Context<HashGeneratorWindow>| {
+                if !matches!(event, InputEvent::Change)
+                    || this.rehost_pending.load(Ordering::Acquire)
+                    || !this.is_current_mount()
+                {
+                    return;
+                }
+                let Some(_operation) = this.restart_admission.admit() else {
+                    return;
+                };
+                let mut session = this
+                    .session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if session.epoch() != this.session_epoch {
+                    return;
+                }
+                session.set_expected(expected.read(cx).value().to_string());
+                cx.notify();
+            },
+        );
+
+        let source_subscription = cx.subscribe(
+            &source_for_subscription,
+            |this: &mut HashGeneratorWindow,
+             source: Entity<SelectState<Vec<HashSourceChoice>>>,
+             event: &SelectEvent<Vec<HashSourceChoice>>,
+             cx: &mut Context<HashGeneratorWindow>| {
+                if !this.is_current_mount() {
+                    return;
+                }
+                let SelectEvent::Confirm(Some(choice)) = event else {
+                    return;
+                };
+                let Some(_operation) = this.restart_admission.admit() else {
+                    return;
+                };
+                let selected = source.read(cx).selected_value().copied();
+                if selected != Some(*choice) {
+                    return;
+                }
+                let mut session = this
+                    .session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if session.epoch() != this.session_epoch {
+                    return;
+                }
+                session.set_mode(choice.mode());
+                this.file_picker_feedback = None;
+                cx.notify();
+            },
+        );
+
+        let algorithm_subscription = cx.subscribe(
+            &algorithm_for_subscription,
+            |this: &mut HashGeneratorWindow,
+             algorithm: Entity<SelectState<Vec<HashAlgorithmChoice>>>,
+             event: &SelectEvent<Vec<HashAlgorithmChoice>>,
+             cx: &mut Context<HashGeneratorWindow>| {
+                if !this.is_current_mount() {
+                    return;
+                }
+                let SelectEvent::Confirm(Some(choice)) = event else {
+                    return;
+                };
+                let Some(_operation) = this.restart_admission.admit() else {
+                    return;
+                };
+                let selected = algorithm.read(cx).selected_value().copied();
+                if selected != Some(*choice) {
+                    return;
+                }
+                let mut session = this
+                    .session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if session.epoch() != this.session_epoch {
+                    return;
+                }
+                session.set_algorithm(choice.0);
+                cx.notify();
+            },
+        );
+
         HashGeneratorWindow {
-            input,
+            text,
+            expected,
+            source,
+            algorithm,
             focus_handle: cx.focus_handle(),
             session,
             wake_signal,
+            file_picker_pending,
             native_window,
             restart_admission,
             mount_generation,
@@ -441,7 +762,13 @@ fn create_hash_generator_view(
             presentation_feedback,
             root,
             mode,
-            _input_subscription: input_subscription,
+            file_picker_feedback: None,
+            _subscriptions: vec![
+                text_subscription,
+                expected_subscription,
+                source_subscription,
+                algorithm_subscription,
+            ],
         }
     })
 }
@@ -577,7 +904,7 @@ fn update_kit_window_content<T: 'static, C: AppContext, R>(
 struct RestartDrafts {
     search: String,
     utility: Option<String>,
-    hash: String,
+    hash: HashDraft,
     hash_window_open: bool,
 }
 
@@ -712,8 +1039,20 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.utility.as_ref().is_some_and(|text| !text.is_empty()) {
         names.push("retained utility editor");
     }
-    if !drafts.hash.is_empty() {
-        names.push("Hash Generator input");
+    if !drafts.hash.text.is_empty() {
+        names.push("Hash Generator text");
+    }
+    if !drafts.hash.expected.is_empty() {
+        names.push("Expected digest");
+    }
+    if drafts.hash.file_path.is_some() {
+        names.push("selected Hash Generator file");
+    }
+    if drafts.hash.mode != HashInputMode::Text {
+        names.push("Hash Generator source selection");
+    }
+    if drafts.hash.algorithm != HashAlgorithm::Sha256 {
+        names.push("non-default Hash Generator algorithm");
     }
     if names.is_empty() {
         return "Restart Multi Launcher in the egui fallback? The GPUI windows will close."
@@ -777,6 +1116,12 @@ impl RootWindow {
                     .to_owned(),
             );
         }
+        if self.hash_file_picker_pending.load(Ordering::Acquire) {
+            return Err(
+                "The Hash Generator file picker is still open. Finish or cancel it, then retry the egui restart."
+                    .to_owned(),
+            );
+        }
 
         let mut child_windows = Vec::new();
         let mut native_windows = self.native_window.into_iter().collect::<Vec<_>>();
@@ -813,7 +1158,7 @@ impl RootWindow {
             }
         };
 
-        let (mut hash_text, hash_work) = {
+        let (mut hash_draft, hash_work) = {
             let session = self
                 .hash_session
                 .lock()
@@ -825,24 +1170,21 @@ impl RootWindow {
             } else {
                 HashWork::Idle
             };
-            (session.text().to_owned(), work)
+            (HashDraft::from_session(&session), work)
         };
         let hash_window_open = self.hash_window.mode().is_some();
         match &self.hash_window {
             HashWindowState::Closed => {}
             HashWindowState::Docked { view, .. } => {
-                hash_text = view.update(cx, |tool, cx| tool.input.read(cx).value().to_string());
+                hash_draft = view.update(cx, |tool, cx| tool.draft(cx));
             }
             HashWindowState::Popout { window, view, .. } => {
                 let handle = *window;
-                let (editor_text, native) =
-                    update_kit_window_content(handle, view, cx, |tool, _, cx| {
-                        (tool.input.read(cx).value().to_string(), tool.native_window)
-                    })
-                    .map_err(|error| {
-                        format!("Could not inspect the Hash Generator window: {error}")
-                    })?;
-                hash_text = editor_text;
+                let (draft, native) = update_kit_window_content(handle, view, cx, |tool, _, cx| {
+                    (tool.draft(cx), tool.native_window)
+                })
+                .map_err(|error| format!("Could not inspect the Hash Generator window: {error}"))?;
+                hash_draft = draft;
                 child_windows.push(handle);
                 if let Some(native) = native {
                     native_windows.push(native);
@@ -877,7 +1219,7 @@ impl RootWindow {
             drafts: RestartDrafts {
                 search: self.query.read(cx).value().to_string(),
                 utility,
-                hash: hash_text,
+                hash: hash_draft,
                 hash_window_open,
             },
             hash_work,
@@ -1023,16 +1365,22 @@ impl RootWindow {
         }
         if let Some(view) = self.hash_window.view() {
             let view = view.clone();
-            view.update(cx, |tool, cx| {
-                tool.input
-                    .update(cx, |input, cx| input.set_readonly(true, cx));
-            });
+            view.update(cx, |tool, cx| tool.set_editors_readonly(true, cx));
         }
 
-        self.hash_session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .set_text(snapshot.drafts.hash.clone());
+        {
+            let mut session = self
+                .hash_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if session.file_path() != snapshot.drafts.hash.file_path.as_deref() {
+                session.set_file_path(snapshot.drafts.hash.file_path.clone());
+            }
+            session.set_text(snapshot.drafts.hash.text.clone());
+            session.set_expected(snapshot.drafts.hash.expected.clone());
+            session.set_mode(snapshot.drafts.hash.mode);
+            session.set_algorithm(snapshot.drafts.hash.algorithm);
+        }
         self.root_visibility.active.store(false, Ordering::Release);
         self.root_visibility
             .request_revision
@@ -1302,9 +1650,7 @@ impl RootWindow {
         match &self.hash_window {
             HashWindowState::Docked { view, .. } => {
                 let view = view.clone();
-                view.update(cx, |tool, cx| {
-                    tool.input.focus_handle(cx).focus(root_window, cx);
-                });
+                view.update(cx, |tool, cx| tool.focus_editable(root_window, cx));
                 return Ok(());
             }
             HashWindowState::Popout { window, view, .. } => {
@@ -1317,7 +1663,7 @@ impl RootWindow {
                     .wrapping_add(1)
                     .max(1);
                 match update_kit_window_content(window, &view, cx, |tool, window, cx| {
-                    tool.input.focus_handle(cx).focus(window, cx);
+                    tool.focus_editable(window, cx);
                     tool.native_window
                 }) {
                     Ok(Some(native_window)) => {
@@ -1362,12 +1708,13 @@ impl RootWindow {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .epoch();
-        let initial_text = self
-            .hash_session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .text()
-            .to_owned();
+        let initial_draft = {
+            let session = self
+                .hash_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            HashDraft::from_session(&session)
+        };
         let mount_generation = self.next_hash_mount_generation();
         let mode = HashPresentationMode::from_saved(
             self.utility_presentations.preference(self.hash_tool_key),
@@ -1376,6 +1723,7 @@ impl RootWindow {
         let mount_config = HashMountConfig {
             session: Arc::clone(&self.hash_session),
             wake_signal: Arc::clone(&self.hash_wake_signal),
+            file_picker_pending: Arc::clone(&self.hash_file_picker_pending),
             restart_admission: Arc::clone(&self.restart_admission),
             mount_generation,
             session_epoch,
@@ -1391,7 +1739,7 @@ impl RootWindow {
                 self.hash_mount_generation
                     .store(mount_generation, Ordering::Release);
                 let view =
-                    create_hash_generator_view(root_window, cx, initial_text, None, mount_config);
+                    create_hash_generator_view(root_window, cx, initial_draft, None, mount_config);
                 self.hash_window = HashWindowState::Docked {
                     mount_generation,
                     view,
@@ -1404,7 +1752,7 @@ impl RootWindow {
                     create_hash_generator_view(
                         window,
                         cx,
-                        initial_text,
+                        initial_draft,
                         native_window,
                         mount_config,
                     )
@@ -1479,8 +1827,7 @@ impl RootWindow {
                 == session_epoch;
         if still_current && let Some(view) = self.hash_window.view().cloned() {
             view.update(cx, |tool, cx| {
-                tool.input
-                    .update(cx, |input, cx| input.set_readonly(false, cx));
+                tool.set_editors_readonly(false, cx);
                 cx.notify();
             });
         }
@@ -1522,8 +1869,7 @@ impl RootWindow {
             self.hash_rehost_pending.store(false, Ordering::Release);
             if let Some(view) = self.hash_window.view().cloned() {
                 view.update(cx, |tool, cx| {
-                    tool.input
-                        .update(cx, |input, cx| input.set_readonly(false, cx));
+                    tool.set_editors_readonly(false, cx);
                     cx.notify();
                 });
             }
@@ -1558,17 +1904,19 @@ impl RootWindow {
             );
             return;
         };
-        let initial_text = self
-            .hash_session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .text()
-            .to_owned();
+        let initial_draft = {
+            let session = self
+                .hash_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            HashDraft::from_session(&session)
+        };
         let destination_mount_generation = self.next_hash_mount_generation();
         let destination_session_epoch = session_epoch;
         let root = cx.entity().downgrade();
         let session = Arc::clone(&self.hash_session);
         let wake_signal = Arc::clone(&self.hash_wake_signal);
+        let file_picker_pending = Arc::clone(&self.hash_file_picker_pending);
         let restart_admission = Arc::clone(&self.restart_admission);
         let active_mount_generation = Arc::clone(&self.hash_mount_generation);
         let rehost_pending = Arc::clone(&self.hash_rehost_pending);
@@ -1584,6 +1932,7 @@ impl RootWindow {
             let mount_config = HashMountConfig {
                 session,
                 wake_signal,
+                file_picker_pending,
                 restart_admission,
                 mount_generation: destination_mount_generation,
                 session_epoch: destination_session_epoch,
@@ -1602,7 +1951,7 @@ impl RootWindow {
                             create_hash_generator_view(
                                 window,
                                 app,
-                                initial_text,
+                                initial_draft,
                                 None,
                                 config,
                             )
@@ -1623,7 +1972,7 @@ impl RootWindow {
                             create_hash_generator_view(
                                 window,
                                 app,
-                                initial_text,
+                                initial_draft,
                                 native_window,
                                 config,
                             )
@@ -1774,8 +2123,7 @@ impl RootWindow {
                         .push((window, subscription));
                 }
                 new_view.update(cx, |tool, cx| {
-                    tool.input
-                        .update(cx, |input, cx| input.set_readonly(false, cx));
+                    tool.set_editors_readonly(false, cx);
                     cx.notify();
                 });
                 root.hash_open_error = None;
@@ -2253,6 +2601,128 @@ impl RootWindow {
         })
         .detach();
     }
+
+    fn hash_picker_target(&self, request: HashPickerRequest) -> Option<HashPickerTarget> {
+        if self.hash_rehost_pending.load(Ordering::Acquire)
+            || self.restart_admission.is_fenced()
+            || self.hash_mount_generation.load(Ordering::Acquire) != request.mount_generation
+        {
+            return None;
+        }
+        let session = self
+            .hash_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !hash_picker_result_is_current(
+            self.hash_mount_generation.load(Ordering::Acquire),
+            request.mount_generation,
+            session.epoch(),
+            request.session_epoch,
+            session.generation(),
+            request.source_generation,
+        ) {
+            return None;
+        }
+        drop(session);
+
+        match &self.hash_window {
+            HashWindowState::Docked {
+                mount_generation,
+                view,
+            } if *mount_generation == request.mount_generation => Some(HashPickerTarget {
+                mode: HashPresentationMode::Docked,
+                window: self.root_window?,
+                view: view.clone(),
+            }),
+            HashWindowState::Popout {
+                mount_generation,
+                window,
+                view,
+            } if *mount_generation == request.mount_generation => Some(HashPickerTarget {
+                mode: HashPresentationMode::Popout,
+                window: *window,
+                view: view.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn start_hash_file_picker<F, E>(
+        &mut self,
+        request: HashPickerRequest,
+        picker: F,
+        operation: EffectPermit,
+        cx: &mut Context<Self>,
+    ) where
+        F: Future<Output = Result<anyhow::Result<Option<Vec<PathBuf>>>, E>> + 'static,
+        E: 'static,
+    {
+        let picker_pending = Arc::clone(&self.hash_file_picker_pending);
+        cx.spawn(async move |this, cx| {
+            let _operation = operation;
+            let mut picker_pending = HashPickerPendingGuard::new(picker_pending);
+            let outcome = classify_hash_picker_result(picker.await);
+            let target = this
+                .update(cx, |root, _| root.hash_picker_target(request))
+                .ok()
+                .flatten();
+            picker_pending.clear_and_notify(&this, cx);
+            let Some(target) = target else {
+                return;
+            };
+
+            let update_result = match target.mode {
+                HashPresentationMode::Docked => {
+                    let Some(root_view) = this.upgrade() else {
+                        return;
+                    };
+                    cx.update(|app| {
+                        update_kit_window_content(
+                            target.window,
+                            &root_view,
+                            app,
+                            |root, window, cx| {
+                                if root.hash_picker_target(request).is_none() {
+                                    return;
+                                }
+                                if let Some(view) = root.hash_window.view().cloned() {
+                                    view.update(cx, |tool, cx| {
+                                        tool.resolve_file_picker(request, outcome, window, cx);
+                                    });
+                                }
+                            },
+                        )
+                    })
+                }
+                HashPresentationMode::Popout => cx.update(|app| {
+                    update_kit_window_content(
+                        target.window,
+                        &target.view,
+                        app,
+                        |tool, window, cx| {
+                            tool.resolve_file_picker(request, outcome, window, cx);
+                        },
+                    )
+                }),
+            };
+            if let Err(error) = update_result {
+                tracing::debug!(%error, "could not apply Hash Generator file picker result");
+            }
+        })
+        .detach();
+    }
+
+    fn request_quit(&mut self, cx: &mut Context<Self>) {
+        if self.hash_file_picker_pending.load(Ordering::Acquire) {
+            self.restart_status = Some(
+                "Finish or cancel the Hash Generator file picker before quitting Multi Launcher."
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        cx.quit();
+    }
 }
 
 impl Render for RootWindow {
@@ -2317,7 +2787,7 @@ impl Render for RootWindow {
                 Button::new("quit-gpui")
                     .label("Quit Multi Launcher")
                     .tab_stop(true)
-                    .on_click(|_, _, cx| cx.quit()),
+                    .on_click(cx.listener(|this, _, _, cx| this.request_quit(cx))),
             )
             .children(
                 self.secondary_error
@@ -2370,10 +2840,14 @@ impl Render for RootWindow {
 }
 
 struct HashGeneratorWindow {
-    input: Entity<InputState>,
+    text: Entity<TextareaState>,
+    expected: Entity<TextareaState>,
+    source: Entity<SelectState<Vec<HashSourceChoice>>>,
+    algorithm: Entity<SelectState<Vec<HashAlgorithmChoice>>>,
     focus_handle: FocusHandle,
     session: Arc<Mutex<HashSession>>,
     wake_signal: Arc<HashWakeSignal>,
+    file_picker_pending: Arc<AtomicBool>,
     native_window: Option<NativeWindow>,
     restart_admission: Arc<RestartAdmission>,
     mount_generation: u64,
@@ -2384,7 +2858,8 @@ struct HashGeneratorWindow {
     presentation_feedback: Arc<Mutex<Option<String>>>,
     root: WeakEntity<RootWindow>,
     mode: HashPresentationMode,
-    _input_subscription: Subscription,
+    file_picker_feedback: Option<String>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl HashGeneratorWindow {
@@ -2407,6 +2882,130 @@ impl HashGeneratorWindow {
         )
     }
 
+    fn draft(&self, cx: &App) -> HashDraft {
+        let text = self.text.read(cx).value().to_string();
+        let expected = self.expected.read(cx).value().to_string();
+        let mode = self
+            .source
+            .read(cx)
+            .selected_value()
+            .copied()
+            .map(HashSourceChoice::mode);
+        let algorithm = self
+            .algorithm
+            .read(cx)
+            .selected_value()
+            .map(|choice| choice.0);
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        HashDraft {
+            text,
+            expected,
+            mode: mode.unwrap_or_else(|| session.mode()),
+            algorithm: algorithm.unwrap_or_else(|| session.algorithm()),
+            file_path: session.file_path().map(PathBuf::from),
+        }
+    }
+
+    fn sync_session_draft(&self, cx: &App) -> Option<HashDraft> {
+        let draft = self.draft(cx);
+        let mut session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if session.epoch() != self.session_epoch {
+            return None;
+        }
+        if session.file_path() != draft.file_path.as_deref() {
+            session.set_file_path(draft.file_path.clone());
+        }
+        session.set_text(draft.text.clone());
+        session.set_expected(draft.expected.clone());
+        session.set_mode(draft.mode);
+        session.set_algorithm(draft.algorithm);
+        Some(draft)
+    }
+
+    fn set_editors_readonly(&mut self, readonly: bool, cx: &mut Context<Self>) {
+        self.text
+            .update(cx, |state, cx| state.set_readonly(readonly, cx));
+        self.expected
+            .update(cx, |state, cx| state.set_readonly(readonly, cx));
+    }
+
+    fn focus_editable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mode();
+        if mode == HashInputMode::Text {
+            self.text.focus_handle(cx).focus(window, cx);
+        } else {
+            self.source.update(cx, |state, cx| state.focus(window, cx));
+        }
+    }
+
+    fn picker_request_is_current(&self, request: HashPickerRequest) -> bool {
+        if !self.is_current_mount()
+            || request.mount_generation != self.mount_generation
+            || request.session_epoch != self.session_epoch
+        {
+            return false;
+        }
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        hash_picker_result_is_current(
+            self.active_mount_generation.load(Ordering::Acquire),
+            request.mount_generation,
+            session.epoch(),
+            request.session_epoch,
+            session.generation(),
+            request.source_generation,
+        )
+    }
+
+    fn resolve_file_picker(
+        &mut self,
+        request: HashPickerRequest,
+        outcome: HashPickerOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.picker_request_is_current(request) {
+            return;
+        }
+        match outcome {
+            HashPickerOutcome::Selected(path) => {
+                self.session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_file_path(Some(path));
+                self.source.update(cx, |state, cx| {
+                    state.set_selected_value(&HashSourceChoice::File, window, cx)
+                });
+                self.file_picker_feedback = None;
+            }
+            HashPickerOutcome::Cancelled => {
+                self.file_picker_feedback =
+                    Some("File selection cancelled; the current source is unchanged.".to_owned());
+            }
+            HashPickerOutcome::Failed(error) => {
+                let message = format!("Could not choose a file: {error}");
+                self.session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_error(message.clone());
+                self.file_picker_feedback = Some(message);
+            }
+        }
+        cx.notify();
+    }
+
     fn calculate_hash(&mut self, cx: &mut Context<Self>) {
         if !self.is_current_mount() {
             return;
@@ -2414,7 +3013,9 @@ impl HashGeneratorWindow {
         let Some(_operation) = self.restart_admission.admit() else {
             return;
         };
-        let text = self.input.read(cx).value().to_string();
+        if self.sync_session_draft(cx).is_none() {
+            return;
+        }
         let mut session = self
             .session
             .lock()
@@ -2422,7 +3023,6 @@ impl HashGeneratorWindow {
         if session.has_job() {
             return;
         }
-        session.set_text(text);
         let wake_signal = Arc::clone(&self.wake_signal);
         if let Err(error) = session.calculate(Arc::new(move || wake_signal.notify())) {
             session.set_error(error);
@@ -2447,8 +3047,69 @@ impl HashGeneratorWindow {
         cx.notify();
     }
 
+    fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_current_mount() {
+            return;
+        }
+        if let Err(error) = checked_active_dialog_owner(window) {
+            self.file_picker_feedback = Some(format!("Could not open the file picker: {error}"));
+            cx.notify();
+            return;
+        }
+        if self
+            .file_picker_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            self.file_picker_feedback = Some("A file picker is already open.".to_owned());
+            cx.notify();
+            return;
+        }
+        let Some(operation) = self.restart_admission.admit() else {
+            self.file_picker_pending.store(false, Ordering::Release);
+            return;
+        };
+        let request = {
+            let session = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if session.epoch() != self.session_epoch {
+                self.file_picker_pending.store(false, Ordering::Release);
+                return;
+            }
+            HashPickerRequest {
+                mount_generation: self.mount_generation,
+                session_epoch: self.session_epoch,
+                source_generation: session.generation(),
+            }
+        };
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose a file to hash".into()),
+        });
+        let pending = Arc::clone(&self.file_picker_pending);
+        let root = self.root.clone();
+        match root.update(cx, |root, cx| {
+            root.start_hash_file_picker(request, picker, operation, cx);
+        }) {
+            Ok(()) => self.file_picker_feedback = None,
+            Err(error) => {
+                pending.store(false, Ordering::Release);
+                self.file_picker_feedback =
+                    Some(format!("Could not start the file picker: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
     fn request_rehost(&mut self, target: HashPresentationMode, cx: &mut Context<Self>) {
-        if target == self.mode || !self.is_current_mount() {
+        if target == self.mode
+            || !self.is_current_mount()
+            || self.file_picker_pending.load(Ordering::Acquire)
+        {
             return;
         }
         if self
@@ -2462,19 +3123,11 @@ impl HashGeneratorWindow {
             self.rehost_pending.store(false, Ordering::Release);
             return;
         };
-        let current_text = self.input.read(cx).value().to_string();
-        let mut session = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if session.epoch() != self.session_epoch {
+        let Some(_) = self.sync_session_draft(cx) else {
             self.rehost_pending.store(false, Ordering::Release);
             return;
-        }
-        session.set_text(current_text);
-        drop(session);
-        self.input
-            .update(cx, |input, cx| input.set_readonly(true, cx));
+        };
+        self.set_editors_readonly(true, cx);
         let revision = self
             .rehost_revision
             .fetch_add(1, Ordering::AcqRel)
@@ -2514,8 +3167,7 @@ impl HashGeneratorWindow {
             self.rehost_pending.store(false, Ordering::Release);
             return;
         };
-        self.input
-            .update(cx, |input, cx| input.set_readonly(true, cx));
+        self.set_editors_readonly(true, cx);
         let revision = self
             .rehost_revision
             .fetch_add(1, Ordering::AcqRel)
@@ -2536,7 +3188,18 @@ impl HashGeneratorWindow {
 
 impl Render for HashGeneratorWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (has_job, is_running, is_stopping, progress, digest, error) = {
+        let (
+            has_job,
+            is_running,
+            is_stopping,
+            progress,
+            digest,
+            error,
+            comparison,
+            mode,
+            algorithm,
+            path,
+        ) = {
             let session = self
                 .session
                 .lock()
@@ -2546,16 +3209,61 @@ impl Render for HashGeneratorWindow {
                 session.is_running(),
                 session.is_stopping_stale_job(),
                 session.progress(),
-                session.result().map(|result| result.digest.clone()),
+                session
+                    .result()
+                    .map(|result| (result.algorithm, result.digest.clone())),
                 session.error().map(str::to_owned),
+                session.comparison(),
+                session.mode(),
+                session.algorithm(),
+                session.file_path().map(|path| path.display().to_string()),
             )
         };
         let can_interact = self.is_current_mount();
+        let file_picker_pending = self.file_picker_pending.load(Ordering::Acquire);
+        let picker_feedback = if file_picker_pending {
+            Some("Choose a file to hash…".to_owned())
+        } else {
+            self.file_picker_feedback.clone()
+        };
         let presentation_feedback = self
             .presentation_feedback
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let progress_label = progress.map(|progress| match progress.total_bytes {
+            Some(total) => {
+                let percent = if total == 0 {
+                    0
+                } else {
+                    progress
+                        .bytes_processed
+                        .saturating_mul(100)
+                        .saturating_div(total)
+                        .min(100)
+                };
+                format!(
+                    "Hashing · {} / {} bytes ({percent}%)",
+                    progress.bytes_processed, total
+                )
+            }
+            None => format!(
+                "Hashing · {} bytes processed (total unknown)",
+                progress.bytes_processed
+            ),
+        });
+        let comparison_label = comparison.map(|comparison| match comparison {
+            Ok(HashComparison::NotRequested) => "Enter an expected digest to compare".to_owned(),
+            Ok(HashComparison::Match) => "Expected digest matches".to_owned(),
+            Ok(HashComparison::Mismatch) => "Expected digest does not match".to_owned(),
+            Err(error) => format!("Expected digest: {error}"),
+        });
+        let source_name = match mode {
+            HashInputMode::Text => "Text",
+            HashInputMode::File => "File",
+            HashInputMode::Clipboard => "Clipboard",
+        };
+        let algorithm_name = algorithm.name();
 
         div()
             .id("hash-generator-tool-scroll")
@@ -2581,17 +3289,62 @@ impl Render for HashGeneratorWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .w(px(520.))
-                    .child(Label::new("Text · SHA-256 · exact UTF-8 bytes"))
+                    .w_full()
+                    .child(Label::new(format!("{source_name} · {algorithm_name}")))
                     .child(
-                        Input::new(&self.input)
-                            .aria_label("Text to hash")
+                        Select::new(&self.source)
+                            .accessibility_label("Hash input source")
+                            .placeholder("Choose source")
+                            .disabled(!can_interact || file_picker_pending),
+                    )
+                    .when(mode == HashInputMode::Text, |this| {
+                        this.child(
+                            Textarea::new(&self.text)
+                                .aria_label("Text to hash")
+                                .tab_index(0)
+                                .readonly(!can_interact),
+                        )
+                    })
+                    .when(mode == HashInputMode::File, |this| {
+                        let selected_path = path
+                            .clone()
+                            .unwrap_or_else(|| "No file selected".to_owned());
+                        this.child(Label::new(format!("File: {selected_path}")))
+                            .child(
+                                Button::new("choose-hash-file")
+                                    .label("Choose File")
+                                    .tab_stop(true)
+                                    .disabled(!can_interact || file_picker_pending)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_file(window, cx);
+                                    })),
+                            )
+                    })
+                    .child(
+                        Textarea::new(&self.expected)
+                            .aria_label("Expected digest")
+                            .tab_index(0)
                             .readonly(!can_interact),
                     )
-                    .child(Label::new("Ctrl+Enter: calculate"))
+                    .children(
+                        comparison_label
+                            .map(|label| Label::new(label).id("hash-comparison-status")),
+                    )
                     .child(
-                        Button::new("calculate-sha256")
-                            .label("Calculate SHA-256")
+                        Select::new(&self.algorithm)
+                            .accessibility_label("Hash algorithm")
+                            .disabled(!can_interact),
+                    )
+                    .children(
+                        algorithm
+                            .security_notice()
+                            .map(|notice| Label::new(notice).id("hash-algorithm-warning")),
+                    )
+                    .child(Label::new("Tab moves through controls · Space or Enter opens a selector"))
+                    .child(Label::new("Ctrl+Enter: calculate · Ctrl+Shift+D: dock · Ctrl+Shift+P: pop out · Ctrl+W: close"))
+                    .child(
+                        Button::new("calculate-hash")
+                            .label("Calculate")
                             .tab_stop(true)
                             .disabled(has_job || !can_interact)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -2625,15 +3378,30 @@ impl Render for HashGeneratorWindow {
                                 this.request_close(cx);
                             })),
                     )
-                    .children(progress.map(|progress| {
-                        Label::new(format!("Hashing · {} bytes", progress.bytes_processed))
+                    .children(
+                        progress_label
+                            .map(|label| Label::new(label).id("hash-progress-status")),
+                    )
+                    .children(is_stopping.then(|| {
+                        Label::new("Stopping the previous calculation…")
+                            .id("hash-stopping-status")
                     }))
-                    .children(is_stopping.then(|| Label::new("Stopping the previous calculation…")))
-                    .children(digest.map(|digest| Label::new(format!("SHA-256: {digest}"))))
-                    .children(error.map(|error| Label::new(error)))
-                    .children(presentation_feedback.map(Label::new))
+                    .children(digest.map(|(algorithm, digest)| {
+                        Label::new(format!("{}: {digest}", algorithm.name()))
+                            .id("hash-digest-result")
+                    }))
+                    .children(error.map(|error| Label::new(error).id("hash-error-status")))
+                    .children(
+                        picker_feedback
+                            .map(|feedback| Label::new(feedback).id("hash-picker-status")),
+                    )
+                    .children(
+                        presentation_feedback.map(|feedback| {
+                            Label::new(feedback).id("hash-presentation-status")
+                        }),
+                    )
                     .children(is_running.then(|| {
-                        Button::new("cancel-sha256")
+                        Button::new("cancel-hash")
                             .label("Cancel")
                             .tab_stop(true)
                             .disabled(!can_interact)
@@ -2749,6 +3517,25 @@ fn checked_native_window(window: &Window) -> Result<Option<NativeWindow>, String
 #[cfg(not(windows))]
 fn checked_native_window(_: &Window) -> Result<Option<NativeWindow>, String> {
     Ok(None)
+}
+
+fn checked_active_dialog_owner(window: &Window) -> Result<Option<NativeWindow>, String> {
+    let native_window = checked_native_window(window)?;
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+
+        let Some(native_window) = native_window else {
+            return Err("The Hash Generator window has no checked Windows owner".to_owned());
+        };
+        let active = native_identity(unsafe { GetActiveWindow() });
+        if active != Some(native_window.identity) {
+            return Err(
+                "Activate this Hash Generator window before opening its file picker".to_owned(),
+            );
+        }
+    }
+    Ok(native_window)
 }
 
 #[cfg(windows)]
@@ -3128,6 +3915,9 @@ pub(crate) fn run_foundation_window(
     let hash_rehost_revision_for_root = Arc::clone(&hash_rehost_revision);
     let hash_presentation_feedback = Arc::new(Mutex::new(None));
     let hash_presentation_feedback_for_root = Arc::clone(&hash_presentation_feedback);
+    let hash_file_picker_pending = Arc::new(AtomicBool::new(false));
+    let hash_file_picker_pending_for_quit = Arc::clone(&hash_file_picker_pending);
+    let hash_file_picker_pending_for_root = Arc::clone(&hash_file_picker_pending);
     let hash_wake_signal = Arc::new(HashWakeSignal::default());
     let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal);
     let hash_wake_signal_for_root = Arc::clone(&hash_wake_signal);
@@ -3182,6 +3972,7 @@ pub(crate) fn run_foundation_window(
                 .shutdown();
             hash_mount_generation_for_quit.store(0, Ordering::Release);
             hash_rehost_pending_for_quit.store(false, Ordering::Release);
+            hash_file_picker_pending_for_quit.store(false, Ordering::Release);
             if let Ok(mut listener) = listener_slot_for_quit.lock()
                 && let Some(mut listener) = listener.take()
             {
@@ -3202,6 +3993,7 @@ pub(crate) fn run_foundation_window(
         let closing_for_root = Arc::clone(&closing_for_app);
         let session_for_root = Arc::clone(&hash_session_for_root);
         let wake_signal_for_root = Arc::clone(&hash_wake_signal_for_root);
+        let picker_pending_for_root_close = Arc::clone(&hash_file_picker_pending_for_root);
         let window_revision_for_root = Arc::clone(&hash_window_revision_for_app);
         let restart_exit_for_root = Rc::clone(&restart_exit);
         let restart_failure_for_root = Rc::clone(&restart_failure);
@@ -3211,7 +4003,7 @@ pub(crate) fn run_foundation_window(
             query.focus_handle(cx).focus(window, cx);
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window, cx);
-            cx.new(|_| RootWindow {
+            let root = cx.new(|_| RootWindow {
                 root_window: None,
                 listener_slot: Arc::clone(&listener_slot_for_root),
                 root_visibility: visibility_for_root.clone(),
@@ -3222,6 +4014,7 @@ pub(crate) fn run_foundation_window(
                 hash_tool_key,
                 hash_session: session_for_root,
                 hash_wake_signal: wake_signal_for_root,
+                hash_file_picker_pending: hash_file_picker_pending_for_root,
                 hash_window: HashWindowState::Closed,
                 hash_window_revision: window_revision_for_root,
                 hash_mount_generation: hash_mount_generation_for_root,
@@ -3248,7 +4041,22 @@ pub(crate) fn run_foundation_window(
                 restart_status: None,
                 restart_exit: restart_exit_for_root,
                 restart_failure: restart_failure_for_root,
-            })
+            });
+            let root_for_window_close = root.downgrade();
+            window.on_window_should_close(cx, move |_, app| {
+                if !picker_pending_for_root_close.load(Ordering::Acquire) {
+                    return true;
+                }
+                let _ = root_for_window_close.update(app, |root, cx| {
+                    root.restart_status = Some(
+                        "Finish or cancel the Hash Generator file picker before closing Multi Launcher."
+                            .to_owned(),
+                    );
+                    cx.notify();
+                });
+                false
+            });
+            root
         }) {
             Ok((window, view)) => (window, view),
             Err(error) => {
@@ -3447,7 +4255,7 @@ pub(crate) fn run_foundation_window(
                                 };
                                 if let Some(view) = hash_view {
                                     view.update(cx, |tool, cx| {
-                                        tool.input.focus_handle(cx).focus(window, cx);
+                                        tool.focus_editable(window, cx);
                                     });
                                 } else {
                                     root.query.focus_handle(cx).focus(window, cx);
@@ -3590,13 +4398,18 @@ pub(crate) fn run_foundation_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        Frontend, FrontendSelection, FutureContext, HashPresentationMode, HashWakeSignal, Poll,
-        docked_hash_focus_is_current, duplicate_instance_message, hash_mount_identity_matches,
+        Frontend, FrontendSelection, FutureContext, HashPickerOutcome, HashPresentationMode,
+        HashWakeSignal, Poll, classify_hash_picker_result, docked_hash_focus_is_current,
+        duplicate_instance_message, hash_mount_identity_matches, hash_picker_result_is_current,
         root_search_focus_is_current, selection_from_args,
     };
-    use multi_launcher::settings::RememberedPresentation;
+    use multi_launcher::{
+        hash_generator::{HashAlgorithm, parse_expected_digest},
+        settings::RememberedPresentation,
+    };
     use std::ffi::OsString;
     use std::future::Future;
+    use std::path::PathBuf;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -3686,6 +4499,57 @@ mod tests {
         assert!(!hash_mount_identity_matches(5, 4, 7, 7));
         assert!(!hash_mount_identity_matches(4, 4, 8, 7));
         assert!(!hash_mount_identity_matches(0, 0, 7, 7));
+    }
+
+    #[test]
+    fn hash_file_picker_completion_requires_mount_session_and_source_generation() {
+        assert!(hash_picker_result_is_current(4, 4, 7, 7, 11, 11));
+        assert!(!hash_picker_result_is_current(5, 4, 7, 7, 11, 11));
+        assert!(!hash_picker_result_is_current(4, 4, 8, 7, 11, 11));
+        assert!(!hash_picker_result_is_current(4, 4, 7, 7, 12, 11));
+    }
+
+    #[test]
+    fn hash_file_picker_completion_classifies_selection_cancel_and_failure() {
+        let selected_path = PathBuf::from("sample.txt");
+        assert!(matches!(
+            classify_hash_picker_result::<std::io::Error>(Ok(Ok(Some(vec![
+                selected_path.clone()
+            ])))),
+            HashPickerOutcome::Selected(path) if path == selected_path
+        ));
+        assert!(matches!(
+            classify_hash_picker_result::<std::io::Error>(Ok(Ok(None))),
+            HashPickerOutcome::Cancelled
+        ));
+        assert!(matches!(
+            classify_hash_picker_result::<std::io::Error>(Ok(Ok(Some(Vec::new())))),
+            HashPickerOutcome::Failed(_)
+        ));
+        assert!(matches!(
+            classify_hash_picker_result::<std::io::Error>(Ok(Err(anyhow::anyhow!(
+                "native dialog failed"
+            )))),
+            HashPickerOutcome::Failed(message) if message.contains("native dialog failed")
+        ));
+        assert!(matches!(
+            classify_hash_picker_result::<std::io::Error>(Err(std::io::Error::other(
+                "dialog task failed"
+            ))),
+            HashPickerOutcome::Failed(message) if message.contains("did not return")
+        ));
+    }
+
+    #[test]
+    fn expected_digest_newlines_remain_invalid_internal_separators() {
+        let digest = "a".repeat(64);
+        let split = format!("{}\n{}", &digest[..32], &digest[32..]);
+        assert!(parse_expected_digest(HashAlgorithm::Sha256, &split).is_err());
+        assert!(
+            parse_expected_digest(HashAlgorithm::Sha256, &format!("\r\n{digest}\t"))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

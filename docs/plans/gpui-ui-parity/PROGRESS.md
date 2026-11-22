@@ -15,7 +15,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Pending execution |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | Implement the complete Hash controls and operating-system source actions. G04-C2 verified real Kit Docked and Popout hosting, fresh reopen, keyboard focus recovery, canonical mode persistence and the same-root egui restart. The reverse switch, G01 global invocation, foreground restoration and additional passive overlay checks remain pending. |
+| Current next action | Apply the saved appearance to Kit and add protected Clipboard Load and digest Copy. G04-C3 verified GPUI Text/File controls, known digests for all three algorithms, Expected comparison, both native picker owners and retained rehost. Geometry, long-job native timing, visual acceptance, reverse restart, G01 global invocation and additional overlay checks remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 
