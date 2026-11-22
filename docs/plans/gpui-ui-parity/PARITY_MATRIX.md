@@ -138,4 +138,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Radial Delete Impact](gui/radial-delete-impact.md) | RADIAL-DELETE-01 | G20 | Specified | Source reference impact and delete refusal mapped. Native and GPUI remain pending. |
 | [Delete Populated Radial Ring](gui/radial-delete-ring.md) | RADIAL-RING-DELETE-01 | G20 | Specified | Source explicit relocation, discard and atomicity mapped. Native and GPUI remain pending. |
 | [Resolve Populated Radial Cells](gui/radial-resolve-populated-cells.md) | RADIAL-RING-RESOLVE-01 | G20 | Specified | Source checked proposal preview and explicit Apply mapped. Native and GPUI remain pending. |
+| [Radial Runtime](gui/radial-runtime.md) | RADIAL-RUNTIME-01–RADIAL-RUNTIME-03 | G20 | Specified | Independent native host, input lifecycle and exact action handoff mapped. Native and GPUI remain pending. |
+| [Radial Authoring Preview](gui/radial-preview.md) | RADIAL-PREVIEW-01–RADIAL-PREVIEW-03 | G20 | Specified | Embedded and checked desktop preview modes mapped. Native and GPUI remain pending. |
+| [Radial Import and Export](gui/radial-import-export.md) | RADIAL-PACKAGE-01–RADIAL-PACKAGE-03 | G20 | Specified | Package and legacy review, backup, export and two source-observed lifetime risks mapped. Native and GPUI remain pending. |
 | [Paste Sequences](gui/paste-sequences.md) | PASTE-SEQUENCE-01–PASTE-SEQUENCE-04 | G21 | Specified | Source editor, preflight, playback and retained host mapped. Native and GPUI remain pending. |
