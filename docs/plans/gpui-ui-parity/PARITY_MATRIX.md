@@ -234,3 +234,22 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Color Picker Plugin Settings](gui/plugin-settings-color-picker.md) | COLOR-PICKER-SETTINGS-01 | G18 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
 | [MkMacro Plugin Settings](gui/plugin-settings-mkmacro.md) | MKMACRO-SETTINGS-01 | G19 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
 | [Mouse Gestures Plugin Settings](gui/plugin-settings-mouse-gestures.md) | MOUSE-GESTURE-PLUGIN-01 | G21 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Plugin Editor](gui/plugin-editor.md) | PLUGIN-EDITOR-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [App Editor](gui/actions-editor.md) | APP-EDITOR-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Add or Edit App](gui/add-action.md) | APP-FORM-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Add Bookmark](gui/add-bookmark.md) | BOOKMARK-FORM-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Folder Alias](gui/alias-editor.md) | FOLDER-ALIAS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Bookmark Alias](gui/bookmark-alias-editor.md) | BOOKMARK-ALIAS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Temporary File Alias](gui/tempfile-alias-editor.md) | TEMPFILE-ALIAS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Favorites Editor](gui/favorites-editor.md) | FAVORITES-EDITOR-01 | G06 | Specified | Actual egui authoring draft and Cancel passed. Save and GPUI remain pending. |
+| [Shell Commands Editor](gui/shell-command-editor.md) | SHELL-EDITOR-01 | G06 | Specified | Actual egui authoring draft and Cancel passed. Save and GPUI remain pending. |
+| [Data and Recovery](gui/data-recovery.md) | RECOVERY-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Data Recovery Confirmation](gui/data-recovery-confirmation.md) | RECOVERY-CONFIRM-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Dynamic Library Settings](gui/plugin-settings-dynamic-library.md) | DYNAMIC-SETTINGS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [File Search Preview](gui/file-preview.md) | FILE-PREVIEW-01 | G07 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [Launcher Result Context Menu](gui/launcher-result-context-menu.md) | CONTEXT-MENU-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
+| [Launcher Action Confirmation](gui/launcher-action-confirmation.md) | LAUNCH-CONFIRM-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
+| [Universal Action Sheet](gui/universal-action-sheet.md) | ACTION-SHEET-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
+| [Quick Help](gui/quick-help.md) | QUICK-HELP-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
+| [Command Help](gui/command-help.md) | COMMAND-HELP-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
+| [Jump Mode Overlay](gui/jump-mode-overlay.md) | JUMP-OVERLAY-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
