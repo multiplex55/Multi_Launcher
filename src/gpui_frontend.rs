@@ -4,7 +4,10 @@ use std::{
     rc::Rc,
 };
 
-use gpui_kit::component::label::Label;
+use gpui_kit::component::{
+    input::{Input, InputState},
+    label::Label,
+};
 use gpui_kit::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,7 +81,9 @@ pub(crate) fn show_startup_error(message: &str) {
     eprintln!("Multi Launcher: {message}");
 }
 
-struct FoundationWindow;
+struct FoundationWindow {
+    query: Entity<InputState>,
+}
 
 impl Render for FoundationWindow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -87,7 +92,15 @@ impl Render for FoundationWindow {
             .size_full()
             .items_center()
             .justify_center()
-            .child(Label::new("GPUI Kit foundation is running"))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w(px(420.))
+                    .child(Label::new("Search"))
+                    .child(Input::new(&self.query).aria_label("Search")),
+            )
     }
 }
 
@@ -104,7 +117,11 @@ pub(crate) fn run_foundation_window() -> Result<(), String> {
             }),
             ..Default::default()
         };
-        if let Err(error) = open_window(options, cx, |_, cx| cx.new(|_| FoundationWindow)) {
+        if let Err(error) = open_window(options, cx, |window, cx| {
+            let query = cx.new(|cx| InputState::new(window, cx).placeholder("Type a query"));
+            query.focus_handle(cx).focus(window, cx);
+            cx.new(|_| FoundationWindow { query })
+        }) {
             *startup_error_sink.borrow_mut() = Some(error.to_string());
             cx.quit();
         }

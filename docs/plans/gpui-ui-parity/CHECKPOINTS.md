@@ -24,10 +24,18 @@ The baseline commit is `3e67f7396f127d6dcb7bec432e9bb1684e9e6ae3`. The single `g
 
 Source discovery increment `e449f6f785ebbb1b466cda361d984214951fb599` was committed and pushed. The [review](reviews/G00-source-discovery.md) and [crosswalk](GUI_ROUTE_CROSSWALK.md) reconcile 77 Panel variants, 60 Jump Mode kinds and 110 persisted geometry keys. These registrations overlap. Coverage remains provisional for feature-specific controls, dynamic plug-ins and runtime confirmation.
 
-G00-C still needs native query/navigation, an independent utility, and a persisted edit under an identified process. The first scope-limited smoke and the G01 same-binary observations are in [Validation log](VALIDATION_LOG.md). G01-C native probes and G02-B Hash Generator session extraction have bounded plans.
+G00-C observed egui launcher keyboard routing, a Hash Generator popout and persisted presentation change on the identified G01-A executable. See [Validation log](VALIDATION_LOG.md). Other baseline scenarios remain assigned to their feature records before acceptance. G01-C native probes and G02-B Hash Generator session extraction have bounded plans.
 
 ## G01-A — Same-binary foundation linked and reviewed
 
 The G01-A checkpoint adds official Kit 0.10.0 and its aligned GPUI 0.3.12 family, early startup selection and a native foundation window. The existing brightness helper remains first. The canonical instance guard and startup recovery remain before frontend initialization. Option-free and explicit-egui startup took the established egui route. Explicit GPUI entered Kit on the main thread. The debug executable linked and all three focused selector tests passed. See [evidence](VALIDATION_LOG.md) and [review](reviews/G01-A-foundation.md).
 
 GPUI foundation is a feasibility surface. No production GUI parity was implemented or accepted. G01-B needs a retained editable field with actual Windows input. G01-C and G01-D still need native lifecycle and release evidence. G03 owns actionable data-lock conflict and controlled restart. Continue from the G01-A commit on the same branch with the G01-B handoff.
+
+The foundation checkpoint is `6b7f623a0` on `feat/gpui-ui-parity`. Its ordinary push succeeded. G00 registration checkpoint `b91320a3a` also pushed successfully.
+
+## G01-B — Editable native Kit proof
+
+The existing selector entered the selected runtime in all three Windows launch forms. A retained Kit input received native Unicode text and an editing key, with focus and the revised value observed through UI Automation. The owned GPUI process closed normally. See [G01-B-EDITABLE-STARTUP](VALIDATION_LOG.md#execution-receipts) for the linked artifact identity and limits. The representative egui workflow from G00-C is also recorded there.
+
+Continue G01-C with the existing hotkey and foreground service boundaries. Prove repeated hide/show, an independent utility and native passive overlay behavior with this binary lineage. Display capture is pending. G01-D release build and fallback after a controlled GPUI startup failure remain required. No production GPUI GUI is accepted.
