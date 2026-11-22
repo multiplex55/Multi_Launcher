@@ -8,4 +8,4 @@ G06 owns `alias-editor`. Set Alias for a current folder result opens the retaine
 
 Select `long_folder_target_scrolls_and_actions_stay_reachable_without_render_mutation` and the folder provider's `malformed_file_rejects_add_remove_and_alias_without_changing_bytes`.
 
-Native and GPUI remain pending.
+`G06-EGUI-FOLDER-TEMPFILE-ALIAS-DRAFTS` verifies the native egui path and current alias prefill, editing, and Cancel with the saved folder record preserved. Save, stale-record handling and GPUI remain pending.
