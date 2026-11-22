@@ -1,6 +1,6 @@
 # File Search
 
-G07 owns `file-search`, also the canonical remembered presentation and geometry key. `G07-EGUI-FILE-SEARCH` records native egui directory search and refinement. `G11-EGUI-FILE-OPS-DUPLICATE-REVIEW` verifies keyboard selection and delivery of that exact file through the toolbar. Hash Generator and File Operations Center own their target workflows. See the [validation log](../VALIDATION_LOG.md), [Hash Generator](hash-generator.md) and [File Operations Center](file-operations-center.md).
+G07 owns `file-search`, also the canonical remembered presentation and geometry key. `G07-EGUI-FILE-SEARCH` records native egui directory search and refinement. `G07-EGUI-NATIVE-PREVIEW` verifies Pop Out retains the content match and opens its owned native preview by keyboard. `G11-EGUI-FILE-OPS-DUPLICATE-REVIEW` verifies keyboard selection and delivery of the exact file through the toolbar. Hash Generator and File Operations Center own their target workflows. [Validation log](../VALIDATION_LOG.md) · [Hash Generator](hash-generator.md) · [File Operations Center](file-operations-center.md)
 
 ## Routes and owners
 

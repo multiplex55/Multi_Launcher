@@ -246,7 +246,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Data and Recovery](gui/data-recovery.md) | RECOVERY-01 | G06 | Specified | Actual egui Health and Recovery and shared startup Reset verified. Backup, Restore, Diagnostics and GPUI controls remain pending. |
 | [Data Recovery Confirmation](gui/data-recovery-confirmation.md) | RECOVERY-CONFIRM-01 | G06 | Specified | Actual egui Bookmarks review, Cancel and Confirm passed. Explicit GPUI startup applied the reset and preserved prior bytes. Restore and GPUI controls remain pending. |
 | [Dynamic Library Settings](gui/plugin-settings-dynamic-library.md) | DYNAMIC-SETTINGS-01 | G06 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
-| [File Search Preview](gui/file-preview.md) | FILE-PREVIEW-01 | G07 | Specified | Source exact current route and ownership mapped. Native and GPUI remain pending. |
+| [File Search Preview](gui/file-preview.md) | FILE-PREVIEW-01 | G07 | Specified | Native egui popout keyboard activation and owned preview close verified. Content, context actions and GPUI remain pending. |
 | [Launcher Result Context Menu](gui/launcher-result-context-menu.md) | CONTEXT-MENU-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
 | [Launcher Action Confirmation](gui/launcher-action-confirmation.md) | LAUNCH-CONFIRM-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
 | [Universal Action Sheet](gui/universal-action-sheet.md) | ACTION-SHEET-01 | G05 | Specified | Actual egui exact Ctrl+Enter, independent filter and Escape passed. Confirm and GPUI remain pending. |
