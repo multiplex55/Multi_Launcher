@@ -121,3 +121,5 @@ The verified C1 source checkpoint is `1cd3dc9f1`, pushed to `origin/feat/gpui-ui
 `UtilityPresentationStore` now owns accepted local preferences, canonical settings revisions, acknowledgement polling, failed-write reporting and rebind. The egui wrapper owns its context registration and repaint cadence. The scoped test run passed all 8 selected cases, including a real egui tool host which persists only accepted actions and reopens the saved presentation. The read-only review found no blocking issues. See `G04-C1-UTILITY-PREFERENCE`.
 
 Next, G04-C2 mounts the retained Hash preview in the root or an independent Kit window according to the shared preference. Keep the session across rehost, serialize the accepted save, and retire old native windows and writes before restart. The remaining controls and full parity stay with G04-B/D. No native fixture processes are running.
+
+The G04-C1 source checkpoint is `25d1e5fc6`, pushed to `origin/feat/gpui-ui-parity`. The checkout was clean before G04-C2. The sole implementer now owns the Kit mount and save integration source, and the parent owns the Windows round trip and checkpoint.
