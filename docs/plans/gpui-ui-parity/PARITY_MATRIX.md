@@ -153,7 +153,6 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Screenshot Pins](gui/pinboard.md) | PIN-LIST-01–PIN-LIST-02 | G22 | Specified | Actual empty list and dismissal passed. Live rows and GPUI remain pending. |
 | [Screenshot Image Pin](gui/image-pin.md) | IMAGE-PIN-01–IMAGE-PIN-03 | G22 | Specified | Source signed capture selection, retained host and outputs mapped. Native and GPUI remain pending. |
 | [Pin Capture Feedback](gui/pin-capture-feedback.md) | PIN-FEEDBACK-01 | G22 | Specified | Source deferred native failure surface and exact retirement mapped. Native and GPUI remain pending. |
-| [Coordinate Overlay](gui/coordinate-overlay.md) | COORD-01–COORD-05 | G22 | Specified | G01 passive native HUD probe exercised. Normal routes, pick, effects and mixed DPI remain pending. |
 | [Screen Draw Toolbar](gui/screen-draw-toolbar.md) | SCREEN-DRAW-BAR-01–SCREEN-DRAW-BAR-02 | G22 | Specified | Actual idle route created and retired a native window. Body controls, capture and GPUI remain pending. |
 | [Screen Draw Canvas](gui/screen-draw-canvas.md) | SCREEN-DRAW-CANVAS-01–SCREEN-DRAW-CANVAS-02 | G22 | Specified | Source signed canvas, input and passive transitions mapped. Native and GPUI remain pending. |
 | [OCR Region Selection](gui/ocr-selection.md) | OCR-SELECTION-01–OCR-SELECTION-02 | G22 | Specified | Source shared selector and exact capture lifecycle mapped. Native and GPUI remain pending. |
@@ -223,3 +222,15 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [MultiManager Settings](gui/multi-manager-settings.md) | MULTIMANAGER-SETTINGS-01 | G24 | Specified | Native distinct Settings route and current scratch paths passed. Save and GPUI remain pending. |
 | [Hotkey Directory](gui/hotkey-directory.md) | HOTKEY-DIR-01–HOTKEY-DIR-02 | G24 | Specified | Source exact current acknowledged entry and typed navigation mapped. Native and GPUI remain pending. |
 | [Virtual Desktop Plugin Settings](gui/plugin-settings-virtual-desktop.md) | VD-SETTINGS-01–VD-SETTINGS-02 | G24 | Specified | Source current desktop GUID and rule runtime mapped. Native and GPUI remain pending. |
+| [History Plugin Settings](gui/plugin-settings-history.md) | HISTORY-SETTINGS-01 | G05 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Omni Search Plugin Settings](gui/plugin-settings-omni-search.md) | OMNI-SETTINGS-01 | G05 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [File Search Plugin Settings](gui/plugin-settings-file-search.md) | FILE-SEARCH-SETTINGS-01 | G07 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Diff Plugin Settings](gui/plugin-settings-diff.md) | DIFF-PLUGIN-SETTINGS-01 | G08 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Note Settings](gui/plugin-settings-note.md) | NOTE-PLUGIN-SETTINGS-01 | G12 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Calculator Plugin Settings](gui/plugin-settings-calculator.md) | CALCULATOR-SETTINGS-01 | G15 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Clipboard Plugin Settings](gui/plugin-settings-clipboard.md) | CLIP-SETTINGS-01 | G13 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Clipboard Modify Plugin Settings](gui/plugin-settings-clipboard-modify.md) | CLIP-MODIFY-SETTINGS-01 | G13 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Screenshot Plugin Settings](gui/plugin-settings-screenshot.md) | SCREENSHOT-SETTINGS-01 | G18 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Color Picker Plugin Settings](gui/plugin-settings-color-picker.md) | COLOR-PICKER-SETTINGS-01 | G18 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [MkMacro Plugin Settings](gui/plugin-settings-mkmacro.md) | MKMACRO-SETTINGS-01 | G19 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
+| [Mouse Gestures Plugin Settings](gui/plugin-settings-mouse-gestures.md) | MOUSE-GESTURE-PLUGIN-01 | G21 | Specified | Source current Settings route, configuration and effect owner mapped. Native and GPUI remain pending. |
