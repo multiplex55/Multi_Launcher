@@ -4660,7 +4660,7 @@ fn main() -> anyhow::Result<()> {
         );
     }
     if frontend == gpui_frontend::Frontend::Gpui {
-        if let Err(error) = gpui_frontend::run_foundation_window() {
+        if let Err(error) = gpui_frontend::run_foundation_window(settings.hotkey()) {
             gpui_frontend::show_startup_error(&error);
             return Err(anyhow::anyhow!(error));
         }

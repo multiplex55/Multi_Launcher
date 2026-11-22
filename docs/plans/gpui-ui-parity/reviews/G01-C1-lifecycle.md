@@ -1,0 +1,7 @@
+# G01-C1 lifecycle review
+
+The configured reviewer inspected the C1 diff from `ea9d1c2ccf08d3f5a3a05fb7849900d0d5b3e3db`. The selected Kit event loop owns one configured launcher hotkey listener. The canonical instance guard spans that loop. Listener teardown happens before return from the selected runtime, and the GPUI path does not initialize the egui worker.
+
+The first review found a stale foreground authorization and a race allowing overlapping utility opens. The implementation now samples the full foreground identity on the GUI owner immediately before hide. A guarded single foreground call avoids unfenced retries and yields to focus that Windows has already transferred. The secondary window has one opening/live slot, explicit close observation and revision retirement. The follow-up review confirmed these corrections and found a remaining summon check. The final correction requires equal full foreground identity before and after `SW_SHOWNOACTIVATE` before requesting activation.
+
+The Windows utility workflow observed one separate native window, retained draft and identity across hide/show, fresh identity after native close and good shutdown with the utility open. Root global invocation and foreground restoration remain validation pending. The desktop tool's F2 action did not generate a recorded accepted listener wake. The proof uses one guarded Windows activation attempt, with no change to the production egui retry policy. Evidence is in [Validation log](../VALIDATION_LOG.md).
