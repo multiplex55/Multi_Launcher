@@ -1,6 +1,6 @@
 # Frontend selection and restart contract
 
-The basic selector and both launch paths have Windows debug evidence from G01-A/B. G03 still owns lock-conflict feedback, remembered chooser behavior and controlled restart. See [Validation log](VALIDATION_LOG.md).
+The basic selector and both launch paths have Windows evidence from G01. G03-B verifies lock-conflict feedback in both frontend directions. Remembered chooser behavior and controlled restart remain pending. See the [validation log](VALIDATION_LOG.md).
 
 ## Controlling precedence
 
@@ -28,13 +28,9 @@ A retained egui state object must not be the hidden process-wide engine in GPUI 
 
 ## Existing-instance behavior
 
-The inspected main startup returns when the same data directory is already owned. G03 must make an explicit UI selection observable: a GPUI owner cannot cause `--ui=egui` to disappear silently.
+`main` retains selector explicitness at the canonical `SingleInstanceGuard::acquire` match. A bare duplicate exits silently with status 0. An explicit duplicate shows a native lock-conflict response naming the requested selector, asks the user to close the current owner and rerun from the same working directory, and exits with an error. The same rule applies to both selectors because the mutex identifies the data directory. The conflict response appears before recovery, settings access or frontend initialization. See `G03-B-INSTANCE-WINDOWS` in the [validation log](VALIDATION_LOG.md).
 
-Preferred minimum: a clear actionable existing-instance response identifying that the current owner must close before the requested frontend can start. A supported controlled restart path is also acceptable. Use current single-instance primitives and authenticated/local coordination only where necessary; do not build a new daemon or general IPC framework.
-
-Specify the same-frontend invocation behavior consistently with the baseline. Distinguish a data-lock conflict from a frontend initialization error. For an unresponsive owner, provide recovery instructions that do not require its UI. Automatic termination or arbitrary crash recovery is not required.
-
-The G03-B implementation boundary is `main`'s canonical `SingleInstanceGuard::acquire` match. Preserve selector explicitness. Bare duplicates follow the existing silent exit. An explicit request gets a native response naming the requested selector and telling the user to close the current owner, then rerun from the same working directory. The current mutex identifies the data directory and does not report the owning frontend. The response should work for either requested frontend without changing the mutex namespace or adding an IPC protocol.
+For an unresponsive owner, use Windows Task Manager to identify the running `multi_launcher.exe` from the matching installation and session. End only the confirmed unresponsive instance. Forced termination can lose unsaved edits and in-flight work. After it exits, rerun `multi_launcher.exe --ui=egui` from the original working directory to use the fallback. A GPUI initialization error that has already exited can be retried with that command immediately.
 
 Verify the conflict on one controllable Windows desktop and one scratch data root. With GPUI open, try a bare launch and then explicit egui. Confirm that the native response belongs to the rejected child and that the GPUI owner stays running. Close that owner, launch explicit egui, then try explicit GPUI to verify the reverse conflict. Use the selected-binary parser tests and the existing mutex identity coverage. Keep restart changes in G03-C so each process behavior has independent evidence.
 

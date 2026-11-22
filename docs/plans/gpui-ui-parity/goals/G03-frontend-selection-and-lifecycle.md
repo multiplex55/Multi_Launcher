@@ -1,6 +1,6 @@
 # G03 — Complete selection, switching and fallback semantics
 
-**Status: Not started.** This is an executable work packet, not a record of implementation or verification.
+**Status: In implementation.** G01 established the selected runtime and startup truth-table baseline. G03-B verified explicit duplicate feedback in both directions. G03-C/D own the remaining controlled restart and cross-frontend persistence.
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
@@ -13,7 +13,7 @@ Dependencies: G01 same-executable foundation and relevant G02 shared-service sea
 
 ## Current source facts
 
-Main startup first handles an internal brightness helper, then acquires canonical AppDataRoot single-instance ownership before recovery/persistent reads/services. The existing Windows mutex is keyed to data identity, not UI choice. AlreadyRunning currently returns success without a frontend-aware response. Preserve the early ownership invariant while making explicit selection observable.
+Main startup first handles an internal brightness helper, then acquires canonical AppDataRoot single-instance ownership before recovery, persistent reads and services. The Windows mutex is keyed to data identity. The verified G03-B branch in `main` returns silent success for a bare duplicate and shows actionable feedback with a nonzero exit for either explicit selector.
 
 Inspect src/main.rs, src/startup.rs, src/platform/app_data.rs, src/platform/single_instance.rs, target_repair/recovery, settings, visibility and shutdown owners. Do not invent a general CLI parser that the repository does not have.
 

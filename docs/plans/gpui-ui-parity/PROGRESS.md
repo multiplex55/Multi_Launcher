@@ -5,7 +5,7 @@
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Execution goals started / accepted | 3 / 0 |
+| Execution goals started / accepted | 4 / 0 |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Provisional source inventory | 217 IDs across 161 product routes and children, 17 built-in plugin settings overrides and 39 dashboard widgets. Includes one dynamic-library capability slot. |
@@ -15,7 +15,7 @@
 | Known migration-caused regressions | No confirmed regression in the scoped startup observations |
 | Required native verification | Pending execution |
 | Evidence requiring revalidation | None yet; no migration acceptance evidence exists |
-| Current next action | G03-B duplicate selector feedback. G01 global invocation, foreground restoration and additional passive overlay checks remain pending. |
+| Current next action | G03-C1 confirmed GPUI-to-egui restart. G03-B duplicate selector feedback is verified. G01 global invocation, foreground restoration and additional passive overlay checks remain pending. |
 
 This does not report a migration completion percentage. The source candidate table is a discovery aid, not a reliable final GUI denominator.
 

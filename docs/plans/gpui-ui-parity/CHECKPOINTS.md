@@ -95,3 +95,11 @@ The source started at `f95359a70` with the `d942d9b65` Hash session and baseline
 The locked application build and all 39 selected Nextest cases passed. The exact disconnect-order test passed again after a test-only warning cleanup. Native keyboard calculation, stale digest clearing, retained reopen, fresh reopen and shutdown are recorded as `G02-C-D-GPUI-HASH`. See the [review](reviews/G02-C-D-hash-adapters.md) and `G02-C-D-FOCUSED` for the scoped evidence. Full Hash Generator parity remains G04 work.
 
 Next is G03-B duplicate feedback. The prior release supplies the egui Text and comparison baseline. The File source appeared through accessibility and the desktop tool could not select it. The scratch `hash-fixture.txt` contains exact bytes for later picker tests. The launch helper can record child status for bare, explicit-egui and explicit-GPUI duplicates. No owned fixture process is running.
+
+The verified G02-C/D checkpoint is `59f8cface`, pushed to `origin/feat/gpui-ui-parity`. G03-B is active with the implementer owning the two startup source files and Cargo verification. The parent owns native duplicate-launch evidence. Keep the single canonical data guard and all recovery/data access ordering.
+
+## G03-B — Duplicate selector feedback verified
+
+Both explicit selectors now produce an actionable native error when another instance holds the canonical root. A bare duplicate remains silent. The locked app build, 4 selected parser/diagnostic cases and 8 single-instance cases passed. Native tests observed both conflicts, child exit statuses, retained owner, egui reacquisition after GPUI close and a fresh bare egui launch from the same scratch root. See `G03-B-INSTANCE-WINDOWS` and `G03-B-SELECTOR-LOCK` in the [validation log](VALIDATION_LOG.md). The read-only review found no correctness issues in helper/selector order, error admission and guard ownership. No fixture processes are running.
+
+Continue G03-C1 with a confirmed GPUI-to-egui restart. The existing Hash, utility and root drafts, pending effects and owned-service teardown are in scope for that source slice. Leave the reverse switch to its actual egui editors and job owners. See [Frontend selection and restart](FRONTEND_SELECTION.md).

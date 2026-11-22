@@ -4620,20 +4620,28 @@ fn main() -> anyhow::Result<()> {
     {
         std::process::exit(exit_code);
     }
-    let frontend = match gpui_frontend::selection_from_args(std::env::args_os().skip(1)) {
-        Ok(frontend) => frontend,
+    let frontend_selection = match gpui_frontend::selection_from_args(std::env::args_os().skip(1)) {
+        Ok(selection) => selection,
         Err(error) => {
             gpui_frontend::show_startup_error(&error);
             return Err(anyhow::anyhow!(error));
         }
     };
+    let frontend = frontend_selection.frontend();
     multi_launcher::performance::init_process_timer();
     // This ownership boundary must stay ahead of every persistent read,
     // migration, watcher, worker, plugin, and GUI initialization.
     let app_data_root = AppDataRoot::from_settings_path("settings.json")?;
     let _single_instance_guard = match SingleInstanceGuard::acquire(&app_data_root)? {
         SingleInstanceAcquire::Acquired(guard) => guard,
-        SingleInstanceAcquire::AlreadyRunning => return Ok(()),
+        SingleInstanceAcquire::AlreadyRunning => {
+            let Some(message) = gpui_frontend::duplicate_instance_message(frontend_selection)
+            else {
+                return Ok(());
+            };
+            gpui_frontend::show_startup_error(&message);
+            return Err(anyhow::anyhow!(message));
+        }
     };
     multi_launcher::target_repair::recover_startup(app_data_root.path())?;
     let settings_timer = multi_launcher::performance::Timer::start();

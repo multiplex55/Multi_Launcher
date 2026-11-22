@@ -49,27 +49,47 @@ pub(crate) enum Frontend {
     Gpui,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrontendSelection {
+    DefaultEgui,
+    Explicit(Frontend),
+}
+
+impl FrontendSelection {
+    pub(crate) const fn frontend(self) -> Frontend {
+        match self {
+            Self::DefaultEgui | Self::Explicit(Frontend::Egui) => Frontend::Egui,
+            Self::Explicit(Frontend::Gpui) => Frontend::Gpui,
+        }
+    }
+
+    const fn requested_selector(self) -> Option<&'static str> {
+        match self {
+            Self::DefaultEgui => None,
+            Self::Explicit(Frontend::Egui) => Some("--ui=egui"),
+            Self::Explicit(Frontend::Gpui) => Some("--ui=gpui"),
+        }
+    }
+}
+
 pub(crate) fn selection_from_args(
     args: impl IntoIterator<Item = OsString>,
-) -> Result<Frontend, String> {
-    let mut selection = Frontend::Egui;
-    let mut has_explicit_selection = false;
+) -> Result<FrontendSelection, String> {
+    let mut selection = FrontendSelection::DefaultEgui;
 
     for arg in args {
         match arg.as_os_str() {
             value if value == OsStr::new("--ui=egui") => {
-                if has_explicit_selection {
+                if matches!(selection, FrontendSelection::Explicit(_)) {
                     return Err("Specify only one --ui selector.".to_owned());
                 }
-                selection = Frontend::Egui;
-                has_explicit_selection = true;
+                selection = FrontendSelection::Explicit(Frontend::Egui);
             }
             value if value == OsStr::new("--ui=gpui") => {
-                if has_explicit_selection {
+                if matches!(selection, FrontendSelection::Explicit(_)) {
                     return Err("Specify only one --ui selector.".to_owned());
                 }
-                selection = Frontend::Gpui;
-                has_explicit_selection = true;
+                selection = FrontendSelection::Explicit(Frontend::Gpui);
             }
             value if value == OsStr::new("--ui") => {
                 return Err("Choose --ui=egui or --ui=gpui.".to_owned());
@@ -82,6 +102,13 @@ pub(crate) fn selection_from_args(
     }
 
     Ok(selection)
+}
+
+pub(crate) fn duplicate_instance_message(selection: FrontendSelection) -> Option<String> {
+    let selector = selection.requested_selector()?;
+    Some(format!(
+        "The data directory is already owned by another Multi Launcher instance. Close that instance, then rerun with {selector} from the same working directory."
+    ))
 }
 
 pub(crate) fn show_startup_error(message: &str) {
@@ -1490,7 +1517,10 @@ pub(crate) fn run_foundation_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{Frontend, FutureContext, HashWakeSignal, Poll, selection_from_args};
+    use super::{
+        Frontend, FrontendSelection, FutureContext, HashWakeSignal, Poll,
+        duplicate_instance_message, selection_from_args,
+    };
     use std::ffi::OsString;
     use std::future::Future;
     use std::sync::{
@@ -1516,7 +1546,7 @@ mod tests {
     fn defaults_to_egui_and_preserves_other_arguments() {
         assert_eq!(
             selection_from_args(args(&["--open", "settings"])),
-            Ok(Frontend::Egui)
+            Ok(FrontendSelection::DefaultEgui)
         );
     }
 
@@ -1524,11 +1554,11 @@ mod tests {
     fn selects_each_explicit_frontend() {
         assert_eq!(
             selection_from_args(args(&["--ui=egui"])),
-            Ok(Frontend::Egui)
+            Ok(FrontendSelection::Explicit(Frontend::Egui))
         );
         assert_eq!(
             selection_from_args(args(&["--ui=gpui"])),
-            Ok(Frontend::Gpui)
+            Ok(FrontendSelection::Explicit(Frontend::Gpui))
         );
     }
 
@@ -1538,6 +1568,26 @@ mod tests {
         assert!(selection_from_args(args(&["--ui"])).is_err());
         assert!(selection_from_args(args(&["--ui=egui", "--ui=gpui"])).is_err());
         assert!(selection_from_args(args(&["--ui=egui", "--ui=egui"])).is_err());
+    }
+
+    #[test]
+    fn duplicate_launch_diagnostic_is_silent_only_for_default_selection() {
+        assert_eq!(
+            duplicate_instance_message(FrontendSelection::DefaultEgui),
+            None
+        );
+        assert_eq!(
+            duplicate_instance_message(FrontendSelection::Explicit(Frontend::Egui)).as_deref(),
+            Some(
+                "The data directory is already owned by another Multi Launcher instance. Close that instance, then rerun with --ui=egui from the same working directory."
+            )
+        );
+        assert_eq!(
+            duplicate_instance_message(FrontendSelection::Explicit(Frontend::Gpui)).as_deref(),
+            Some(
+                "The data directory is already owned by another Multi Launcher instance. Close that instance, then rerun with --ui=gpui from the same working directory."
+            )
+        );
     }
 
     #[test]
