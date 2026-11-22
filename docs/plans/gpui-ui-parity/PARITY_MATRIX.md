@@ -249,7 +249,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [File Search Preview](gui/file-preview.md) | FILE-PREVIEW-01 | G07 | Specified | Native egui popout keyboard activation and owned preview close verified. Content, context actions and GPUI remain pending. |
 | [Launcher Result Context Menu](gui/launcher-result-context-menu.md) | CONTEXT-MENU-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
 | [Launcher Action Confirmation](gui/launcher-action-confirmation.md) | LAUNCH-CONFIRM-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
-| [Universal Action Sheet](gui/universal-action-sheet.md) | ACTION-SHEET-01 | G05 | Specified | Actual egui exact Ctrl+Enter, independent filter and Escape passed. Confirm and GPUI remain pending. |
+| [Universal Action Sheet](gui/universal-action-sheet.md) | ACTION-SHEET-01 | G05 | Specified | Actual egui Ctrl+Enter, filter, Escape and keyboard Execute passed. GPUI remains pending. |
 | [Quick Help](gui/quick-help.md) | QUICK-HELP-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |
 | [Command Help](gui/command-help.md) | COMMAND-HELP-01 | G05 | Specified | Actual typed egui entry opened. Body controls and GPUI remain pending. |
 | [Jump Mode Overlay](gui/jump-mode-overlay.md) | JUMP-OVERLAY-01 | G05 | Specified | Source current launcher child and input ownership mapped. Native and GPUI remain pending. |

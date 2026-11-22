@@ -8,4 +8,4 @@ G05 owns `universal-action-sheet`. Exact Ctrl+Enter from Search opens the curren
 
 Select `production_action_sheet_router_consumes_exact_ctrl_enter_and_preserves_tab`, `action_sheet_escape_preserves_query_and_does_not_activate_result` and `sheet_selection_preserves_keyboard_and_mouse_activation_sources`.
 
-`G05-EGUI-ACTION-SHEET-HELP` verifies the actual Ctrl+Enter route, independent filter and Escape with Search focus. Action acceptance and GPUI remain pending.
+`G05-EGUI-ACTION-SHEET-HELP` verifies the actual Ctrl+Enter route, independent filter and Escape with Search focus. `G05-EGUI-ACTION-SHEET-EXECUTE` verifies the keyboard-filtered Execute action opens one Hash Generator and closing it restores the exact launcher query. GPUI remains pending.
