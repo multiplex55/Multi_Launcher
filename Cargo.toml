@@ -262,6 +262,7 @@ resvg = { version = "=0.47.0", default-features = false, features = ["text", "sy
 [target.'cfg(windows)'.dependencies]
 # std mpsc has no stable absolute-deadline receive; preserve the read admission Instant.
 crossbeam-channel = "0.5.15"
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.12", default-features = false }
 
 [features]
 unstable_grab = ["rdev/unstable_grab"]
@@ -334,6 +335,7 @@ strip = "none"
 
 # Local lifecycle seam for hidden-root prompt viewport bootstrapping.
 [patch.crates-io]
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 accesskit_windows = { path = "vendor/accesskit_windows" }
 epaint = { path = "vendor/epaint" }
 egui = { path = "vendor/egui" }

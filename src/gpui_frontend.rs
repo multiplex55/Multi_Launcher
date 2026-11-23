@@ -38,6 +38,8 @@ use gpui_kit::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 #[cfg(windows)]
+use gpui_windows::NativeKeydownReceipt;
+#[cfg(windows)]
 use std::ffi::c_void;
 
 pub(crate) use crate::gpui_restart::Frontend;
@@ -659,6 +661,22 @@ impl LauncherSearchResults {
         changed
     }
 
+    fn move_keypad_selection(&mut self, movement: QuerySelectionMove) -> bool {
+        let next = match movement {
+            QuerySelectionMove::Left if !self.layout.grid => None,
+            QuerySelectionMove::Right if !self.layout.grid && !self.actions.is_empty() => {
+                Some(self.selected.unwrap_or(0))
+            }
+            QuerySelectionMove::Right if !self.layout.grid => self.selected,
+            _ => {
+                return self.move_selection(movement);
+            }
+        };
+        let changed = self.selected != next;
+        self.selected = next;
+        changed
+    }
+
     fn can_capture_lateral_move(&self) -> bool {
         // The current Search layout owns plain lateral moves in Grid mode even
         // when there are no results to select. In List mode the input owns them.
@@ -1138,6 +1156,71 @@ fn context_stack_has_primary(context_stack: &[KeyContext], name: &str) -> bool {
             .primary()
             .is_some_and(|entry| entry.key.as_ref() == name && entry.value.is_none())
     })
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PhysicalKeydown {
+    hwnd: usize,
+    virtual_key: u16,
+    scan_code: u8,
+    extended: bool,
+    modifiers: Modifiers,
+}
+
+#[cfg(windows)]
+impl From<NativeKeydownReceipt> for PhysicalKeydown {
+    fn from(receipt: NativeKeydownReceipt) -> Self {
+        Self {
+            hwnd: receipt.hwnd,
+            virtual_key: receipt.virtual_key,
+            scan_code: receipt.scan_code,
+            extended: receipt.extended,
+            modifiers: receipt.modifiers,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn physical_keypad_selection_move(
+    receipt: Option<PhysicalKeydown>,
+    event_modifiers: Modifiers,
+    context_stack: &[KeyContext],
+    root_identity: Option<ForegroundIdentity>,
+    foreground_identity: Option<ForegroundIdentity>,
+    event_window_is_root: bool,
+) -> Option<QuerySelectionMove> {
+    let receipt = receipt?;
+    let movement = physical_keypad_receipt_direction(receipt)?;
+    let root_identity = root_identity?;
+    if !event_window_is_root
+        || foreground_identity != Some(root_identity)
+        || receipt.hwnd != root_identity.hwnd
+        || event_modifiers != Modifiers::default()
+        || !context_stack_has_primary(context_stack, "LauncherSearch")
+        || context_stack_has_primary(context_stack, "HashGeneratorWindow")
+    {
+        return None;
+    }
+
+    Some(movement)
+}
+
+#[cfg(any(windows, test))]
+fn physical_keypad_receipt_direction(receipt: PhysicalKeydown) -> Option<QuerySelectionMove> {
+    if receipt.extended || receipt.modifiers.modified() {
+        return None;
+    }
+
+    match (receipt.scan_code, receipt.virtual_key) {
+        // Some Win32 input drivers omit scan metadata; VK_NUMPAD* still
+        // identifies the dedicated keypad key without matching arrows/digits.
+        (0x50, 0x62 | 0x28) | (0, 0x62) => Some(QuerySelectionMove::Down),
+        (0x4b, 0x64 | 0x25) | (0, 0x64) => Some(QuerySelectionMove::Left),
+        (0x4d, 0x66 | 0x27) | (0, 0x66) => Some(QuerySelectionMove::Right),
+        (0x48, 0x68 | 0x26) | (0, 0x68) => Some(QuerySelectionMove::Up),
+        _ => None,
+    }
 }
 
 fn root_tab_traversed_to_search(
@@ -3403,22 +3486,46 @@ impl RootWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.move_search_selection_inner(movement, false, window, cx)
+    }
+
+    fn move_search_keypad_selection(
+        &mut self,
+        movement: QuerySelectionMove,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.move_search_selection_inner(movement, true, window, cx)
+    }
+
+    fn move_search_selection_inner(
+        &mut self,
+        movement: QuerySelectionMove,
+        physical_keypad: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(_operation) = self.search_input_operation(window, cx) else {
             return false;
         };
         if self.launcher_results.query != self.query.read(cx).value().to_string() {
             return false;
         }
-        if matches!(movement, QuerySelectionMove::Left | QuerySelectionMove::Right)
-            && !self.launcher_results.can_capture_lateral_move()
+        if matches!(
+            movement,
+            QuerySelectionMove::Left | QuerySelectionMove::Right
+        ) && !self.launcher_results.can_capture_lateral_move()
+            && !physical_keypad
         {
             return false;
         }
 
-        let changed = self.launcher_results.move_selection(movement);
-        if changed
-            && let Some(row) = self.launcher_results.selected_scroll_child()
-        {
+        let changed = if physical_keypad {
+            self.launcher_results.move_keypad_selection(movement)
+        } else {
+            self.launcher_results.move_selection(movement)
+        };
+        if changed && let Some(row) = self.launcher_results.selected_scroll_child() {
             self.launcher_results_scroll.scroll_to_item(row);
         }
         cx.notify();
@@ -7225,6 +7332,61 @@ pub(crate) fn run_foundation_window(
                 restart_exit: restart_exit_for_root,
                 restart_failure: restart_failure_for_root,
             });
+            #[cfg(windows)]
+            {
+                let keypad_subscription = root.update(cx, |_, cx| {
+                    let root = root.downgrade();
+                    cx.intercept_keystrokes(move |event, window, cx| {
+                        let receipt = gpui_windows::take_current_native_keydown_receipt()
+                            .map(PhysicalKeydown::from);
+                        let Some(receipt) = receipt else {
+                            return;
+                        };
+                        if physical_keypad_receipt_direction(receipt).is_none()
+                            || event.keystroke.modifiers != Modifiers::default()
+                            || !context_stack_has_primary(
+                                &event.context_stack,
+                                "LauncherSearch",
+                            )
+                            || context_stack_has_primary(
+                                &event.context_stack,
+                                "HashGeneratorWindow",
+                            )
+                        {
+                            return;
+                        }
+
+                        let _ = root.update(cx, |root, cx| {
+                            let Some(native_root) = root
+                                .native_window
+                                .filter(|native_root| native_window_is_valid(*native_root))
+                            else {
+                                return;
+                            };
+                            let event_window_is_root = root.root_window.is_some_and(|root_handle| {
+                                root_handle.window_id() == window.window_handle().window_id()
+                            });
+                            let Some(movement) = physical_keypad_selection_move(
+                                Some(receipt),
+                                event.keystroke.modifiers,
+                                &event.context_stack,
+                                Some(native_root.identity),
+                                current_foreground_identity(),
+                                event_window_is_root,
+                            ) else {
+                                return;
+                            };
+                            if root.move_search_keypad_selection(movement, window, cx) {
+                                root.fresh_search_enter = None;
+                                cx.stop_propagation();
+                            }
+                        });
+                    })
+                });
+                appearance_subscription_sink
+                    .borrow_mut()
+                    .push(keypad_subscription);
+            }
             let search_subscription = root.update(cx, |root, cx| {
                 let query = root.query.clone();
                 cx.subscribe(
@@ -7806,21 +7968,21 @@ pub(crate) fn run_foundation_window(
 mod tests {
     use super::{
         ActivationSource, AppliedWindowSize, CommandOutcome, DockedHashResize,
-        DockedHashResizeOrigin, Frontend, FrontendSelection, FutureContext,
+        DockedHashResizeOrigin, ForegroundIdentity, Frontend, FrontendSelection, FutureContext,
         HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest, HashDraft,
         HashPickerOutcome, HashPresentationMode, HashWakeSignal, InstalledSearchInvocation,
         InstalledSearchRoute, LauncherResultActivationOrigin, LauncherSearchCatalog,
-        LauncherSearchResults, LauncherSearchStartup, Modifiers, Poll, PreferredWindowSize,
-        SearchCompletion, classify_hash_picker_result, dispatch_hash_open,
+        LauncherSearchResults, LauncherSearchStartup, Modifiers, PhysicalKeydown, Poll,
+        PreferredWindowSize, SearchCompletion, classify_hash_picker_result, dispatch_hash_open,
         docked_hash_available_size, docked_hash_fit, docked_hash_focus_is_current,
         docked_hash_resize_accessibility_label, docked_hash_resize_identity_matches,
         docked_resize_commit_size, duplicate_instance_message, fresh_search_enter_marker,
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
         is_fresh_plain_search_enter, keyboard_docked_resize_preview,
-        launcher_result_activation_is_current, launcher_result_grid_row_id,
-        launcher_result_row_id, launcher_results_viewport_max_height,
-        parse_installed_search_invocation, pointer_docked_resize_preview, query_set_outcome_text,
+        launcher_result_activation_is_current, launcher_result_grid_row_id, launcher_result_row_id,
+        launcher_results_viewport_max_height, parse_installed_search_invocation,
+        physical_keypad_selection_move, pointer_docked_resize_preview, query_set_outcome_text,
         result_click_source, root_search_focus_is_current, root_tab_traversed_to_search,
         search_completion_session_is_current, search_input_is_current, selection_from_args,
         single_line_history_queries, supported_launcher_search_actions,
@@ -7866,6 +8028,23 @@ mod tests {
         .into_iter()
         .next()
         .expect("the built-in Hash Generator route is installed")
+    }
+
+    fn physical_keydown(scan_code: u8, virtual_key: u16) -> PhysicalKeydown {
+        PhysicalKeydown {
+            hwnd: 17,
+            virtual_key,
+            scan_code,
+            extended: false,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn launcher_search_contexts() -> Vec<KeyContext> {
+        ["RootWindow", "LauncherSearch"]
+            .into_iter()
+            .map(|name| KeyContext::parse(name).expect("valid launcher key context"))
+            .collect()
     }
 
     fn completion_catalog(
@@ -8242,6 +8421,264 @@ mod tests {
         );
         assert!(!results.can_capture_lateral_move());
         assert_eq!(results.selected, None);
+    }
+
+    #[test]
+    fn launcher_search_keypad_classifier_maps_all_scan_and_virtual_key_forms() {
+        use multi_launcher::launcher::query_results_layout::QuerySelectionMove;
+
+        let root = ForegroundIdentity {
+            hwnd: 17,
+            process_id: 19,
+            thread_id: 23,
+        };
+        let contexts = launcher_search_contexts();
+        for (scan, virtual_key, expected) in [
+            (0x50, 0x62, QuerySelectionMove::Down),
+            (0x50, 0x28, QuerySelectionMove::Down),
+            (0, 0x62, QuerySelectionMove::Down),
+            (0x4b, 0x64, QuerySelectionMove::Left),
+            (0x4b, 0x25, QuerySelectionMove::Left),
+            (0, 0x64, QuerySelectionMove::Left),
+            (0x4d, 0x66, QuerySelectionMove::Right),
+            (0x4d, 0x27, QuerySelectionMove::Right),
+            (0, 0x66, QuerySelectionMove::Right),
+            (0x48, 0x68, QuerySelectionMove::Up),
+            (0x48, 0x26, QuerySelectionMove::Up),
+            (0, 0x68, QuerySelectionMove::Up),
+        ] {
+            assert_eq!(
+                physical_keypad_selection_move(
+                    Some(physical_keydown(scan, virtual_key)),
+                    Modifiers::default(),
+                    &contexts,
+                    Some(root),
+                    Some(root),
+                    true,
+                ),
+                Some(expected),
+                "scan {scan:#04x}, virtual key {virtual_key:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn launcher_search_keypad_classifier_rejects_nonphysical_or_foreign_events() {
+        let root = ForegroundIdentity {
+            hwnd: 17,
+            process_id: 19,
+            thread_id: 23,
+        };
+        let contexts = launcher_search_contexts();
+        let accepted = |receipt, event_modifiers, contexts: &[KeyContext], foreground, is_root| {
+            physical_keypad_selection_move(
+                receipt,
+                event_modifiers,
+                contexts,
+                Some(root),
+                foreground,
+                is_root,
+            )
+        };
+
+        assert_eq!(
+            accepted(
+                Some(physical_keydown(0x50, 0x62)),
+                Modifiers::default(),
+                &contexts,
+                Some(root),
+                true,
+            ),
+            Some(multi_launcher::launcher::query_results_layout::QuerySelectionMove::Down)
+        );
+        for receipt in [
+            None,
+            Some(PhysicalKeydown {
+                extended: true,
+                ..physical_keydown(0x50, 0x62)
+            }),
+            Some(PhysicalKeydown {
+                extended: true,
+                ..physical_keydown(0, 0x62)
+            }),
+            Some(physical_keydown(0x03, 0x32)),
+            Some(physical_keydown(0, 0x32)),
+            Some(physical_keydown(0x50, 0x32)),
+            Some(physical_keydown(0, 0x28)),
+            Some(physical_keydown(0, 0x25)),
+            Some(physical_keydown(0, 0x27)),
+            Some(physical_keydown(0, 0x26)),
+            Some(physical_keydown(0x51, 0x62)),
+            Some(PhysicalKeydown {
+                modifiers: Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+                ..physical_keydown(0x50, 0x62)
+            }),
+        ] {
+            assert_eq!(
+                accepted(receipt, Modifiers::default(), &contexts, Some(root), true),
+                None
+            );
+        }
+
+        let modified_event = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            accepted(
+                Some(physical_keydown(0x50, 0x62)),
+                modified_event,
+                &contexts,
+                Some(root),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            accepted(
+                Some(physical_keydown(0x50, 0x62)),
+                Modifiers::default(),
+                &contexts,
+                Some(ForegroundIdentity {
+                    process_id: root.process_id + 1,
+                    ..root
+                }),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            accepted(
+                Some(PhysicalKeydown {
+                    hwnd: root.hwnd + 1,
+                    ..physical_keydown(0x50, 0x62)
+                }),
+                Modifiers::default(),
+                &contexts,
+                Some(root),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            accepted(
+                Some(physical_keydown(0x50, 0x62)),
+                Modifiers::default(),
+                &contexts,
+                Some(root),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            physical_keypad_selection_move(
+                Some(physical_keydown(0x50, 0x62)),
+                Modifiers::default(),
+                &[],
+                Some(root),
+                Some(root),
+                true,
+            ),
+            None
+        );
+        let hash_contexts = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("LauncherSearch").expect("valid search key context"),
+            KeyContext::parse("HashGeneratorWindow").expect("valid Hash key context"),
+        ];
+        assert_eq!(
+            physical_keypad_selection_move(
+                Some(physical_keydown(0x50, 0x62)),
+                Modifiers::default(),
+                &hash_contexts,
+                Some(root),
+                Some(root),
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn launcher_search_keypad_list_lateral_moves_preserve_and_clear_exact_rows() {
+        use multi_launcher::launcher::query_results_layout::QuerySelectionMove;
+
+        let actions = ["Alpha", "Beta"]
+            .into_iter()
+            .map(|label| multi_launcher::actions::Action {
+                label: label.to_owned(),
+                desc: "Inert keypad fixture".to_owned(),
+                action: "query:".to_owned(),
+                args: Some(label.to_ascii_lowercase()),
+            })
+            .collect::<Vec<_>>();
+        let mut results = LauncherSearchResults::default();
+        results.replace(
+            "app KMarker".to_owned(),
+            actions.clone(),
+            ResolvedQueryResultsLayout::new(false, 3),
+            2,
+        );
+
+        assert!(results.move_keypad_selection(QuerySelectionMove::Right));
+        assert_eq!(results.selected, Some(0));
+        assert!(!results.move_keypad_selection(QuerySelectionMove::Right));
+        assert_eq!(results.selected, Some(0));
+        assert!(results.move_keypad_selection(QuerySelectionMove::Down));
+        assert_eq!(results.selected, Some(1));
+        assert!(!results.move_keypad_selection(QuerySelectionMove::Down));
+        assert_eq!(results.selected, Some(1));
+        assert!(results.move_keypad_selection(QuerySelectionMove::Left));
+        assert_eq!(results.selected, None);
+        assert!(!results.move_keypad_selection(QuerySelectionMove::Left));
+        assert_eq!(results.enter_target("app KMarker"), None);
+        assert_eq!(results.query, "app KMarker");
+
+        assert!(results.move_keypad_selection(QuerySelectionMove::Right));
+        let (generation, index) = results
+            .enter_target("app KMarker")
+            .expect("keypad Right selects the first available result");
+        assert_eq!(index, 0);
+        assert_eq!(
+            results.resolve_action(generation, index, "app KMarker"),
+            Some(actions[0].clone())
+        );
+    }
+
+    #[test]
+    fn launcher_search_keypad_grid_reuses_shared_direction_and_reveal_mapping() {
+        use multi_launcher::launcher::query_results_layout::QuerySelectionMove;
+
+        let actions = (0..7)
+            .map(|index| multi_launcher::actions::Action {
+                label: format!("KMarker Grid row {index}"),
+                desc: "Grid navigation fixture".into(),
+                action: "query:".into(),
+                args: Some(index.to_string()),
+            })
+            .collect::<Vec<_>>();
+        let mut results = LauncherSearchResults::default();
+        results.replace(
+            "app GridFixture".into(),
+            actions,
+            ResolvedQueryResultsLayout::new(true, 3),
+            2,
+        );
+
+        assert!(results.move_keypad_selection(QuerySelectionMove::Down));
+        assert_eq!(results.selected, Some(0));
+        assert!(results.move_keypad_selection(QuerySelectionMove::Right));
+        assert_eq!(results.selected, Some(1));
+        assert!(results.move_keypad_selection(QuerySelectionMove::Down));
+        assert_eq!(results.selected, Some(4));
+        assert!(results.move_keypad_selection(QuerySelectionMove::Down));
+        assert_eq!(results.selected, Some(6));
+        assert_eq!(results.selected_scroll_child(), Some(2));
+        assert!(!results.move_keypad_selection(QuerySelectionMove::Down));
+        assert_eq!(results.selected, Some(6));
     }
 
     #[test]
