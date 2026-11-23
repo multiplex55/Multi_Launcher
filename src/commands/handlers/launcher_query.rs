@@ -34,7 +34,7 @@ pub(crate) fn handle_launcher<H: LauncherCommandHost + ?Sized>(
     }
 }
 
-pub(crate) fn handle_query(command: &QueryCommand, source: ActivationSource) -> CommandOutcome {
+pub fn handle_query(command: &QueryCommand, source: ActivationSource) -> CommandOutcome {
     match command {
         QueryCommand::Set { query, argument } => {
             let query = argument
@@ -79,5 +79,50 @@ mod tests {
         assert_eq!(outcome.query, QueryPolicy::Set("notes".into()));
         assert_eq!(outcome.activate_first_result, Some(ActivationSource::Macro));
         assert!(!outcome.invalidate_results);
+    }
+
+    #[test]
+    fn query_set_outcome_preserves_literal_and_json_argument_text() {
+        let literal = handle_query(
+            &QueryCommand::Set {
+                query: "  literal  東京  ".into(),
+                argument: None,
+            },
+            ActivationSource::Click,
+        );
+        assert_eq!(literal, CommandOutcome::query("  literal  東京  ".into()));
+
+        let argument = handle_query(
+            &QueryCommand::Set {
+                query: "g05 outcome  ".into(),
+                argument: Some("  second β  ".into()),
+            },
+            ActivationSource::Enter,
+        );
+        assert_eq!(
+            argument,
+            CommandOutcome::query("g05 outcome   second β  ".into())
+        );
+    }
+
+    #[test]
+    fn query_set_empty_text_and_argument_keep_the_handler_policy() {
+        let empty = handle_query(
+            &QueryCommand::Set {
+                query: String::new(),
+                argument: None,
+            },
+            ActivationSource::Click,
+        );
+        assert_eq!(empty, CommandOutcome::query(String::new()));
+
+        let empty_argument = handle_query(
+            &QueryCommand::Set {
+                query: String::new(),
+                argument: Some(String::new()),
+            },
+            ActivationSource::Click,
+        );
+        assert_eq!(empty_argument, CommandOutcome::query(" ".into()));
     }
 }

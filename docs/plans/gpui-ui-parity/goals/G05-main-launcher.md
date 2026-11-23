@@ -1,6 +1,6 @@
 # G05 — Main launcher, query interaction, results, and help
 
-**Status:** Shared scoring and composition, Hash result activation, single-line history and list arrows, and [pointer and traversal Tab completion](../gui/launcher.md#tab-completion) have scoped Windows and Rust evidence. The acknowledged global hotkey association is still pending. [Saved Query Set activation](../gui/launcher.md#saved-query-set-activation) follows. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
+**Status:** Shared scoring and composition, Hash result activation, single-line history and list arrows, [pointer and traversal Tab completion](../gui/launcher.md#tab-completion), and [saved Query Set activation](../gui/launcher.md#saved-query-set-activation) have scoped Windows and Rust evidence. Acknowledged global hotkey association is still pending. [Cached command fallback](../gui/launcher.md#cached-command-fallback) follows. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
 
 ## Objective and dependencies
 

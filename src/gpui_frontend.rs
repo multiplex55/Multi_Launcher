@@ -49,10 +49,11 @@ use multi_launcher::common::query::ActionFilterMetadata;
 use multi_launcher::clipboard_modify::clipboard::{
     ArboardClipboardBackend, ClipboardBackend, ClipboardError,
 };
-use multi_launcher::commands::handlers::handle_hash_generator;
+use multi_launcher::commands::handlers::{handle_hash_generator, handle_query};
 use multi_launcher::commands::{
-    ActivationSource, Command, CommandInvocation, CommandOutcome, HashGeneratorCommand,
-    parse_action, parse_command,
+    ActivationSource, Command, CommandInvocation, CommandOutcome, FavoriteLogPolicy,
+    HashGeneratorCommand, HistoryPolicy, PendingQueryPolicy, QueryCommand, QueryPolicy,
+    ResultsPolicy, VisibilityPolicy, parse_action, parse_command,
 };
 use multi_launcher::coordinate_tool::{
     CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
@@ -111,9 +112,9 @@ impl LauncherSearchCatalog {
         startup: LauncherSearchStartup,
         enabled_plugins: Option<&HashSet<String>>,
     ) -> Self {
-        // The GPUI slice currently has one installed typed result route. Keep
-        // only persisted actions that the real activation boundary can parse.
-        let actions = supported_hash_search_actions(startup.actions);
+        // Keep only persisted actions that the installed typed activation
+        // boundary can execute without changing their Search payload.
+        let actions = supported_launcher_search_actions(startup.actions);
         let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
         let commands = if enabled_plugins
             .is_none_or(|enabled| enabled.contains(hash_generator.name()))
@@ -195,6 +196,12 @@ struct PendingCompletionChange {
 }
 
 impl SearchCompletion {
+    fn clear_for_query_replacement(&mut self) {
+        self.suggestions.clear();
+        self.next_index = 0;
+        self.pending_change = None;
+    }
+
     fn reset_for_query(&mut self, catalog: &LauncherSearchCatalog, query: &str) {
         self.pending_change = None;
         self.next_index = 0;
@@ -238,16 +245,96 @@ impl SearchCompletion {
     }
 }
 
-fn supported_hash_search_actions(actions: Vec<Action>) -> Vec<Action> {
+fn supported_launcher_search_actions(actions: Vec<Action>) -> Vec<Action> {
     actions
         .into_iter()
-        .filter(|action| {
-            matches!(
-                parse_action(action),
-                Ok(Command::HashGenerator(HashGeneratorCommand::Open))
-            )
+        .filter(|action| match parse_action(action) {
+            Ok(command) => {
+                classify_installed_search_command(&command, ActivationSource::Click).is_ok()
+            }
+            Err(_) => false,
         })
         .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum InstalledSearchRoute {
+    HashOpen,
+    QuerySet(CommandOutcome),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InstalledSearchActionError {
+    Unsupported(String),
+    QuerySet(String),
+}
+
+fn query_set_outcome_text(outcome: &CommandOutcome) -> Option<&str> {
+    let QueryPolicy::Set(query) = &outcome.query else {
+        return None;
+    };
+    (!query.contains(['\r', '\n'])
+        && matches!(&outcome.pending_query, PendingQueryPolicy::Keep)
+        && outcome.search
+        && !outcome.invalidate_results
+        && matches!(&outcome.results, ResultsPolicy::Keep)
+        && outcome.visibility == VisibilityPolicy::Show
+        && outcome.restore
+        && outcome.focus
+        && outcome.move_cursor_end
+        && outcome.activate_first_result.is_none()
+        && outcome.history == HistoryPolicy::Skip
+        && outcome.toasts.is_empty()
+        && matches!(&outcome.favorite_log, FavoriteLogPolicy::None))
+    .then_some(query)
+}
+
+fn classify_installed_search_command(
+    command: &Command,
+    source: ActivationSource,
+) -> Result<InstalledSearchRoute, InstalledSearchActionError> {
+    match command {
+        Command::HashGenerator(HashGeneratorCommand::Open) => Ok(InstalledSearchRoute::HashOpen),
+        Command::Query(command @ QueryCommand::Set { .. }) => {
+            let outcome = handle_query(command, source);
+            if query_set_outcome_text(&outcome).is_none() {
+                return Err(InstalledSearchActionError::QuerySet(
+                    "The saved Query Set outcome cannot be represented by single-line Search."
+                        .to_owned(),
+                ));
+            }
+            Ok(InstalledSearchRoute::QuerySet(outcome))
+        }
+        _ => Err(InstalledSearchActionError::Unsupported(
+            "The selected launcher action is not an installed Search route.".to_owned(),
+        )),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct InstalledSearchInvocation {
+    invocation: CommandInvocation,
+    route: InstalledSearchRoute,
+}
+
+fn parse_installed_search_invocation(
+    action: Action,
+    source: ActivationSource,
+) -> Result<InstalledSearchInvocation, InstalledSearchActionError> {
+    let invocation = parse_command(action, None, source)
+        .map_err(|error| InstalledSearchActionError::Unsupported(error.to_string()))?;
+    let route = classify_installed_search_command(&invocation.command, source)?;
+    Ok(InstalledSearchInvocation { invocation, route })
+}
+
+fn dispatch_hash_open(
+    invocation: CommandInvocation,
+    open_hash: impl FnOnce() -> Result<(), String>,
+) -> Result<CommandOutcome, String> {
+    match invocation.command {
+        Command::HashGenerator(command) => handle_hash_generator(&command, open_hash),
+        _ => Err("The selected launcher action is not an installed Hash Generator route.".into()),
+    }
 }
 
 fn single_line_history_queries<'a>(queries: impl IntoIterator<Item = &'a str>) -> Vec<String> {
@@ -451,6 +538,7 @@ struct RootWindow {
     hash_window_close_subscriptions: Vec<(AnyWindowHandle, Subscription)>,
     hash_retiring_windows: Vec<RetiringHashWindow>,
     hash_presentation_feedback: Arc<Mutex<Option<String>>>,
+    launcher_search_error: Option<String>,
     hash_open_error: Option<String>,
     hash_presentation_error: Option<String>,
     hash_native_geometry_error: Option<String>,
@@ -568,37 +656,18 @@ fn fresh_search_enter_marker(
         .then_some(FreshSearchEnter { generation, query })
 }
 
-fn parse_hash_search_invocation(
-    action: multi_launcher::actions::Action,
-    source: ActivationSource,
-) -> Result<CommandInvocation, String> {
-    let invocation = parse_command(action, None, source).map_err(|error| error.to_string())?;
-    if matches!(
-        &invocation.command,
-        Command::HashGenerator(HashGeneratorCommand::Open)
-    ) {
-        Ok(invocation)
-    } else {
-        Err("The selected launcher action is not an installed Hash Generator route.".to_owned())
-    }
-}
-
-fn dispatch_hash_search_invocation(
-    invocation: CommandInvocation,
-    open: impl FnOnce() -> Result<(), String>,
-) -> Result<CommandOutcome, String> {
-    match invocation.command {
-        Command::HashGenerator(command) => handle_hash_generator(&command, open),
-        _ => Err("The selected launcher action is not an installed Hash Generator route.".into()),
-    }
-}
-
 fn result_click_source(is_keyboard: bool) -> ActivationSource {
     if is_keyboard {
         ActivationSource::Enter
     } else {
         ActivationSource::Click
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LauncherResultActivationOrigin {
+    DeferredSearchEnter,
+    ResultWidget,
 }
 
 enum HashWindowState {
@@ -896,7 +965,37 @@ fn search_input_is_current(
     search_focused: bool,
     window_active: bool,
 ) -> bool {
-    root_visible && lifecycle_active && root_window_matches && search_focused && window_active
+    launcher_root_is_current(
+        root_visible,
+        lifecycle_active,
+        root_window_matches,
+        window_active,
+    ) && search_focused
+}
+
+fn launcher_root_is_current(
+    root_visible: bool,
+    lifecycle_active: bool,
+    root_window_matches: bool,
+    window_active: bool,
+) -> bool {
+    root_visible && lifecycle_active && root_window_matches && window_active
+}
+
+fn launcher_result_activation_is_current(
+    root_visible: bool,
+    lifecycle_active: bool,
+    root_window_matches: bool,
+    search_focused: bool,
+    window_active: bool,
+    origin: LauncherResultActivationOrigin,
+) -> bool {
+    launcher_root_is_current(
+        root_visible,
+        lifecycle_active,
+        root_window_matches,
+        window_active,
+    ) && (origin != LauncherResultActivationOrigin::DeferredSearchEnter || search_focused)
 }
 
 fn search_completion_session_is_current(session_revision: Option<u64>, revision: u64) -> bool {
@@ -3043,6 +3142,25 @@ impl RootWindow {
         )
     }
 
+    fn launcher_result_activation_is_live(
+        &self,
+        origin: LauncherResultActivationOrigin,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let root_window_matches = self
+            .root_window
+            .is_some_and(|root| root.window_id() == window.window_handle().window_id());
+        launcher_result_activation_is_current(
+            self.root_visibility.visible.load(Ordering::Acquire),
+            self.root_visibility.active.load(Ordering::Acquire),
+            root_window_matches,
+            self.query.focus_handle(cx).is_focused(window),
+            window.is_window_active(),
+            origin,
+        )
+    }
+
     fn accept_search_completion(
         &mut self,
         require_focus_session: bool,
@@ -3167,6 +3285,7 @@ impl RootWindow {
         generation: u64,
         index: usize,
         source: ActivationSource,
+        origin: LauncherResultActivationOrigin,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3177,32 +3296,90 @@ impl RootWindow {
         else {
             return;
         };
-        let invocation = match parse_hash_search_invocation(action, source) {
-            Ok(invocation) => invocation,
-            Err(error) => {
+        if !self.launcher_result_activation_is_live(origin, window, cx) {
+            return;
+        }
+        let installed_invocation = match parse_installed_search_invocation(action, source) {
+            Ok(installed_invocation) => installed_invocation,
+            Err(InstalledSearchActionError::QuerySet(error)) => {
+                self.launcher_search_error = Some(format!("Could not apply saved query: {error}"));
+                cx.notify();
+                return;
+            }
+            Err(InstalledSearchActionError::Unsupported(error)) => {
                 self.hash_open_error = Some(format!("Could not open Hash Generator: {error}"));
                 cx.notify();
                 return;
             }
         };
+        let query_set = matches!(
+            &installed_invocation.route,
+            InstalledSearchRoute::QuerySet(_)
+        );
         let Some(operation) = self.restart_admission.admit() else {
-            self.hash_open_error =
-                Some("GPUI is closing; new utility operations are disabled.".to_owned());
+            if query_set {
+                self.launcher_search_error =
+                    Some("GPUI is closing; saved queries can no longer be applied.".to_owned());
+            } else {
+                self.hash_open_error =
+                    Some("GPUI is closing; new utility operations are disabled.".to_owned());
+            }
             cx.notify();
             return;
         };
-        let outcome = dispatch_hash_search_invocation(invocation, || {
-            self.open_hash_generator_window(operation, window, cx)
-        });
-        if outcome.is_ok() {
-            self.query_history.reset();
+        let InstalledSearchInvocation { invocation, route } = installed_invocation;
+        match route {
+            InstalledSearchRoute::HashOpen => {
+                let outcome = dispatch_hash_open(invocation, || {
+                    self.open_hash_generator_window(operation, window, cx)
+                });
+                if outcome.is_ok() {
+                    self.query_history.reset();
+                }
+                self.hash_open_error = outcome
+                    .err()
+                    .map(|error| format!("Could not open Hash Generator: {error}"));
+            }
+            InstalledSearchRoute::QuerySet(outcome) => {
+                if let Err(error) = self.apply_query_set_outcome(outcome, operation, window, cx) {
+                    self.launcher_search_error =
+                        Some(format!("Could not apply saved query: {error}"));
+                }
+            }
         }
-        self.hash_open_error = outcome
-            .err()
-            .map(|error| format!("Could not open Hash Generator: {error}"));
-        // Hash Open preserves the launcher query and results. A successful
-        // activation retires transient traversal without writing query history.
+        // Hash Open preserves the launcher query and results. Query Set uses
+        // the real editor Change path to refresh and invalidate transient rows.
         cx.notify();
+    }
+
+    fn apply_query_set_outcome(
+        &mut self,
+        outcome: CommandOutcome,
+        _operation: EffectPermit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if query_set_outcome_text(&outcome).is_none() {
+            return Err("the Query Set outcome is not supported by Search".to_owned());
+        }
+        let CommandOutcome {
+            query: QueryPolicy::Set(query),
+            focus,
+            ..
+        } = outcome
+        else {
+            return Err("the Query Set outcome does not contain a new query".to_owned());
+        };
+        self.query_history.reset();
+        self.search_completion.clear_for_query_replacement();
+        self.launcher_search_error = None;
+        self.query.update(cx, |state, cx| {
+            state.replace_all(query, window, cx);
+        });
+        if focus {
+            self.query.focus_handle(cx).focus(window, cx);
+        }
+        Ok(())
     }
 
     fn next_hash_mount_generation(&mut self) -> u64 {
@@ -4981,6 +5158,13 @@ impl Render for RootWindow {
                             .readonly(self.restart_admission.is_fenced()),
                     ),
             )
+            .children(self.launcher_search_error.as_ref().map(|error| {
+                Label::new(error.clone())
+                    .id("launcher-search-error")
+                    .text_color(appearance::to_hsla(palette.error))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
             .children(completion_preview.into_iter().enumerate().map(|(index, preview)| {
                 Label::new(preview)
                     .id(format!("launcher-search-completion-{index}"))
@@ -5013,6 +5197,7 @@ impl Render for RootWindow {
                                 generation,
                                 index,
                                 result_click_source(event.is_keyboard()),
+                                LauncherResultActivationOrigin::ResultWidget,
                                 window,
                                 cx,
                             );
@@ -6805,6 +6990,7 @@ pub(crate) fn run_foundation_window(
                 hash_window_close_subscriptions: Vec::new(),
                 hash_retiring_windows: Vec::new(),
                 hash_presentation_feedback: hash_presentation_feedback_for_root,
+                launcher_search_error: None,
                 hash_open_error: None,
                 hash_presentation_error: None,
                 hash_native_geometry_error: None,
@@ -6836,6 +7022,7 @@ pub(crate) fn run_foundation_window(
                         match event {
                             InputEvent::Change => {
                                 let query_text = query.read(cx).value().to_string();
+                                root.launcher_search_error = None;
                                 root.query_history.synchronize(&query_text);
                                 root.search_completion
                                     .apply_change(&root.search_catalog, &query_text);
@@ -6892,6 +7079,7 @@ pub(crate) fn run_foundation_window(
                                                         generation,
                                                         index,
                                                         ActivationSource::Enter,
+                                                        LauncherResultActivationOrigin::DeferredSearchEnter,
                                                         window,
                                                         cx,
                                                     );
@@ -7406,20 +7594,21 @@ mod tests {
         ActivationSource, AppliedWindowSize, CommandOutcome, DockedHashResize,
         DockedHashResizeOrigin, Frontend, FrontendSelection, FutureContext,
         HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest, HashDraft,
-        HashPickerOutcome, HashPresentationMode, HashWakeSignal, LauncherSearchCatalog,
+        HashPickerOutcome, HashPresentationMode, HashWakeSignal, InstalledSearchInvocation,
+        InstalledSearchRoute, LauncherResultActivationOrigin, LauncherSearchCatalog,
         LauncherSearchResults, LauncherSearchStartup, Modifiers, Poll, PreferredWindowSize,
-        SearchCompletion,
-        classify_hash_picker_result, dispatch_hash_search_invocation,
+        SearchCompletion, classify_hash_picker_result, dispatch_hash_open,
         docked_hash_available_size, docked_hash_fit, docked_hash_focus_is_current,
         docked_hash_resize_accessibility_label, docked_hash_resize_identity_matches,
         docked_resize_commit_size, duplicate_instance_message, fresh_search_enter_marker,
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
-        is_fresh_plain_search_enter, keyboard_docked_resize_preview, launcher_result_row_id,
-        parse_hash_search_invocation, pointer_docked_resize_preview, result_click_source,
-        root_search_focus_is_current, root_tab_traversed_to_search,
+        is_fresh_plain_search_enter, keyboard_docked_resize_preview,
+        launcher_result_activation_is_current, launcher_result_row_id,
+        parse_installed_search_invocation, pointer_docked_resize_preview, query_set_outcome_text,
+        result_click_source, root_search_focus_is_current, root_tab_traversed_to_search,
         search_completion_session_is_current, search_input_is_current, selection_from_args,
-        single_line_history_queries, supported_hash_search_actions,
+        single_line_history_queries, supported_launcher_search_actions,
     };
     use gpui_kit::{KeyContext, point, px};
     use multi_launcher::{
@@ -7491,6 +7680,90 @@ mod tests {
         }
     }
 
+    fn saved_action(
+        label: &str,
+        action: &str,
+        args: Option<&str>,
+    ) -> multi_launcher::actions::Action {
+        multi_launcher::actions::Action {
+            label: label.into(),
+            desc: "Saved launcher fixture".into(),
+            action: action.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn installed_search_routes_keep_exact_handler_query_set_output() {
+        let cases = [
+            (
+                saved_action("Literal", "query:  literal  東京  ", None),
+                "  literal  東京  ",
+            ),
+            (
+                saved_action(
+                    "Argument",
+                    "query:g05 outcome",
+                    Some(r#"{"query":"  second β  "}"#),
+                ),
+                "g05 outcome   second β  ",
+            ),
+            (saved_action("Empty", "query:", None), ""),
+            (
+                saved_action("Empty argument", "query:", Some(r#"{"query":""}"#)),
+                " ",
+            ),
+            (
+                saved_action(
+                    "Invalid JSON fallback",
+                    "query:plain text",
+                    Some("not JSON"),
+                ),
+                "plain text",
+            ),
+        ];
+
+        for (action, expected_query) in cases {
+            for source in [ActivationSource::Enter, ActivationSource::Click] {
+                let InstalledSearchInvocation { invocation, route } =
+                    parse_installed_search_invocation(action.clone(), source)
+                        .expect("the shared Query Set handler outcome is representable");
+                assert_eq!(invocation.original_action, action);
+                assert_eq!(invocation.query_override, None);
+                assert_eq!(invocation.source, source);
+                let InstalledSearchRoute::QuerySet(outcome) = route else {
+                    panic!("saved Query Set action must retain the Query route");
+                };
+                assert_eq!(query_set_outcome_text(&outcome), Some(expected_query));
+            }
+        }
+
+        for action in [
+            saved_action("Raw LF", "query:line\nbreak", None),
+            saved_action("Raw CR", "query:line\rbreak", None),
+            saved_action(
+                "Decoded LF",
+                "query:prefix",
+                Some(r#"{"query":"line\nbreak"}"#),
+            ),
+            saved_action("Execute First", "queryexec:hash", None),
+            saved_action("Uninstalled tool", "mouse:settings", None),
+            saved_action("External", "launch-external", None),
+        ] {
+            assert!(
+                parse_installed_search_invocation(action, ActivationSource::Click).is_err(),
+                "unsupported or multiline action must not enter the installed catalog"
+            );
+        }
+
+        let hash = parse_installed_search_invocation(
+            saved_hash_action("Hash Open"),
+            ActivationSource::Click,
+        )
+        .expect("Hash Open remains installed");
+        assert!(matches!(hash.route, InstalledSearchRoute::HashOpen));
+    }
+
     #[test]
     fn launcher_results_follow_egui_enter_selection_and_reject_stale_rows() {
         let first = hash_action();
@@ -7518,8 +7791,10 @@ mod tests {
         let selected = results
             .resolve_action(rendered_generation, 1, "hash")
             .expect("the selected absolute row resolves in its current generation");
-        let invocation = parse_hash_search_invocation(selected, ActivationSource::Enter)
-            .expect("the persisted row resolves through the installed typed route");
+        let InstalledSearchInvocation { invocation, route } =
+            parse_installed_search_invocation(selected, ActivationSource::Enter)
+                .expect("the persisted row resolves through the installed typed route");
+        assert!(matches!(route, InstalledSearchRoute::HashOpen));
         assert_eq!(invocation.original_action, second);
         assert_eq!(invocation.source, ActivationSource::Enter);
 
@@ -7600,7 +7875,67 @@ mod tests {
     }
 
     #[test]
-    fn gpui_app_catalog_keeps_distinct_hash_arguments_and_omits_unsupported_rows() {
+    fn result_activation_requires_a_live_root_and_search_focus_for_enter() {
+        assert!(launcher_result_activation_is_current(
+            true,
+            true,
+            true,
+            false,
+            true,
+            LauncherResultActivationOrigin::ResultWidget,
+        ));
+        assert!(!launcher_result_activation_is_current(
+            true,
+            true,
+            true,
+            false,
+            true,
+            LauncherResultActivationOrigin::DeferredSearchEnter,
+        ));
+        assert!(launcher_result_activation_is_current(
+            true,
+            true,
+            true,
+            true,
+            true,
+            LauncherResultActivationOrigin::DeferredSearchEnter,
+        ));
+        assert!(!launcher_result_activation_is_current(
+            false,
+            true,
+            true,
+            true,
+            true,
+            LauncherResultActivationOrigin::ResultWidget,
+        ));
+        assert!(!launcher_result_activation_is_current(
+            true,
+            false,
+            true,
+            true,
+            true,
+            LauncherResultActivationOrigin::ResultWidget,
+        ));
+        assert!(!launcher_result_activation_is_current(
+            true,
+            true,
+            false,
+            true,
+            true,
+            LauncherResultActivationOrigin::ResultWidget,
+        ));
+        assert!(!launcher_result_activation_is_current(
+            true,
+            true,
+            true,
+            true,
+            false,
+            LauncherResultActivationOrigin::ResultWidget,
+        ));
+    }
+
+    #[test]
+    fn gpui_app_catalog_admits_query_set_and_keeps_distinct_hash_arguments() {
         let alpha = multi_launcher::actions::Action {
             label: "Alpha QMarker".into(),
             desc: "Hash generator".into(),
@@ -7613,15 +7948,25 @@ mod tests {
             action: "hash:open".into(),
             args: Some("beta argument".into()),
         };
+        let query_set = saved_action(
+            "Query Set QMarker",
+            "query:g05 outcome",
+            Some(r#"{"query":"  second β  "}"#),
+        );
         let unsupported = multi_launcher::actions::Action {
             label: "Unsupported QMarker".into(),
             desc: "Other feature".into(),
-            action: "query:settings".into(),
+            action: "queryexec:hash".into(),
             args: None,
         };
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
-                actions: vec![alpha.clone(), beta.clone(), unsupported.clone()],
+                actions: vec![
+                    alpha.clone(),
+                    beta.clone(),
+                    query_set.clone(),
+                    unsupported.clone(),
+                ],
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -7633,11 +7978,14 @@ mod tests {
             None,
         );
 
-        assert_eq!(catalog.actions, vec![alpha.clone(), beta.clone()]);
+        assert_eq!(
+            catalog.actions,
+            vec![alpha.clone(), beta.clone(), query_set.clone()]
+        );
         let composed = catalog.compose("app QMarker", Vec::new());
         assert_eq!(
             composed,
-            vec![alpha.clone(), beta.clone()],
+            vec![alpha.clone(), beta.clone(), query_set.clone()],
             "same command strings do not collapse actions with distinct arguments"
         );
         let mut results = LauncherSearchResults::default();
@@ -7652,15 +8000,20 @@ mod tests {
         let action = results
             .resolve_action(generation, index, "app QMarker")
             .expect("the current query, generation and absolute position resolve Beta");
-        let invocation = parse_hash_search_invocation(action, ActivationSource::Enter)
-            .expect("Beta resolves through the installed typed Hash Open route");
+        let InstalledSearchInvocation { invocation, route } =
+            parse_installed_search_invocation(action, ActivationSource::Enter)
+                .expect("Beta resolves through the installed typed Hash Open route");
+        assert!(matches!(route, InstalledSearchRoute::HashOpen));
         assert_eq!(invocation.original_action, beta);
         assert_eq!(invocation.source, ActivationSource::Enter);
         assert!(
             catalog.compose("", Vec::new()).is_empty(),
             "clearing GPUI Search keeps the existing blank result scope"
         );
-        assert_eq!(supported_hash_search_actions(vec![unsupported]), Vec::new());
+        assert_eq!(
+            supported_launcher_search_actions(vec![unsupported]),
+            Vec::new()
+        );
     }
 
     #[test]
@@ -7670,7 +8023,7 @@ mod tests {
         let unsupported = multi_launcher::actions::Action {
             label: "G05 Comp 東 Unsupported".into(),
             desc: "Other route".into(),
-            action: "query:settings".into(),
+            action: "queryexec:hash".into(),
             args: None,
         };
         let catalog =
@@ -7753,6 +8106,32 @@ mod tests {
         completion.apply_change(&catalog, &format!("{accepted}β"));
         assert!(completion.suggestions.is_empty());
         assert_eq!(completion.next_index, 0, "a user edit clears the accepted sequence");
+    }
+
+    #[test]
+    fn query_set_change_cannot_consume_a_pending_completion_receipt() {
+        let catalog = completion_catalog(
+            vec![
+                saved_hash_action("G05 Comp 東 Alpha"),
+                saved_hash_action("G05 Comp 東 Beta"),
+            ],
+            true,
+            None,
+        );
+        let mut completion = SearchCompletion::default();
+        completion.reset_for_query(&catalog, "app g05 comp 東");
+        assert_eq!(completion.suggestions.len(), 2);
+        let query = completion
+            .begin_replacement("app g05 comp 東")
+            .expect("the first suggestion creates a completion receipt");
+        assert_eq!(query, "app g05 comp 東 alpha");
+        assert!(completion.pending_change.is_some());
+
+        completion.clear_for_query_replacement();
+        completion.apply_change(&catalog, &query);
+        assert!(completion.suggestions.is_empty());
+        assert_eq!(completion.next_index, 0);
+        assert!(completion.pending_change.is_none());
     }
 
     #[test]
@@ -7870,19 +8249,21 @@ mod tests {
     }
 
     #[test]
-    fn search_activation_preserves_source_and_dispatches_hash_open_once() {
+    fn search_activation_preserves_source_and_dispatches_installed_routes_once() {
         let mut action = hash_action();
         action.args = Some("retained action arguments".into());
         assert_eq!(result_click_source(true), ActivationSource::Enter);
         assert_eq!(result_click_source(false), ActivationSource::Click);
         for source in [ActivationSource::Enter, ActivationSource::Click] {
-            let invocation = parse_hash_search_invocation(action.clone(), source).unwrap();
+            let InstalledSearchInvocation { invocation, route } =
+                parse_installed_search_invocation(action.clone(), source).unwrap();
+            assert!(matches!(route, InstalledSearchRoute::HashOpen));
             assert_eq!(invocation.original_action, action);
             assert_eq!(invocation.query_override, None);
             assert_eq!(invocation.source, source);
 
             let mut opened = 0;
-            let outcome = dispatch_hash_search_invocation(invocation, || {
+            let outcome = dispatch_hash_open(invocation, || {
                 opened += 1;
                 Ok(())
             })
@@ -7891,13 +8272,33 @@ mod tests {
             assert_eq!(outcome, CommandOutcome::default());
         }
 
+        let query_action = saved_action(
+            "Saved query",
+            "query:g05 outcome",
+            Some(r#"{"query":"  second β  "}"#),
+        );
+        for source in [ActivationSource::Enter, ActivationSource::Click] {
+            let InstalledSearchInvocation { invocation, route } =
+                parse_installed_search_invocation(query_action.clone(), source).unwrap();
+            assert_eq!(invocation.original_action, query_action);
+            assert_eq!(invocation.query_override, None);
+            assert_eq!(invocation.source, source);
+            let InstalledSearchRoute::QuerySet(outcome) = route else {
+                panic!("saved query must use the shared Query Set handler");
+            };
+            assert_eq!(
+                query_set_outcome_text(&outcome),
+                Some("g05 outcome   second β  ")
+            );
+        }
+
         let invalid = multi_launcher::actions::Action {
             label: "Not Hash".into(),
             desc: "Other route".into(),
-            action: "query:settings".into(),
+            action: "queryexec:hash".into(),
             args: None,
         };
-        assert!(parse_hash_search_invocation(invalid, ActivationSource::Click).is_err());
+        assert!(parse_installed_search_invocation(invalid, ActivationSource::Click).is_err());
     }
 
     #[test]
