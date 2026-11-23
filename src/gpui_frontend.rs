@@ -27,6 +27,7 @@ use gpui_kit::component::{
     button::Button,
     input::{Input, InputState, Textarea, TextareaState},
     label::Label,
+    scroll::ScrollableElement as _,
     searchable_list::SearchableListItem,
     select::{Select, SelectEvent, SelectState},
 };
@@ -5621,11 +5622,10 @@ impl Render for HashGeneratorWindow {
         let algorithm_name = algorithm.name();
 
         div()
-            .id("hash-generator-tool-scroll")
             .flex()
+            .flex_col()
             .size_full()
             .p(px(metrics.window_padding))
-            .overflow_y_scroll()
             .track_focus(&self.focus_handle)
             .key_context("HashGeneratorWindow")
             .on_action(cx.listener(|this, _: &CalculateHash, _, cx| {
@@ -5644,6 +5644,9 @@ impl Render for HashGeneratorWindow {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_none()
+                    .h_auto()
+                    .min_h_full()
                     .gap_y(px(metrics.item_spacing_y))
                     .w_full()
                     .p(px(metrics.panel_padding))
@@ -5875,6 +5878,11 @@ impl Render for HashGeneratorWindow {
                             }))
                     })),
             )
+            .overflow_y_scrollbar()
+            .id(format!(
+                "hash-generator-tool-scroll-{}",
+                self.mount_generation
+            ))
     }
 }
 
