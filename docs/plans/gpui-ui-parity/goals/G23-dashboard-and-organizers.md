@@ -1,6 +1,6 @@
 # G23 — Dashboard, Calendar, Todo, timers, and activity surfaces
 
-**Status: not started.** Checkpoints A–D are not started. Execute on the initiative's single branch. Preserve default egui and opt-in native GPUI.
+**Status: The Toast Log tail, Refresh, Close and OS handoff have scoped acceptance.** The native viewer is paired with the G05-C Help entries. Toast Log geometry and the larger Dashboard and organizer checkpoints remain pending. Execute on the initiative's single branch. Preserve default egui and opt-in native GPUI. [Toast Log evidence](../VALIDATION_LOG.md#g05g23-gpui-file-close-and-toast-log)
 
 ## Objective and dependencies
 

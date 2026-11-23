@@ -297,7 +297,7 @@ use crate::settings::{
     Settings,
 };
 use crate::settings_editor::SettingsEditor;
-use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
+use crate::toast_log::append_toast_log;
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::{
     RootFocusIntent, RootViewportCtx, RootWindowBridge, ViewportCtx, ViewportWake,

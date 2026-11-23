@@ -1,5 +1,5 @@
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
-use crate::toast_log::TOAST_LOG_FILE;
+use crate::toast_log::{TOAST_LOG_FILE, TOAST_LOG_TAIL_LINES, read_last_lines};
 use eframe::egui;
 
 #[derive(Default)]
@@ -10,17 +10,8 @@ pub struct ToastLogDialog {
 
 impl ToastLogDialog {
     pub fn open(&mut self) {
-        self.lines = Self::read_last_lines(TOAST_LOG_FILE, 20);
+        self.lines = read_last_lines(TOAST_LOG_FILE, TOAST_LOG_TAIL_LINES);
         self.open = true;
-    }
-
-    fn read_last_lines(path: &str, count: usize) -> Vec<String> {
-        let content = std::fs::read_to_string(path).unwrap_or_default();
-        let mut lines: Vec<String> = content.lines().map(|s| s.to_owned()).collect();
-        if lines.len() > count {
-            lines.drain(0..lines.len() - count);
-        }
-        lines
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, _app: &mut crate::gui::LauncherApp) {
@@ -57,7 +48,7 @@ impl ToastLogDialog {
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Refresh").clicked() {
-                            self.lines = Self::read_last_lines(TOAST_LOG_FILE, 20);
+                            self.lines = read_last_lines(TOAST_LOG_FILE, TOAST_LOG_TAIL_LINES);
                         }
                         if ui.button("Close").clicked() {
                             close = true;

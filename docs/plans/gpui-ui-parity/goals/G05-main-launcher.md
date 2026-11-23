@@ -2,6 +2,8 @@
 
 **Status:** Shared scoring and composition, Hash result activation, single-line history and list arrows, [pointer and traversal Tab completion](../gui/launcher.md#tab-completion), [saved Query Set activation](../gui/launcher.md#saved-query-set-activation), [cached command fallback](../gui/launcher.md#cached-command-fallback), [grid and page navigation](../gui/launcher.md#grid-and-page-navigation-baseline), [keypad navigation](../gui/launcher.md#physical-windows-keypad-navigation) and [Search Jump Mode](../gui/launcher.md#search-jump-mode) have scoped Windows and Rust evidence. Actual keypad hardware, explicit Num Lock states, wider Jump owners and acknowledged global invocation remain pending. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
 
+The first [Settings menu and bare typed entry](../gui/settings-main.md#first-native-settings-save) also passed the scoped checkpoint. File Close and both Toast Log actions have native and focused Rust evidence, with G23 ownership for the remaining viewer geometry. [File and Toast Log evidence](../VALIDATION_LOG.md#g05g23-gpui-file-close-and-toast-log)
+
 ## Objective and dependencies
 
 Recreate the complete launcher interaction in GPUI Kit: opening from the existing global trigger, editing a query, navigating the same results, invoking the same actions, and returning focus according to the existing policy. Preserve the application's compact working layout and command language while applying the agreed visual specification. A search box displaying plausible results is not this goal's acceptance result.

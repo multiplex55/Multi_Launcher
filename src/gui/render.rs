@@ -12393,18 +12393,8 @@ impl LauncherApp {
                         self.help_window.overlay_open = true;
                     }
                     if ui.button("Open Toast Log").clicked() && first_ui_pass {
-                        if std::fs::OpenOptions::new()
-                            .create(true)
-                            .write(true)
-                            .open(TOAST_LOG_FILE)
-                            .is_err()
-                        {
-                            self.report_error_message("launcher", "Failed to create log");
-                        } else if let Err(e) = open::that(TOAST_LOG_FILE) {
-                            self.report_error_message(
-                                "launcher",
-                                format!("Failed to open log: {e}"),
-                            );
+                        if let Err(error) = crate::toast_log::open_toast_log() {
+                            self.report_error_message("launcher", error.to_string());
                         }
                     }
                     if ui.button("View Toast Log").clicked() && first_ui_pass {

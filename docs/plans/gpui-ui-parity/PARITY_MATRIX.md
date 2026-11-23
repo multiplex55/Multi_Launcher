@@ -173,7 +173,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Timer Completion](gui/timer-completion.md) | TIMER-FINISHED-01 | G23 | Specified | Actual typed silent timer, completion and OK verified. Other modes and GPUI remain pending. |
 | [Notification Inbox](gui/notification-inbox.md) | INBOX-01–INBOX-02 | G23 | Specified | Actual generated timer fact, capture Off and disabled consent verified. Live capture and GPUI remain pending. |
 | [Activity Center](gui/activity-center.md) | ACTIVITY-01–ACTIVITY-02 | G23 | Specified | Source refresh, diagnostics and operation handoff mapped. Native and GPUI remain pending. |
-| [Toast History](gui/toast-history.md) | TOAST-HISTORY-01 | G23 | Specified | Native Help menu entry and internal viewer close observed. Tail, refresh and GPUI remain pending. |
+| [Toast History](gui/toast-history.md) | TOAST-HISTORY-01–TOAST-HISTORY-02 | G23 | In implementation | Native GPUI and egui verified the canonical tail and Close, with GPUI Refresh, compact scrolling and separate OS handoff evidenced. Utility geometry remains pending. |
 | [Stopwatch Plugin Settings](gui/plugin-settings-stopwatch.md) | STOPWATCH-SETTINGS-01 | G23 | Specified | Source built-in callback, live application and persistence mapped. Native and GPUI remain pending. |
 | [Weather](gui/dashboard-widget-weather_site.md) | DASH-WEATHER-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
 | [Pinned Commands](gui/dashboard-widget-pinned_commands.md) | DASH-PINNED-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |

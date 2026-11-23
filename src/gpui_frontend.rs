@@ -85,6 +85,7 @@ use multi_launcher::settings::{
     QueryResultsLayoutSettings, RememberedPresentation, UtilityDialogSizes,
     UtilityPresentations, UtilityToolKey,
 };
+use multi_launcher::toast_log;
 use multi_launcher::utility_geometry_binding::{
     CheckedNativeWindow, NativeGeometryBinding, NativeGeometrySlot, NativeGeometryStamp,
     NativeWindowMetrics, NativeWindowRect, native_window_metrics, new_native_geometry_slot,
@@ -467,6 +468,285 @@ impl SettingsEditorState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ToastLogReadReceipt {
+    session_id: u64,
+    request_id: u64,
+}
+
+#[derive(Default)]
+struct ToastLogViewerState {
+    open: bool,
+    rows: Vec<String>,
+    status: Option<String>,
+    session_id: u64,
+    next_request_id: u64,
+    pending: Option<ToastLogReadReceipt>,
+}
+
+impl ToastLogViewerState {
+    fn open(&mut self) -> Option<ToastLogReadReceipt> {
+        if self.open {
+            return None;
+        }
+        self.open = true;
+        self.rows.clear();
+        self.session_id = self.session_id.wrapping_add(1).max(1);
+        self.status = None;
+        self.begin_read()
+    }
+
+    fn begin_read(&mut self) -> Option<ToastLogReadReceipt> {
+        if !self.open {
+            return None;
+        }
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        let receipt = ToastLogReadReceipt {
+            session_id: self.session_id,
+            request_id: self.next_request_id,
+        };
+        self.pending = Some(receipt);
+        self.status = None;
+        Some(receipt)
+    }
+
+    fn finish_read(&mut self, receipt: ToastLogReadReceipt, rows: Vec<String>) -> bool {
+        if !self.open || self.pending != Some(receipt) || receipt.session_id != self.session_id {
+            return false;
+        }
+        self.rows = rows;
+        self.pending = None;
+        self.status = None;
+        true
+    }
+
+    fn close(&mut self) -> bool {
+        if !self.open {
+            return false;
+        }
+        self.open = false;
+        self.session_id = self.session_id.wrapping_add(1).max(1);
+        self.pending = None;
+        self.status = None;
+        true
+    }
+}
+
+#[derive(IntoElement)]
+struct LauncherMenuBar {
+    root: WeakEntity<RootWindow>,
+    action_context: FocusHandle,
+    settings_menu_focus_handle: FocusHandle,
+    toast_log_open_pending: bool,
+}
+
+impl RenderOnce for LauncherMenuBar {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let file_action_context = self.action_context.clone();
+        let file_root = self.root.clone();
+        let file_menu = Button::new("launcher-file-menu")
+            .label("File")
+            .dropdown_menu(move |menu, _, _| {
+                let action_context = file_action_context.clone();
+                menu.item(
+                    PopupMenuItem::new("Close Application")
+                        .action(Box::new(CloseApplication))
+                        .on_click(move |_, window, app| {
+                            action_context.dispatch_action(&CloseApplication, window, app);
+                        }),
+                )
+            })
+            .on_open_change(move |open, window, app| {
+                root_menu_open_change(&file_root, RootMenuKind::File, *open, window, app);
+            });
+
+        let settings_action_context = self.action_context.clone();
+        let settings_root = self.root.clone();
+        let settings_menu = Button::new("launcher-settings-menu")
+            .label("Settings")
+            .track_focus(&self.settings_menu_focus_handle)
+            .dropdown_menu(move |menu, _, _| {
+                let action_context = settings_action_context.clone();
+                menu.item(
+                    PopupMenuItem::new("Edit Settings")
+                        .action(Box::new(ToggleSettings))
+                        .on_click(move |_, window, app| {
+                            action_context.dispatch_action(&ToggleSettings, window, app);
+                        }),
+                )
+            })
+            .on_open_change(move |open, window, app| {
+                root_menu_open_change(&settings_root, RootMenuKind::Settings, *open, window, app);
+            });
+
+        let help_action_context = self.action_context;
+        let help_root = self.root;
+        let toast_log_open_pending = self.toast_log_open_pending;
+        let help_menu = Button::new("launcher-help-menu")
+            .label("Help")
+            .dropdown_menu(move |menu, _, _| {
+                let open_action_context = help_action_context.clone();
+                let view_action_context = help_action_context.clone();
+                menu.item(
+                    PopupMenuItem::new("Open Toast Log")
+                        .action(Box::new(OpenToastLog))
+                        .disabled(toast_log_open_pending)
+                        .on_click(move |_, window, app| {
+                            open_action_context.dispatch_action(&OpenToastLog, window, app);
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("View Toast Log")
+                        .action(Box::new(ViewToastLog))
+                        .on_click(move |_, window, app| {
+                            view_action_context.dispatch_action(&ViewToastLog, window, app);
+                        }),
+                )
+            })
+            .on_open_change(move |open, window, app| {
+                root_menu_open_change(&help_root, RootMenuKind::Help, *open, window, app);
+            });
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_x(px(6.0))
+            .child(file_menu)
+            .child(settings_menu)
+            .child(help_menu)
+    }
+}
+
+#[derive(IntoElement)]
+struct ToastLogViewerPanel {
+    root: WeakEntity<RootWindow>,
+    rows: Vec<String>,
+    reading: bool,
+    status: Option<String>,
+    width: f32,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+    palette: multi_launcher::gui::theme::SemanticPalette,
+    owner_focus_handle: FocusHandle,
+    close_focus_handle: FocusHandle,
+    scroll: ScrollHandle,
+}
+
+#[derive(Clone, Copy)]
+enum RootMenuKind {
+    File,
+    Settings,
+    Help,
+}
+
+fn root_menu_open_change(
+    root: &WeakEntity<RootWindow>,
+    menu: RootMenuKind,
+    open: bool,
+    window: &mut Window,
+    app: &mut App,
+) {
+    let _ = root.update(app, |root, cx| {
+        root.set_root_menu_open(menu, open, window, cx);
+    });
+}
+
+impl RenderOnce for ToastLogViewerPanel {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        let status = if self.reading {
+            Some("Refreshing Toast Log…".to_owned())
+        } else {
+            self.status
+        };
+        let metrics = self.metrics;
+        let footer_height = metrics.row_min_height + 2.0 * metrics.button_padding_y;
+        let reserved_height = 2.0 * metrics.window_padding
+            + 2.0 * metrics.panel_padding
+            + metrics.heading_text_size.max(metrics.line_height)
+            + metrics.line_height
+            + footer_height
+            + 3.0 * metrics.item_spacing_y;
+        let body_height =
+            toast_log_viewport_body_height(window.viewport_size().height.as_f32(), reserved_height);
+        let refresh_root = self.root.clone();
+        let close_root = self.root;
+        div()
+            .id("toast-log-viewer")
+            .track_focus(&self.owner_focus_handle)
+            .key_context("ToastLogViewer")
+            .flex()
+            .flex_col()
+            .gap_y(px(self.metrics.item_spacing_y))
+            .w(px(self.width))
+            .p(px(self.metrics.panel_padding))
+            .bg(appearance::to_hsla(self.palette.panel_surface))
+            .rounded(px(self.metrics.corner_radius))
+            .text_color(appearance::to_hsla(self.palette.primary_text))
+            .text_size(px(self.metrics.body_text_size))
+            .line_height(px(self.metrics.line_height))
+            .child(
+                Label::new("Toast Log")
+                    .text_size(px(metrics.heading_text_size))
+                    .line_height(px(metrics.line_height)),
+            )
+            .child(
+                div()
+                    .id("toast-log-lines")
+                    .flex()
+                    .flex_col()
+                    .gap_y(px(metrics.item_spacing_y))
+                    .w_full()
+                    .h(px(body_height))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .children(self.rows.into_iter().enumerate().map(|(index, line)| {
+                        Label::new(line)
+                            .id(format!("toast-log-line-{index}"))
+                            .line_height(px(metrics.line_height))
+                    })),
+            )
+            .child(
+                div()
+                    .h(px(metrics.line_height))
+                    .children(status.map(|message| {
+                        Label::new(message)
+                            .id("toast-log-status")
+                            .text_color(appearance::to_hsla(self.palette.warning))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_x(px(metrics.item_spacing_x))
+                    .child(
+                        Button::new("toast-log-refresh")
+                            .label("Refresh")
+                            .tab_stop(true)
+                            .on_click(move |_, _, app| {
+                                let _ = refresh_root.update(app, |root, cx| {
+                                    root.refresh_toast_log(cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("toast-log-close")
+                            .label("Close")
+                            .tab_stop(true)
+                            .track_focus(&self.close_focus_handle)
+                            .on_click(move |_, window, app| {
+                                let _ = close_root.update(app, |root, cx| {
+                                    root.close_toast_log_viewer(window, cx, true);
+                                });
+                            }),
+                    ),
+            )
+    }
+}
+
 #[derive(IntoElement)]
 struct SettingsEditorPanel {
     root: WeakEntity<RootWindow>,
@@ -771,6 +1051,9 @@ gpui_kit::actions!([
     ToggleSecondaryWindow,
     ToggleCoordinateHudProbe,
     ToggleSettings,
+    CloseApplication,
+    OpenToastLog,
+    ViewToastLog,
     OpenHashGenerator,
     SearchHistoryOlder,
     SearchHistoryNewer,
@@ -945,8 +1228,19 @@ struct RootWindow {
     settings_save_token: Option<multi_launcher::settings::QueryAutocompleteSaveToken>,
     settings_read_permit: Option<EffectPermit>,
     settings_close_after_terminal: bool,
+    file_menu_open: bool,
     settings_menu_open: bool,
-    settings_menu_previous_focus: Option<FocusHandle>,
+    help_menu_open: bool,
+    root_menu_previous_focus: Option<FocusHandle>,
+    root_menu_action_routed_focus: bool,
+    toast_log_external_open_pending: bool,
+    toast_log_external_open_error: Option<String>,
+    toast_log_viewer: ToastLogViewerState,
+    toast_log_return_focus: Option<FocusHandle>,
+    toast_log_return_scroll_offset: Option<Point<Pixels>>,
+    toast_log_focus_handle: FocusHandle,
+    toast_log_owner_focus_handle: FocusHandle,
+    toast_log_scroll: ScrollHandle,
     settings_focus_handle: FocusHandle,
     settings_owner_focus_handle: FocusHandle,
     settings_menu_focus_handle: FocusHandle,
@@ -2455,7 +2749,24 @@ fn root_tab_traversed_to_search(
         && !context_stack_has_primary(context_stack, "LauncherSearch")
         && !context_stack_has_primary(context_stack, "HashGeneratorWindow")
         && !context_stack_has_primary(context_stack, "SettingsEditor")
+        && !context_stack_has_primary(context_stack, "ToastLogViewer")
         && !context_stack_has_primary(context_stack, "PopupMenu")
+}
+
+fn root_menu_close_should_restore_focus(
+    another_menu_open: bool,
+    current_focus_is_live_in_root: bool,
+    accepted_panel_route: bool,
+    window_is_active: bool,
+) -> bool {
+    !another_menu_open
+        && !current_focus_is_live_in_root
+        && !accepted_panel_route
+        && window_is_active
+}
+
+fn toast_log_viewport_body_height(viewport_height: f32, reserved_height: f32) -> f32 {
+    (viewport_height - reserved_height).clamp(0.0, 240.0)
 }
 
 fn settings_return_focus_is_still_owned(
@@ -2471,6 +2782,44 @@ const SETTINGS_DIRTY_RESTART_STATUS: &str =
     "Save or Cancel the dirty Settings preference before restarting in egui.";
 const SETTINGS_COMMIT_CLOSE_STATUS: &str =
     "The Settings save is committing; Multi Launcher will close after it finishes.";
+const TOAST_LOG_OPEN_PENDING_STATUS: &str =
+    "Wait for the Toast Log open request to finish before closing Multi Launcher.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootCloseBlocker {
+    HashClipboard(&'static str),
+    HashFilePicker,
+    ToastLogOpen,
+    SettingsSave,
+}
+
+fn root_close_blocker(
+    clipboard_message: Option<&'static str>,
+    file_picker_pending: bool,
+    toast_log_open_pending: bool,
+    settings_save_pending: bool,
+) -> Option<RootCloseBlocker> {
+    if let Some(message) = clipboard_message {
+        Some(RootCloseBlocker::HashClipboard(message))
+    } else if file_picker_pending {
+        Some(RootCloseBlocker::HashFilePicker)
+    } else if toast_log_open_pending {
+        Some(RootCloseBlocker::ToastLogOpen)
+    } else if settings_save_pending {
+        Some(RootCloseBlocker::SettingsSave)
+    } else {
+        None
+    }
+}
+
+fn clear_toast_log_open_pending_status(status: &mut Option<String>) -> bool {
+    if status.as_deref() == Some(TOAST_LOG_OPEN_PENDING_STATUS) {
+        *status = None;
+        true
+    } else {
+        false
+    }
+}
 
 fn clear_stale_settings_restart_status(
     status: &mut Option<String>,
@@ -3460,6 +3809,59 @@ fn restart_blocker_message(blocker: RestartBlocker) -> String {
 }
 
 impl RootWindow {
+    fn set_root_menu_open(
+        &mut self,
+        menu: RootMenuKind,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_menu_open = self.file_menu_open || self.settings_menu_open || self.help_menu_open;
+        match menu {
+            RootMenuKind::File => self.file_menu_open = open,
+            RootMenuKind::Settings => self.settings_menu_open = open,
+            RootMenuKind::Help => self.help_menu_open = open,
+        }
+        if open && !was_menu_open {
+            self.root_menu_action_routed_focus = false;
+        }
+
+        let another_menu_open =
+            self.file_menu_open || self.settings_menu_open || self.help_menu_open;
+        if !open {
+            let current_focus_is_live_in_root = window
+                .focused(cx)
+                .is_some_and(|focus| self.focus_handle.contains(&focus, window));
+            if root_menu_close_should_restore_focus(
+                another_menu_open,
+                current_focus_is_live_in_root,
+                self.root_menu_action_routed_focus,
+                window.is_window_active(),
+            ) {
+                let last_live_focus = self
+                    .root_menu_previous_focus
+                    .clone()
+                    .filter(|focus| self.focus_handle.contains(focus, window));
+                if let Some(focus) = last_live_focus {
+                    focus.focus(window, cx);
+                }
+            }
+            if !another_menu_open {
+                self.root_menu_action_routed_focus = false;
+            }
+        }
+        cx.notify();
+    }
+
+    fn remember_live_root_menu_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = window
+            .focused(cx)
+            .filter(|focus| self.focus_handle.contains(focus, window))
+        {
+            self.root_menu_previous_focus = Some(focus);
+        }
+    }
+
     fn focus_docked_hash_resize_handle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hash_window.mode() != Some(HashPresentationMode::Docked)
             || self.hash_rehost_pending.load(Ordering::Acquire)
@@ -4572,6 +4974,152 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn open_toast_log_external(&mut self, cx: &mut Context<Self>) {
+        if self.toast_log_external_open_pending {
+            return;
+        }
+        let Some(operation) = self.restart_admission.admit() else {
+            self.toast_log_external_open_error =
+                Some("GPUI is closing; Toast Log cannot be opened.".to_owned());
+            cx.notify();
+            return;
+        };
+        self.toast_log_external_open_pending = true;
+        self.toast_log_external_open_error = None;
+        cx.notify();
+
+        let task = cx
+            .background_executor()
+            .spawn(async move { toast_log::open_toast_log() });
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = root.update(cx, |root, cx| {
+                root.toast_log_external_open_pending = false;
+                root.toast_log_external_open_error = result.err().map(|error| error.to_string());
+                clear_toast_log_open_pending_status(&mut root.restart_status);
+                cx.notify();
+            });
+            drop(operation);
+        })
+        .detach();
+    }
+
+    fn toast_log_viewer_scroll_item(&self) -> usize {
+        if self.settings_editor.open {
+            ROOT_SCROLL_SETTINGS_ITEM + 1
+        } else {
+            ROOT_SCROLL_SETTINGS_ITEM
+        }
+    }
+
+    fn open_toast_log_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.toast_log_viewer.open {
+            if self.help_menu_open {
+                self.root_menu_action_routed_focus = true;
+            }
+            self.root_scroll
+                .scroll_to_top_of_item(self.toast_log_viewer_scroll_item());
+            self.toast_log_focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
+        if self.restart_admission.is_fenced() {
+            return;
+        }
+
+        let return_focus = self
+            .root_menu_previous_focus
+            .clone()
+            .unwrap_or_else(|| self.query.focus_handle(cx));
+        let return_scroll_offset = self.root_scroll.offset();
+        let Some(receipt) = self.toast_log_viewer.open() else {
+            return;
+        };
+        if self.help_menu_open {
+            self.root_menu_action_routed_focus = true;
+        }
+        self.toast_log_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.toast_log_return_focus = Some(return_focus);
+        self.toast_log_return_scroll_offset = Some(return_scroll_offset);
+        self.root_scroll
+            .scroll_to_top_of_item(self.toast_log_viewer_scroll_item());
+        self.toast_log_focus_handle.focus(window, cx);
+        self.start_toast_log_read(receipt, cx);
+        cx.notify();
+    }
+
+    fn refresh_toast_log(&mut self, cx: &mut Context<Self>) {
+        if !self.toast_log_viewer.open {
+            return;
+        }
+        if self.restart_admission.is_fenced() {
+            self.toast_log_viewer.status =
+                Some("GPUI is closing; Toast Log refresh was not started.".to_owned());
+            cx.notify();
+            return;
+        }
+        let Some(receipt) = self.toast_log_viewer.begin_read() else {
+            return;
+        };
+        self.start_toast_log_read(receipt, cx);
+        cx.notify();
+    }
+
+    fn start_toast_log_read(&self, receipt: ToastLogReadReceipt, cx: &mut Context<Self>) {
+        let task = cx.background_executor().spawn(async move {
+            toast_log::read_last_lines(toast_log::TOAST_LOG_FILE, toast_log::TOAST_LOG_TAIL_LINES)
+        });
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let rows = task.await;
+            let _ = root.update(cx, |root, cx| {
+                if root.toast_log_viewer.finish_read(receipt, rows) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn close_toast_log_viewer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        restore_origin: bool,
+    ) {
+        if !self.toast_log_viewer.close() {
+            return;
+        }
+        let restore_origin = restore_origin
+            && self
+                .toast_log_owner_focus_handle
+                .contains_focused(window, cx)
+            && !self.restart_admission.is_fenced();
+        let return_focus = self.toast_log_return_focus.take();
+        let return_scroll_offset = self.toast_log_return_scroll_offset.take();
+        if restore_origin {
+            let return_focus_is_live = return_focus
+                .as_ref()
+                .is_some_and(|focus| self.focus_handle.contains(focus, window));
+            if return_focus_is_live {
+                if let Some(offset) = return_scroll_offset {
+                    self.root_scroll.set_offset(offset);
+                }
+                if let Some(focus) = return_focus {
+                    focus.focus(window, cx);
+                }
+            } else {
+                self.root_scroll
+                    .scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
+                self.query.focus_handle(cx).focus(window, cx);
+            }
+        }
+        self.toast_log_return_focus = None;
+        self.toast_log_return_scroll_offset = None;
+        cx.notify();
+    }
+
     fn open_settings_editor(
         &mut self,
         window: &mut Window,
@@ -4596,7 +5144,7 @@ impl RootWindow {
         let return_focus = match origin {
             SettingsOpenOrigin::Search => self.query.focus_handle(cx),
             SettingsOpenOrigin::Menu => self
-                .settings_menu_previous_focus
+                .root_menu_previous_focus
                 .clone()
                 .unwrap_or_else(|| self.settings_menu_focus_handle.clone()),
         };
@@ -4604,6 +5152,9 @@ impl RootWindow {
             drop(operation);
             return;
         };
+        if origin == SettingsOpenOrigin::Menu && self.settings_menu_open {
+            self.root_menu_action_routed_focus = true;
+        }
         self.settings_return_focus = Some(return_focus);
         self.settings_return_scroll_offset = Some(self.root_scroll.offset());
         self.fresh_search_enter = None;
@@ -4682,7 +5233,7 @@ impl RootWindow {
                 self.restart_admission.is_fenced(),
             );
             let menu_origin_was_settings = self
-                .settings_menu_previous_focus
+                .root_menu_previous_focus
                 .as_ref()
                 .is_some_and(|focus| self.settings_owner_focus_handle.contains(focus, window));
             let focus_settings_menu_after_close = settings_menu_close_needs_trigger_focus(
@@ -6854,27 +7405,40 @@ impl RootWindow {
     }
 
     fn request_quit(&mut self, cx: &mut Context<Self>) {
-        if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
-            self.restart_status = Some(message.to_owned());
-            cx.notify();
-            return;
+        let blocker = root_close_blocker(
+            hash_clipboard_close_message(self.hash_clipboard_pending.kind()),
+            self.hash_file_picker_pending.load(Ordering::Acquire),
+            self.toast_log_external_open_pending,
+            self.settings_editor.pending.is_some(),
+        );
+        match blocker {
+            Some(RootCloseBlocker::HashClipboard(message)) => {
+                self.restart_status = Some(message.to_owned());
+            }
+            Some(RootCloseBlocker::HashFilePicker) => {
+                self.restart_status = Some(
+                    "Finish or cancel the Hash Generator file picker before quitting Multi Launcher."
+                        .to_owned(),
+                );
+            }
+            Some(RootCloseBlocker::ToastLogOpen) => {
+                self.restart_status = Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
+            }
+            Some(RootCloseBlocker::SettingsSave) => {
+                if !self
+                    .settings_save_token
+                    .as_ref()
+                    .is_some_and(|token| token.request_cancel())
+                {
+                    self.settings_close_after_terminal = true;
+                    self.restart_status = Some(SETTINGS_COMMIT_CLOSE_STATUS.to_owned());
+                    cx.notify();
+                    return;
+                }
+            }
+            None => {}
         }
-        if self.hash_file_picker_pending.load(Ordering::Acquire) {
-            self.restart_status = Some(
-                "Finish or cancel the Hash Generator file picker before quitting Multi Launcher."
-                    .to_owned(),
-            );
-            cx.notify();
-            return;
-        }
-        if self.settings_editor.pending.is_some()
-            && !self
-                .settings_save_token
-                .as_ref()
-                .is_some_and(|token| token.request_cancel())
-        {
-            self.settings_close_after_terminal = true;
-            self.restart_status = Some(SETTINGS_COMMIT_CLOSE_STATUS.to_owned());
+        if blocker.is_some_and(|blocker| blocker != RootCloseBlocker::SettingsSave) {
             cx.notify();
             return;
         }
@@ -6889,10 +7453,10 @@ impl RootWindow {
 
 impl Render for RootWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.settings_menu_open {
-            // Preserve the actual focus under the popover. The menu itself
-            // takes focus, so this must be sampled before it opens.
-            self.settings_menu_previous_focus = window.focused(cx);
+        if !self.file_menu_open && !self.settings_menu_open && !self.help_menu_open {
+            // Popovers may transiently report no focus. Keep the last focus
+            // that was actually inside the live root focus tree.
+            self.remember_live_root_menu_focus(window, cx);
         }
         let resolved = appearance::current(cx);
         let metrics = resolved.metrics;
@@ -7250,24 +7814,12 @@ impl Render for RootWindow {
         } else {
             search_field.into_any_element()
         };
-        let settings_menu_action_context = self.focus_handle.clone();
-        let settings_menu = Button::new("launcher-settings-menu")
-            .label("Settings")
-            .track_focus(&self.settings_menu_focus_handle)
-            .dropdown_menu(move |menu, _, _| {
-                let action_context = settings_menu_action_context.clone();
-                menu.item(
-                    PopupMenuItem::new("Edit Settings")
-                        .action(Box::new(ToggleSettings))
-                        .on_click(move |_, window, app| {
-                            action_context.dispatch_action(&ToggleSettings, window, app);
-                        }),
-                )
-            })
-            .on_open_change(cx.listener(|this, open, _, cx| {
-                this.settings_menu_open = *open;
-                cx.notify();
-            }));
+        let root_menu_bar = LauncherMenuBar {
+            root: cx.entity().downgrade(),
+            action_context: self.focus_handle.clone(),
+            settings_menu_focus_handle: self.settings_menu_focus_handle.clone(),
+            toast_log_open_pending: self.toast_log_external_open_pending,
+        };
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
             root: cx.entity().downgrade(),
             draft: self.settings_editor.draft,
@@ -7282,6 +7834,18 @@ impl Render for RootWindow {
             settings_focus_handle: self.settings_focus_handle.clone(),
             settings_owner_focus_handle: self.settings_owner_focus_handle.clone(),
         });
+        let toast_log_viewer_panel = self.toast_log_viewer.open.then(|| ToastLogViewerPanel {
+            root: cx.entity().downgrade(),
+            rows: self.toast_log_viewer.rows.clone(),
+            reading: self.toast_log_viewer.pending.is_some(),
+            status: self.toast_log_viewer.status.clone(),
+            width: root_controls_width,
+            metrics,
+            palette,
+            owner_focus_handle: self.toast_log_owner_focus_handle.clone(),
+            close_focus_handle: self.toast_log_focus_handle.clone(),
+            scroll: self.toast_log_scroll.clone(),
+        });
         let root_controls = div()
             .flex()
             .flex_col()
@@ -7293,7 +7857,7 @@ impl Render for RootWindow {
             .text_color(appearance::to_hsla(palette.primary_text))
             .text_size(px(metrics.body_text_size))
             .line_height(px(metrics.line_height))
-            .child(settings_menu)
+            .child(root_menu_bar)
             .child(
                 Label::new("Search")
                     .text_size(px(metrics.heading_text_size))
@@ -7380,6 +7944,13 @@ impl Render for RootWindow {
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
             }))
+            .children(self.toast_log_external_open_error.as_ref().map(|error| {
+                Label::new(error.clone())
+                    .id("toast-log-open-error")
+                    .text_color(appearance::to_hsla(palette.error))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
             .child(
                 Button::new("quit-gpui")
                     .label("Quit Multi Launcher")
@@ -7423,6 +7994,7 @@ impl Render for RootWindow {
             .when(
                 !search_content_can_overflow
                     && settings_editor_panel.is_none()
+                    && toast_log_viewer_panel.is_none()
                     && docked_hash.is_none(),
                 |this| {
                     // Center the ordinary root only when its content fits.
@@ -7446,9 +8018,19 @@ impl Render for RootWindow {
             .track_focus(&self.focus_handle)
             .key_context("RootWindow")
             .capture_key_down(cx.listener(|root, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape"
-                    && event.keystroke.modifiers == Modifiers::default()
-                    && root.settings_editor.open
+                if event.keystroke.key != "escape"
+                    || event.keystroke.modifiers != Modifiers::default()
+                {
+                    return;
+                }
+                if root.toast_log_viewer.open
+                    && root
+                        .toast_log_owner_focus_handle
+                        .contains_focused(window, cx)
+                {
+                    root.close_toast_log_viewer(window, cx, true);
+                    cx.stop_propagation();
+                } else if root.settings_editor.open
                     && root
                         .settings_owner_focus_handle
                         .contains_focused(window, cx)
@@ -7492,6 +8074,15 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &ToggleSettings, window, cx| {
                 this.toggle_settings_editor(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &CloseApplication, _, cx| {
+                this.request_quit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenToastLog, _, cx| {
+                this.open_toast_log_external(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ViewToastLog, window, cx| {
+                this.open_toast_log_viewer(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &RestartWithEgui, window, cx| {
                 this.open_restart_confirmation(window, cx);
             }))
@@ -7501,6 +8092,13 @@ impl Render for RootWindow {
                 div()
                     .flex_shrink_0()
                     .child(settings_editor_panel),
+            );
+        }
+        if let Some(toast_log_viewer_panel) = toast_log_viewer_panel {
+            root_scroll = root_scroll.child(
+                div()
+                    .flex_shrink_0()
+                    .child(toast_log_viewer_panel),
             );
         }
         if let Some(docked_hash_frame) = docked_hash_frame {
@@ -9118,6 +9716,8 @@ pub(crate) fn run_foundation_window(
             let settings_focus_handle = cx.focus_handle();
             let settings_owner_focus_handle = cx.focus_handle();
             let settings_menu_focus_handle = cx.focus_handle();
+            let toast_log_focus_handle = cx.focus_handle();
+            let toast_log_owner_focus_handle = cx.focus_handle();
             let initial_result_layout =
                 search_catalog_for_root.resolve_result_layout("", enabled_plugins.as_ref());
             let mut initial_launcher_results = LauncherSearchResults::default();
@@ -9147,8 +9747,19 @@ pub(crate) fn run_foundation_window(
                 settings_save_token: None,
                 settings_read_permit: None,
                 settings_close_after_terminal: false,
+                file_menu_open: false,
                 settings_menu_open: false,
-                settings_menu_previous_focus: None,
+                help_menu_open: false,
+                root_menu_previous_focus: None,
+                root_menu_action_routed_focus: false,
+                toast_log_external_open_pending: false,
+                toast_log_external_open_error: None,
+                toast_log_viewer: ToastLogViewerState::default(),
+                toast_log_return_focus: None,
+                toast_log_return_scroll_offset: None,
+                toast_log_focus_handle,
+                toast_log_owner_focus_handle,
+                toast_log_scroll: ScrollHandle::new(),
                 settings_focus_handle,
                 settings_owner_focus_handle,
                 settings_menu_focus_handle,
@@ -9373,7 +9984,7 @@ pub(crate) fn run_foundation_window(
                         event.action.is_some(),
                         &event.context_stack,
                         root.search_input_is_live(window, cx),
-                        root.settings_menu_open,
+                        root.file_menu_open || root.settings_menu_open || root.help_menu_open,
                     ) {
                         root.accept_search_completion(false, window, cx);
                     }
@@ -9410,54 +10021,73 @@ pub(crate) fn run_foundation_window(
                 let clipboard_message =
                     hash_clipboard_close_message(clipboard_pending_for_root_close.kind());
                 let picker_pending = picker_pending_for_root_close.load(Ordering::Acquire);
-                let settings_pending = root_for_window_close
-                    .update(app, |root, _| root.settings_editor.pending.is_some())
-                    .unwrap_or(true);
-                if clipboard_message.is_none() && !picker_pending && !settings_pending {
-                    return true;
-                }
-                if clipboard_message.is_none() && !picker_pending && settings_pending {
-                    let cancellation_accepted = root_for_window_close
-                        .update(app, |root, cx| {
-                            let accepted = root
-                                .settings_save_token
-                                .as_ref()
-                                .is_some_and(|token| token.request_cancel());
-                            if accepted {
-                                root.restart_status = Some(
-                                    "Canceling the pending Settings save before closing Multi Launcher."
-                                        .to_owned(),
-                                );
-                            } else {
-                                root.settings_close_after_terminal = true;
-                                root.restart_status =
-                                    Some(SETTINGS_COMMIT_CLOSE_STATUS.to_owned());
-                            }
-                            cx.notify();
-                            accepted
-                        })
-                        .unwrap_or(false);
-                    if cancellation_accepted {
-                        return true;
-                    }
-                    // Preserve the commit-specific status set above. The
-                    // window must stay alive until an irrevocable write has
-                    // reached its terminal result.
+                let Ok(blocker) = root_for_window_close.update(app, |root, _| {
+                    root_close_blocker(
+                        clipboard_message,
+                        picker_pending,
+                        root.toast_log_external_open_pending,
+                        root.settings_editor.pending.is_some(),
+                    )
+                }) else {
                     return false;
+                };
+                match blocker {
+                    None => return true,
+                    Some(RootCloseBlocker::SettingsSave) => {
+                        let cancellation_accepted = root_for_window_close
+                            .update(app, |root, cx| {
+                                let accepted = root
+                                    .settings_save_token
+                                    .as_ref()
+                                    .is_some_and(|token| token.request_cancel());
+                                if accepted {
+                                    root.restart_status = Some(
+                                        "Canceling the pending Settings save before closing Multi Launcher."
+                                            .to_owned(),
+                                    );
+                                } else {
+                                    root.settings_close_after_terminal = true;
+                                    root.restart_status =
+                                        Some(SETTINGS_COMMIT_CLOSE_STATUS.to_owned());
+                                }
+                                cx.notify();
+                                accepted
+                            })
+                            .unwrap_or(false);
+                        if cancellation_accepted {
+                            return true;
+                        }
+                        // Preserve the commit-specific status set above. The
+                        // window must stay alive until an irrevocable write has
+                        // reached its terminal result.
+                        return false;
+                    }
+                    Some(RootCloseBlocker::HashClipboard(message)) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status = Some(message.to_owned());
+                            cx.notify();
+                        });
+                        false
+                    }
+                    Some(RootCloseBlocker::HashFilePicker) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status = Some(
+                                "Finish or cancel the Hash Generator file picker before closing Multi Launcher."
+                                    .to_owned(),
+                            );
+                            cx.notify();
+                        });
+                        false
+                    }
+                    Some(RootCloseBlocker::ToastLogOpen) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status =
+                                Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
+                            cx.notify();
+                        });
+                        false
+                    }
                 }
-                let _ = root_for_window_close.update(app, |root, cx| {
-                    root.restart_status = Some(if let Some(message) = clipboard_message {
-                        message.to_owned()
-                    } else if picker_pending {
-                        "Finish or cancel the Hash Generator file picker before closing Multi Launcher."
-                            .to_owned()
-                    } else {
-                        "Wait for the Settings preference save to finish before closing Multi Launcher."
-                            .to_owned()
-                    });
-                    cx.notify();
-                });
-                false
             });
             root
         }) {
@@ -9916,15 +10546,20 @@ mod tests {
         launcher_result_activation_is_current, launcher_result_grid_row_id, launcher_result_row_id,
         launcher_results_viewport_max_height, parse_installed_search_invocation,
         physical_keypad_selection_move, pointer_docked_resize_preview, query_set_outcome_text,
-        result_click_source, root_search_focus_is_current, root_tab_traversed_to_search,
+        result_click_source, root_menu_close_should_restore_focus,
+        root_search_focus_is_current, root_tab_traversed_to_search,
         search_jump_badge_placement, search_jump_result_target_id, search_jump_search_target_id, select_search_result_state,
         search_completion_session_is_current, search_input_is_current, selection_from_args,
         SettingsEditorState, SettingsReadAttempt,
-        clear_stale_settings_restart_status,
+        RootCloseBlocker, ToastLogViewerState,
+        clear_stale_settings_restart_status, clear_toast_log_open_pending_status,
         settings_menu_close_needs_trigger_focus, settings_return_focus_is_still_owned,
+        root_close_blocker,
         SETTINGS_DIRTY_RESTART_STATUS,
+        TOAST_LOG_OPEN_PENDING_STATUS,
         single_line_history_queries,
         supported_launcher_search_actions,
+        toast_log_viewport_body_height,
     };
     use gpui_kit::{Bounds, KeyContext, Pixels, point, px};
     use multi_launcher::{
@@ -11690,6 +12325,10 @@ mod tests {
             KeyContext::parse("RootWindow").expect("valid root key context"),
             KeyContext::parse("PopupMenu").expect("valid popup menu context"),
         ];
+        let toast_log = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("ToastLogViewer").expect("valid Toast Log viewer context"),
+        ];
         assert!(root_tab_traversed_to_search(
             "tab",
             Modifiers::default(),
@@ -11738,6 +12377,14 @@ mod tests {
             true,
             false,
         ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &toast_log,
+            true,
+            false,
+        ));
         assert!(root_tab_traversed_to_search(
             "tab",
             Modifiers::default(),
@@ -11770,6 +12417,116 @@ mod tests {
             false,
             false,
         ));
+    }
+
+    #[test]
+    fn root_menu_close_restores_only_after_the_final_menu_loses_live_focus() {
+        assert!(root_menu_close_should_restore_focus(
+            false, false, false, true
+        ));
+        assert!(
+            !root_menu_close_should_restore_focus(false, true, false, true),
+            "Kit focus inside Settings or Toast routing remains authoritative"
+        );
+        assert!(
+            !root_menu_close_should_restore_focus(true, false, false, true),
+            "closing one popup cannot steal focus while another root menu stays open"
+        );
+        assert!(
+            !root_menu_close_should_restore_focus(false, false, true, true),
+            "accepted Settings or Toast routing remains authoritative"
+        );
+        assert!(
+            !root_menu_close_should_restore_focus(false, false, false, false),
+            "a menu dismissal cannot reactivate an unfocused launcher window"
+        );
+    }
+
+    #[test]
+    fn toast_log_body_height_reserves_footer_and_caps_at_240_pixels() {
+        assert_eq!(toast_log_viewport_body_height(171.0, 112.0), 59.0);
+        assert_eq!(toast_log_viewport_body_height(500.0, 112.0), 240.0);
+        assert_eq!(toast_log_viewport_body_height(100.0, 112.0), 0.0);
+    }
+
+    #[test]
+    fn toast_log_viewer_preserves_rows_and_fences_stale_reads_by_session_and_request() {
+        let mut viewer = ToastLogViewerState::default();
+        viewer.rows = vec!["existing row".to_owned()];
+        let open_receipt = viewer.open().expect("opening starts a read");
+        assert!(viewer.rows.is_empty(), "a fresh session clears prior rows");
+
+        let refresh_receipt = viewer.begin_read().expect("Refresh starts a newer request");
+        assert!(viewer.rows.is_empty());
+        assert!(
+            !viewer.finish_read(open_receipt, vec!["stale open row".to_owned()]),
+            "an older request in the same session cannot replace the current Refresh"
+        );
+        assert!(viewer.rows.is_empty());
+        assert!(viewer.finish_read(refresh_receipt, vec!["refreshed row".to_owned()]));
+        assert_eq!(viewer.rows, vec!["refreshed row".to_owned()]);
+
+        let pending_close = viewer.begin_read().expect("a second refresh is admitted");
+        assert_eq!(
+            viewer.rows,
+            vec!["refreshed row".to_owned()],
+            "Refresh retains the current rows until its receipt"
+        );
+        assert!(viewer.close());
+        assert_eq!(viewer.rows, vec!["refreshed row".to_owned()]);
+        assert!(
+            !viewer.finish_read(pending_close, vec!["closed session row".to_owned()]),
+            "closing the viewer invalidates an outstanding read"
+        );
+        let reopened_receipt = viewer
+            .open()
+            .expect("reopening starts a fresh session read");
+        assert_ne!(reopened_receipt.session_id, open_receipt.session_id);
+        assert!(
+            viewer.rows.is_empty(),
+            "reopening clears rows from the old session"
+        );
+        assert!(
+            !viewer.finish_read(pending_close, vec!["old session row".to_owned()]),
+            "a completion from the prior session cannot replace retained rows"
+        );
+        assert!(viewer.rows.is_empty());
+        assert!(viewer.finish_read(reopened_receipt, vec!["new session row".to_owned()]));
+        assert_eq!(viewer.rows, vec!["new session row".to_owned()]);
+    }
+
+    #[test]
+    fn root_close_paths_wait_for_toast_log_open_and_clear_only_its_status() {
+        assert_eq!(
+            root_close_blocker(None, false, true, false),
+            Some(RootCloseBlocker::ToastLogOpen),
+            "the external OS handoff remains a close blocker until its receipt"
+        );
+        assert_eq!(
+            root_close_blocker(None, false, true, true),
+            Some(RootCloseBlocker::ToastLogOpen),
+            "the same pending predicate applies before a Settings save can claim close"
+        );
+        assert_eq!(
+            root_close_blocker(None, false, false, true),
+            Some(RootCloseBlocker::SettingsSave)
+        );
+        assert_eq!(
+            root_close_blocker(None, false, false, false),
+            None,
+            "read-only viewer requests do not delay close"
+        );
+
+        let mut status = Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
+        assert!(clear_toast_log_open_pending_status(&mut status));
+        assert_eq!(status, None);
+
+        let mut unrelated = Some("A Hash Generator operation is still pending.".to_owned());
+        assert!(!clear_toast_log_open_pending_status(&mut unrelated));
+        assert_eq!(
+            unrelated.as_deref(),
+            Some("A Hash Generator operation is still pending.")
+        );
     }
 
     #[test]
