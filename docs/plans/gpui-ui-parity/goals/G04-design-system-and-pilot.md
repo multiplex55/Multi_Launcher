@@ -1,6 +1,6 @@
 # G04 — Create reusable Kit components and one complete real GUI
 
-**Status: In implementation.** The shared Text/SHA-256 preview is verified. The first hosting checkpoint extracts the existing presentation preference and acknowledgement owner before creating the real Kit mounts. See the [Hash Generator record](../gui/hash-generator.md) and [checkpoints](../CHECKPOINTS.md).
+**Status: In implementation.** The real Kit Hash Generator has shared Text, File and Clipboard operations, native picker and streamed cancellation evidence, retained Dock and Pop Out, and persisted keyboard and pointer geometry. Windows capture exposed a clipped footer at shorter heights. Compact scrolling and focus, mixed DPI, hidden-root lifetime, Jump Mode and the remaining component acceptance are open. See the [Hash Generator record](../gui/hash-generator.md) and [checkpoints](../CHECKPOINTS.md).
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 

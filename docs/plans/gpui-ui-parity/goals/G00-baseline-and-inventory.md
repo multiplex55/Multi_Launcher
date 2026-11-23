@@ -1,6 +1,6 @@
 # G00 — Establish source, scope and durable execution records
 
-**Status: In implementation.** G00-A is complete. The scoped G00-C egui workflow has evidence. See [Checkpoints](../CHECKPOINTS.md) for receipts and the remaining inventory work.
+**Status: In implementation.** G00-A and the representative G00-C baseline are complete. Keyboard Search, an independently closed Hash popout, saved presentation, and later saved-action edits with reopen evidence are recorded. Native global invocation remains with G01. The remaining feature-specific baselines stay with their owners. See [Checkpoints](../CHECKPOINTS.md) for receipts and the remaining inventory work.
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 

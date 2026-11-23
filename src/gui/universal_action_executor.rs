@@ -763,7 +763,7 @@ pub(super) struct RadialRootState {
     last_search_query: String,
     suggestions: Vec<String>,
     autocomplete_index: usize,
-    query_history: super::query_history::QueryHistoryNavigator,
+    query_history: crate::launcher::query_history::QueryHistoryNavigator,
 }
 
 impl RadialRootState {

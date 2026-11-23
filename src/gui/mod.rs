@@ -105,7 +105,6 @@ mod mouse_form_host;
 #[cfg(feature = "qa-framebuffer-capture")]
 mod qa_framebuffer;
 mod qr_dialog;
-mod query_history;
 mod query_navigation;
 mod query_observation;
 mod radial_actions;
@@ -283,6 +282,7 @@ use crate::file_search::coordinator::SearchCoordinator;
 use crate::help_window::HelpWindow;
 use crate::history::{self, HISTORY_PINS_FILE, HistoryEntry, HistoryPin};
 use crate::indexer;
+use crate::launcher::query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 
 use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
@@ -316,7 +316,6 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
-use query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 #[cfg(test)]
 use search::{COMPLETION_REBUILD_DEBOUNCE, NOTE_SEARCH_DEBOUNCE};
 use serde::{Deserialize, Serialize};

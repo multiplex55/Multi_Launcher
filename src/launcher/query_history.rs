@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum QueryHistoryDirection {
+pub enum QueryHistoryDirection {
     Older,
     Newer,
 }
@@ -11,7 +11,7 @@ pub(crate) enum QueryHistoryDirection {
 /// The persisted history remains owned by `history`; this type takes one lazy
 /// snapshot when traversal starts and holds it only for that traversal.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct QueryHistoryNavigator {
+pub struct QueryHistoryNavigator {
     entries: Vec<String>,
     cursor: Option<usize>,
     draft: String,
@@ -44,7 +44,7 @@ impl QueryHistoryNavigator {
         hash
     }
 
-    pub(crate) fn synchronize(&mut self, actual_query: &str) {
+    pub fn synchronize(&mut self, actual_query: &str) {
         if self
             .expected_query
             .as_deref()
@@ -54,11 +54,7 @@ impl QueryHistoryNavigator {
         }
     }
 
-    pub(crate) fn older<I>(
-        &mut self,
-        current_query: &str,
-        snapshot: impl FnOnce() -> I,
-    ) -> Option<String>
+    pub fn older<I>(&mut self, current_query: &str, snapshot: impl FnOnce() -> I) -> Option<String>
     where
         I: IntoIterator<Item = String>,
     {
@@ -90,7 +86,7 @@ impl QueryHistoryNavigator {
         Some(query)
     }
 
-    pub(crate) fn newer(&mut self, current_query: &str) -> Option<String> {
+    pub fn newer(&mut self, current_query: &str) -> Option<String> {
         self.synchronize(current_query);
         let cursor = self.cursor?;
         if cursor > 0 {
@@ -106,7 +102,7 @@ impl QueryHistoryNavigator {
         }
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.entries.clear();
         self.cursor = None;
         self.draft.clear();

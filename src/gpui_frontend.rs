@@ -21,7 +21,7 @@ use std::{
 use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::IndexPath;
-use gpui_kit::component::input::{InputEvent, MoveDown};
+use gpui_kit::component::input::{InputEvent, MoveDown, MoveUp};
 use gpui_kit::component::{
     WindowExt as _,
     button::Button,
@@ -62,6 +62,7 @@ use multi_launcher::hash_generator::{
 use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
+use multi_launcher::launcher::query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 use multi_launcher::settings::{
     AppliedWindowSize, NativeWindowGeometry, PreferredWindowSize, RememberedPresentation,
     UtilityDialogSizes, UtilityPresentations, UtilityToolKey,
@@ -173,10 +174,20 @@ fn supported_hash_search_actions(actions: Vec<Action>) -> Vec<Action> {
         .collect()
 }
 
+fn single_line_history_queries<'a>(queries: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    queries
+        .into_iter()
+        .filter(|query| !query.contains(['\n', '\r']))
+        .map(str::to_owned)
+        .collect()
+}
+
 gpui_kit::actions!([
     ToggleSecondaryWindow,
     ToggleCoordinateHudProbe,
     OpenHashGenerator,
+    SearchHistoryOlder,
+    SearchHistoryNewer,
     FocusDockedHashResize,
     CalculateHash,
     DockHashGenerator,
@@ -334,6 +345,7 @@ struct RootWindow {
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_catalog: LauncherSearchCatalog,
     launcher_results: LauncherSearchResults,
+    query_history: QueryHistoryNavigator,
     fresh_search_enter: Option<FreshSearchEnter>,
     native_window: Option<NativeWindow>,
     focus_handle: FocusHandle,
@@ -407,6 +419,16 @@ impl LauncherSearchResults {
                 Some((index + 1).min(self.actions.len() - 1))
             }
             _ => Some(0),
+        };
+        let changed = self.selected != next;
+        self.selected = next;
+        changed
+    }
+
+    fn select_up(&mut self) -> bool {
+        let next = match self.selected {
+            Some(index) if index > 0 && index < self.actions.len() => Some(index - 1),
+            _ => None,
         };
         let changed = self.selected != next;
         self.selected = next;
@@ -787,6 +809,16 @@ fn root_search_focus_is_current(
         && current_mount_generation
             == (requested_mount_generation != 0).then_some(requested_mount_generation)
         && active_mount_generation == requested_mount_generation
+}
+
+fn search_input_is_current(
+    root_visible: bool,
+    lifecycle_active: bool,
+    root_window_matches: bool,
+    search_focused: bool,
+    window_active: bool,
+) -> bool {
+    root_visible && lifecycle_active && root_window_matches && search_focused && window_active
 }
 
 impl HashWindowState {
@@ -2866,7 +2898,7 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         self.fresh_search_enter = fresh_search_enter_marker(
-            self.query.focus_handle(cx).is_focused(window),
+            self.search_input_is_live(window, cx),
             event.keystroke.key.as_str(),
             event.keystroke.modifiers,
             event.is_held,
@@ -2881,11 +2913,72 @@ impl RootWindow {
         }
     }
 
-    fn move_search_selection_down(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
-        if !self.query.focus_handle(cx).is_focused(window) {
-            return false;
+    fn search_input_operation(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<EffectPermit> {
+        if !self.search_input_is_live(window, cx) {
+            return None;
         }
+        self.restart_admission.admit()
+    }
+
+    fn search_input_is_live(&self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let root_window_matches = self
+            .root_window
+            .is_some_and(|root| root.window_id() == window.window_handle().window_id());
+        search_input_is_current(
+            self.root_visibility.visible.load(Ordering::Acquire),
+            self.root_visibility.active.load(Ordering::Acquire),
+            root_window_matches,
+            self.query.focus_handle(cx).is_focused(window),
+            window.is_window_active(),
+        )
+    }
+
+    fn navigate_search_history(
+        &mut self,
+        direction: QueryHistoryDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(_operation) = self.search_input_operation(window, cx) else {
+            return false;
+        };
+        let current_query = self.query.read(cx).value().to_string();
+        self.query_history.synchronize(&current_query);
+        let next_query = match direction {
+            QueryHistoryDirection::Older => self.query_history.older(&current_query, || {
+                multi_launcher::history::with_history(|entries| {
+                    single_line_history_queries(entries.iter().map(|entry| entry.query.as_str()))
+                })
+                .unwrap_or_default()
+            }),
+            QueryHistoryDirection::Newer => self.query_history.newer(&current_query),
+        };
+        if let Some(next_query) = next_query {
+            self.query.update(cx, |state, cx| {
+                state.replace_all(next_query, window, cx);
+            });
+        }
+        true
+    }
+
+    fn move_search_selection_down(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let Some(_operation) = self.search_input_operation(window, cx) else {
+            return false;
+        };
         self.launcher_results.select_down();
+        cx.notify();
+        true
+    }
+
+    fn move_search_selection_up(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let Some(_operation) = self.search_input_operation(window, cx) else {
+            return false;
+        };
+        self.launcher_results.select_up();
         cx.notify();
         true
     }
@@ -2922,11 +3015,14 @@ impl RootWindow {
         let outcome = dispatch_hash_search_invocation(invocation, || {
             self.open_hash_generator_window(operation, window, cx)
         });
+        if outcome.is_ok() {
+            self.query_history.reset();
+        }
         self.hash_open_error = outcome
             .err()
             .map(|error| format!("Could not open Hash Generator: {error}"));
-        // Hash Open currently returns Keep/Skip policies. Preserve the existing
-        // launcher query, results, visibility and history for this route.
+        // Hash Open preserves the launcher query and results. A successful
+        // activation retires transient traversal without writing query history.
         cx.notify();
     }
 
@@ -4643,8 +4739,32 @@ impl Render for RootWindow {
             .child(
                 div()
                     .id("launcher-search-input")
+                    .key_context("LauncherSearch")
                     .capture_action(cx.listener(|root, _: &MoveDown, window, cx| {
                         if root.move_search_selection_down(window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|root, _: &MoveUp, window, cx| {
+                        if root.move_search_selection_up(window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|root, _: &SearchHistoryOlder, window, cx| {
+                        if root.navigate_search_history(
+                            QueryHistoryDirection::Older,
+                            window,
+                            cx,
+                        ) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|root, _: &SearchHistoryNewer, window, cx| {
+                        if root.navigate_search_history(
+                            QueryHistoryDirection::Newer,
+                            window,
+                            cx,
+                        ) {
                             cx.stop_propagation();
                         }
                     }))
@@ -6341,6 +6461,8 @@ pub(crate) fn run_foundation_window(
             KeyBinding::new("ctrl-g", OpenHashGenerator, Some("RootWindow")),
             KeyBinding::new("ctrl-shift-r", FocusDockedHashResize, Some("RootWindow")),
             KeyBinding::new("ctrl-shift-e", RestartWithEgui, Some("RootWindow")),
+            KeyBinding::new("ctrl-up", SearchHistoryOlder, Some("LauncherSearch")),
+            KeyBinding::new("ctrl-down", SearchHistoryNewer, Some("LauncherSearch")),
             KeyBinding::new("ctrl-enter", CalculateHash, Some("HashGeneratorWindow")),
             KeyBinding::new(
                 "ctrl-shift-d",
@@ -6437,6 +6559,8 @@ pub(crate) fn run_foundation_window(
                 enabled_capabilities: enabled_capabilities.clone(),
                 search_catalog: search_catalog_for_root,
                 launcher_results: LauncherSearchResults::default(),
+                query_history:
+                    QueryHistoryNavigator::default(),
                 fresh_search_enter: None,
                 native_window: None,
                 focus_handle,
@@ -6494,9 +6618,9 @@ pub(crate) fn run_foundation_window(
                      cx: &mut Context<RootWindow>| {
                         match event {
                             InputEvent::Change => {
-                                root.refresh_launcher_results(
-                                    query.read(cx).value().to_string(),
-                                );
+                                let query_text = query.read(cx).value().to_string();
+                                root.query_history.synchronize(&query_text);
+                                root.refresh_launcher_results(query_text);
                                 cx.notify();
                             }
                             InputEvent::PressEnter { secondary, shift } => {
@@ -6530,6 +6654,11 @@ pub(crate) fn run_foundation_window(
                                             &root_view,
                                             app,
                                             |root, window, cx| {
+                                                let Some(_search_operation) =
+                                                    root.search_input_operation(window, cx)
+                                                else {
+                                                    return;
+                                                };
                                                 let query_is_current = root
                                                     .query
                                                     .read(cx)
@@ -6539,10 +6668,6 @@ pub(crate) fn run_foundation_window(
                                                 if query_is_current
                                                     && root.launcher_results.generation
                                                         == generation
-                                                    && root
-                                                        .query
-                                                        .focus_handle(cx)
-                                                        .is_focused(window)
                                                 {
                                                     root.activate_launcher_result(
                                                         generation,
@@ -6999,14 +7124,15 @@ mod tests {
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
         is_fresh_plain_search_enter, keyboard_docked_resize_preview, launcher_result_row_id,
         parse_hash_search_invocation, pointer_docked_resize_preview, result_click_source,
-        root_search_focus_is_current, selection_from_args, supported_hash_search_actions,
+        root_search_focus_is_current, search_input_is_current, selection_from_args,
+        single_line_history_queries, supported_hash_search_actions,
     };
     use gpui_kit::{point, px};
-    use std::collections::HashMap;
     use multi_launcher::{
         hash_generator::{HashAlgorithm, parse_expected_digest},
         settings::RememberedPresentation,
     };
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::future::Future;
     use std::path::PathBuf;
@@ -7090,6 +7216,64 @@ mod tests {
             None,
             "replacement at the same query and index still rejects the old row generation"
         );
+    }
+
+    #[test]
+    fn launcher_search_arrows_navigate_and_invalidate_equal_query_rows() {
+        let first = hash_action();
+        let second = multi_launcher::actions::Action {
+            label: "Second installed route".into(),
+            desc: "Fixture row".into(),
+            action: "hash:open".into(),
+            args: Some("second argument".into()),
+        };
+        let actions = vec![first, second];
+        let mut results = LauncherSearchResults::default();
+        results.replace("app QMarker".into(), actions.clone());
+
+        assert!(!results.select_up());
+        assert!(results.select_down());
+        assert_eq!(results.selected, Some(0));
+        assert!(results.select_down());
+        assert_eq!(results.selected, Some(1));
+        assert!(!results.select_down());
+        assert_eq!(results.selected, Some(1));
+        assert!(results.select_up());
+        assert_eq!(results.selected, Some(0));
+        assert!(results.select_up());
+        assert_eq!(results.selected, None);
+        assert_eq!(results.enter_target("app QMarker"), None);
+
+        let previous_generation = results.generation;
+        assert!(results.select_down());
+        assert_eq!(results.selected, Some(0));
+        results.replace("app QMarker".into(), actions);
+        assert_eq!(results.generation, previous_generation + 1);
+        assert_eq!(results.selected, None);
+        assert_eq!(results.enter_target("app QMarker"), None);
+    }
+
+    #[test]
+    fn gpui_history_snapshot_preserves_single_line_unicode_and_filters_newlines() {
+        assert_eq!(
+            single_line_history_queries([
+                " app QMarker 東京 ",
+                "query\nwith line break",
+                "query\rwith carriage return",
+                "hash",
+            ]),
+            vec![" app QMarker 東京 ", "hash"]
+        );
+    }
+
+    #[test]
+    fn search_history_actions_require_the_visible_live_focused_root() {
+        assert!(search_input_is_current(true, true, true, true, true));
+        assert!(!search_input_is_current(false, true, true, true, true));
+        assert!(!search_input_is_current(true, false, true, true, true));
+        assert!(!search_input_is_current(true, true, false, true, true));
+        assert!(!search_input_is_current(true, true, true, false, true));
+        assert!(!search_input_is_current(true, true, true, true, false));
     }
 
     #[test]

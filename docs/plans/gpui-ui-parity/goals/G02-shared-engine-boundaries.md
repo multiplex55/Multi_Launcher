@@ -1,6 +1,6 @@
 # G02 — Extract authoritative operations without changing egui behavior
 
-**Status: In implementation.** The [source ownership map](../CORE_CONTRACTS.md) specifies the first G02-B extraction. The existing egui behavior remains the baseline. Shared-session verification and GPUI routing are pending.
+**Status: In implementation.** Both frontends use the verified shared Hash session and typed Hash handler, canonical settings and action readers, and shared read-only search composition. The existing egui behavior remains the baseline. The other command outcomes, broader service ownership and feature-specific adapters remain in scope. See the [source ownership map](../CORE_CONTRACTS.md) and [validation log](../VALIDATION_LOG.md).
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
