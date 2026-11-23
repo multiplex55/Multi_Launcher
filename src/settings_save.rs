@@ -4,7 +4,7 @@ use crate::gui::LauncherApp;
 use crate::hotkey::reconfiguration::{
     AppliedHotkeyReconfiguration, HotkeyApplySubmissionError, HotkeyReconfigurationError,
 };
-use crate::settings::Settings;
+use crate::settings::{QueryAutocompleteSaveToken, Settings};
 use crate::settings::utility_dialog_sizes::{
     UtilitySizeAcknowledgement, UtilitySizeMutation, UtilitySizePreference, UtilitySizeRevision,
     UtilityToolKey, persist_mutation,
@@ -679,6 +679,10 @@ struct WorkerRegistryState {
     shutdown_worker_panics: Vec<String>,
     shutdown_close_preference_failures: Vec<String>,
     shutdown_final_utility_size_enqueue_failures: Vec<(UtilityToolKey, String)>,
+    query_autocomplete_next_id: u64,
+    query_autocomplete_pending: HashMap<u64, QueryAutocompleteSaveToken>,
+    query_autocomplete_failures: HashMap<u64, String>,
+    query_autocomplete_shutdown_failures: Vec<(u64, String)>,
     utility_sizes_path: Option<String>,
     utility_sizes_next_revision: HashMap<UtilityToolKey, u64>,
     utility_sizes_latest_revision: HashMap<UtilityToolKey, UtilitySizeRevision>,
@@ -721,6 +725,7 @@ pub(crate) struct UtilitySizeShutdownFailure {
 pub struct SettingsSaveShutdownReceipt {
     utility_size_failures: Vec<UtilitySizeShutdownFailure>,
     utility_presentation_failures: Vec<(UtilityToolKey, u64, String)>,
+    query_autocomplete_failures: Vec<(u64, String)>,
     worker_panics: Vec<String>,
     close_preference_failures: Vec<String>,
     final_utility_size_enqueue_failures: Vec<(UtilityToolKey, String)>,
@@ -730,6 +735,7 @@ impl SettingsSaveShutdownReceipt {
     pub fn is_clean(&self) -> bool {
         self.utility_size_failures.is_empty()
             && self.utility_presentation_failures.is_empty()
+            && self.query_autocomplete_failures.is_empty()
             && self.worker_panics.is_empty()
             && self.close_preference_failures.is_empty()
             && self.final_utility_size_enqueue_failures.is_empty()
@@ -749,6 +755,11 @@ impl SettingsSaveShutdownReceipt {
             failures.push(format!(
                 "{} presentation revision {revision}: {error}",
                 key.as_str()
+            ));
+        }
+        for (request, error) in &self.query_autocomplete_failures {
+            failures.push(format!(
+                "query autocomplete save request {request}: {error}"
             ));
         }
         for error in &self.close_preference_failures {
@@ -821,6 +832,10 @@ impl Default for SettingsSaveWorkerRegistry {
                 shutdown_worker_panics: Vec::new(),
                 shutdown_close_preference_failures: Vec::new(),
                 shutdown_final_utility_size_enqueue_failures: Vec::new(),
+                query_autocomplete_next_id: 0,
+                query_autocomplete_pending: HashMap::new(),
+                query_autocomplete_failures: HashMap::new(),
+                query_autocomplete_shutdown_failures: Vec::new(),
                 utility_sizes_path: None,
                 utility_sizes_next_revision: HashMap::new(),
                 utility_sizes_latest_revision: HashMap::new(),
@@ -850,6 +865,112 @@ impl Default for SettingsSaveWorkerRegistry {
 }
 
 impl SettingsSaveWorkerRegistry {
+    /// Read the Search & Results baseline on a registered Settings worker.
+    /// The caller owns the typed receipt and keeps any admission it needs
+    /// until this receiver settles.
+    pub fn begin_query_autocomplete_read(
+        &self,
+        settings_path: String,
+    ) -> Result<Receiver<Result<bool, String>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        self.spawn(move || {
+            let result = Settings::read_current(&settings_path)
+                .map(|settings| settings.query_autocomplete)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("could not start the Settings baseline reader: {error}"))?;
+        Ok(receiver)
+    }
+
+    /// Save one Search & Results preference on the shared Settings writer
+    /// registry. The returned receiver carries the terminal store
+    /// acknowledgement to the owning frontend.
+    pub fn begin_query_autocomplete_save(
+        &self,
+        settings_path: String,
+        request: crate::settings::QueryAutocompleteSaveRequest,
+    ) -> Result<
+        (
+            Receiver<
+            Result<
+                crate::settings::QueryAutocompleteSaveAcknowledgement,
+                crate::settings::QueryAutocompleteSaveError,
+            >,
+            >,
+            QueryAutocompleteSaveToken,
+        ),
+        String,
+    > {
+        let token = {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !state.accepting {
+                return Err("launcher is shutting down".to_owned());
+            }
+            let id = state
+                .query_autocomplete_next_id
+                .checked_add(1)
+                .ok_or_else(|| "Settings save request identity is exhausted".to_owned())?;
+            state.query_autocomplete_next_id = id;
+            let token = QueryAutocompleteSaveToken::new(id);
+            state.query_autocomplete_pending.insert(id, token.clone());
+            token
+        };
+        let (sender, receiver) = mpsc::channel();
+        let registry = self.clone();
+        let worker_token = token.clone();
+        if let Err(error) = self.spawn(move || {
+            let result = Settings::save_query_autocomplete_checked_cancellable(
+                &settings_path,
+                request,
+                &worker_token,
+            );
+            registry.complete_query_autocomplete_save(worker_token.id(), &result);
+            let _ = sender.send(result);
+        }) {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .query_autocomplete_pending
+                .remove(&token.id());
+            return Err(format!("could not start the Settings preference writer: {error}"));
+        }
+        Ok((receiver, token))
+    }
+
+    fn complete_query_autocomplete_save(
+        &self,
+        request_id: u64,
+        result: &Result<
+            crate::settings::QueryAutocompleteSaveAcknowledgement,
+            crate::settings::QueryAutocompleteSaveError,
+        >,
+    ) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.query_autocomplete_pending.remove(&request_id);
+        if let Err(error) = result
+            && !matches!(error, crate::settings::QueryAutocompleteSaveError::Cancelled)
+        {
+            state
+                .query_autocomplete_failures
+                .insert(request_id, error.to_string());
+        }
+    }
+
+    pub fn acknowledge_query_autocomplete_save(&self, request_id: u64) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .query_autocomplete_failures
+            .remove(&request_id);
+    }
+
     pub fn reverse_restart_preflight(&self) -> Result<(), String> {
         let state = self
             .0
@@ -1393,10 +1514,21 @@ impl SettingsSaveWorkerRegistry {
     }
 
     pub fn begin_shutdown(&self) {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .accepting = false;
+        let pending = {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.accepting = false;
+            state
+                .query_autocomplete_pending
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for token in pending {
+            token.request_cancel();
+        }
     }
 
     pub fn join_all(&self) {
@@ -1522,6 +1654,24 @@ impl SettingsSaveWorkerRegistry {
             tracing::error!(tool = key.as_str(), revision, %error, "utility presentation remains unsaved at shutdown");
         }
 
+        let query_autocomplete_failures = {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut failures = state
+                .query_autocomplete_failures
+                .iter()
+                .map(|(request_id, error)| (*request_id, error.clone()))
+                .collect::<Vec<_>>();
+            failures.sort_by_key(|(request_id, _)| *request_id);
+            state.query_autocomplete_shutdown_failures = failures.clone();
+            failures
+        };
+        for (request_id, error) in &query_autocomplete_failures {
+            tracing::error!(request_id, %error, "query autocomplete Settings write did not complete successfully at shutdown");
+        }
+
         let receipt = {
             let state = self
                 .0
@@ -1531,6 +1681,9 @@ impl SettingsSaveWorkerRegistry {
                 utility_size_failures: state.utility_sizes_shutdown_failures.clone(),
                 utility_presentation_failures: state
                     .utility_presentations_shutdown_failures
+                    .clone(),
+                query_autocomplete_failures: state
+                    .query_autocomplete_shutdown_failures
                     .clone(),
                 worker_panics: state.shutdown_worker_panics.clone(),
                 close_preference_failures: state.shutdown_close_preference_failures.clone(),
@@ -2538,6 +2691,24 @@ mod tests {
 
     fn save_path(root: &Path) -> String {
         root.join("settings.json").to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn settings_baseline_read_is_registered_and_returns_the_current_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let mut settings = Settings::default();
+        settings.query_autocomplete = false;
+        settings.save(&path).unwrap();
+
+        let workers = SettingsSaveWorkerRegistry::default();
+        let receipt = workers
+            .begin_query_autocomplete_read(path)
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(receipt.unwrap(), false);
+        assert!(workers.join_all_checked().is_clean());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, mpsc::TryRecvError,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     task::{Context as FutureContext, Poll, Waker},
@@ -20,6 +20,7 @@ use std::{
 
 use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::base::Disableable;
+use gpui_kit::base::{Checkbox, CheckboxIndicator, CheckboxState};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{
     IndentInline, InputEvent, MoveDown, MoveLeft, MovePageDown, MovePageUp, MoveRight, MoveUp,
@@ -29,6 +30,7 @@ use gpui_kit::component::{
     button::Button,
     input::{Input, InputState, Textarea, TextareaState},
     label::Label,
+    menu::{DropdownMenu, PopupMenuItem},
     scroll::ScrollableElement as _,
     searchable_list::SearchableListItem,
     select::{Select, SelectEvent, SelectState},
@@ -55,9 +57,9 @@ use multi_launcher::clipboard_modify::clipboard::{
 };
 use multi_launcher::commands::handlers::{handle_hash_generator, handle_query};
 use multi_launcher::commands::{
-    ActivationSource, Command, CommandInvocation, CommandOutcome, FavoriteLogPolicy,
-    HashGeneratorCommand, HistoryPolicy, PendingQueryPolicy, QueryCommand, QueryPolicy,
-    ResultsPolicy, VisibilityPolicy, parse_action, parse_command,
+    ActivationSource, Command, CommandInvocation, CommandOutcome, DialogCommand,
+    FavoriteLogPolicy, HashGeneratorCommand, HistoryPolicy, PendingQueryPolicy, QueryCommand,
+    QueryPolicy, ResultsPolicy, VisibilityPolicy, parse_action, parse_command,
 };
 use multi_launcher::coordinate_tool::{
     CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
@@ -134,17 +136,24 @@ impl LauncherSearchCatalog {
         startup: LauncherSearchStartup,
         enabled_plugins: Option<&HashSet<String>>,
     ) -> Self {
+        let settings_plugin = multi_launcher::plugins::settings::SettingsPlugin;
         // Keep only persisted actions that the installed typed activation
-        // boundary can execute without changing their Search payload.
+        // boundary can execute without changing their Search payload. Saved
+        // typed actions retain the shared local-action admission semantics.
         let actions = supported_launcher_search_actions(startup.actions);
         let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
-        let commands = if enabled_plugins
+        let mut commands = if enabled_plugins
             .is_none_or(|enabled| enabled.contains(hash_generator.name()))
         {
             supported_launcher_search_actions(hash_generator.commands())
         } else {
             Vec::new()
         };
+        // Installed command labels and completion fallbacks follow plugin
+        // enablement. Search capability gates provider rows at query time.
+        if enabled_plugins.is_none_or(|enabled| enabled.contains(settings_plugin.name())) {
+            commands.extend(supported_launcher_search_actions(settings_plugin.commands()));
+        }
         let cached_entries = actions.iter().map(CachedSearchEntry::from_action).collect();
         let filter_metadata = actions
             .iter()
@@ -264,6 +273,348 @@ struct PendingCompletionChange {
     next_index: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SettingsSaveAttempt {
+    id: u64,
+    expected_baseline: bool,
+    desired: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SettingsReadAttempt {
+    id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettingsRestartDraft {
+    open: bool,
+    available: bool,
+    baseline: bool,
+    draft: bool,
+    read_pending: bool,
+    pending_request: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsOpenOrigin {
+    Search,
+    Menu,
+}
+
+struct SettingsEditorState {
+    open: bool,
+    available: bool,
+    baseline: bool,
+    draft: bool,
+    status: Option<String>,
+    read_pending: Option<SettingsReadAttempt>,
+    next_read_id: u64,
+    pending: Option<SettingsSaveAttempt>,
+    next_request_id: u64,
+}
+
+impl SettingsEditorState {
+    fn new(startup_value: bool) -> Self {
+        Self {
+            open: false,
+            available: true,
+            baseline: startup_value,
+            draft: startup_value,
+            status: None,
+            read_pending: None,
+            next_read_id: 0,
+            pending: None,
+            next_request_id: 0,
+        }
+    }
+
+    fn begin_read(&mut self) -> Option<SettingsReadAttempt> {
+        if self.open || self.read_pending.is_some() || self.pending.is_some() {
+            return None;
+        }
+        self.next_read_id = self.next_read_id.wrapping_add(1).max(1);
+        let attempt = SettingsReadAttempt {
+            id: self.next_read_id,
+        };
+        self.open = true;
+        self.available = false;
+        self.read_pending = Some(attempt);
+        self.pending = None;
+        self.status = Some("Reading current Settings…".to_owned());
+        Some(attempt)
+    }
+
+    fn open_with_baseline(&mut self, baseline: bool) {
+        self.open = true;
+        self.available = true;
+        self.baseline = baseline;
+        self.draft = baseline;
+        self.status = None;
+        self.read_pending = None;
+        self.pending = None;
+    }
+
+    fn open_unavailable(&mut self, message: String) {
+        self.open = true;
+        self.available = false;
+        self.draft = self.baseline;
+        self.status = Some(message);
+        self.read_pending = None;
+        self.pending = None;
+    }
+
+    fn finish_read(
+        &mut self,
+        attempt: SettingsReadAttempt,
+        result: Result<bool, String>,
+    ) -> bool {
+        if self.read_pending != Some(attempt) {
+            return false;
+        }
+        match result {
+            Ok(baseline) => self.open_with_baseline(baseline),
+            Err(error) => self.open_unavailable(format!(
+                "Could not read the current Settings value: {error}"
+            )),
+        }
+        true
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.available && self.draft != self.baseline
+    }
+
+    fn begin_save(&mut self) -> Option<SettingsSaveAttempt> {
+        if !self.open
+            || !self.available
+            || self.read_pending.is_some()
+            || self.pending.is_some()
+            || !self.is_dirty()
+        {
+            return None;
+        }
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        let attempt = SettingsSaveAttempt {
+            id: self.next_request_id,
+            expected_baseline: self.baseline,
+            desired: self.draft,
+        };
+        self.pending = Some(attempt);
+        self.status = None;
+        Some(attempt)
+    }
+
+    fn fail_to_start(&mut self, request_id: u64, message: String) {
+        if self.pending.is_some_and(|pending| pending.id == request_id) {
+            self.pending = None;
+            self.status = Some(message);
+        }
+    }
+
+    fn finish_save(
+        &mut self,
+        request_id: u64,
+        result: Result<
+            multi_launcher::settings::QueryAutocompleteSaveAcknowledgement,
+            multi_launcher::settings::QueryAutocompleteSaveError,
+        >,
+    ) -> Option<bool> {
+        let pending = self.pending.filter(|pending| pending.id == request_id)?;
+        self.pending = None;
+        match result {
+            Ok(acknowledgement) if acknowledgement.value() == pending.desired => {
+                self.baseline = acknowledgement.value();
+                self.draft = acknowledgement.value();
+                self.status = Some("Settings saved.".to_owned());
+                Some(acknowledgement.value())
+            }
+            Ok(acknowledgement) => {
+                self.status = Some(format!(
+                    "Settings acknowledged {} instead of the requested value {}.",
+                    acknowledgement.value(),
+                    pending.desired
+                ));
+                None
+            }
+            Err(error) => {
+                self.status = Some(format!("Could not save Settings: {error}"));
+                None
+            }
+        }
+    }
+
+    fn cancel_idle(&mut self) -> bool {
+        if self.pending.is_some() || self.read_pending.is_some() {
+            return false;
+        }
+        self.draft = self.baseline;
+        self.open = false;
+        self.available = true;
+        self.status = None;
+        self.read_pending = None;
+        true
+    }
+
+    fn restart_draft(&self) -> SettingsRestartDraft {
+        SettingsRestartDraft {
+            open: self.open,
+            available: self.available,
+            baseline: self.baseline,
+            draft: self.draft,
+            read_pending: self.read_pending.is_some(),
+            pending_request: self.pending.map(|pending| pending.id),
+        }
+    }
+}
+
+#[derive(IntoElement)]
+struct SettingsEditorPanel {
+    root: WeakEntity<RootWindow>,
+    draft: bool,
+    saving: bool,
+    reading: bool,
+    available: bool,
+    dirty: bool,
+    status: Option<String>,
+    width: f32,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+    palette: multi_launcher::gui::theme::SemanticPalette,
+    settings_focus_handle: FocusHandle,
+    settings_owner_focus_handle: FocusHandle,
+}
+
+impl RenderOnce for SettingsEditorPanel {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let busy = self.saving || self.reading;
+        let checkbox_disabled = busy || !self.available;
+        let save_disabled = checkbox_disabled || !self.dirty;
+        let status = if self.saving {
+            Some("Saving Settings…".to_owned())
+        } else if self.reading {
+            Some("Reading current Settings…".to_owned())
+        } else {
+            self.status
+        };
+        let status_color = if self.saving || self.reading {
+            self.palette.warning
+        } else if !self.available || self.dirty {
+            self.palette.error
+        } else {
+            self.palette.success
+        };
+
+        let checkbox_root = self.root.clone();
+        let checkbox = Checkbox::new("settings-query-autocomplete")
+            .checked(self.draft)
+            .track_focus(&self.settings_focus_handle)
+            .disabled(checkbox_disabled)
+            .accessibility_label("Enable query autocomplete")
+            .on_change(move |state, _, _, app| {
+                let _ = checkbox_root.update(app, |root, cx| {
+                    if root.settings_editor.read_pending.is_some()
+                        || root.settings_editor.pending.is_some()
+                        || !root.settings_editor.available
+                    {
+                        return;
+                    }
+                    root.settings_editor.draft = state == CheckboxState::Checked;
+                    root.settings_editor.status = None;
+                    clear_stale_settings_restart_status(
+                        &mut root.restart_status,
+                        !root.settings_editor.is_dirty(),
+                    );
+                    cx.notify();
+                });
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_x(px(self.metrics.item_spacing_x))
+                    .child(
+                        CheckboxIndicator::new()
+                            .checked(self.draft)
+                            .size(px(18.0))
+                            .rounded(px(3.0))
+                            .border_1()
+                            .border_color(appearance::to_hsla(self.palette.control_border))
+                            .when(self.draft, |indicator| {
+                                indicator
+                                    .bg(appearance::to_hsla(self.palette.accent))
+                                    .text_color(appearance::to_hsla(self.palette.primary_text))
+                            })
+                            .text_size(px(self.metrics.small_text_size))
+                            .items_center()
+                            .justify_center()
+                            .child(if self.draft { "✓" } else { "" }),
+                    )
+                    .child(Label::new("Enable query autocomplete")),
+            );
+
+        let save_root = self.root.clone();
+        let cancel_root = self.root;
+        div()
+            .id("settings-editor")
+            .track_focus(&self.settings_owner_focus_handle)
+            .key_context("SettingsEditor")
+            .flex()
+            .flex_col()
+            .gap_y(px(self.metrics.item_spacing_y))
+            .w(px(self.width))
+            .p(px(self.metrics.panel_padding))
+            .bg(appearance::to_hsla(self.palette.panel_surface))
+            .rounded(px(self.metrics.corner_radius))
+            .text_color(appearance::to_hsla(self.palette.primary_text))
+            .text_size(px(self.metrics.body_text_size))
+            .line_height(px(self.metrics.line_height))
+            .child(
+                Label::new("Settings")
+                    .text_size(px(self.metrics.heading_text_size))
+                    .line_height(px(self.metrics.line_height)),
+            )
+            .child(
+                Label::new("Search & Results")
+                    .text_size(px(self.metrics.body_text_size))
+                    .line_height(px(self.metrics.line_height)),
+            )
+            .child(checkbox)
+            .children(status.map(|message| {
+                Label::new(message)
+                    .id("settings-save-status")
+                    .text_color(appearance::to_hsla(status_color))
+                    .text_size(px(self.metrics.small_text_size))
+                    .line_height(px(self.metrics.line_height))
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_x(px(self.metrics.item_spacing_x))
+                    .child(
+                        Button::new("settings-save")
+                            .label(if self.saving { "Saving…" } else { "Save" })
+                            .disabled(save_disabled)
+                            .on_click(move |_, _, app| {
+                                let _ = save_root.update(app, |root, cx| {
+                                    root.save_settings_editor(cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("settings-cancel")
+                            .label("Cancel")
+                            .disabled(busy)
+                            .on_click(move |_, window, app| {
+                                let _ = cancel_root.update(app, |root, cx| {
+                                    root.cancel_settings_editor(window, cx, true);
+                                });
+                            }),
+                    ),
+            )
+    }
+}
+
 impl SearchCompletion {
     fn clear_for_query_replacement(&mut self) {
         self.suggestions.clear();
@@ -330,6 +681,7 @@ fn supported_launcher_search_actions(actions: Vec<Action>) -> Vec<Action> {
 enum InstalledSearchRoute {
     HashOpen,
     QuerySet(CommandOutcome),
+    Settings,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -374,6 +726,7 @@ fn classify_installed_search_command(
             }
             Ok(InstalledSearchRoute::QuerySet(outcome))
         }
+        Command::Dialog(DialogCommand::Settings) => Ok(InstalledSearchRoute::Settings),
         _ => Err(InstalledSearchActionError::Unsupported(
             "The selected launcher action is not an installed Search route.".to_owned(),
         )),
@@ -417,6 +770,7 @@ fn single_line_history_queries<'a>(queries: impl IntoIterator<Item = &'a str>) -
 gpui_kit::actions!([
     ToggleSecondaryWindow,
     ToggleCoordinateHudProbe,
+    ToggleSettings,
     OpenHashGenerator,
     SearchHistoryOlder,
     SearchHistoryNewer,
@@ -584,6 +938,20 @@ struct RootWindow {
     search_jump_geometry_frame: Rc<RefCell<Option<SearchJumpGeometryFrame>>>,
     search_completion: SearchCompletion,
     search_completion_focus_revision: Option<u64>,
+    settings_editor: SettingsEditorState,
+    settings_path: String,
+    settings_save_workers: SettingsSaveWorkerRegistry,
+    settings_save_permit: Option<EffectPermit>,
+    settings_save_token: Option<multi_launcher::settings::QueryAutocompleteSaveToken>,
+    settings_read_permit: Option<EffectPermit>,
+    settings_close_after_terminal: bool,
+    settings_menu_open: bool,
+    settings_menu_previous_focus: Option<FocusHandle>,
+    settings_focus_handle: FocusHandle,
+    settings_owner_focus_handle: FocusHandle,
+    settings_menu_focus_handle: FocusHandle,
+    settings_return_focus: Option<FocusHandle>,
+    settings_return_scroll_offset: Option<Point<Pixels>>,
     native_window: Option<NativeWindow>,
     focus_handle: FocusHandle,
     resize_focus_handle: FocusHandle,
@@ -2076,14 +2444,54 @@ fn root_tab_traversed_to_search(
     action_present: bool,
     context_stack: &[KeyContext],
     search_focused_after_dispatch: bool,
+    popup_menu_open: bool,
 ) -> bool {
     key == "tab"
+        && !popup_menu_open
         && modifiers == Modifiers::default()
         && action_present
         && search_focused_after_dispatch
         && context_stack_has_primary(context_stack, "RootWindow")
         && !context_stack_has_primary(context_stack, "LauncherSearch")
         && !context_stack_has_primary(context_stack, "HashGeneratorWindow")
+        && !context_stack_has_primary(context_stack, "SettingsEditor")
+        && !context_stack_has_primary(context_stack, "PopupMenu")
+}
+
+fn settings_return_focus_is_still_owned(
+    settings_owner_has_focus: bool,
+    restart_is_fenced: bool,
+) -> bool {
+    settings_owner_has_focus && !restart_is_fenced
+}
+
+const ROOT_SCROLL_SEARCH_ITEM: usize = 0;
+const ROOT_SCROLL_SETTINGS_ITEM: usize = 1;
+const SETTINGS_DIRTY_RESTART_STATUS: &str =
+    "Save or Cancel the dirty Settings preference before restarting in egui.";
+const SETTINGS_COMMIT_CLOSE_STATUS: &str =
+    "The Settings save is committing; Multi Launcher will close after it finishes.";
+
+fn clear_stale_settings_restart_status(
+    status: &mut Option<String>,
+    settings_clean_or_closed: bool,
+) -> bool {
+    if settings_clean_or_closed
+        && status.as_deref() == Some(SETTINGS_DIRTY_RESTART_STATUS)
+    {
+        *status = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn settings_menu_close_needs_trigger_focus(
+    settings_scope_has_focus: bool,
+    menu_was_open: bool,
+    menu_origin_was_settings: bool,
+) -> bool {
+    settings_scope_has_focus || (menu_was_open && menu_origin_was_settings)
 }
 
 impl HashWindowState {
@@ -2861,6 +3269,7 @@ struct RestartDrafts {
     utility: Option<String>,
     hash: HashDraft,
     hash_window_open: bool,
+    settings: SettingsRestartDraft,
 }
 
 struct RestartSnapshot {
@@ -3011,6 +3420,13 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     }
     if drafts.hash.algorithm != HashAlgorithm::Sha256 {
         names.push("non-default Hash Generator algorithm");
+    }
+    if drafts.settings.read_pending {
+        names.push("Settings loading");
+    } else if drafts.settings.pending_request.is_some() {
+        names.push("pending Settings save");
+    } else if drafts.settings.open && drafts.settings.draft != drafts.settings.baseline {
+        names.push("unsaved Settings preference");
     }
     if names.is_empty() {
         return "Restart Multi Launcher in the egui fallback? The GPUI windows will close."
@@ -3636,6 +4052,21 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if self.settings_editor.read_pending.is_some() {
+            return Err(
+                "The current Settings value is still loading. Wait for it to finish before restarting in egui."
+                    .to_owned(),
+            );
+        }
+        if self.settings_editor.pending.is_some() {
+            return Err(
+                "A Settings preference save is still pending. Wait for its acknowledgement before restarting in egui."
+                    .to_owned(),
+            );
+        }
+        if self.settings_editor.open && self.settings_editor.is_dirty() {
+            return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned());
+        }
         if self
             .hash_docked_resize
             .lock()
@@ -3811,6 +4242,7 @@ impl RootWindow {
                 utility,
                 hash: hash_draft,
                 hash_window_open,
+                settings: self.settings_editor.restart_draft(),
             },
             hash_work,
             child_windows,
@@ -4140,14 +4572,311 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn open_settings_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        origin: SettingsOpenOrigin,
+    ) {
+        if self.settings_editor.open {
+            self.root_scroll
+                .scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
+            self.settings_focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
+
+        let Some(operation) = self.restart_admission.admit() else {
+            self.restart_status =
+                Some("GPUI is closing; Settings can no longer be opened.".to_owned());
+            cx.notify();
+            return;
+        };
+
+        let return_focus = match origin {
+            SettingsOpenOrigin::Search => self.query.focus_handle(cx),
+            SettingsOpenOrigin::Menu => self
+                .settings_menu_previous_focus
+                .clone()
+                .unwrap_or_else(|| self.settings_menu_focus_handle.clone()),
+        };
+        let Some(attempt) = self.settings_editor.begin_read() else {
+            drop(operation);
+            return;
+        };
+        self.settings_return_focus = Some(return_focus);
+        self.settings_return_scroll_offset = Some(self.root_scroll.offset());
+        self.fresh_search_enter = None;
+        self.root_scroll
+            .scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
+        self.settings_focus_handle.focus(window, cx);
+        let receiver = match self
+            .settings_save_workers
+            .begin_query_autocomplete_read(self.settings_path.clone())
+        {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.settings_editor.finish_read(attempt, Err(error));
+                drop(operation);
+                cx.notify();
+                return;
+            }
+        };
+        self.settings_read_permit = Some(operation);
+        cx.notify();
+
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = loop {
+                match receiver.try_recv() {
+                    Ok(result) => break result,
+                    Err(TryRecvError::Disconnected) => {
+                        break Err("Settings reader ended without a receipt.".to_owned());
+                    }
+                    Err(TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                }
+            };
+            let _ = root.update(cx, |root, cx| {
+                root.finish_settings_editor_read(attempt, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_settings_editor_read(
+        &mut self,
+        attempt: SettingsReadAttempt,
+        result: Result<bool, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings_editor.finish_read(attempt, result) {
+            return;
+        }
+        self.settings_read_permit.take();
+        cx.notify();
+    }
+
+    fn toggle_settings_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_editor.open {
+            if self.settings_editor.pending.is_some()
+                || self.settings_editor.read_pending.is_some()
+            {
+                self.settings_editor.status = Some(
+                    if self.settings_editor.pending.is_some() {
+                        "Wait for the Settings save to finish before closing this editor."
+                    } else {
+                        "Wait for Settings to finish loading before closing this editor."
+                    }
+                    .into(),
+                );
+                self.settings_focus_handle.focus(window, cx);
+                cx.notify();
+                return;
+            }
+            let settings_owned_focus = settings_return_focus_is_still_owned(
+                self.settings_owner_focus_handle.contains_focused(window, cx),
+                self.restart_admission.is_fenced(),
+            );
+            let menu_origin_was_settings = self
+                .settings_menu_previous_focus
+                .as_ref()
+                .is_some_and(|focus| self.settings_owner_focus_handle.contains(focus, window));
+            let focus_settings_menu_after_close = settings_menu_close_needs_trigger_focus(
+                settings_owned_focus,
+                self.settings_menu_open,
+                menu_origin_was_settings,
+            );
+            self.cancel_settings_editor(window, cx, false);
+            if !self.settings_editor.open && focus_settings_menu_after_close {
+                self.root_scroll
+                    .scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
+                self.settings_menu_focus_handle.focus(window, cx);
+            }
+        } else {
+            self.open_settings_editor(window, cx, SettingsOpenOrigin::Menu);
+        }
+    }
+
+    fn cancel_settings_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        restore_origin: bool,
+    ) {
+        if !self.settings_editor.open {
+            return;
+        }
+        let restore_origin = restore_origin
+            && settings_return_focus_is_still_owned(
+                self.settings_owner_focus_handle.contains_focused(window, cx),
+                self.restart_admission.is_fenced(),
+            );
+        if self.settings_editor.pending.is_some()
+            || self.settings_editor.read_pending.is_some()
+            || !self.settings_editor.cancel_idle()
+        {
+            self.settings_editor.status = Some(
+                if self.settings_editor.pending.is_some() {
+                    "Wait for the Settings save to finish before closing this editor."
+                } else {
+                    "Wait for Settings to finish loading before closing this editor."
+                }
+                .into(),
+            );
+            cx.notify();
+            return;
+        }
+        clear_stale_settings_restart_status(&mut self.restart_status, true);
+        let return_focus = self.settings_return_focus.take();
+        let return_scroll_offset = self.settings_return_scroll_offset.take();
+        if restore_origin {
+            let return_focus_is_live = return_focus
+                .as_ref()
+                .is_some_and(|focus| self.focus_handle.contains(focus, window));
+            if return_focus_is_live {
+                if let Some(offset) = return_scroll_offset {
+                    self.root_scroll.set_offset(offset);
+                }
+            } else {
+                self.root_scroll
+                    .scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
+            }
+            if return_focus_is_live {
+                if let Some(focus) = return_focus {
+                    focus.focus(window, cx);
+                }
+            } else {
+                self.query.focus_handle(cx).focus(window, cx);
+            }
+        } else {
+            self.settings_return_focus = None;
+            self.settings_return_scroll_offset = None;
+        }
+        cx.notify();
+    }
+
+    fn save_settings_editor(&mut self, cx: &mut Context<Self>) {
+        if self.settings_editor.pending.is_some() {
+            return;
+        }
+        let Some(operation) = self.restart_admission.admit() else {
+            self.settings_editor.status =
+                Some("GPUI is closing; the Settings save was not started.".into());
+            cx.notify();
+            return;
+        };
+        let Some(attempt) = self.settings_editor.begin_save() else {
+            drop(operation);
+            return;
+        };
+        let request = multi_launcher::settings::QueryAutocompleteSaveRequest::new(
+            attempt.expected_baseline,
+            attempt.desired,
+        );
+        let (receiver, token) = match self.settings_save_workers.begin_query_autocomplete_save(
+            self.settings_path.clone(),
+            request,
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.settings_editor.fail_to_start(attempt.id, error);
+                drop(operation);
+                cx.notify();
+                return;
+            }
+        };
+        self.settings_save_permit = Some(operation);
+        self.settings_save_token = Some(token);
+        cx.notify();
+
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = loop {
+                match receiver.try_recv() {
+                    Ok(result) => break result,
+                    Err(TryRecvError::Disconnected) => {
+                        break Err(multi_launcher::settings::QueryAutocompleteSaveError::Store(
+                            "Settings writer ended without an acknowledgement.".into(),
+                        ));
+                    }
+                    Err(TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                }
+            };
+            let _ = root.update(cx, |root, cx| {
+                root.finish_settings_editor_save(attempt.id, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_settings_editor_save(
+        &mut self,
+        request_id: u64,
+        result: Result<
+            multi_launcher::settings::QueryAutocompleteSaveAcknowledgement,
+            multi_launcher::settings::QueryAutocompleteSaveError,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .settings_editor
+            .pending
+            .is_some_and(|pending| pending.id == request_id)
+        {
+            return;
+        }
+        let save_failed = result.is_err();
+        let acknowledged = self.settings_editor.finish_save(request_id, result);
+        if let Some(token) = self.settings_save_token.take() {
+            self.settings_save_workers
+                .acknowledge_query_autocomplete_save(token.id());
+        }
+        self.settings_save_permit.take();
+        if let Some(value) = acknowledged {
+            self.search_catalog.query_autocomplete = value;
+            let query = self.query.read(cx).value().to_string();
+            self.search_completion
+                .reset_for_query(&self.search_catalog, &query);
+            clear_stale_settings_restart_status(&mut self.restart_status, true);
+        }
+        let close_after_terminal = std::mem::take(&mut self.settings_close_after_terminal);
+        cx.notify();
+        if close_after_terminal {
+            if save_failed {
+                if self.restart_status.as_deref() == Some(SETTINGS_COMMIT_CLOSE_STATUS) {
+                    self.restart_status = None;
+                    cx.notify();
+                }
+            } else {
+                // Re-enter the guarded quit path: clipboard or picker work may
+                // have started while the irrevocable Settings write finished.
+                self.request_quit(cx);
+            }
+        }
+    }
+
     fn refresh_launcher_results(&mut self, query: String) {
         self.retire_search_jump_mode();
         let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
-        let provider_actions = multi_launcher::plugin::search_filtered_plugins(
-            [&hash_generator as &dyn multi_launcher::plugin::Plugin],
-            &query,
-            self.enabled_plugins.as_ref(),
-            self.enabled_capabilities.as_ref(),
+        let settings_plugin = multi_launcher::plugins::settings::SettingsPlugin;
+        let provider_actions = supported_launcher_search_actions(
+            multi_launcher::plugin::search_filtered_plugins(
+                [
+                    &hash_generator as &dyn multi_launcher::plugin::Plugin,
+                    &settings_plugin as &dyn multi_launcher::plugin::Plugin,
+                ],
+                &query,
+                self.enabled_plugins.as_ref(),
+                self.enabled_capabilities.as_ref(),
+            ),
         );
         let actions = self.search_catalog.compose(&query, provider_actions);
         let layout = self
@@ -4160,7 +4889,8 @@ impl RootWindow {
         // Query replacement can change the list height while the root is
         // scrolled near the end. Keep the Search field at the leading edge
         // whenever a tall result set overflows the shared root scroller.
-        self.root_scroll.scroll_to_top_of_item(0);
+        self.root_scroll
+            .scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
     }
 
     fn record_search_key_down(
@@ -4538,10 +5268,17 @@ impl RootWindow {
             &installed_invocation.route,
             InstalledSearchRoute::QuerySet(_)
         );
+        let settings_open = matches!(
+            &installed_invocation.route,
+            InstalledSearchRoute::Settings
+        );
         let Some(operation) = self.restart_admission.admit() else {
             if query_set {
                 self.launcher_search_error =
                     Some("GPUI is closing; saved queries can no longer be applied.".to_owned());
+            } else if settings_open {
+                self.launcher_search_error =
+                    Some("GPUI is closing; Settings can no longer be opened.".to_owned());
             } else {
                 self.hash_open_error =
                     Some("GPUI is closing; new utility operations are disabled.".to_owned());
@@ -4568,9 +5305,13 @@ impl RootWindow {
                         Some(format!("Could not apply saved query: {error}"));
                 }
             }
+            InstalledSearchRoute::Settings => {
+                drop(operation);
+                self.open_settings_editor(window, cx, SettingsOpenOrigin::Search);
+            }
         }
-        // Hash Open preserves the launcher query and results. Query Set uses
-        // the real editor Change path to refresh and invalidate transient rows.
+        // Hash Open and Settings preserve the launcher query and results.
+        // Query Set uses the real editor Change path to refresh transient rows.
         cx.notify();
     }
 
@@ -6126,6 +6867,17 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        if self.settings_editor.pending.is_some()
+            && !self
+                .settings_save_token
+                .as_ref()
+                .is_some_and(|token| token.request_cancel())
+        {
+            self.settings_close_after_terminal = true;
+            self.restart_status = Some(SETTINGS_COMMIT_CLOSE_STATUS.to_owned());
+            cx.notify();
+            return;
+        }
         self.hash_docked_resize
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6137,6 +6889,11 @@ impl RootWindow {
 
 impl Render for RootWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.settings_menu_open {
+            // Preserve the actual focus under the popover. The menu itself
+            // takes focus, so this must be sampled before it opens.
+            self.settings_menu_previous_focus = window.focused(cx);
+        }
         let resolved = appearance::current(cx);
         let metrics = resolved.metrics;
         let palette = resolved.palette;
@@ -6493,6 +7250,38 @@ impl Render for RootWindow {
         } else {
             search_field.into_any_element()
         };
+        let settings_menu_action_context = self.focus_handle.clone();
+        let settings_menu = Button::new("launcher-settings-menu")
+            .label("Settings")
+            .track_focus(&self.settings_menu_focus_handle)
+            .dropdown_menu(move |menu, _, _| {
+                let action_context = settings_menu_action_context.clone();
+                menu.item(
+                    PopupMenuItem::new("Edit Settings")
+                        .action(Box::new(ToggleSettings))
+                        .on_click(move |_, window, app| {
+                            action_context.dispatch_action(&ToggleSettings, window, app);
+                        }),
+                )
+            })
+            .on_open_change(cx.listener(|this, open, _, cx| {
+                this.settings_menu_open = *open;
+                cx.notify();
+            }));
+        let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
+            root: cx.entity().downgrade(),
+            draft: self.settings_editor.draft,
+            saving: self.settings_editor.pending.is_some(),
+            reading: self.settings_editor.read_pending.is_some(),
+            available: self.settings_editor.available,
+            dirty: self.settings_editor.is_dirty(),
+            status: self.settings_editor.status.clone(),
+            width: root_controls_width,
+            metrics,
+            palette,
+            settings_focus_handle: self.settings_focus_handle.clone(),
+            settings_owner_focus_handle: self.settings_owner_focus_handle.clone(),
+        });
         let root_controls = div()
             .flex()
             .flex_col()
@@ -6504,6 +7293,7 @@ impl Render for RootWindow {
             .text_color(appearance::to_hsla(palette.primary_text))
             .text_size(px(metrics.body_text_size))
             .line_height(px(metrics.line_height))
+            .child(settings_menu)
             .child(
                 Label::new("Search")
                     .text_size(px(metrics.heading_text_size))
@@ -6628,26 +7418,24 @@ impl Render for RootWindow {
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
             }));
-        let mut body = div()
-            .flex()
-            .flex_col()
+        let root_controls = root_controls
             .flex_shrink_0()
-            .gap_y(px(metrics.section_spacing))
-            .w(px(root_controls_width))
-            .when(!search_content_can_overflow && docked_hash.is_none(), |this| {
-                // Center the ordinary root only when its content fits.
-                this.my_auto()
-            })
-            .child(root_controls);
-        if let Some(docked_hash_frame) = docked_hash_frame {
-            body = body.child(docked_hash_frame);
-        }
+            .when(
+                !search_content_can_overflow
+                    && settings_editor_panel.is_none()
+                    && docked_hash.is_none(),
+                |this| {
+                    // Center the ordinary root only when its content fits.
+                    this.my_auto()
+                },
+            );
 
         let mut root_scroll = div()
             .id("multi-launcher-root-scroll")
             .role(Role::Group)
             .flex()
             .flex_col()
+            .gap_y(px(metrics.section_spacing))
             .size_full()
             .p(px(metrics.window_padding))
             .overflow_y_scroll()
@@ -6657,6 +7445,18 @@ impl Render for RootWindow {
             .when(docked_hash.is_some(), |this| this.items_start())
             .track_focus(&self.focus_handle)
             .key_context("RootWindow")
+            .capture_key_down(cx.listener(|root, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == Modifiers::default()
+                    && root.settings_editor.open
+                    && root
+                        .settings_owner_focus_handle
+                        .contains_focused(window, cx)
+                {
+                    root.cancel_settings_editor(window, cx, true);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &FocusDockedHashResize, window, cx| {
                 this.focus_docked_hash_resize_handle(window, cx);
             }))
@@ -6689,10 +7489,23 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &OpenHashGenerator, window, cx| {
                 this.run_hash_generator_open(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleSettings, window, cx| {
+                this.toggle_settings_editor(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &RestartWithEgui, window, cx| {
                 this.open_restart_confirmation(window, cx);
             }))
-            .child(body);
+            .child(root_controls);
+        if let Some(settings_editor_panel) = settings_editor_panel {
+            root_scroll = root_scroll.child(
+                div()
+                    .flex_shrink_0()
+                    .child(settings_editor_panel),
+            );
+        }
+        if let Some(docked_hash_frame) = docked_hash_frame {
+            root_scroll = root_scroll.child(docked_hash_frame);
+        }
         if docked_hash.is_some() {
             root_scroll = root_scroll.capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 if this.cancel_docked_hash_preview() {
@@ -8107,6 +8920,8 @@ pub(crate) fn run_foundation_window(
         settings_save_workers.clone(),
         saved_utility_presentations,
     );
+    let settings_path_for_root = settings_path.clone();
+    let settings_save_workers_for_root = settings_save_workers.clone();
     let mut utility_sizes = UtilitySizeStore::new(
         settings_path,
         settings_save_workers.clone(),
@@ -8139,6 +8954,7 @@ pub(crate) fn run_foundation_window(
     let listener_slot_for_root = Arc::clone(&listener_slot);
     let restart_admission = Arc::new(RestartAdmission::default());
     let restart_admission_for_quit = Arc::clone(&restart_admission);
+    let settings_save_workers_for_quit = settings_save_workers.clone();
     let restart_admission_for_root = Arc::clone(&restart_admission);
     let restart_admission_for_hotkey = Arc::clone(&restart_admission);
     let visibility = RootVisibility::new();
@@ -8222,13 +9038,18 @@ pub(crate) fn run_foundation_window(
         let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal_for_quit);
         let hash_window_revision_for_quit = Arc::clone(&hash_window_revision_for_app);
         let restart_admission_for_quit = Arc::clone(&restart_admission_for_quit);
+        let settings_save_workers_for_quit = settings_save_workers_for_quit.clone();
         let quit_subscription = cx.on_app_quit(move |app| {
             if let Some(root) = root_for_quit_callback.borrow().clone() {
                 let _ = root.update(app, |root, cx| {
+                    if let Some(token) = root.settings_save_token.as_ref() {
+                        token.request_cancel();
+                    }
                     root.retire_search_jump_mode();
                     root.drain_hash_native_geometry(cx, true);
                 });
             }
+            settings_save_workers_for_quit.begin_shutdown();
             visibility_for_quit.active.store(false, Ordering::Release);
             restart_admission_for_quit.fence();
             coordinate_hud_probe_closing_for_quit.store(true, Ordering::Release);
@@ -8292,6 +9113,11 @@ pub(crate) fn run_foundation_window(
             focus_handle.focus(window, cx);
             let resize_focus_handle = cx.focus_handle();
             let search_catalog_for_root = launcher_search_catalog;
+            let settings_editor_for_root =
+                SettingsEditorState::new(search_catalog_for_root.query_autocomplete);
+            let settings_focus_handle = cx.focus_handle();
+            let settings_owner_focus_handle = cx.focus_handle();
+            let settings_menu_focus_handle = cx.focus_handle();
             let initial_result_layout =
                 search_catalog_for_root.resolve_result_layout("", enabled_plugins.as_ref());
             let mut initial_launcher_results = LauncherSearchResults::default();
@@ -8314,6 +9140,20 @@ pub(crate) fn run_foundation_window(
                 search_jump_geometry_frame: Rc::clone(&search_jump_geometry_frame_for_root),
                 search_completion: SearchCompletion::default(),
                 search_completion_focus_revision: None,
+                settings_editor: settings_editor_for_root,
+                settings_path: settings_path_for_root.clone(),
+                settings_save_workers: settings_save_workers_for_root.clone(),
+                settings_save_permit: None,
+                settings_save_token: None,
+                settings_read_permit: None,
+                settings_close_after_terminal: false,
+                settings_menu_open: false,
+                settings_menu_previous_focus: None,
+                settings_focus_handle,
+                settings_owner_focus_handle,
+                settings_menu_focus_handle,
+                settings_return_focus: None,
+                settings_return_scroll_offset: None,
                 native_window: None,
                 focus_handle,
                 resize_focus_handle,
@@ -8533,6 +9373,7 @@ pub(crate) fn run_foundation_window(
                         event.action.is_some(),
                         &event.context_stack,
                         root.search_input_is_live(window, cx),
+                        root.settings_menu_open,
                     ) {
                         root.accept_search_completion(false, window, cx);
                     }
@@ -8569,14 +9410,51 @@ pub(crate) fn run_foundation_window(
                 let clipboard_message =
                     hash_clipboard_close_message(clipboard_pending_for_root_close.kind());
                 let picker_pending = picker_pending_for_root_close.load(Ordering::Acquire);
-                if clipboard_message.is_none() && !picker_pending {
+                let settings_pending = root_for_window_close
+                    .update(app, |root, _| root.settings_editor.pending.is_some())
+                    .unwrap_or(true);
+                if clipboard_message.is_none() && !picker_pending && !settings_pending {
                     return true;
                 }
+                if clipboard_message.is_none() && !picker_pending && settings_pending {
+                    let cancellation_accepted = root_for_window_close
+                        .update(app, |root, cx| {
+                            let accepted = root
+                                .settings_save_token
+                                .as_ref()
+                                .is_some_and(|token| token.request_cancel());
+                            if accepted {
+                                root.restart_status = Some(
+                                    "Canceling the pending Settings save before closing Multi Launcher."
+                                        .to_owned(),
+                                );
+                            } else {
+                                root.settings_close_after_terminal = true;
+                                root.restart_status =
+                                    Some(SETTINGS_COMMIT_CLOSE_STATUS.to_owned());
+                            }
+                            cx.notify();
+                            accepted
+                        })
+                        .unwrap_or(false);
+                    if cancellation_accepted {
+                        return true;
+                    }
+                    // Preserve the commit-specific status set above. The
+                    // window must stay alive until an irrevocable write has
+                    // reached its terminal result.
+                    return false;
+                }
                 let _ = root_for_window_close.update(app, |root, cx| {
-                    root.restart_status = Some(clipboard_message.map_or_else(
-                        || "Finish or cancel the Hash Generator file picker before closing Multi Launcher.".to_owned(),
-                        str::to_owned,
-                    ));
+                    root.restart_status = Some(if let Some(message) = clipboard_message {
+                        message.to_owned()
+                    } else if picker_pending {
+                        "Finish or cancel the Hash Generator file picker before closing Multi Launcher."
+                            .to_owned()
+                    } else {
+                        "Wait for the Settings preference save to finish before closing Multi Launcher."
+                            .to_owned()
+                    });
                     cx.notify();
                 });
                 false
@@ -9041,10 +9919,16 @@ mod tests {
         result_click_source, root_search_focus_is_current, root_tab_traversed_to_search,
         search_jump_badge_placement, search_jump_result_target_id, search_jump_search_target_id, select_search_result_state,
         search_completion_session_is_current, search_input_is_current, selection_from_args,
-        single_line_history_queries, supported_launcher_search_actions,
+        SettingsEditorState, SettingsReadAttempt,
+        clear_stale_settings_restart_status,
+        settings_menu_close_needs_trigger_focus, settings_return_focus_is_still_owned,
+        SETTINGS_DIRTY_RESTART_STATUS,
+        single_line_history_queries,
+        supported_launcher_search_actions,
     };
     use gpui_kit::{Bounds, KeyContext, Pixels, point, px};
     use multi_launcher::{
+        commands::{Command, DialogCommand},
         hash_generator::{HashAlgorithm, parse_expected_digest},
         launcher::{
             jump_mode::{HintMap, TargetGeneration, TargetId, TargetKind, TargetMetadata},
@@ -9799,6 +10683,150 @@ mod tests {
         )
         .expect("Hash Open remains installed");
         assert!(matches!(hash.route, InstalledSearchRoute::HashOpen));
+    }
+
+    #[test]
+    fn bare_settings_route_and_completion_fallback_follow_installed_search_capability() {
+        let plugin = multi_launcher::plugins::settings::SettingsPlugin;
+        let provider_action = plugin
+            .search("settings")
+            .into_iter()
+            .next()
+            .expect("the installed Settings search provider returns its bare route");
+        let invocation = parse_installed_search_invocation(
+            provider_action.clone(),
+            ActivationSource::Enter,
+        )
+        .expect("the bare typed command is an installed route");
+        assert_eq!(
+            invocation.invocation.command,
+            Command::Dialog(DialogCommand::Settings)
+        );
+        assert!(matches!(invocation.route, InstalledSearchRoute::Settings));
+        let suffix_action = plugin.search("settings font").remove(0);
+        assert!(
+            parse_installed_search_invocation(suffix_action, ActivationSource::Enter).is_err(),
+            "the later Settings search suffix route is not admitted in this checkpoint"
+        );
+
+        let settings_action = saved_action("Open Settings", "settings:dialog", None);
+        let startup = || LauncherSearchStartup {
+            actions: vec![settings_action.clone()],
+            match_exact: true,
+            fuzzy_weight: 0.25,
+            usage_weight: 0.0,
+            query_autocomplete: true,
+            page_jump: 2,
+            query_results_layout: QueryResultsLayoutSettings::default(),
+            jump_mode_enabled: false,
+            jump_mode_activation_chord: JumpModeChord::default(),
+            jump_mode_hint_alphabet: HintAlphabet::default(),
+            usage: HashMap::new(),
+            folder_aliases_lc: HashMap::new(),
+            bookmark_aliases_lc: HashMap::new(),
+        };
+        let enabled = HashSet::from(["settings".to_owned()]);
+        let search_enabled = HashMap::from([("settings".to_owned(), vec!["search".to_owned()])]);
+        let enabled_catalog = LauncherSearchCatalog::new(startup(), Some(&enabled));
+        assert_eq!(enabled_catalog.actions, vec![settings_action.clone()]);
+        assert!(enabled_catalog.commands.iter().any(|action| {
+            parse_installed_search_invocation(action.clone(), ActivationSource::Enter)
+                .is_ok_and(|invocation| matches!(invocation.route, InstalledSearchRoute::Settings))
+        }));
+        let composed = enabled_catalog.compose("settings", Vec::new());
+        assert_eq!(composed.len(), 1);
+        assert!(matches!(
+            parse_installed_search_invocation(composed[0].clone(), ActivationSource::Enter)
+                .expect("the admitted Settings command composes into Search")
+                .route,
+            InstalledSearchRoute::Settings
+        ));
+
+        let provider = multi_launcher::plugin::search_filtered_plugins(
+            [&plugin as &dyn multi_launcher::plugin::Plugin],
+            "settings",
+            Some(&enabled),
+            Some(&search_enabled),
+        );
+        assert_eq!(provider, vec![provider_action]);
+
+        let mut fallback_startup = startup();
+        fallback_startup.actions.clear();
+        let fallback_catalog = LauncherSearchCatalog::new(fallback_startup, Some(&enabled));
+        let fallback = fallback_catalog.compose("settings", Vec::new());
+        assert_eq!(fallback.len(), 1, "the admitted bare command is a fallback");
+        assert!(matches!(
+            parse_installed_search_invocation(fallback[0].clone(), ActivationSource::Enter)
+                .expect("fallback retains the typed Settings route")
+                .route,
+            InstalledSearchRoute::Settings
+        ));
+
+        let suffix_provider = supported_launcher_search_actions(
+            multi_launcher::plugin::search_filtered_plugins(
+                [&plugin as &dyn multi_launcher::plugin::Plugin],
+                "settings font",
+                Some(&enabled),
+                Some(&search_enabled),
+            ),
+        );
+        assert!(suffix_provider.is_empty());
+        assert!(
+            enabled_catalog
+                .compose("settings font", suffix_provider)
+                .is_empty(),
+            "unsupported typed Settings search does not leak through command fallback"
+        );
+
+        let capability_disabled =
+            HashMap::from([("settings".to_owned(), Vec::<String>::new())]);
+        let capability_disabled_catalog =
+            LauncherSearchCatalog::new(startup(), Some(&enabled));
+        assert_eq!(
+            capability_disabled_catalog.actions,
+            vec![settings_action.clone()],
+            "explicit saved actions use local-action admission independent of Search capability"
+        );
+        assert!(capability_disabled_catalog.commands.iter().any(|action| {
+            parse_installed_search_invocation(action.clone(), ActivationSource::Enter)
+                .is_ok_and(|invocation| matches!(invocation.route, InstalledSearchRoute::Settings))
+        }));
+        let provider = multi_launcher::plugin::search_filtered_plugins(
+            [&plugin as &dyn multi_launcher::plugin::Plugin],
+            "settings",
+            Some(&enabled),
+            Some(&capability_disabled),
+        );
+        assert!(provider.is_empty(), "Search capability gates provider rows");
+        let capability_fallback = capability_disabled_catalog.compose("settings", Vec::new());
+        assert_eq!(capability_fallback.len(), 1);
+        assert!(matches!(
+            parse_installed_search_invocation(
+                capability_fallback[0].clone(),
+                ActivationSource::Enter
+            )
+            .expect("enabled plugin command remains in fallback")
+            .route,
+            InstalledSearchRoute::Settings
+        ));
+
+        let disabled = HashSet::new();
+        let disabled_catalog = LauncherSearchCatalog::new(startup(), Some(&disabled));
+        assert_eq!(
+            disabled_catalog.actions,
+            vec![settings_action],
+            "explicit saved typed actions remain available through shared local Search"
+        );
+        assert!(disabled_catalog.commands.is_empty());
+        assert!(disabled_catalog.compose("settings", Vec::new()).is_empty());
+        let saved = disabled_catalog.compose("app settings", Vec::new());
+        assert_eq!(saved.len(), 1);
+        assert!(matches!(
+            parse_installed_search_invocation(saved[0].clone(), ActivationSource::Enter)
+                .expect("explicit saved action remains an installed route")
+                .route,
+            InstalledSearchRoute::Settings
+        ));
     }
 
     #[test]
@@ -10654,12 +11682,21 @@ mod tests {
             KeyContext::parse("RootWindow").expect("valid root key context"),
             KeyContext::parse("HashGeneratorWindow").expect("valid Hash key context"),
         ];
+        let settings = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("SettingsEditor").expect("valid Settings editor context"),
+        ];
+        let popup = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("PopupMenu").expect("valid popup menu context"),
+        ];
         assert!(root_tab_traversed_to_search(
             "tab",
             Modifiers::default(),
             true,
             &root,
             true,
+            false,
         ));
         assert!(!root_tab_traversed_to_search(
             "tab",
@@ -10667,6 +11704,7 @@ mod tests {
             true,
             &root,
             true,
+            false,
         ));
         assert!(!root_tab_traversed_to_search(
             "tab",
@@ -10674,6 +11712,7 @@ mod tests {
             true,
             &search,
             true,
+            false,
         ));
         assert!(!root_tab_traversed_to_search(
             "tab",
@@ -10681,6 +11720,39 @@ mod tests {
             true,
             &utility,
             true,
+            false,
+        ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &settings,
+            true,
+            false,
+        ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &popup,
+            true,
+            false,
+        ));
+        assert!(root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &root,
+            true,
+            false,
+        ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &root,
+            true,
+            true,
         ));
         assert!(!root_tab_traversed_to_search(
             "tab",
@@ -10688,6 +11760,7 @@ mod tests {
             false,
             &root,
             true,
+            false,
         ));
         assert!(!root_tab_traversed_to_search(
             "tab",
@@ -10695,7 +11768,159 @@ mod tests {
             true,
             &root,
             false,
+            false,
         ));
+    }
+
+    #[test]
+    fn settings_editor_keeps_draft_until_store_ack_and_blocks_pending_dismissal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(&path, br#"{"query_autocomplete":true}"#).unwrap();
+        let mut editor = SettingsEditorState::new(true);
+        editor.open_with_baseline(true);
+        editor.draft = false;
+
+        let attempt = editor.begin_save().expect("dirty editor admits one save");
+        assert!(editor.is_dirty());
+        assert!(!editor.cancel_idle());
+        assert_eq!(editor.pending, Some(attempt));
+        assert_eq!(
+            editor.finish_save(
+                attempt.id + 1,
+                Err(multi_launcher::settings::QueryAutocompleteSaveError::Store(
+                    "stale receipt".into()
+                )),
+            ),
+            None,
+            "a receipt for another request cannot release the current save"
+        );
+        assert_eq!(editor.pending, Some(attempt));
+
+        let acknowledgement = multi_launcher::settings::Settings::save_query_autocomplete_checked(
+            &path,
+            multi_launcher::settings::QueryAutocompleteSaveRequest::new(true, false),
+        )
+        .unwrap();
+        assert_eq!(editor.finish_save(attempt.id, Ok(acknowledgement)), Some(false));
+        assert!(editor.open, "Save keeps the retained editor open");
+        assert!(!editor.is_dirty());
+        assert_eq!(editor.baseline, false);
+        assert_eq!(editor.draft, false);
+        assert_eq!(editor.status.as_deref(), Some("Settings saved."));
+        assert!(editor.pending.is_none());
+        assert!(editor.cancel_idle());
+        assert!(!editor.open);
+    }
+
+    #[test]
+    fn settings_editor_applies_only_the_current_baseline_read_receipt() {
+        let mut editor = SettingsEditorState::new(true);
+        let attempt = editor.begin_read().expect("closed editor admits one read");
+        assert!(editor.open);
+        assert!(editor.read_pending.is_some());
+        assert!(!editor.available);
+        assert!(!editor.cancel_idle(), "a current read retains its editor");
+
+        assert!(
+            !editor.finish_read(
+                SettingsReadAttempt { id: attempt.id + 1 },
+                Ok(false),
+            ),
+            "an obsolete read cannot replace the current baseline"
+        );
+        assert_eq!(editor.read_pending, Some(attempt));
+        assert!(editor.finish_read(attempt, Ok(false)));
+        assert!(editor.available);
+        assert_eq!(editor.baseline, false);
+        assert_eq!(editor.draft, false);
+        assert!(editor.read_pending.is_none());
+
+        assert!(
+            editor.begin_read().is_none(),
+            "a retained open editor does not start a second baseline read"
+        );
+        assert!(editor.cancel_idle(), "an idle read result can be dismissed");
+        assert!(!editor.open);
+        let failed = editor.begin_read().expect("completed editor can reread");
+        assert!(editor.finish_read(failed, Err("malformed Settings".into())));
+        assert!(!editor.available);
+        assert!(editor.status.as_deref().unwrap().contains("malformed Settings"));
+    }
+
+    #[test]
+    fn settings_cleaning_clears_only_the_stale_dirty_restart_message() {
+        let mut editor = SettingsEditorState::new(true);
+        editor.open_with_baseline(true);
+        editor.draft = false;
+        assert!(editor.is_dirty());
+
+        let mut status = Some(SETTINGS_DIRTY_RESTART_STATUS.to_owned());
+        assert!(!clear_stale_settings_restart_status(&mut status, !editor.is_dirty()));
+        assert_eq!(status.as_deref(), Some(SETTINGS_DIRTY_RESTART_STATUS));
+
+        editor.draft = editor.baseline;
+        assert!(!editor.is_dirty());
+        assert!(clear_stale_settings_restart_status(&mut status, !editor.is_dirty()));
+        assert_eq!(status, None);
+
+        let mut unrelated = Some("A Hash Generator operation is still pending.".to_owned());
+        assert!(!clear_stale_settings_restart_status(&mut unrelated, true));
+        assert_eq!(
+            unrelated.as_deref(),
+            Some("A Hash Generator operation is still pending.")
+        );
+    }
+
+    #[test]
+    fn settings_cancel_restores_origin_only_while_settings_still_owns_focus() {
+        assert!(settings_return_focus_is_still_owned(true, false));
+        assert!(
+            !settings_return_focus_is_still_owned(false, false),
+            "a newer docked Hash focus owner must keep its focus"
+        );
+        assert!(
+            !settings_return_focus_is_still_owned(true, true),
+            "focus restoration cannot cross the restart fence"
+        );
+        assert!(settings_menu_close_needs_trigger_focus(true, false, false));
+        assert!(settings_menu_close_needs_trigger_focus(false, true, true));
+        assert!(
+            !settings_menu_close_needs_trigger_focus(false, true, false),
+            "closing Settings from a popup opened over Search or Hash leaves that live origin alone"
+        );
+        assert!(!settings_menu_close_needs_trigger_focus(false, false, true));
+    }
+
+    #[test]
+    fn settings_editor_failure_preserves_retryable_draft_and_restart_snapshot() {
+        let mut editor = SettingsEditorState::new(true);
+        editor.open_with_baseline(true);
+        editor.draft = false;
+        let attempt = editor.begin_save().unwrap();
+        assert_eq!(
+            editor.finish_save(
+                attempt.id,
+                Err(multi_launcher::settings::QueryAutocompleteSaveError::Store(
+                    "write failed".into()
+                )),
+            ),
+            None
+        );
+        assert!(editor.open);
+        assert!(editor.is_dirty());
+        assert_eq!(editor.baseline, true);
+        assert_eq!(editor.draft, false);
+        assert!(editor.pending.is_none());
+        assert!(editor.status.as_deref().unwrap().contains("write failed"));
+        let snapshot = editor.restart_draft();
+        assert!(snapshot.open);
+        assert_eq!(snapshot.baseline, true);
+        assert_eq!(snapshot.draft, false);
+        assert!(!snapshot.read_pending);
+        assert_eq!(snapshot.pending_request, None);
+        assert!(editor.cancel_idle());
+        assert_eq!(editor.draft, true);
     }
 
     #[test]

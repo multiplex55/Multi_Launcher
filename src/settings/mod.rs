@@ -8,6 +8,10 @@ pub mod utility_presentations;
 pub use defaults::*;
 pub use io::{set_settings_path, settings_path};
 pub use model::*;
+pub use store::{
+    QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError,
+    QueryAutocompleteSaveRequest, QueryAutocompleteSaveToken,
+};
 pub use utility_dialog_sizes::{
     AppliedWindowSize, NativeWindowGeometry, ObservedWindowSize, PreferredWindowSize,
     SavedWindowPosition, UtilityDialogSizes, UtilitySizeAcknowledgement, UtilitySizePreference,

@@ -2,8 +2,186 @@ use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use anyhow::Context;
 use once_cell::sync::Lazy;
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryAutocompleteSaveRequest {
+    expected_baseline: bool,
+    desired: bool,
+}
+
+impl QueryAutocompleteSaveRequest {
+    pub fn new(expected_baseline: bool, desired: bool) -> Self {
+        Self {
+            expected_baseline,
+            desired,
+        }
+    }
+
+    pub fn expected_baseline(self) -> bool {
+        self.expected_baseline
+    }
+
+    pub fn desired(self) -> bool {
+        self.desired
+    }
+}
+
+const SAVE_PENDING: u8 = 0;
+const SAVE_WAITING_FOR_SETTINGS: u8 = 1;
+const SAVE_CANCELED: u8 = 2;
+const SAVE_COMMITTING: u8 = 3;
+
+/// A registry-owned cancellation fence for one query-autocomplete write.
+/// Cancellation wins only until the worker claims its atomic commit boundary.
+#[derive(Clone, Debug)]
+pub struct QueryAutocompleteSaveToken {
+    id: u64,
+    state: Arc<AtomicU8>,
+}
+
+impl QueryAutocompleteSaveToken {
+    pub(crate) fn new(id: u64) -> Self {
+        Self {
+            id,
+            state: Arc::new(AtomicU8::new(SAVE_PENDING)),
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns true when cancellation is accepted or was already accepted.
+    /// False means the worker has crossed the commit boundary.
+    pub fn request_cancel(&self) -> bool {
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                SAVE_PENDING | SAVE_WAITING_FOR_SETTINGS => {
+                    let state = self.state.load(Ordering::Acquire);
+                    if state == SAVE_PENDING || state == SAVE_WAITING_FOR_SETTINGS {
+                        if self
+                            .state
+                            .compare_exchange(
+                                state,
+                                SAVE_CANCELED,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            return true;
+                        }
+                    }
+                }
+                SAVE_CANCELED => return true,
+                SAVE_COMMITTING => return false,
+                _ => return false,
+            }
+        }
+    }
+
+    fn is_canceled(&self) -> bool {
+        self.state.load(Ordering::Acquire) == SAVE_CANCELED
+    }
+
+    fn mark_waiting_for_settings(&self) -> bool {
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                SAVE_PENDING => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            SAVE_PENDING,
+                            SAVE_WAITING_FOR_SETTINGS,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                SAVE_WAITING_FOR_SETTINGS => return true,
+                SAVE_CANCELED | SAVE_COMMITTING => return false,
+                _ => return false,
+            }
+        }
+    }
+
+    fn begin_irrevocable_commit(&self) -> bool {
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                SAVE_PENDING | SAVE_WAITING_FOR_SETTINGS => {
+                    let state = self.state.load(Ordering::Acquire);
+                    if state == SAVE_PENDING || state == SAVE_WAITING_FOR_SETTINGS {
+                        if self
+                            .state
+                            .compare_exchange(
+                                state,
+                                SAVE_COMMITTING,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            return true;
+                        }
+                    }
+                }
+                SAVE_CANCELED => return false,
+                SAVE_COMMITTING => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_waiting_for_settings(&self) -> bool {
+        self.state.load(Ordering::Acquire) == SAVE_WAITING_FOR_SETTINGS
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryAutocompleteSaveAcknowledgement {
+    value: bool,
+    persisted: bool,
+}
+
+impl QueryAutocompleteSaveAcknowledgement {
+    pub fn value(self) -> bool {
+        self.value
+    }
+
+    pub fn persisted(self) -> bool {
+        self.persisted
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueryAutocompleteSaveError {
+    Cancelled,
+    Conflict { expected: bool, actual: bool },
+    Store(String),
+}
+
+impl std::fmt::Display for QueryAutocompleteSaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("query autocomplete save was canceled"),
+            Self::Conflict { expected, actual } => write!(
+                formatter,
+                "query autocomplete changed from the editor baseline ({expected}) to {actual}"
+            ),
+            Self::Store(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for QueryAutocompleteSaveError {}
 
 static SETTINGS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -71,6 +249,111 @@ impl Settings {
         load_effective(path)
     }
 
+    /// Acknowledge one GPUI-owned Search & Results preference without
+    /// reserializing any of the other Settings values. Both the typed
+    /// baseline check and raw JSON patch share the canonical Settings lock.
+    pub fn save_query_autocomplete_checked(
+        path: impl AsRef<Path>,
+        request: QueryAutocompleteSaveRequest,
+    ) -> Result<QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError> {
+        Self::save_query_autocomplete_checked_inner(path.as_ref(), request, None)
+    }
+
+    pub(crate) fn save_query_autocomplete_checked_cancellable(
+        path: impl AsRef<Path>,
+        request: QueryAutocompleteSaveRequest,
+        token: &QueryAutocompleteSaveToken,
+    ) -> Result<QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError> {
+        if !token.mark_waiting_for_settings() {
+            return Err(QueryAutocompleteSaveError::Cancelled);
+        }
+        Self::save_query_autocomplete_checked_inner(path.as_ref(), request, Some(token))
+    }
+
+    fn save_query_autocomplete_checked_inner(
+        path: &Path,
+        request: QueryAutocompleteSaveRequest,
+        token: Option<&QueryAutocompleteSaveToken>,
+    ) -> Result<QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError> {
+        let _transaction = transaction_guard();
+        if token.is_some_and(QueryAutocompleteSaveToken::is_canceled) {
+            return Err(QueryAutocompleteSaveError::Cancelled);
+        }
+        let source_bytes = read_exact_bytes(path)
+            .map_err(|error| QueryAutocompleteSaveError::Store(error.to_string()))?;
+        let source_settings = parse_effective_settings(path, &source_bytes)?;
+        let actual = source_settings.query_autocomplete;
+
+        // A second writer may already have committed the requested value.
+        // That state is an acknowledgement, and does not require a rewrite.
+        if actual == request.desired {
+            if token.is_some_and(QueryAutocompleteSaveToken::is_canceled) {
+                return Err(QueryAutocompleteSaveError::Cancelled);
+            }
+            return Ok(QueryAutocompleteSaveAcknowledgement {
+                value: actual,
+                persisted: false,
+            });
+        }
+        if actual != request.expected_baseline {
+            return Err(QueryAutocompleteSaveError::Conflict {
+                expected: request.expected_baseline,
+                actual,
+            });
+        }
+
+        let raw_source = if source_bytes.iter().all(u8::is_ascii_whitespace) {
+            // A missing or empty store starts with the full effective defaults.
+            // A sparse JSON object can have different deserialization defaults.
+            serde_json::to_vec(&source_settings).map_err(|error| {
+                QueryAutocompleteSaveError::Store(format!(
+                    "failed to serialize default Settings for {}: {error}",
+                    path.display()
+                ))
+            })?
+        } else {
+            source_bytes
+        };
+        let mut raw_settings =
+            serde_json::from_slice::<BTreeMap<String, Box<serde_json::value::RawValue>>>(
+                &raw_source,
+            )
+            .map_err(|error| {
+                QueryAutocompleteSaveError::Store(format!(
+                    "failed to preserve raw Settings values from {}: {error}",
+                    path.display()
+                ))
+            })?;
+        let raw_value = serde_json::value::RawValue::from_string(request.desired.to_string())
+            .map_err(|error| QueryAutocompleteSaveError::Store(error.to_string()))?;
+        raw_settings.insert("query_autocomplete".to_owned(), raw_value);
+        if token.is_some_and(|token| !token.begin_irrevocable_commit()) {
+            return Err(QueryAutocompleteSaveError::Cancelled);
+        }
+        save_json_atomic(path, &raw_settings)
+            .map_err(|error| QueryAutocompleteSaveError::Store(error.to_string()))?;
+
+        // Read the committed typed value back before returning an
+        // acknowledgement to the editor.
+        let committed_bytes = std::fs::read(path).map_err(|error| {
+            QueryAutocompleteSaveError::Store(format!(
+                "failed to verify Settings write at {}: {error}",
+                path.display()
+            ))
+        })?;
+        let committed = parse_effective_settings(path, &committed_bytes)?;
+        if committed.query_autocomplete != request.desired {
+            return Err(QueryAutocompleteSaveError::Store(
+                "query autocomplete did not match the requested Settings value after writing"
+                    .to_owned(),
+            ));
+        }
+        Ok(QueryAutocompleteSaveAcknowledgement {
+            value: committed.query_autocomplete,
+            persisted: true,
+        })
+    }
+
     /// Update settings only when the raw bytes still match the caller's
     /// inspected SHA-256. The exact serialized bytes are atomically committed
     /// and read back before their digest is returned.
@@ -109,6 +392,21 @@ impl Settings {
     }
 }
 
+fn parse_effective_settings(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<Settings, QueryAutocompleteSaveError> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Settings::default());
+    }
+    serde_json::from_slice(bytes).map_err(|error| {
+        QueryAutocompleteSaveError::Store(format!(
+            "failed to parse Settings from {}: {error}",
+            path.display()
+        ))
+    })
+}
+
 /// SHA-256 of the exact persisted settings bytes. Missing files hash as empty
 /// bytes, matching the radial authoring store's empty-source convention.
 pub fn settings_file_sha256(path: impl AsRef<Path>) -> anyhow::Result<String> {
@@ -143,9 +441,15 @@ fn load_effective(path: impl AsRef<Path>) -> anyhow::Result<Settings> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, settings_file_sha256};
+    use super::{
+        QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError,
+        QueryAutocompleteSaveRequest, QueryAutocompleteSaveToken, Settings,
+        settings_file_sha256, transaction_guard,
+    };
     use crate::common::persistence::{LoadState, PersistenceError};
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn compatibility_load_defaults_only_missing_and_empty() {
@@ -325,5 +629,191 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn query_autocomplete_write_preserves_raw_unowned_json_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let opaque =
+            r#"{ "signed": -9223372036854775809123, "nested": [9007199254740993123456789] }"#;
+        let source = format!("{{\"query_autocomplete\":true,\"opaque_extension\":{opaque}}}");
+        std::fs::write(&path, source).unwrap();
+
+        let acknowledgement = Settings::save_query_autocomplete_checked(
+            &path,
+            QueryAutocompleteSaveRequest::new(true, false),
+        )
+        .unwrap();
+
+        assert_eq!(
+            acknowledgement,
+            QueryAutocompleteSaveAcknowledgement {
+                value: false,
+                persisted: true,
+            }
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        let raw = serde_json::from_slice::<BTreeMap<String, Box<serde_json::value::RawValue>>>(
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(raw["opaque_extension"].get(), opaque);
+        assert!(!Settings::read_current(&path).unwrap().query_autocomplete);
+    }
+
+    #[test]
+    fn query_autocomplete_acknowledges_desired_value_without_rewriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let source = br#"{ "query_autocomplete": false, "opaque": 1234567890123456789012345 }"#;
+        std::fs::write(&path, source).unwrap();
+
+        let acknowledgement = Settings::save_query_autocomplete_checked(
+            &path,
+            QueryAutocompleteSaveRequest::new(true, false),
+        )
+        .unwrap();
+
+        assert_eq!(
+            acknowledgement,
+            QueryAutocompleteSaveAcknowledgement {
+                value: false,
+                persisted: false,
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn query_autocomplete_write_uses_existing_missing_and_empty_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, b" \r\n\t").unwrap();
+        let mut expected = Settings::default();
+        let baseline = expected.query_autocomplete;
+        let desired = !baseline;
+        expected.query_autocomplete = desired;
+
+        for path in [&missing, &empty] {
+            let acknowledgement = Settings::save_query_autocomplete_checked(
+                path,
+                QueryAutocompleteSaveRequest::new(baseline, desired),
+            )
+            .unwrap();
+            assert_eq!(acknowledgement.value(), desired);
+            assert!(acknowledgement.persisted());
+            let reloaded = Settings::read_current(path).unwrap();
+            assert_eq!(reloaded.query_autocomplete, desired);
+            assert_eq!(reloaded.help_hotkey, expected.help_hotkey);
+            assert_eq!(reloaded.offscreen_pos, expected.offscreen_pos);
+        }
+
+        let sparse = directory.path().join("sparse.json");
+        std::fs::write(&sparse, b"{}").unwrap();
+        Settings::save_query_autocomplete_checked(
+            &sparse,
+            QueryAutocompleteSaveRequest::new(baseline, desired),
+        )
+        .unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(sparse).unwrap()).unwrap();
+        assert_eq!(stored, serde_json::json!({ "query_autocomplete": desired }));
+    }
+
+    #[test]
+    fn pending_query_autocomplete_save_cancels_while_waiting_for_settings_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let source = br#"{ "query_autocomplete": true, "opaque": 1234567890123456789012345 }"#;
+        std::fs::write(&path, source).unwrap();
+        let settings_lock = transaction_guard();
+        let workers = crate::SettingsSaveWorkerRegistry::default();
+        let (receipt_rx, token) = workers
+            .begin_query_autocomplete_save(
+                path.to_string_lossy().into_owned(),
+                QueryAutocompleteSaveRequest::new(true, false),
+            )
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !token.is_waiting_for_settings() {
+            assert!(Instant::now() < deadline, "writer did not wait on Settings lock");
+            std::thread::yield_now();
+        }
+        assert!(token.request_cancel());
+        drop(settings_lock);
+
+        assert_eq!(
+            receipt_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Err(QueryAutocompleteSaveError::Cancelled)
+        );
+        let shutdown = workers.join_all_checked();
+        assert!(shutdown.is_clean(), "{:?}", shutdown.failure_summary());
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn query_autocomplete_save_token_rejects_cancel_after_commit_claim() {
+        let token = QueryAutocompleteSaveToken::new(1);
+        assert!(token.begin_irrevocable_commit());
+        assert!(!token.request_cancel());
+    }
+
+    #[test]
+    fn checked_shutdown_reports_unacknowledged_query_autocomplete_write_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let source = b"{broken";
+        std::fs::write(&path, source).unwrap();
+        let workers = crate::SettingsSaveWorkerRegistry::default();
+        let (receipt_rx, _token) = workers
+            .begin_query_autocomplete_save(
+                path.to_string_lossy().into_owned(),
+                QueryAutocompleteSaveRequest::new(true, false),
+            )
+            .unwrap();
+        assert!(matches!(
+            receipt_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Err(QueryAutocompleteSaveError::Store(_))
+        ));
+
+        let shutdown = workers.join_all_checked();
+        let failure = shutdown.failure_summary().unwrap();
+        assert!(failure.contains("query autocomplete save request 1"));
+        assert!(failure.contains("failed to parse Settings"));
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn query_autocomplete_conflict_and_malformed_input_preserve_source_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let conflicting = br#"{ "query_autocomplete": false, "opaque": 123 }"#;
+        std::fs::write(&path, conflicting).unwrap();
+        assert_eq!(
+            Settings::save_query_autocomplete_checked(
+                &path,
+                QueryAutocompleteSaveRequest::new(true, true),
+            )
+            .unwrap_err(),
+            QueryAutocompleteSaveError::Conflict {
+                expected: true,
+                actual: false,
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), conflicting);
+
+        let malformed = b"{broken";
+        std::fs::write(&path, malformed).unwrap();
+        assert!(matches!(
+            Settings::save_query_autocomplete_checked(
+                &path,
+                QueryAutocompleteSaveRequest::new(true, false),
+            ),
+            Err(QueryAutocompleteSaveError::Store(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), malformed);
     }
 }
