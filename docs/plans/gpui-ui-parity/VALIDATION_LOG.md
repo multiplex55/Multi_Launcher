@@ -241,11 +241,35 @@ test(query_args_are_typed_but_invalid_json_keeps_plain_query) | test(command_bus
 
 PID 18548 repeated that route with the Search capability disabled and the plugin enabled. The exact disabled seed SHA-256 was `1F64F9AA5411495194A9D3D1E361B91DF2E6174FEEE8D4FD26C2F95EAF45A9F9`. Search offered the command label at both `ha` and `hash`. First Enter set the query to `hash`. The second Enter left it unchanged, with no provider row or mounted tool. Both processes exited 0. The owned Actions `E3A7215F599E700D41FD13E46DE4087B2650292EE363933E76CCBE1ACD28F5C0` and original History `B0E0668FFBB6B285F30813FBF8DC5E4392652CB6318B7DE57B3E28C6CDC760F5` stayed byte-exact. Egui rewrote Settings on close. Original scratch Settings, Actions and History were restored before the next app run.
 
+## G05 GPUI cached command fallback native checkpoint
+
+**G05-GPUI-CACHED-COMMAND-FALLBACK-WINDOWS.** The locked dev app build passed in 11 min 11 s. Exact SHA-256 `509828EA27B59BE77781ECA6CAF69330001E605A1B691BF8220B4EBEFCC084F4`, 230,054,912 bytes. Explicit GPUI PID 10672 used exact matching, Hash only, completion and Dashboard disabled, and both Paste Sequence shortcuts disabled. Search `ha` showed one `hash` command label. Enter set exact `hash` and the `Open Hash Generator` provider result replaced that label while the tool remained closed. Another fresh Enter opened one actual docked tool. Ctrl+W closed it, preserving the query. Clearing Search restored its blank result state.
+
+PID 10684 replayed with Hash enabled and its Search capability disabled. The `hash` command label remained at both `ha` and `hash`. First Enter set the query. A second fresh Enter kept it equal and refreshed the command row without mounting a tool or admitting a provider result. The independent Ctrl+G shortcut still opened one real Hash tool, and Ctrl+W closed it. Both explicit GPUI processes exited 0. Their exact Settings, Actions `E3A7215F…`, History `B0E0668F…` and Usage `75022DA6A0FBD2F45898E0F2C3B80A1F1A1BD766F6B34158E47F77359F73F73E` remained unchanged.
+
+Explicit egui PID 19696 on the same executable and enabled fixture matched its earlier `ha` → `hash` → actual Hash behavior and Escape retained the query. It exited 0. Actions and History stayed exact. Egui's ordinary exit serialized Settings and Usage. Original scratch Settings, Actions and History were restored and all owned processes retired.
+
+**G05-CACHED-COMMAND-FALLBACK-FOCUSED.** `cargo nextest run --locked -p multi_launcher --lib --bin multi_launcher --build-jobs 1 --test-threads 1 --no-fail-fast -E '<filter below>'` used the default stack wrapper on its two intended binaries. Run ID `20ba9c49-32b3-4a8f-838f-51b0a212c585`, log `target/g05-cached-fallback-nextest.log`. Compilation and link took 28 min 34 s. All 10 selected tests passed in 7.361 s with 8,794 skipped. The source fingerprints matched the native build and the review cleared the scope. No new workspace test stores remained.
+
+```text
+test(command_fallback_requires_a_nonblank_non_global_query_without_provider_rows) | test(command_fallback_preserves_action_identity_exact_alias_precedence_and_fuzzy_score) | test(cached_command_fallback_uses_original_provider_snapshot_and_ignores_pending_state) | test(gpui_cached_hash_command_fallback_respects_enablement_and_provider_precedence) | test(track_c2a_oracle_covers_provider_precedence_and_snapshot_outcomes) | test(track_c2a_oracle_search_shared_owner_matches_work_receipts) | test(hash_generator_search_uses_committed_enablement_and_capability_filters) | test(gpui_completion_uses_admitted_actions_and_enabled_hash_commands) | test(unified_launcher_and_read_only_snapshot_keep_order) | test(search_activation_preserves_source_and_dispatches_installed_routes_once)
+```
+
+## G05 lateral keypad native baseline
+
+**G05-EGUI-INJECTED-LATERAL-KEYPAD.** Explicit egui PID 20760 on `C0C93EF1…` used the two inert KMarker Query Set rows with exact list mode and both Paste Sequence shortcuts disabled. The Windows controller's `KP_6` selected Alpha and preserved `app KMarker`. `KP_4` cleared the visible selection, and fresh Enter left the query intact. Another `KP_6` and fresh Enter applied exact `g05 keypad alpha`. Ordinary top-row 6 and 4 inserted their digits into Search. The controller's plain Left did not demonstrate caret travel in either the result or manual text probe. Physical arrow identity and explicit Num Lock states remain unverified. The process exited 0, the exact KMarker catalog and original History were unchanged, and original scratch stores were restored.
+
 ## G05 grid and page native baseline
 
 **G05-EGUI-GRID-PAGE-NAVIGATION.** Explicit egui PID 5684 on `CD4078A6…` used seven owned Query Set actions, three grid columns, two configured visible rows, page jump two, and completion, Dashboard and both Paste Sequence shortcuts disabled. Search `app PageFixture` showed the seven saved labels in order. Down, Right, Down selected the fifth Action and scrolled it into view while preserving Search. Fresh Enter applied exact `owned row 05`. Resetting Search and pressing Page Down twice selected row 03. Additional Page Down stopped at row 07 in the partial last row and scrolled it into view. Page Up returned to row 05. Left then Up selected row 01 and fresh Enter applied exact `owned row 01`.
 
 The fixture exited 0. `settings-g05-grid-page-seed.json` has SHA-256 `587A558C1B6C749CA78441ACC70ABF511CEE827DF10970C5D7A6150D59EC4480`. The active Actions matched the seed `49F5F420FF8B16DE91046A065AC33756AE4707002DCC878175888F4545542CFD`, and original History remained byte-exact. Egui serialized the existing usage map on close and no fixture Query Set command appeared in it. Original scratch Settings, Actions and History were restored.
+
+## G05 native Help filter and examples baseline
+
+**G05-EGUI-HELP-SHARED-FILTER-EXAMPLES.** Explicit egui PID 10168 on exact `509828EA…` used the owned Help and Hash fixture, both Paste Sequence shortcuts disabled and Show examples initially off. Help → Command List opened the actual retained Command Help. Filter `hash` exposed the registered `hash_generator`, exact checksum description, `search` capability, `hash` prefix and usage. Clicking Show examples revealed the `hash` example and immediately committed `show_examples=true` while the panel was open. The receipt `settings-g05-command-help-examples-result.json` has SHA-256 `228097E9BE6E85A850AD236815A3E07E7EC797D3AA2266CF75E459ACEDC73609`. A wheel scroll on the short panel moved its body with the Filter and checkbox retained at the top.
+
+Escape closed Command Help. Opening Quick Help through its own menu entry displayed the exact retained `hash` filter, the fixed guide content and the matched Hash plugin metadata. Escape and ordinary exit closed the fixture. PID 10168 exited 0. The effective stored examples flag remained true, Actions and History were exact, and original scratch Settings, Actions and History were restored. This verifies the menu paths, shared filter and successful preference write. The global help shortcut and focused save-error path remain open.
 
 ## G06 Settings completion preference native baseline
 

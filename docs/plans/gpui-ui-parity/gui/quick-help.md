@@ -8,4 +8,4 @@ G05 owns `quick-help`. The configured help shortcut or Help → Quick Help Overl
 
 Select `bounded_help_scroll_keeps_controls_and_full_content_reachable`.
 
-`G05-EGUI-HELP-MENU-ROUTES` verifies the actual menu entry, representative Hotkeys and Jump Mode content, and Escape dismissal. The shortcut, retained filter, scroll behavior and GPUI remain pending. [Validation log](../VALIDATION_LOG.md)
+`G05-EGUI-HELP-MENU-ROUTES` verifies the actual menu entry, representative Hotkeys and Jump Mode content, and Escape dismissal. `G05-EGUI-HELP-SHARED-FILTER-EXAMPLES` verifies that the other Help window's exact filter is retained with the matched plugin metadata. The shortcut, Quick Help body scrolling and GPUI remain pending. [Validation log](../VALIDATION_LOG.md#g05-native-help-filter-and-examples-baseline)

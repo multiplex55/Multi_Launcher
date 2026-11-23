@@ -1102,41 +1102,36 @@ impl LauncherApp {
             return (res, pending);
         }
 
-        if plugin_results.is_empty() && !trimmed.is_empty() {
-            for (a, cached) in self
-                .command_cache
-                .iter()
-                .zip(self.command_search_cache.iter())
-            {
-                #[cfg(test)]
-                if c2a_observer.is_some() {
-                    c2a_command_fallback_actions_visited =
-                        c2a_command_fallback_actions_visited.saturating_add(1);
-                }
-                let exact_match_mode = self.is_exact_match_mode();
-                let alias_match = exact_match_mode && self.alias_matches_lc(&a.action, trimmed_lc);
-                if let Some(score) = cached.score_candidate(
-                    a,
-                    trimmed,
-                    trimmed_lc,
-                    exact_match_mode,
-                    alias_match,
-                    &self.matcher,
-                    self.fuzzy_weight,
-                ) {
-                    #[cfg(test)]
-                    if c2a_observer.is_some() {
-                        c2a_command_fallback_hits_cloned =
-                            c2a_command_fallback_hits_cloned.saturating_add(1);
-                        c2a_command_fallback_clone_logical_bytes =
-                            c2a_command_fallback_clone_logical_bytes
-                                .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                        c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
-                            .saturating_add(c2a_search_observer::action_payload_strings(a));
-                    }
-                    res.push((a.clone(), score));
+        let command_fallback = crate::actions::search::collect_command_fallback_candidates(
+            crate::actions::search::CommandFallbackInput {
+                actions: &self.command_cache,
+                cached_entries: &self.command_search_cache,
+                matcher: &self.matcher,
+                match_exact: self.match_exact,
+                fuzzy_weight: self.fuzzy_weight,
+                folder_aliases_lc: &self.folder_aliases_lc,
+                bookmark_aliases_lc: &self.bookmark_aliases_lc,
+            },
+            trimmed,
+            trimmed_lc,
+            plugin_results.is_empty(),
+        );
+
+        if plugin_results.is_empty() {
+            #[cfg(test)]
+            if c2a_observer.is_some() {
+                c2a_command_fallback_actions_visited =
+                    command_fallback.stats.actions_visited as u64;
+                c2a_command_fallback_hits_cloned = command_fallback.stats.hits_cloned as u64;
+                for (action, _) in &command_fallback.scored_actions {
+                    c2a_command_fallback_clone_logical_bytes =
+                        c2a_command_fallback_clone_logical_bytes
+                            .saturating_add(c2a_search_observer::action_payload_bytes(action));
+                    c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
+                        .saturating_add(c2a_search_observer::action_payload_strings(action));
                 }
             }
+            res = command_fallback.scored_actions;
         } else {
             let tail = trimmed_lc.split_once(" ").map(|x| x.1).unwrap_or("");
             let mut query_term = tail.split(" ").nth(1).unwrap_or("").to_string();
@@ -3511,6 +3506,14 @@ mod tests {
         );
         assert_eq!(command_fallback.actions, vec![command.clone()]);
 
+        let pending_fallback = c2a_assert_reference_parity(
+            &app,
+            "needle",
+            c2a_snapshot(Vec::new(), true, 10, 10, versions, versions),
+        );
+        assert_eq!(pending_fallback.actions, vec![command.clone()]);
+        assert_eq!(pending_fallback.state, LauncherSearchState::Pending);
+
         let empty_browse = c2a_assert_reference_parity(
             &app,
             "",
@@ -3973,6 +3976,58 @@ mod tests {
         app.query = "x needle".into();
         app.search();
         assert!(app.results.iter().any(|action| action.action == "fixture:folder"));
+    }
+
+    #[test]
+    fn cached_command_fallback_uses_original_provider_snapshot_and_ignores_pending_state() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_inert_app(&ctx, workspace.root());
+        let command = Action {
+            label: "hash preview".into(),
+            desc: "Open the Hash Generator".into(),
+            action: "query:hash".into(),
+            args: None,
+        };
+        app.command_cache = vec![command.clone()];
+        app.command_search_cache = vec![CachedSearchEntry::from_action(&command)];
+        app.match_exact = true;
+
+        let provider = Action {
+            label: "Unrelated provider row".into(),
+            desc: "No matching display text".into(),
+            action: "provider:unrelated".into(),
+            args: None,
+        };
+        let (filtered_provider, provider_pending) = app.search_plugins_from_results(
+            "hash preview",
+            "hash preview",
+            "hash preview",
+            vec![provider],
+            true,
+        );
+        assert!(filtered_provider.is_empty());
+        assert!(provider_pending);
+
+        let (pending_fallback, fallback_pending) = app.search_plugins_from_results(
+            "hash preview",
+            "hash preview",
+            "hash preview",
+            Vec::new(),
+            true,
+        );
+        assert_eq!(pending_fallback, vec![(command.clone(), 0.0)]);
+        assert!(fallback_pending);
+
+        let (global_search, global_pending) =
+            app.search_plugins_from_results("g hash", "g hash", "g hash", Vec::new(), true);
+        assert!(global_search.is_empty());
+        assert!(global_pending);
+
+        drop(app);
+        drop(workspace);
     }
 
     #[test]

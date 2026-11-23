@@ -1,6 +1,6 @@
 # Launcher
 
-G05 owns `launcher`, the root query and result workflow. The source baseline is `98bbc0ccc22a297e8eafae7e844c2f7e45854856`. GPUI implements one installed Hash Generator Search result and its typed activation. The full launcher remains in implementation. Native egui evidence also covers the scoped `app` query for a reopened custom action. [Validation log](../VALIDATION_LOG.md)
+G05 owns `launcher`, the root query and result workflow. The source baseline is `98bbc0ccc22a297e8eafae7e844c2f7e45854856`. GPUI Search supports the installed Hash Generator result, single-line saved Query Set actions, list arrows, query history and Tab completion within their verified scopes. The full launcher remains in implementation. Native egui evidence also covers the scoped `app` query for a reopened custom action. [Validation log](../VALIDATION_LOG.md)
 
 ## Routes and ownership
 
@@ -108,6 +108,8 @@ Select both existing Track C2a provider-precedence and shared-owner oracle cases
 
 `G05-EGUI-CACHED-COMMAND-FALLBACK` observed both capability states on the matched exact fixture. The live provider replaced the command label only with its search capability enabled. Each process exited cleanly and left the Actions and History files intact. [Validation log](../VALIDATION_LOG.md#g05-command-fallback-native-baseline)
 
+`G05-GPUI-CACHED-COMMAND-FALLBACK-WINDOWS` matched both capability states in GPUI and replayed the enabled route in egui on the same linked build. It also verified true Hash close, the preserved direct shortcut and GPUI's blank Search. All 10 focused Rust cases passed, including the independent provider precedence and work receipts. [Validation log](../VALIDATION_LOG.md#g05-gpui-cached-command-fallback-native-checkpoint)
+
 ## Physical vertical keypad navigation
 
 After Saved Query Set can serve as an inert row-selection receipt, handle physical NumPad2 and NumPad8 for the active visible GPUI Search list. The pinned Windows backend still has the virtual key and LPARAM scan metadata in `translate_accelerator` and `handle_keydown_msg`. It dispatches GPUI before `TranslateMessage`. A consumed event therefore suppresses the exact Windows character translation. The public GPUI input retains the logical key and normalized modifiers, so this checkpoint needs a narrow typed receipt from the pinned backend. The proposed local Windows backend patch should expose the HWND, virtual key, scan, extended bit and original modifiers only within the synchronous input callback. Keep the receipt scoped to its dispatch, including reentry.
@@ -115,6 +117,8 @@ After Saved Query Set can serve as an inert row-selection receipt, handle physic
 Recognize nonextended scan `0x50` with NumPad2 or Down and nonextended scan `0x48` with NumPad8 or Up. Require an unmodified event. Register a Windows GPUI keystroke interceptor before Kit evaluates ordinary arrow actions. Match the current HWND and originating Search key context, and reuse the existing guarded list movement. Stop propagation only when that operation accepts the event. Preserve ordinary arrow behavior, Ctrl+Up/Down history, top-row digits, modified keypad and editor input. Hash and other controls keep ownership when focused. Lateral keypad, result-focus handoff, grid and page navigation have separate behavior.
 
 Select focused classification cases for both virtual-key forms, extended arrows, top-row scans, modified events and absent native provenance. Use the two inert Query Set rows to verify one move per press, unchanged Search text and selection via fresh Enter. Check both measured Num Lock states, top-row input, ordinary arrows and a real Hash focus negative. Record injected scans separately from physical hardware. First establish whether the pinned parser delivers both Num Lock on virtual keys on the test layout. The matched egui controller baseline is `G05-EGUI-INJECTED-KEYPAD`. [Validation log](../VALIDATION_LOG.md)
+
+The separate list-mode lateral baseline `G05-EGUI-INJECTED-LATERAL-KEYPAD` shows that keypad Right selects the first available row when unselected. Keypad Left clears selection. The egui names `EnterResults` and `ReturnToQuery` describe selection intent. Their handlers preserve or request Search focus. Treat ordinary editor arrow provenance as a separate case from the controller's observed list selection. [Validation log](../VALIDATION_LOG.md#g05-lateral-keypad-native-baseline)
 
 ## Grid and page navigation baseline
 

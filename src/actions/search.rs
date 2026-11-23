@@ -54,6 +54,81 @@ impl CachedSearchEntry {
     }
 }
 
+/// Cached command data needed by the launcher's installed command fallback.
+pub struct CommandFallbackInput<'a, M> {
+    pub actions: &'a [Action],
+    pub cached_entries: &'a [CachedSearchEntry],
+    pub matcher: &'a M,
+    pub match_exact: bool,
+    pub fuzzy_weight: f32,
+    pub folder_aliases_lc: &'a HashMap<String, Option<String>>,
+    pub bookmark_aliases_lc: &'a HashMap<String, Option<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommandFallbackStats {
+    pub actions_visited: usize,
+    pub hits_cloned: usize,
+}
+
+pub struct CommandFallbackResults {
+    pub scored_actions: Vec<(Action, f32)>,
+    pub stats: CommandFallbackStats,
+}
+
+/// Score the cached installed commands only when there is no provider snapshot
+/// to display. The provider-presence decision is made from its original result
+/// vector before any adapter-specific display filtering.
+pub fn collect_command_fallback_candidates<M: FuzzyMatcher>(
+    input: CommandFallbackInput<'_, M>,
+    trimmed: &str,
+    trimmed_lc: &str,
+    provider_results_empty: bool,
+) -> CommandFallbackResults {
+    if !provider_results_empty || trimmed.is_empty() || trimmed_lc.starts_with("g ") {
+        return CommandFallbackResults {
+            scored_actions: Vec::new(),
+            stats: CommandFallbackStats::default(),
+        };
+    }
+
+    debug_assert_eq!(input.actions.len(), input.cached_entries.len());
+    let exact_match_mode = input.match_exact || input.fuzzy_weight <= 0.0;
+    let mut scored_actions = Vec::new();
+    let pairs = input.actions.iter().zip(input.cached_entries);
+    let actions_visited = pairs.len();
+
+    for (action, cached) in pairs {
+        let alias_match = exact_match_mode
+            && alias_matches_lc(
+                &action.action,
+                trimmed_lc,
+                input.folder_aliases_lc,
+                input.bookmark_aliases_lc,
+            );
+        if let Some(score) = cached.score_candidate(
+            action,
+            trimmed,
+            trimmed_lc,
+            exact_match_mode,
+            alias_match,
+            input.matcher,
+            input.fuzzy_weight,
+        ) {
+            scored_actions.push((action.clone(), score));
+        }
+    }
+
+    let stats = CommandFallbackStats {
+        actions_visited,
+        hits_cloned: scored_actions.len(),
+    };
+    CommandFallbackResults {
+        scored_actions,
+        stats,
+    }
+}
+
 /// Borrowed local-action search data. The egui and GPUI adapters can use the
 /// same collector while retaining ownership of their respective catalogs.
 pub struct LocalActionSearchInput<'a, M> {
@@ -350,6 +425,15 @@ mod tests {
     use fuzzy_matcher::skim::SkimMatcherV2;
     use std::collections::HashMap;
 
+    fn command_action(label: &str, action: &str, args: &str) -> Action {
+        Action {
+            label: label.into(),
+            desc: "Hash generator command".into(),
+            action: action.into(),
+            args: Some(args.into()),
+        }
+    }
+
     fn action(label: &str, args: &str) -> Action {
         Action {
             label: label.into(),
@@ -499,5 +583,150 @@ mod tests {
             &folder_aliases,
             &bookmark_aliases,
         ));
+    }
+
+    #[test]
+    fn command_fallback_requires_a_nonblank_non_global_query_without_provider_rows() {
+        use super::{CommandFallbackInput, collect_command_fallback_candidates};
+
+        let command = command_action("hash", "query:hash", "complete command");
+        let commands = vec![command.clone()];
+        let cached = vec![CachedSearchEntry::from_action(&command)];
+        let matcher = SkimMatcherV2::default();
+        let aliases = HashMap::new();
+        let input = || CommandFallbackInput {
+            actions: &commands,
+            cached_entries: &cached,
+            matcher: &matcher,
+            match_exact: true,
+            fuzzy_weight: 1.0,
+            folder_aliases_lc: &aliases,
+            bookmark_aliases_lc: &aliases,
+        };
+
+        for (query, query_lc, provider_results_empty) in [
+            ("", "", true),
+            ("g needle", "g needle", true),
+            ("needle", "needle", false),
+        ] {
+            let results = collect_command_fallback_candidates(
+                input(),
+                query,
+                query_lc,
+                provider_results_empty,
+            );
+            assert!(results.scored_actions.is_empty());
+            assert_eq!(results.stats, super::CommandFallbackStats::default());
+        }
+
+        // Pending provider work does not change this boundary. The adapter
+        // supplies the current empty snapshot, and fallback remains available.
+        let pending_snapshot = collect_command_fallback_candidates(
+            input(),
+            "ha",
+            "ha",
+            true,
+        );
+        assert_eq!(pending_snapshot.scored_actions, vec![(command, 0.0)]);
+        assert_eq!(
+            pending_snapshot.stats,
+            super::CommandFallbackStats {
+                actions_visited: 1,
+                hits_cloned: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn command_fallback_preserves_action_identity_exact_alias_precedence_and_fuzzy_score() {
+        use super::{CommandFallbackInput, collect_command_fallback_candidates};
+        use fuzzy_matcher::FuzzyMatcher;
+
+        let alpha = command_action("Alpha needle", "query:shared", "alpha arguments");
+        let beta = command_action("Beta needle", "query:shared", "beta arguments");
+        let folder_alias = command_action("Folder command", "folder:one", "folder arguments");
+        let shadowed_alias = command_action("Shadowed command", "folder:two", "shadow arguments");
+        let commands = vec![
+            alpha.clone(),
+            beta.clone(),
+            folder_alias.clone(),
+            shadowed_alias,
+        ];
+        let cached = commands
+            .iter()
+            .map(CachedSearchEntry::from_action)
+            .collect::<Vec<_>>();
+        let matcher = SkimMatcherV2::default();
+        let folder_aliases = HashMap::from([
+            ("folder:one".to_owned(), Some("needle folder".to_owned())),
+            ("folder:two".to_owned(), None),
+        ]);
+        let bookmark_aliases = HashMap::from([
+            ("folder:one".to_owned(), Some("ignored bookmark".to_owned())),
+            ("folder:two".to_owned(), Some("needle bookmark".to_owned())),
+        ]);
+        let exact = collect_command_fallback_candidates(
+            CommandFallbackInput {
+                actions: &commands,
+                cached_entries: &cached,
+                matcher: &matcher,
+                match_exact: true,
+                fuzzy_weight: 1.0,
+                folder_aliases_lc: &folder_aliases,
+                bookmark_aliases_lc: &bookmark_aliases,
+            },
+            "needle",
+            "needle",
+            true,
+        );
+        assert_eq!(
+            exact.scored_actions,
+            vec![(alpha.clone(), 0.0), (beta.clone(), 0.0), (folder_alias, 1.0)]
+        );
+
+        let fuzzy_action = Action {
+            label: "Hash command".into(),
+            desc: "fuzzy arguments description".into(),
+            action: "query:fuzzy".into(),
+            args: Some("fuzzy arguments".into()),
+        };
+        let fuzzy_commands = vec![fuzzy_action.clone()];
+        let fuzzy_cached = vec![CachedSearchEntry::from_action(&fuzzy_action)];
+        let fuzzy = collect_command_fallback_candidates(
+            CommandFallbackInput {
+                actions: &fuzzy_commands,
+                cached_entries: &fuzzy_cached,
+                matcher: &matcher,
+                match_exact: false,
+                fuzzy_weight: 0.25,
+                folder_aliases_lc: &HashMap::new(),
+                bookmark_aliases_lc: &HashMap::new(),
+            },
+            "fuzzy arguments",
+            "fuzzy arguments",
+            true,
+        );
+        let expected = matcher
+            .fuzzy_match(&fuzzy_action.label, "fuzzy arguments")
+            .max(matcher.fuzzy_match(&fuzzy_action.desc, "fuzzy arguments"))
+            .unwrap() as f32
+            * 0.25;
+        assert_eq!(fuzzy.scored_actions, vec![(fuzzy_action.clone(), expected)]);
+
+        let exact_override = collect_command_fallback_candidates(
+            CommandFallbackInput {
+                actions: &fuzzy_commands,
+                cached_entries: &fuzzy_cached,
+                matcher: &matcher,
+                match_exact: false,
+                fuzzy_weight: 0.0,
+                folder_aliases_lc: &HashMap::new(),
+                bookmark_aliases_lc: &HashMap::new(),
+            },
+            "fzy",
+            "fzy",
+            true,
+        );
+        assert!(exact_override.scored_actions.is_empty());
     }
 }

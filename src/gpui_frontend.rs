@@ -96,6 +96,8 @@ struct LauncherSearchCatalog {
     actions: Vec<Action>,
     cached_entries: Vec<CachedSearchEntry>,
     filter_metadata: Vec<ActionFilterMetadata>,
+    commands: Vec<Action>,
+    command_cached_entries: Vec<CachedSearchEntry>,
     matcher: SkimMatcherV2,
     match_exact: bool,
     fuzzy_weight: f32,
@@ -119,7 +121,7 @@ impl LauncherSearchCatalog {
         let commands = if enabled_plugins
             .is_none_or(|enabled| enabled.contains(hash_generator.name()))
         {
-            hash_generator.commands()
+            supported_launcher_search_actions(hash_generator.commands())
         } else {
             Vec::new()
         };
@@ -128,11 +130,17 @@ impl LauncherSearchCatalog {
             .iter()
             .map(ActionFilterMetadata::from_action)
             .collect();
+        let command_cached_entries = commands
+            .iter()
+            .map(CachedSearchEntry::from_action)
+            .collect();
         let completion_index = multi_launcher::completion::build_index(&commands, &actions);
         Self {
             actions,
             cached_entries,
             filter_metadata,
+            commands,
+            command_cached_entries,
             matcher: SkimMatcherV2::default(),
             match_exact: startup.match_exact,
             fuzzy_weight: startup.fuzzy_weight,
@@ -150,11 +158,33 @@ impl LauncherSearchCatalog {
         raw_query: &str,
         provider_actions: Vec<Action>,
     ) -> Vec<Action> {
-        // GPUI currently has no ordinary empty-query catalog or command cache.
-        // Clearing Search therefore restores its existing blank result state.
+        // Clearing GPUI Search restores the blank result state.
+        // Cached commands become searchable once there is a query.
         if raw_query.trim().is_empty() {
             return Vec::new();
         }
+        let trimmed = raw_query.trim();
+        let trimmed_lc = trimmed.to_lowercase();
+        let command_fallback =
+            multi_launcher::actions::search::collect_command_fallback_candidates(
+                multi_launcher::actions::search::CommandFallbackInput {
+                    actions: &self.commands,
+                    cached_entries: &self.command_cached_entries,
+                    matcher: &self.matcher,
+                    match_exact: self.match_exact,
+                    fuzzy_weight: self.fuzzy_weight,
+                    folder_aliases_lc: &self.folder_aliases_lc,
+                    bookmark_aliases_lc: &self.bookmark_aliases_lc,
+                },
+                trimmed,
+                &trimmed_lc,
+                provider_actions.is_empty(),
+            );
+        let mut scored_provider_actions = provider_actions
+            .into_iter()
+            .map(|action| (action, 0.0))
+            .collect::<Vec<_>>();
+        scored_provider_actions.extend(command_fallback.scored_actions);
         compose_read_only_results(
             ReadOnlySearchInput {
                 raw_query,
@@ -171,10 +201,7 @@ impl LauncherSearchCatalog {
                 collect_candidate_count: false,
                 usage: &self.usage,
                 usage_weight: self.usage_weight,
-                provider_results: provider_actions
-                    .into_iter()
-                    .map(|action| (action, 0.0))
-                    .collect(),
+                provider_results: scored_provider_actions,
             },
             |_| {},
             None,
@@ -7613,6 +7640,7 @@ mod tests {
     use gpui_kit::{KeyContext, point, px};
     use multi_launcher::{
         hash_generator::{HashAlgorithm, parse_expected_digest},
+        plugin::Plugin as _,
         settings::RememberedPresentation,
     };
     use std::collections::{HashMap, HashSet};
@@ -8013,6 +8041,85 @@ mod tests {
         assert_eq!(
             supported_launcher_search_actions(vec![unsupported]),
             Vec::new()
+        );
+    }
+
+    #[test]
+    fn gpui_cached_hash_command_fallback_respects_enablement_and_provider_precedence() {
+        let enabled = HashSet::from(["hash_generator".to_owned()]);
+        let startup = |match_exact| LauncherSearchStartup {
+            actions: Vec::new(),
+            match_exact,
+            fuzzy_weight: 0.25,
+            usage_weight: 0.0,
+            query_autocomplete: true,
+            usage: HashMap::new(),
+            folder_aliases_lc: HashMap::new(),
+            bookmark_aliases_lc: HashMap::new(),
+        };
+
+        let enabled_catalog = LauncherSearchCatalog::new(startup(true), Some(&enabled));
+        let hash_command = multi_launcher::plugins::hash_generator::HashGeneratorPlugin
+            .commands()
+            .into_iter()
+            .next()
+            .expect("Hash installs one cached Search command");
+        assert_eq!(enabled_catalog.commands, vec![hash_command.clone()]);
+        assert_eq!(enabled_catalog.command_cached_entries.len(), 1);
+        assert_eq!(enabled_catalog.compose("ha", Vec::new()), vec![hash_command.clone()]);
+
+        let route = parse_installed_search_invocation(hash_command.clone(), ActivationSource::Enter)
+            .expect("the fallback command uses the installed Query Set route");
+        assert!(matches!(route.route, InstalledSearchRoute::QuerySet(_)));
+        assert_eq!(route.invocation.original_action, hash_command);
+
+        let provider = multi_launcher::actions::Action {
+            label: "Provider owns this query".into(),
+            desc: "Installed provider row".into(),
+            action: "provider:owned".into(),
+            args: Some("full provider arguments".into()),
+        };
+        assert_eq!(
+            enabled_catalog.compose("ha", vec![provider.clone()]),
+            vec![provider],
+            "an incoming provider row suppresses command fallback"
+        );
+        assert!(
+            enabled_catalog.compose("g ha", Vec::new()).is_empty(),
+            "global search never offers a cached command fallback"
+        );
+
+        let disabled_catalog = LauncherSearchCatalog::new(startup(true), Some(&HashSet::new()));
+        assert!(disabled_catalog.commands.is_empty());
+        assert!(disabled_catalog.compose("ha", Vec::new()).is_empty());
+
+        let fuzzy_catalog = LauncherSearchCatalog::new(startup(false), Some(&enabled));
+        assert_eq!(
+            fuzzy_catalog.compose("hsh", Vec::new()),
+            vec![enabled_catalog.commands[0].clone()],
+            "non-exact installed fallback reuses cached fuzzy command scoring"
+        );
+
+        let hash_plugin = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
+        let disabled_plugin_provider = multi_launcher::plugin::search_filtered_plugins(
+            [&hash_plugin as &dyn multi_launcher::plugin::Plugin],
+            "hash",
+            Some(&HashSet::new()),
+            None,
+        );
+        assert!(disabled_plugin_provider.is_empty());
+
+        let capability_disabled_provider = multi_launcher::plugin::search_filtered_plugins(
+            [&hash_plugin as &dyn multi_launcher::plugin::Plugin],
+            "hash",
+            Some(&enabled),
+            Some(&HashMap::from([("hash_generator".into(), Vec::new())])),
+        );
+        assert!(capability_disabled_provider.is_empty());
+        assert_eq!(
+            enabled_catalog.compose("hash", capability_disabled_provider),
+            vec![enabled_catalog.commands[0].clone()],
+            "plugin enablement admits its command label while Search capability filters provider results"
         );
     }
 
