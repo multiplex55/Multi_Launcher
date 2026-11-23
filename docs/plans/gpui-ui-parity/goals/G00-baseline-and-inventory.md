@@ -1,6 +1,6 @@
 # G00 — Establish source, scope and durable execution records
 
-**Status: In implementation.** G00-A and the representative G00-C baseline are complete. Keyboard Search, an independently closed Hash popout, saved presentation, and later saved-action edits with reopen evidence are recorded. Native global invocation remains with G01. The remaining feature-specific baselines stay with their owners. See [Checkpoints](../CHECKPOINTS.md) for receipts and the remaining inventory work.
+**Status: Accepted for source discovery and representative baseline.** G00-A establishes the dedicated branch. G00-B and G00-D reconcile the reviewed source registrations and named GUI owners. G00-C records keyboard Search, an independently closed Hash popout, saved presentation, and later saved-action edits with reopen evidence. Native global invocation remains with G01. Feature-specific runtime baselines and expanded GUI acceptance stay with their owners through the G25 reconciliation. See [source review](../reviews/G00-source-discovery.md) and [checkpoints](../CHECKPOINTS.md) for evidence.
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 

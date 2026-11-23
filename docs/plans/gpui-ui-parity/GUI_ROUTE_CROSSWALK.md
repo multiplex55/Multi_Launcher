@@ -212,3 +212,12 @@ Source checked at `98bbc0ccc22a297e8eafae7e844c2f7e45854856`. Stable GUI IDs lin
 | G24 | `SystemPlugin`, `ProcessesPlugin`, `SysInfoPlugin`, `NetworkPlugin`, `ShellPlugin`, `KeysPlugin`, `MultiManagerPlugin`, `RecyclePlugin`, `MediaPlugin`, `IpPlugin`, `VolumePlugin`, `BrightnessPlugin`, `TaskManagerPlugin`, `WindowsPlugin`, `VirtualDesktopPlugin`, `BrowserTabsPlugin`, `LayoutPlugin` | System results, native controls and established external handoffs. |
 
 The same reload path uses `load_dir` for configured directories. G06 owns supported dynamic plugin settings capability and lifetime. Preserve built-in, registered and dynamic origin identities. The runtime enumeration must be repeated against an actual supported dynamic library before accepting that route.
+
+## Separately constructed Windows mouse surfaces
+
+| Native constructor | Source disposition |
+| --- | --- |
+| `mouse_gestures/overlay.rs::HintOverlaySurface` | G21 [Mouse Gesture Hint Overlay](gui/mouse-gesture-hint-overlay.md) |
+| `mouse_gestures/overlay.rs::TrailOverlaySurface` | G21 [Mouse Gesture Trail Overlay](gui/mouse-gesture-trail-overlay.md) |
+| `coordinate_tool/native.rs::WindowsSurfaceBackend` HUD `LayeredSurface` | G22 [Coordinate overlay](gui/coordinate-overlay.md) |
+| `coordinate_tool/native.rs::WindowsSurfaceBackend` crosshair, guide and click `LayeredSurface` instances, and `WindowsEffectOperations` halo and zoom hosts and children | G22 [Mouse Effects Overlays](gui/mouse-effects-overlay.md) |
