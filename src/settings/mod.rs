@@ -15,6 +15,6 @@ pub use utility_dialog_sizes::{
 };
 pub use utility_presentations::{RememberedPresentation, UtilityPresentations};
 
-pub use crate::gui::jump_mode::config::{
+pub use crate::launcher::jump_mode::config::{
     HintAlphabet, HintAlphabetError, JumpChordError, JumpModeChord,
 };

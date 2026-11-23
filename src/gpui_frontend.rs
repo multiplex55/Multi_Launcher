@@ -69,14 +69,19 @@ use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
 use multi_launcher::launcher::query_history::{QueryHistoryDirection, QueryHistoryNavigator};
+use multi_launcher::launcher::jump_mode::{
+    Hint, HintMap, HintSession, MatchOutcome, SemanticTargetId, SurfaceId,
+    TargetGeneration, TargetId, TargetKind, TargetMetadata,
+};
 use multi_launcher::launcher::query_results_layout::{
     QueryLayoutPlugin, QuerySelectionMove, ResolvedQueryResultsLayout, move_query_selection,
     resolve_query_results_layout,
 };
 use multi_launcher::plugin::Plugin as _;
 use multi_launcher::settings::{
-    AppliedWindowSize, NativeWindowGeometry, PreferredWindowSize, QueryResultsLayoutSettings,
-    RememberedPresentation, UtilityDialogSizes, UtilityPresentations, UtilityToolKey,
+    AppliedWindowSize, HintAlphabet, JumpModeChord, NativeWindowGeometry, PreferredWindowSize,
+    QueryResultsLayoutSettings, RememberedPresentation, UtilityDialogSizes,
+    UtilityPresentations, UtilityToolKey,
 };
 use multi_launcher::utility_geometry_binding::{
     CheckedNativeWindow, NativeGeometryBinding, NativeGeometrySlot, NativeGeometryStamp,
@@ -97,6 +102,9 @@ pub(crate) struct LauncherSearchStartup {
     pub query_autocomplete: bool,
     pub page_jump: usize,
     pub query_results_layout: QueryResultsLayoutSettings,
+    pub jump_mode_enabled: bool,
+    pub jump_mode_activation_chord: JumpModeChord,
+    pub jump_mode_hint_alphabet: HintAlphabet,
     pub usage: HashMap<String, u32>,
     pub folder_aliases_lc: HashMap<String, Option<String>>,
     pub bookmark_aliases_lc: HashMap<String, Option<String>>,
@@ -572,6 +580,8 @@ struct RootWindow {
     launcher_results_scroll: ScrollHandle,
     query_history: QueryHistoryNavigator,
     fresh_search_enter: Option<FreshSearchEnter>,
+    search_jump_mode: SearchJumpModeController,
+    search_jump_geometry_frame: Rc<RefCell<Option<SearchJumpGeometryFrame>>>,
     search_completion: SearchCompletion,
     search_completion_focus_revision: Option<u64>,
     native_window: Option<NativeWindow>,
@@ -713,6 +723,811 @@ impl LauncherSearchResults {
     }
 }
 
+fn select_search_result_state(
+    results: &mut LauncherSearchResults,
+    current_query: &str,
+    generation: u64,
+    index: usize,
+) -> Option<(bool, Option<usize>)> {
+    if generation != results.generation
+        || results.query != current_query
+        || index >= results.actions.len()
+    {
+        return None;
+    }
+    let changed = results.selected != Some(index);
+    results.selected = Some(index);
+    let reveal_row = changed.then(|| results.layout.scroll_child_for(index));
+    Some((changed, reveal_row))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SearchJumpTargetGeometry {
+    metadata: TargetMetadata,
+    bounds: Bounds<Pixels>,
+    visible_bounds: Bounds<Pixels>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SearchJumpGeometryFrame {
+    generation: u64,
+    targets: Vec<SearchJumpTargetGeometry>,
+    target_ids: Vec<TargetId>,
+    target_indices: HashMap<TargetId, usize>,
+    matches_active_session: bool,
+}
+
+impl SearchJumpGeometryFrame {
+    fn target_ids(&self) -> &[TargetId] {
+        &self.target_ids
+    }
+
+    fn has_target(&self, id: &TargetId) -> bool {
+        self.target_indices.contains_key(id)
+    }
+
+    fn same_population(&self, other: &Self) -> bool {
+        self.generation == other.generation && self.target_ids == other.target_ids
+    }
+
+    fn same_geometry(&self, other: &Self) -> bool {
+        self.same_population(other)
+            && self.target_ids.iter().all(|target_id| {
+                self.target_geometry(target_id)
+                    .zip(other.target_geometry(target_id))
+                    .is_some_and(|(left, right)| {
+                        left.bounds == right.bounds && left.visible_bounds == right.visible_bounds
+                    })
+            })
+    }
+
+    fn target_geometry(&self, id: &TargetId) -> Option<&SearchJumpTargetGeometry> {
+        self.target_indices
+            .get(id)
+            .and_then(|index| self.targets.get(*index))
+    }
+}
+
+fn clipped_search_jump_geometry(
+    metadata: TargetMetadata,
+    bounds: Bounds<Pixels>,
+    content_mask: Bounds<Pixels>,
+) -> Option<SearchJumpTargetGeometry> {
+    let visible_bounds = bounds.intersect(&content_mask);
+    (visible_bounds.size.width.as_f32() > 0.0
+        && visible_bounds.size.height.as_f32() > 0.0)
+    .then_some(SearchJumpTargetGeometry {
+        metadata,
+        bounds,
+        visible_bounds,
+    })
+}
+
+#[derive(Debug)]
+struct SearchJumpGeometryDraft {
+    generation: u64,
+    targets: Vec<SearchJumpTargetGeometry>,
+}
+
+impl SearchJumpGeometryDraft {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            targets: Vec::new(),
+        }
+    }
+
+    fn finish(
+        &self,
+        expected_generation: Option<u64>,
+        expected_target_ids: &[TargetId],
+        alphabet: &HintAlphabet,
+        metrics: multi_launcher::gui::theme::ThemeMetrics,
+    ) -> SearchJumpGeometryFrame {
+        // A target belongs to the eligible population only if its assigned
+        // marker fits inside the currently visible part of the element.
+        // Assign against the full visible snapshot first so the filter is
+        // deterministic and cannot silently retarget a code mid-session.
+        let geometry_by_id = self
+            .targets
+            .iter()
+            .map(|target| (target.metadata.id().clone(), target))
+            .collect::<HashMap<_, _>>();
+        let eligible_target_ids = HintMap::assign_with_alphabet(
+            self.targets
+                .iter()
+                .map(|target| target.metadata.clone()),
+            alphabet,
+        )
+        .map(|map| {
+            map.assignments()
+                .iter()
+                .filter_map(|assignment| {
+                    let target_id = assignment.target().id();
+                    let geometry = geometry_by_id.get(target_id)?;
+                    search_jump_badge_placement(geometry, assignment.hint(), metrics)
+                        .is_some()
+                        .then(|| target_id.to_owned())
+                })
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+        let targets = self
+            .targets
+            .iter()
+            .filter(|target| eligible_target_ids.contains(target.metadata.id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut target_ids = targets
+            .iter()
+            .map(|target| target.metadata.id().clone())
+            .collect::<Vec<_>>();
+        target_ids.sort();
+        let target_indices = targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| (target.metadata.id().clone(), index))
+            .collect();
+        SearchJumpGeometryFrame {
+            generation: self.generation,
+            targets,
+            matches_active_session: expected_generation == Some(self.generation)
+                && expected_target_ids == target_ids.as_slice(),
+            target_ids,
+            target_indices,
+        }
+    }
+}
+
+struct SearchJumpModeController {
+    enabled: bool,
+    chord_vk: Option<u16>,
+    chord_modifiers: Modifiers,
+    alphabet: HintAlphabet,
+    session: Option<HintSession>,
+    generation: Option<u64>,
+    target_ids: Vec<TargetId>,
+    held_owned_vkeys: HashSet<u16>,
+    revision: u64,
+}
+
+#[derive(Default)]
+struct SearchJumpKeyResult {
+    consumed: bool,
+    repaint: bool,
+    session_transition: bool,
+    selected_target: Option<TargetId>,
+}
+
+impl SearchJumpModeController {
+    fn new(enabled: bool, chord: JumpModeChord, alphabet: HintAlphabet) -> Self {
+        let chord_vk = multi_launcher::hotkey::launcher_invocation::vk_from_key(chord.hotkey_key())
+            .and_then(|virtual_key| u16::try_from(virtual_key).ok());
+        Self {
+            enabled,
+            chord_vk,
+            chord_modifiers: Modifiers {
+                control: chord.ctrl(),
+                alt: chord.alt(),
+                shift: chord.shift(),
+                platform: false,
+                function: false,
+            },
+            alphabet,
+            session: None,
+            generation: None,
+            target_ids: Vec::new(),
+            held_owned_vkeys: HashSet::new(),
+            revision: 0,
+        }
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn is_active(&self) -> bool {
+        self.session.is_some()
+    }
+
+    fn target_ids(&self) -> &[TargetId] {
+        &self.target_ids
+    }
+
+    fn session_generation(&self) -> Option<u64> {
+        self.generation
+    }
+
+    fn hint_for(&self, target: &TargetId) -> Option<&Hint> {
+        self.session.as_ref()?.matching_assignments().find_map(|assignment| {
+            (assignment.target().id() == target).then_some(assignment.hint())
+        })
+    }
+
+    fn matches_leader(&self, receipt: PhysicalKeydown) -> bool {
+        self.enabled
+            && self.chord_vk == Some(receipt.virtual_key)
+            && self.chord_modifiers == receipt.modifiers
+    }
+
+    fn should_process_key_down(&self, receipt: PhysicalKeydown) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if Self::is_native_alt_space(receipt) {
+            return !receipt.held && self.matches_leader(receipt);
+        }
+        if self.held_owned_vkeys.contains(&receipt.virtual_key) {
+            return true;
+        }
+        if self.session.is_some() {
+            return self.matches_leader(receipt)
+                || matches!(receipt.virtual_key, 0x0D | 0x20)
+                || !(receipt.modifiers.control
+                    || receipt.modifiers.alt
+                    || receipt.modifiers.platform
+                    || receipt.modifiers.function);
+        }
+        self.matches_leader(receipt)
+    }
+
+    fn is_native_alt_space(receipt: PhysicalKeydown) -> bool {
+        receipt.virtual_key == 0x20
+            && receipt.modifiers.alt
+            && !receipt.modifiers.control
+            && !receipt.modifiers.shift
+            && !receipt.modifiers.platform
+            && !receipt.modifiers.function
+    }
+
+    fn start(&mut self, frame: &SearchJumpGeometryFrame) -> bool {
+        let targets = frame
+            .targets
+            .iter()
+            .map(|target| target.metadata.clone())
+            .collect::<Vec<_>>();
+        let Ok(map) = HintMap::assign_with_alphabet(targets, &self.alphabet) else {
+            return false;
+        };
+        if map.is_empty() {
+            return false;
+        }
+        self.target_ids = map
+            .assignments()
+            .iter()
+            .map(|assignment| assignment.target().id().clone())
+            .collect();
+        self.generation = Some(frame.generation);
+        self.session = Some(HintSession::new(map));
+        self.revision = self.revision.wrapping_add(1).max(1);
+        true
+    }
+
+    fn retire(&mut self) -> bool {
+        if self.session.take().is_none() {
+            return false;
+        }
+        self.generation = None;
+        self.target_ids.clear();
+        self.revision = self.revision.wrapping_add(1).max(1);
+        true
+    }
+
+    fn reconcile_frame(&mut self, frame: Option<&SearchJumpGeometryFrame>) -> bool {
+        if self.session.is_none() {
+            return false;
+        }
+        let matches = frame.is_some_and(|frame| {
+            self.generation == Some(frame.generation)
+                && frame.target_ids() == self.target_ids.as_slice()
+        });
+        !matches && self.retire()
+    }
+
+    fn process_key_down(
+        &mut self,
+        receipt: PhysicalKeydown,
+        frame: Option<&SearchJumpGeometryFrame>,
+        result_generation: u64,
+    ) -> SearchJumpKeyResult {
+        let mut outcome = SearchJumpKeyResult::default();
+        let native_alt_space = Self::is_native_alt_space(receipt);
+        if !native_alt_space && self.held_owned_vkeys.contains(&receipt.virtual_key) {
+            if receipt.held {
+                outcome.consumed = true;
+                return outcome;
+            }
+            self.held_owned_vkeys.remove(&receipt.virtual_key);
+        }
+
+        if self.session.is_some() {
+            if self.matches_leader(receipt) {
+                if native_alt_space {
+                    if !receipt.held {
+                        outcome.session_transition = self.retire();
+                        outcome.repaint = outcome.session_transition;
+                    }
+                    return outcome;
+                }
+                self.held_owned_vkeys.insert(receipt.virtual_key);
+                outcome.consumed = true;
+                if !receipt.held {
+                    outcome.session_transition = self.retire();
+                    outcome.repaint = outcome.session_transition;
+                }
+                return outcome;
+            }
+
+            // Windows reserves Alt+Space for the system menu. It remains
+            // native even when it is the configured leader or a hint is live.
+            if native_alt_space {
+                return outcome;
+            }
+
+            if matches!(receipt.virtual_key, 0x0D | 0x20) {
+                self.held_owned_vkeys.insert(receipt.virtual_key);
+                outcome.consumed = true;
+                return outcome;
+            }
+
+            // Other Ctrl/Alt/Win/Fn chords remain available to existing
+            // launcher bindings while a hint session owns ordinary Search input.
+            if receipt.modifiers.control
+                || receipt.modifiers.alt
+                || receipt.modifiers.platform
+                || receipt.modifiers.function
+            {
+                return outcome;
+            }
+
+            if receipt.held {
+                self.held_owned_vkeys.insert(receipt.virtual_key);
+                outcome.consumed = true;
+                return outcome;
+            }
+
+            let (previous_prefix, current_prefix, match_outcome) = {
+                let Some(session) = self.session.as_mut() else {
+                    return outcome;
+                };
+                let previous_prefix = session.prefix().to_owned();
+                let match_outcome = match receipt.virtual_key {
+                    0x08 => session.backspace(),
+                    0x1B => session.cancel(),
+                    0x41..=0x5A => session.push_char(char::from(receipt.virtual_key as u8)),
+                    _ => MatchOutcome::Partial {
+                        matching_targets: session.matching_assignments().count(),
+                    },
+                };
+                (
+                    previous_prefix,
+                    session.prefix().to_owned(),
+                    match_outcome,
+                )
+            };
+            self.held_owned_vkeys.insert(receipt.virtual_key);
+            outcome.consumed = true;
+            outcome.repaint = current_prefix != previous_prefix;
+            match match_outcome {
+                MatchOutcome::Completed(target) => {
+                    outcome.selected_target = Some(target);
+                    outcome.session_transition = self.retire();
+                    outcome.repaint = true;
+                }
+                MatchOutcome::Cancelled => {
+                    outcome.session_transition = self.retire();
+                    outcome.repaint = true;
+                }
+                MatchOutcome::NoTarget | MatchOutcome::SessionClosed => {
+                    outcome.session_transition = self.retire();
+                    outcome.repaint = true;
+                }
+                MatchOutcome::NoTargets | MatchOutcome::Partial { .. } | MatchOutcome::Invalid => {}
+            }
+            return outcome;
+        }
+
+        if !self.matches_leader(receipt) {
+            return outcome;
+        }
+        if native_alt_space {
+            if !receipt.held
+                && let Some(frame) = frame.filter(|frame| frame.generation == result_generation)
+                && self.start(frame)
+            {
+                outcome.repaint = true;
+                outcome.session_transition = true;
+            }
+            return outcome;
+        }
+        outcome.consumed = true;
+        self.held_owned_vkeys.insert(receipt.virtual_key);
+        if receipt.held {
+            return outcome;
+        }
+        let Some(frame) = frame.filter(|frame| frame.generation == result_generation) else {
+            return outcome;
+        };
+        if self.start(frame) {
+            outcome.repaint = true;
+            outcome.session_transition = true;
+        }
+        outcome
+    }
+}
+
+struct SearchJumpGeometryElement<E> {
+    inner: E,
+    metadata: TargetMetadata,
+    draft: Rc<RefCell<SearchJumpGeometryDraft>>,
+}
+
+impl<E> SearchJumpGeometryElement<E> {
+    fn new(
+        inner: E,
+        metadata: TargetMetadata,
+        draft: Rc<RefCell<SearchJumpGeometryDraft>>,
+    ) -> Self {
+        Self {
+            inner,
+            metadata,
+            draft,
+        }
+    }
+}
+
+impl<E: InteractiveElement> InteractiveElement for SearchJumpGeometryElement<E> {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.inner.interactivity()
+    }
+}
+
+impl<E: Element> IntoElement for SearchJumpGeometryElement<E> {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl<E: Element> Element for SearchJumpGeometryElement<E> {
+    type RequestLayoutState = E::RequestLayoutState;
+    type PrepaintState = E::PrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        self.inner.id()
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.inner.source_location()
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.inner
+            .request_layout(id, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let prepaint = self
+            .inner
+            .prepaint(id, inspector_id, bounds.clone(), layout, window, cx);
+        if let Some(target) = clipped_search_jump_geometry(
+            self.metadata.clone(),
+            bounds,
+            window.content_mask().bounds,
+        ) {
+            self.draft.borrow_mut().targets.push(target);
+        }
+        prepaint
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.inner
+            .paint(id, inspector_id, bounds, layout, prepaint, window, cx);
+    }
+
+    fn a11y_role(&self) -> Option<Role> {
+        self.inner.a11y_role()
+    }
+
+    fn write_a11y_info(&self, node: &mut gpui_kit::accesskit::Node) {
+        self.inner.write_a11y_info(node);
+    }
+
+    fn a11y_synthetic_children(
+        &mut self,
+        prepaint: &mut Self::PrepaintState,
+        builder: &mut A11ySubtreeBuilder,
+    ) {
+        self.inner.a11y_synthetic_children(prepaint, builder);
+    }
+}
+
+struct SearchJumpBadgeElement<E> {
+    inner: E,
+    frame_slot: Rc<RefCell<Option<SearchJumpGeometryFrame>>>,
+    generation: u64,
+    target: TargetId,
+}
+
+impl<E> SearchJumpBadgeElement<E> {
+    fn new(
+        inner: E,
+        frame_slot: Rc<RefCell<Option<SearchJumpGeometryFrame>>>,
+        generation: u64,
+        target: TargetId,
+    ) -> Self {
+        Self {
+            inner,
+            frame_slot,
+            generation,
+            target,
+        }
+    }
+}
+
+impl<E: Element> IntoElement for SearchJumpBadgeElement<E> {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl<E: Element> Element for SearchJumpBadgeElement<E> {
+    type RequestLayoutState = E::RequestLayoutState;
+    type PrepaintState = E::PrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        self.inner.id()
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.inner.source_location()
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.inner
+            .request_layout(id, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.inner
+            .prepaint(id, inspector_id, bounds, layout, window, cx)
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let frame_is_current = self
+            .frame_slot
+            .borrow()
+            .as_ref()
+            .filter(|frame| {
+                frame.generation == self.generation && frame.matches_active_session
+            })
+            .and_then(|frame| frame.target_geometry(&self.target))
+            .is_some_and(|target| bounds_are_contained_by(&bounds, &target.visible_bounds));
+        if frame_is_current {
+            self.inner
+                .paint(id, inspector_id, bounds, layout, prepaint, window, cx);
+        }
+    }
+
+    fn a11y_role(&self) -> Option<Role> {
+        self.inner.a11y_role()
+    }
+
+    fn write_a11y_info(&self, node: &mut gpui_kit::accesskit::Node) {
+        self.inner.write_a11y_info(node);
+    }
+
+    fn a11y_synthetic_children(
+        &mut self,
+        prepaint: &mut Self::PrepaintState,
+        builder: &mut A11ySubtreeBuilder,
+    ) {
+        self.inner.a11y_synthetic_children(prepaint, builder);
+    }
+}
+
+fn search_jump_search_target_id(generation: u64) -> TargetId {
+    TargetId::new(
+        SurfaceId::LauncherResults,
+        SemanticTargetId::named("launcher-search"),
+        TargetGeneration(generation),
+    )
+}
+
+fn search_jump_result_target_id(generation: u64, index: usize) -> TargetId {
+    TargetId::root_result(TargetGeneration(generation), index)
+}
+
+#[derive(Clone, Copy)]
+struct SearchJumpBadgePlacement {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+fn search_jump_badge_placement(
+    target: &SearchJumpTargetGeometry,
+    hint: &Hint,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+) -> Option<SearchJumpBadgePlacement> {
+    let target_width = target.bounds.size.width.as_f32();
+    let target_height = target.bounds.size.height.as_f32();
+    let visible_left = target.visible_bounds.origin.x.as_f32() - target.bounds.origin.x.as_f32();
+    let visible_top = target.visible_bounds.origin.y.as_f32() - target.bounds.origin.y.as_f32();
+    let visible_right = visible_left + target.visible_bounds.size.width.as_f32();
+    let visible_bottom = visible_top + target.visible_bounds.size.height.as_f32();
+    let width = (hint.as_str().len() as f32 * metrics.small_text_size * 0.72 + 6.0).max(10.0);
+    let height = metrics.line_height.max(metrics.small_text_size) + 4.0;
+    if visible_right - visible_left < width || visible_bottom - visible_top < height {
+        return None;
+    }
+    Some(SearchJumpBadgePlacement {
+        left: (visible_right - width).min(target_width - width).max(visible_left),
+        top: visible_top.max(0.0).min(target_height - height),
+        width,
+        height,
+    })
+}
+
+fn bounds_are_contained_by(inner: &Bounds<Pixels>, outer: &Bounds<Pixels>) -> bool {
+    let inner_right = inner.origin.x.as_f32() + inner.size.width.as_f32();
+    let inner_bottom = inner.origin.y.as_f32() + inner.size.height.as_f32();
+    let outer_right = outer.origin.x.as_f32() + outer.size.width.as_f32();
+    let outer_bottom = outer.origin.y.as_f32() + outer.size.height.as_f32();
+    inner.origin.x.as_f32() >= outer.origin.x.as_f32()
+        && inner.origin.y.as_f32() >= outer.origin.y.as_f32()
+        && inner_right <= outer_right
+        && inner_bottom <= outer_bottom
+}
+
+fn search_jump_hint_badge(
+    hint: Option<&Hint>,
+    target: &TargetId,
+    generation: u64,
+    frame_slot: Rc<RefCell<Option<SearchJumpGeometryFrame>>>,
+    palette: multi_launcher::gui::theme::SemanticPalette,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+) -> Option<AnyElement> {
+    let hint = hint?;
+    let frame = frame_slot.borrow();
+    let target_geometry = frame.as_ref()?.target_geometry(target)?;
+    let placement = search_jump_badge_placement(target_geometry, hint, metrics)?;
+    drop(frame);
+    let badge = div()
+        .absolute()
+        .top(px(placement.top))
+        .left(px(placement.left))
+        .w(px(placement.width))
+        .h(px(placement.height))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.0))
+        .bg(appearance::to_hsla(palette.accent))
+        .text_color(appearance::to_hsla(palette.primary_text))
+        .tab_stop(false)
+        .child(
+            Label::new(hint.as_str().to_owned())
+                .text_size(px(metrics.small_text_size))
+                .line_height(px(metrics.line_height)),
+        );
+    Some(
+        SearchJumpBadgeElement::new(
+            badge.into_element(),
+            frame_slot,
+            generation,
+            target.clone(),
+        )
+        .into_any_element(),
+    )
+}
+
+fn search_jump_geometry_publisher(
+    draft: Rc<RefCell<SearchJumpGeometryDraft>>,
+    frame_slot: Rc<RefCell<Option<SearchJumpGeometryFrame>>>,
+    root: WeakEntity<RootWindow>,
+    expected_generation: Option<u64>,
+    expected_target_ids: Rc<Vec<TargetId>>,
+    alphabet: HintAlphabet,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+) -> impl IntoElement {
+    canvas(
+        move |_, window, app| {
+            let frame = draft.borrow().finish(
+                expected_generation,
+                expected_target_ids.as_slice(),
+                &alphabet,
+                metrics,
+            );
+            let (population_changed, geometry_changed) = {
+                let mut slot = frame_slot.borrow_mut();
+                let population_changed = slot
+                    .as_ref()
+                    .is_none_or(|previous| !previous.same_population(&frame));
+                let geometry_changed = slot
+                    .as_ref()
+                    .is_some_and(|previous| !previous.same_geometry(&frame));
+                *slot = Some(frame);
+                (population_changed, geometry_changed)
+            };
+            if population_changed || (expected_generation.is_some() && geometry_changed) {
+                let root = root.clone();
+                let latest_frame_slot = Rc::clone(&frame_slot);
+                window.defer(app, move |window, app| {
+                    let latest_frame = latest_frame_slot.borrow();
+                    let Some(frame) = latest_frame.as_ref() else {
+                        return;
+                    };
+                    let _ = root.update(app, |root, cx| {
+                        let retired =
+                            root.reconcile_search_jump_geometry_frame(frame, window, cx);
+                        let geometry_changed = geometry_changed
+                            && expected_generation.is_some()
+                            && root.search_jump_mode.is_active()
+                            && frame.matches_active_session;
+                        if retired || geometry_changed {
+                            cx.notify();
+                        }
+                    });
+                });
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size(px(0.0))
+}
+
 fn launcher_result_row_id(generation: u64, absolute_index: usize) -> String {
     format!("launcher-search-result-row-{generation}-{absolute_index}")
 }
@@ -730,12 +1545,25 @@ fn render_launcher_result_cell(
     generation: u64,
     absolute_index: usize,
     selected: bool,
+    hint: Option<&Hint>,
+    jump_geometry_draft: Option<Rc<RefCell<SearchJumpGeometryDraft>>>,
+    jump_geometry_frame: Rc<RefCell<Option<SearchJumpGeometryFrame>>>,
     palette: multi_launcher::gui::theme::SemanticPalette,
     metrics: multi_launcher::gui::theme::ThemeMetrics,
     cx: &mut Context<RootWindow>,
-) -> impl IntoElement {
-    div()
+) -> AnyElement {
+    let target_id = search_jump_result_target_id(generation, absolute_index);
+    let hint = search_jump_hint_badge(
+        hint,
+        &target_id,
+        generation,
+        jump_geometry_frame,
+        palette,
+        metrics,
+    );
+    let cell = div()
         .id(launcher_result_row_id(generation, absolute_index))
+        .relative()
         .flex()
         .flex_col()
         .flex_shrink_0()
@@ -775,12 +1603,25 @@ fn render_launcher_result_cell(
                 .text_size(px(metrics.small_text_size))
                 .line_height(px(metrics.line_height)),
         )
+        .children(hint);
+    if let Some(draft) = jump_geometry_draft {
+        let metadata = TargetMetadata::new(
+            target_id,
+            action.label.clone(),
+            TargetKind::Action,
+            absolute_index.saturating_add(1) as u64,
+        );
+        SearchJumpGeometryElement::new(cell, metadata, draft).into_any_element()
+    } else {
+        cell.into_any_element()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FreshSearchEnter {
     generation: u64,
     query: String,
+    jump_mode_revision: u64,
 }
 
 fn is_fresh_plain_search_enter(
@@ -799,9 +1640,14 @@ fn fresh_search_enter_marker(
     is_held: bool,
     generation: u64,
     query: String,
+    jump_mode_revision: u64,
 ) -> Option<FreshSearchEnter> {
     is_fresh_plain_search_enter(focused, key, modifiers, is_held)
-        .then_some(FreshSearchEnter { generation, query })
+        .then_some(FreshSearchEnter {
+            generation,
+            query,
+            jump_mode_revision,
+        })
 }
 
 fn result_click_source(is_keyboard: bool) -> ActivationSource {
@@ -1158,7 +2004,6 @@ fn context_stack_has_primary(context_stack: &[KeyContext], name: &str) -> bool {
     })
 }
 
-#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PhysicalKeydown {
     hwnd: usize,
@@ -1166,6 +2011,7 @@ struct PhysicalKeydown {
     scan_code: u8,
     extended: bool,
     modifiers: Modifiers,
+    held: bool,
 }
 
 #[cfg(windows)]
@@ -1177,6 +2023,7 @@ impl From<NativeKeydownReceipt> for PhysicalKeydown {
             scan_code: receipt.scan_code,
             extended: receipt.extended,
             modifiers: receipt.modifiers,
+            held: receipt.held,
         }
     }
 }
@@ -3126,6 +3973,7 @@ impl RootWindow {
             session.set_algorithm(snapshot.drafts.hash.algorithm);
         }
         self.root_visibility.active.store(false, Ordering::Release);
+        self.retire_search_jump_mode();
         self.root_visibility
             .request_revision
             .fetch_add(1, Ordering::AcqRel);
@@ -3293,6 +4141,7 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results(&mut self, query: String) {
+        self.retire_search_jump_mode();
         let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
         let provider_actions = multi_launcher::plugin::search_filtered_plugins(
             [&hash_generator as &dyn multi_launcher::plugin::Plugin],
@@ -3327,6 +4176,7 @@ impl RootWindow {
             event.is_held,
             self.launcher_results.generation,
             self.query.read(cx).value().to_string(),
+            self.search_jump_mode.revision(),
         );
     }
 
@@ -3334,6 +4184,100 @@ impl RootWindow {
         if event.keystroke.key == "enter" {
             self.fresh_search_enter = None;
         }
+    }
+
+    fn retire_search_jump_mode(&mut self) -> bool {
+        let retired = self.search_jump_mode.retire();
+        if retired {
+            self.fresh_search_enter = None;
+        }
+        retired
+    }
+
+    fn reconcile_search_jump_geometry_frame(
+        &mut self,
+        frame: &SearchJumpGeometryFrame,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let retired = if self.search_input_is_live(window, cx) {
+            self.search_jump_mode.reconcile_frame(Some(frame))
+        } else {
+            self.search_jump_mode.retire()
+        };
+        if retired {
+            self.fresh_search_enter = None;
+        }
+        retired
+    }
+
+    fn handle_search_jump_keydown(
+        &mut self,
+        receipt: PhysicalKeydown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.search_jump_mode.should_process_key_down(receipt) {
+            return false;
+        }
+        let Some(operation) = self.search_input_operation(window, cx) else {
+            let retired = self.search_jump_mode.retire();
+            if retired {
+                self.fresh_search_enter = None;
+                cx.notify();
+            }
+            return false;
+        };
+
+        let query_is_current = self.launcher_results.query
+            == self.query.read(cx).value().to_string();
+        let geometry_slot = self.search_jump_geometry_frame.borrow();
+        let frame = query_is_current
+            .then_some(geometry_slot.as_ref())
+            .flatten();
+        let retired = self.search_jump_mode.reconcile_frame(frame);
+        if retired {
+            self.fresh_search_enter = None;
+        }
+        let result = self.search_jump_mode.process_key_down(
+            receipt,
+            frame,
+            self.launcher_results.generation,
+        );
+        if result.session_transition {
+            self.fresh_search_enter = None;
+        }
+        drop(operation);
+
+        let selected_result_index = result.selected_target.as_ref().and_then(|target| {
+            let target_is_current = frame.is_some_and(|frame| {
+                frame.generation == self.launcher_results.generation
+                    && target.generation() == TargetGeneration(frame.generation)
+                    && frame.has_target(target)
+            });
+            if target_is_current {
+                if let SemanticTargetId::RootResult(index) = target.semantic() {
+                    return Some(*index);
+                }
+            }
+            None
+        });
+        drop(geometry_slot);
+
+        if let Some(index) = selected_result_index {
+            self.select_search_result_exact(
+                self.launcher_results.generation,
+                index,
+                window,
+                cx,
+            );
+        }
+
+        if retired || result.repaint || result.session_transition || result.selected_target.is_some()
+        {
+            cx.notify();
+        }
+        result.consumed
     }
 
     fn search_input_operation(
@@ -3527,6 +4471,32 @@ impl RootWindow {
         };
         if changed && let Some(row) = self.launcher_results.selected_scroll_child() {
             self.launcher_results_scroll.scroll_to_item(row);
+        }
+        cx.notify();
+        true
+    }
+
+    fn select_search_result_exact(
+        &mut self,
+        generation: u64,
+        index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(_operation) = self.search_input_operation(window, cx) else {
+            return false;
+        };
+        let current_query = self.query.read(cx).value().to_string();
+        let Some((_, reveal_row)) = select_search_result_state(
+            &mut self.launcher_results,
+            &current_query,
+            generation,
+            index,
+        ) else {
+            return false;
+        };
+        if let Some(scroll_child) = reveal_row {
+            self.launcher_results_scroll.scroll_to_item(scroll_child);
         }
         cx.notify();
         true
@@ -5206,6 +6176,14 @@ impl Render for RootWindow {
         let result_layout = self.launcher_results.layout;
         let result_generation = self.launcher_results.generation;
         let result_count = self.launcher_results.actions.len();
+        let jump_mode_enabled = self.search_jump_mode.enabled;
+        let jump_geometry_draft = jump_mode_enabled.then(|| {
+            Rc::new(RefCell::new(SearchJumpGeometryDraft::new(result_generation)))
+        });
+        let jump_geometry_frame = Rc::clone(&self.search_jump_geometry_frame);
+        let jump_target_ids = jump_mode_enabled
+            .then(|| Rc::new(self.search_jump_mode.target_ids().to_vec()));
+        let jump_session_generation = self.search_jump_mode.session_generation();
         let result_row_count = result_layout.row_count(result_count);
         let result_columns = result_layout.columns.max(1);
         let result_rows = (0..result_row_count)
@@ -5231,6 +6209,9 @@ impl Render for RootWindow {
                         .w_full();
                     for absolute_index in first_index..end_index {
                         let action = &self.launcher_results.actions[absolute_index];
+                        let target_id =
+                            search_jump_result_target_id(result_generation, absolute_index);
+                        let hint = self.search_jump_mode.hint_for(&target_id);
                         row = row.child(
                             div()
                                 .flex_1()
@@ -5240,6 +6221,9 @@ impl Render for RootWindow {
                                     result_generation,
                                     absolute_index,
                                     self.launcher_results.selected == Some(absolute_index),
+                                    hint,
+                                    jump_geometry_draft.as_ref().map(Rc::clone),
+                                    Rc::clone(&jump_geometry_frame),
                                     palette,
                                     metrics,
                                     cx,
@@ -5260,11 +6244,16 @@ impl Render for RootWindow {
                     row.into_any_element()
                 } else {
                     let action = &self.launcher_results.actions[first_index];
+                    let target_id = search_jump_result_target_id(result_generation, first_index);
+                    let hint = self.search_jump_mode.hint_for(&target_id);
                     render_launcher_result_cell(
                         action,
                         result_generation,
                         first_index,
                         self.launcher_results.selected == Some(first_index),
+                        hint,
+                        jump_geometry_draft.as_ref().map(Rc::clone),
+                        Rc::clone(&jump_geometry_frame),
                         palette,
                         metrics,
                         cx,
@@ -5414,6 +6403,96 @@ impl Render for RootWindow {
                 )
                 .child(resize_handle)
         });
+        let search_target_id = search_jump_search_target_id(result_generation);
+        let search_hint = self.search_jump_mode.hint_for(&search_target_id);
+        let search_hint_badge = search_jump_hint_badge(
+            search_hint,
+            &search_target_id,
+            result_generation,
+            Rc::clone(&jump_geometry_frame),
+            palette,
+            metrics,
+        );
+        let search_field = div()
+                .id("launcher-search-input")
+                .relative()
+                .key_context("LauncherSearch")
+                .capture_action(cx.listener(|root, _: &IndentInline, window, cx| {
+                    if root.accept_search_completion(true, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_action(cx.listener(|root, _: &MoveDown, window, cx| {
+                    if root.move_search_selection(QuerySelectionMove::Down, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_action(cx.listener(|root, _: &MoveUp, window, cx| {
+                    if root.move_search_selection(QuerySelectionMove::Up, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_action(cx.listener(|root, _: &MoveLeft, window, cx| {
+                    if root.move_search_selection(QuerySelectionMove::Left, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_action(cx.listener(|root, _: &MoveRight, window, cx| {
+                    if root.move_search_selection(QuerySelectionMove::Right, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_action(cx.listener(|root, _: &MovePageUp, window, cx| {
+                    if root.move_search_selection(QuerySelectionMove::PageUp, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_action(cx.listener(|root, _: &MovePageDown, window, cx| {
+                    if root.move_search_selection(QuerySelectionMove::PageDown, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_action(cx.listener(|root, _: &SearchHistoryOlder, window, cx| {
+                    if root.navigate_search_history(QueryHistoryDirection::Older, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_action(cx.listener(|root, _: &SearchHistoryNewer, window, cx| {
+                    if root.navigate_search_history(QueryHistoryDirection::Newer, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .capture_key_down(cx.listener(|root, event, window, cx| {
+                    root.record_search_key_down(event, window, cx);
+                }))
+                .on_key_up(cx.listener(|root, event, _, _| {
+                    root.record_search_key_up(event);
+                }))
+                .on_mouse_down(MouseButton::Left, cx.listener(|root, _, window, cx| {
+                    root.record_search_completion_pointer_press(window, cx);
+                }))
+                .child(
+                    Input::new(&self.query)
+                        .aria_label("Search")
+                        .readonly(self.restart_admission.is_fenced()),
+                )
+                .children(search_hint_badge);
+        let search_field = if let Some(draft) = jump_geometry_draft.as_ref() {
+            let search_target_metadata = TargetMetadata::new(
+                search_target_id,
+                "Search",
+                TargetKind::TextEntry,
+                0,
+            );
+            SearchJumpGeometryElement::new(
+                search_field,
+                search_target_metadata,
+                Rc::clone(draft),
+            )
+            .into_any_element()
+        } else {
+            search_field.into_any_element()
+        };
         let root_controls = div()
             .flex()
             .flex_col()
@@ -5430,78 +6509,7 @@ impl Render for RootWindow {
                     .text_size(px(metrics.heading_text_size))
                     .line_height(px(metrics.line_height)),
             )
-            .child(
-                div()
-                    .id("launcher-search-input")
-                    .key_context("LauncherSearch")
-                    .capture_action(cx.listener(|root, _: &IndentInline, window, cx| {
-                        if root.accept_search_completion(true, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|root, _: &MoveDown, window, cx| {
-                        if root.move_search_selection(QuerySelectionMove::Down, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|root, _: &MoveUp, window, cx| {
-                        if root.move_search_selection(QuerySelectionMove::Up, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|root, _: &MoveLeft, window, cx| {
-                        if root.move_search_selection(QuerySelectionMove::Left, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|root, _: &MoveRight, window, cx| {
-                        if root.move_search_selection(QuerySelectionMove::Right, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|root, _: &MovePageUp, window, cx| {
-                        if root.move_search_selection(QuerySelectionMove::PageUp, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|root, _: &MovePageDown, window, cx| {
-                        if root.move_search_selection(QuerySelectionMove::PageDown, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|root, _: &SearchHistoryOlder, window, cx| {
-                        if root.navigate_search_history(
-                            QueryHistoryDirection::Older,
-                            window,
-                            cx,
-                        ) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|root, _: &SearchHistoryNewer, window, cx| {
-                        if root.navigate_search_history(
-                            QueryHistoryDirection::Newer,
-                            window,
-                            cx,
-                        ) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_key_down(cx.listener(|root, event, window, cx| {
-                        root.record_search_key_down(event, window, cx);
-                    }))
-                    .on_key_up(cx.listener(|root, event, _, _| {
-                        root.record_search_key_up(event);
-                    }))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|root, _, window, cx| {
-                        root.record_search_completion_pointer_press(window, cx);
-                    }))
-                    .child(
-                        Input::new(&self.query)
-                            .aria_label("Search")
-                            .readonly(self.restart_admission.is_fenced()),
-                    ),
-            )
+            .child(search_field)
             .children(self.launcher_search_error.as_ref().map(|error| {
                 Label::new(error.clone())
                     .id("launcher-search-error")
@@ -5691,6 +6699,17 @@ impl Render for RootWindow {
                     cx.notify();
                 }
             }));
+        }
+        if let (Some(draft), Some(target_ids)) = (jump_geometry_draft, jump_target_ids) {
+            root_scroll = root_scroll.child(search_jump_geometry_publisher(
+                draft,
+                jump_geometry_frame,
+                cx.entity().downgrade(),
+                jump_session_generation,
+                target_ids,
+                self.search_jump_mode.alphabet.clone(),
+                metrics,
+            ));
         }
         root_scroll
     }
@@ -7072,8 +8091,15 @@ pub(crate) fn run_foundation_window(
     saved_utility_sizes: UtilityDialogSizes,
     settings_save_workers: SettingsSaveWorkerRegistry,
 ) -> Result<Option<RestartPlan>, String> {
+    let search_jump_mode_for_root = SearchJumpModeController::new(
+        search_startup.jump_mode_enabled,
+        search_startup.jump_mode_activation_chord,
+        search_startup.jump_mode_hint_alphabet.clone(),
+    );
     let launcher_search_catalog =
         LauncherSearchCatalog::new(search_startup, enabled_plugins.as_ref());
+    let search_jump_geometry_frame_for_root =
+        Rc::new(RefCell::new(None::<SearchJumpGeometryFrame>));
     let hash_tool_key = UtilityToolKey::parse("hash-generator")
         .map_err(|error| format!("Hash Generator has no stable presentation key: {error}"))?;
     let utility_presentations = UtilityPresentationStore::new(
@@ -7199,6 +8225,7 @@ pub(crate) fn run_foundation_window(
         let quit_subscription = cx.on_app_quit(move |app| {
             if let Some(root) = root_for_quit_callback.borrow().clone() {
                 let _ = root.update(app, |root, cx| {
+                    root.retire_search_jump_mode();
                     root.drain_hash_native_geometry(cx, true);
                 });
             }
@@ -7283,6 +8310,8 @@ pub(crate) fn run_foundation_window(
                 query_history:
                     QueryHistoryNavigator::default(),
                 fresh_search_enter: None,
+                search_jump_mode: search_jump_mode_for_root,
+                search_jump_geometry_frame: Rc::clone(&search_jump_geometry_frame_for_root),
                 search_completion: SearchCompletion::default(),
                 search_completion_focus_revision: None,
                 native_window: None,
@@ -7342,12 +8371,7 @@ pub(crate) fn run_foundation_window(
                         let Some(receipt) = receipt else {
                             return;
                         };
-                        if physical_keypad_receipt_direction(receipt).is_none()
-                            || event.keystroke.modifiers != Modifiers::default()
-                            || !context_stack_has_primary(
-                                &event.context_stack,
-                                "LauncherSearch",
-                            )
+                        if !context_stack_has_primary(&event.context_stack, "LauncherSearch")
                             || context_stack_has_primary(
                                 &event.context_stack,
                                 "HashGeneratorWindow",
@@ -7366,6 +8390,21 @@ pub(crate) fn run_foundation_window(
                             let event_window_is_root = root.root_window.is_some_and(|root_handle| {
                                 root_handle.window_id() == window.window_handle().window_id()
                             });
+                            if !event_window_is_root
+                                || receipt.hwnd != native_root.identity.hwnd
+                                || current_foreground_identity() != Some(native_root.identity)
+                            {
+                                return;
+                            }
+                            if root.handle_search_jump_keydown(receipt, window, cx) {
+                                cx.stop_propagation();
+                                return;
+                            }
+                            if physical_keypad_receipt_direction(receipt).is_none()
+                                || event.keystroke.modifiers != Modifiers::default()
+                            {
+                                return;
+                            }
                             let Some(movement) = physical_keypad_selection_move(
                                 Some(receipt),
                                 event.keystroke.modifiers,
@@ -7414,6 +8453,8 @@ pub(crate) fn run_foundation_window(
                                 let Some(marker) = marker.filter(|marker| {
                                     marker.generation == root.launcher_results.generation
                                         && marker.query == query_text
+                                        && marker.jump_mode_revision
+                                            == root.search_jump_mode.revision()
                                 }) else {
                                     return;
                                 };
@@ -7428,6 +8469,7 @@ pub(crate) fn run_foundation_window(
                                 let Some(root_window) = root.root_window else {
                                     return;
                                 };
+                                let jump_mode_revision = marker.jump_mode_revision;
                                 let root_view = cx.entity();
                                 cx.spawn(async move |_, cx| {
                                     let _ = cx.update(|app| {
@@ -7450,6 +8492,8 @@ pub(crate) fn run_foundation_window(
                                                 if query_is_current
                                                     && root.launcher_results.generation
                                                         == generation
+                                                    && root.search_jump_mode.revision()
+                                                        == jump_mode_revision
                                                 {
                                                     root.activate_launcher_result(
                                                         generation,
@@ -7468,6 +8512,9 @@ pub(crate) fn run_foundation_window(
                             }
                             InputEvent::Blur => {
                                 root.fresh_search_enter = None;
+                                if root.retire_search_jump_mode() {
+                                    cx.notify();
+                                }
                                 root.revoke_search_completion_focus();
                             }
                             _ => {}
@@ -7495,9 +8542,11 @@ pub(crate) fn run_foundation_window(
                 .borrow_mut()
                 .push(tab_completion_subscription);
             let activation_subscription = root.update(cx, |_, cx| {
-                cx.observe_window_activation(window, |root, window, _| {
+                cx.observe_window_activation(window, |root, window, cx| {
                     if !window.is_window_active() {
+                        root.retire_search_jump_mode();
                         root.revoke_search_completion_focus();
+                        cx.notify();
                     }
                 })
             });
@@ -7720,6 +8769,9 @@ pub(crate) fn run_foundation_window(
                         &mut *cx,
                         |root, window, cx| {
                             root.revoke_search_completion_focus();
+                            if !desired_visible {
+                                root.retire_search_jump_mode();
+                            }
                             let mut search_focus_selected = false;
                             if desired_visible {
                                 let docked_mount_generation = match &root.hash_window {
@@ -7971,26 +9023,33 @@ mod tests {
         DockedHashResizeOrigin, ForegroundIdentity, Frontend, FrontendSelection, FutureContext,
         HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest, HashDraft,
         HashPickerOutcome, HashPresentationMode, HashWakeSignal, InstalledSearchInvocation,
-        InstalledSearchRoute, LauncherResultActivationOrigin, LauncherSearchCatalog,
-        LauncherSearchResults, LauncherSearchStartup, Modifiers, PhysicalKeydown, Poll,
+        InstalledSearchRoute, JumpModeChord, Hint, HintAlphabet, LauncherResultActivationOrigin,
+        LauncherSearchCatalog, LauncherSearchResults, LauncherSearchStartup, Modifiers,
+        PhysicalKeydown, Poll, SearchJumpGeometryDraft, SearchJumpGeometryFrame,
+        SearchJumpModeController,
         PreferredWindowSize, SearchCompletion, classify_hash_picker_result, dispatch_hash_open,
         docked_hash_available_size, docked_hash_fit, docked_hash_focus_is_current,
         docked_hash_resize_accessibility_label, docked_hash_resize_identity_matches,
         docked_resize_commit_size, duplicate_instance_message, fresh_search_enter_marker,
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
-        is_fresh_plain_search_enter, keyboard_docked_resize_preview,
+        bounds_are_contained_by, clipped_search_jump_geometry, is_fresh_plain_search_enter,
+        keyboard_docked_resize_preview,
         launcher_result_activation_is_current, launcher_result_grid_row_id, launcher_result_row_id,
         launcher_results_viewport_max_height, parse_installed_search_invocation,
         physical_keypad_selection_move, pointer_docked_resize_preview, query_set_outcome_text,
         result_click_source, root_search_focus_is_current, root_tab_traversed_to_search,
+        search_jump_badge_placement, search_jump_result_target_id, search_jump_search_target_id, select_search_result_state,
         search_completion_session_is_current, search_input_is_current, selection_from_args,
         single_line_history_queries, supported_launcher_search_actions,
     };
-    use gpui_kit::{KeyContext, point, px};
+    use gpui_kit::{Bounds, KeyContext, Pixels, point, px};
     use multi_launcher::{
         hash_generator::{HashAlgorithm, parse_expected_digest},
-        launcher::query_results_layout::{QuerySelectionMove, ResolvedQueryResultsLayout},
+        launcher::{
+            jump_mode::{HintMap, TargetGeneration, TargetId, TargetKind, TargetMetadata},
+            query_results_layout::{QuerySelectionMove, ResolvedQueryResultsLayout},
+        },
         plugin::Plugin as _,
         settings::{QueryResultsLayoutSettings, RememberedPresentation},
     };
@@ -8037,7 +9096,127 @@ mod tests {
             scan_code,
             extended: false,
             modifiers: Modifiers::default(),
+            held: false,
         }
+    }
+
+    fn test_bounds(left: f32, top: f32, width: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::from_corners(
+            point(px(left), px(top)),
+            point(px(left + width), px(top + height)),
+        )
+    }
+
+    fn jump_test_theme_metrics() -> multi_launcher::gui::theme::ThemeMetrics {
+        multi_launcher::gui::theme::ThemeMetrics {
+            body_text_size: 14.0,
+            heading_text_size: 18.0,
+            small_text_size: 12.0,
+            line_height: 18.0,
+            item_spacing_x: 6.0,
+            item_spacing_y: 4.0,
+            section_spacing: 8.0,
+            window_padding: 8.0,
+            panel_padding: 6.0,
+            button_padding_x: 8.0,
+            button_padding_y: 4.0,
+            corner_radius: 4.0,
+            stroke_width: 1.0,
+            shadow_blur: 8.0,
+            icon_size: 16.0,
+            row_min_height: 28.0,
+        }
+    }
+
+    fn jump_test_frame(
+        generation: u64,
+        visible_rows: &[usize],
+        layout: ResolvedQueryResultsLayout,
+    ) -> SearchJumpGeometryFrame {
+        let mut draft = SearchJumpGeometryDraft::new(generation);
+        let clip = test_bounds(0.0, 0.0, 500.0, 600.0);
+        let search_id = search_jump_search_target_id(generation);
+        let search = TargetMetadata::new(search_id, "Search", TargetKind::TextEntry, 0);
+        draft.targets.push(
+            clipped_search_jump_geometry(
+                search,
+                test_bounds(0.0, 0.0, 460.0, 32.0),
+                clip.clone(),
+            )
+            .expect("the Search fixture is visible"),
+        );
+        for &index in visible_rows {
+            let (left, top, width, height) = if layout.grid {
+                let column = index % layout.columns;
+                let row = index / layout.columns;
+                (column as f32 * 165.0, 42.0 + row as f32 * 64.0, 160.0, 60.0)
+            } else {
+                (0.0, 42.0 + index as f32 * 48.0, 460.0, 44.0)
+            };
+            let metadata = TargetMetadata::new(
+                search_jump_result_target_id(generation, index),
+                format!("action-{index}"),
+                TargetKind::Action,
+                index.saturating_add(1) as u64,
+            );
+            draft.targets.push(
+                clipped_search_jump_geometry(
+                    metadata,
+                    test_bounds(left, top, width, height),
+                    clip.clone(),
+                )
+                .expect("each fixture result is clipped into view"),
+            );
+        }
+        draft.finish(
+            None,
+            &[],
+            &HintAlphabet::default(),
+            jump_test_theme_metrics(),
+        )
+    }
+
+    fn jump_test_actions(count: usize) -> Vec<multi_launcher::actions::Action> {
+        (0..count)
+            .map(|index| {
+                let mut action = hash_action();
+                action.label = format!("Fixture action {index}");
+                action.args = Some(format!("full-action-payload-{index}"));
+                action
+            })
+            .collect()
+    }
+
+    fn jump_leader(chord: JumpModeChord) -> PhysicalKeydown {
+        let virtual_key = multi_launcher::hotkey::launcher_invocation::vk_from_key(
+            chord.hotkey_key(),
+        )
+        .expect("the configured Jump Mode key has a native virtual key") as u16;
+        let mut receipt = physical_keydown(0, virtual_key);
+        receipt.modifiers = Modifiers {
+            control: chord.ctrl(),
+            alt: chord.alt(),
+            shift: chord.shift(),
+            ..Modifiers::default()
+        };
+        receipt
+    }
+
+    fn enter_jump_hint(
+        controller: &mut SearchJumpModeController,
+        frame: &SearchJumpGeometryFrame,
+        generation: u64,
+        hint: &str,
+    ) -> Option<TargetId> {
+        let mut completed = None;
+        for character in hint.chars() {
+            let receipt = physical_keydown(0, character as u16);
+            let outcome = controller.process_key_down(receipt, Some(frame), generation);
+            if outcome.selected_target.is_some() {
+                completed = outcome.selected_target;
+            }
+        }
+        completed
     }
 
     fn launcher_search_contexts() -> Vec<KeyContext> {
@@ -8045,6 +9224,390 @@ mod tests {
             .into_iter()
             .map(|name| KeyContext::parse(name).expect("valid launcher key context"))
             .collect()
+    }
+
+    #[test]
+    fn jump_mode_root_result_hints_select_without_activation_in_list_and_grid_then_fresh_enter_activates_full_action() {
+        let chord = JumpModeChord::parse("Ctrl+J").expect("valid configured leader");
+        for layout in [
+            ResolvedQueryResultsLayout::new(false, 1),
+            ResolvedQueryResultsLayout::new(true, 3),
+        ] {
+            let mut results = LauncherSearchResults {
+                generation: 19,
+                query: "hash".to_owned(),
+                actions: jump_test_actions(7),
+                selected: None,
+                layout,
+                page_jump: 3,
+            };
+            let visible_rows = (0..7).collect::<Vec<_>>();
+            let frame = jump_test_frame(19, &visible_rows, layout);
+            let mut jump = SearchJumpModeController::new(
+                true,
+                chord,
+                HintAlphabet::default(),
+            );
+            let started = jump.process_key_down(jump_leader(chord), Some(&frame), 19);
+            assert!(started.consumed);
+            assert!(started.session_transition);
+            assert!(jump.is_active());
+            assert_eq!(results.enter_target("hash"), None);
+
+            let target = search_jump_result_target_id(19, 6);
+            let hint = jump
+                .hint_for(&target)
+                .expect("visible result has a frozen hint")
+                .as_str()
+                .to_owned();
+            let completed = enter_jump_hint(&mut jump, &frame, 19, &hint);
+            assert_eq!(completed, Some(target.clone()));
+            assert!(!jump.is_active());
+            assert_eq!(results.selected, None);
+            assert_eq!(results.enter_target("hash"), None);
+
+            let (changed, reveal_row) = select_search_result_state(
+                &mut results,
+                "hash",
+                19,
+                6,
+            )
+            .expect("the exact current result remains selectable");
+            assert!(changed);
+            assert_eq!(reveal_row, Some(layout.scroll_child_for(6)));
+            assert_eq!(results.query, "hash");
+            assert_eq!(results.enter_target("hash"), Some((19, 6)));
+            assert_eq!(
+                select_search_result_state(&mut results, "hash", 19, 6),
+                Some((false, None)),
+                "an accepted hint does not repeat the reveal when already selected",
+            );
+
+            let marker = fresh_search_enter_marker(
+                true,
+                "enter",
+                Modifiers::default(),
+                false,
+                19,
+                "hash".to_owned(),
+                jump.revision(),
+            )
+            .expect("only a separate fresh Enter can activate the selected row");
+            assert_eq!(marker.jump_mode_revision, jump.revision());
+            let (generation, index) = results.enter_target(&marker.query).unwrap();
+            let action = results
+                .resolve_action(generation, index, &marker.query)
+                .expect("fresh Enter resolves the current full action");
+            assert_eq!(action.label, "Fixture action 6");
+            assert_eq!(action.args.as_deref(), Some("full-action-payload-6"));
+        }
+    }
+
+    #[test]
+    fn jump_mode_root_result_targets_follow_visible_clipped_rows_and_cancel_on_generation_change() {
+        let cell = test_bounds(0.0, 0.0, 100.0, 40.0);
+        let root_clip = test_bounds(0.0, 0.0, 80.0, 40.0);
+        let results_clip = test_bounds(0.0, 0.0, 60.0, 25.0);
+        let nested_clip = root_clip.intersect(&results_clip);
+        let metadata = TargetMetadata::new(
+            TargetId::root_result(TargetGeneration(23), 3),
+            "Partial grid cell",
+            TargetKind::Action,
+            4,
+        );
+        let partial = clipped_search_jump_geometry(metadata.clone(), cell.clone(), nested_clip)
+            .expect("a partially clipped cell remains a visible target");
+        assert_eq!(partial.visible_bounds.size.width.as_f32(), 60.0);
+        assert_eq!(partial.visible_bounds.size.height.as_f32(), 25.0);
+        let metrics = jump_test_theme_metrics();
+        let badge_fits_visible_bounds = |target: &super::SearchJumpTargetGeometry, hint: &Hint| {
+            let placement = search_jump_badge_placement(target, hint, metrics)
+                .expect("the fixture clip can contain the hint badge");
+            let badge_bounds = test_bounds(
+                target.bounds.origin.x.as_f32() + placement.left,
+                target.bounds.origin.y.as_f32() + placement.top,
+                placement.width,
+                placement.height,
+            );
+            bounds_are_contained_by(&badge_bounds, &target.visible_bounds)
+        };
+        let partial_hint_map = HintMap::assign([partial.metadata.clone()]).unwrap();
+        assert!(badge_fits_visible_bounds(
+            &partial,
+            partial_hint_map.assignments()[0].hint(),
+        ));
+
+        let scrolled_list = clipped_search_jump_geometry(
+            TargetMetadata::new(
+                TargetId::root_result(TargetGeneration(23), 5),
+                "Scrolled List row",
+                TargetKind::Action,
+                6,
+            ),
+            test_bounds(0.0, -20.0, 220.0, 44.0),
+            test_bounds(0.0, 0.0, 200.0, 24.0),
+        )
+        .expect("a partially scrolled List row remains visible");
+        let list_hint_map = HintMap::assign([scrolled_list.metadata.clone()]).unwrap();
+        assert!(badge_fits_visible_bounds(
+            &scrolled_list,
+            list_hint_map.assignments()[0].hint(),
+        ));
+
+        let mut tiny_clip_draft = SearchJumpGeometryDraft::new(25);
+        let tiny_target = TargetMetadata::new(
+            TargetId::root_result(TargetGeneration(25), 0),
+            "Tiny clipped row",
+            TargetKind::Action,
+            1,
+        );
+        tiny_clip_draft.targets.push(
+            clipped_search_jump_geometry(
+                tiny_target,
+                test_bounds(0.0, 0.0, 100.0, 40.0),
+                test_bounds(0.0, 0.0, 8.0, 8.0),
+            )
+            .expect("the row has a positive but too-small visible clip"),
+        );
+        let tiny_clip_frame = tiny_clip_draft.finish(
+            None,
+            &[],
+            &HintAlphabet::default(),
+            metrics,
+        );
+        assert!(tiny_clip_frame.targets.is_empty());
+        let mut empty_population_jump = SearchJumpModeController::new(
+            true,
+            JumpModeChord::default(),
+            HintAlphabet::default(),
+        );
+        assert!(empty_population_jump
+            .process_key_down(
+                jump_leader(JumpModeChord::default()),
+                Some(&tiny_clip_frame),
+                25,
+            )
+            .consumed);
+        assert!(!empty_population_jump.is_active());
+        assert!(
+            !empty_population_jump
+                .process_key_down(physical_keydown(0, b'A' as u16), Some(&tiny_clip_frame), 25,)
+                .consumed,
+            "an empty eligible population does not silently own later input",
+        );
+
+        assert!(
+            clipped_search_jump_geometry(
+                metadata,
+                test_bounds(70.0, 0.0, 20.0, 20.0),
+                nested_clip,
+            )
+            .is_none(),
+            "a fully clipped cell is not registered",
+        );
+
+        let layout = ResolvedQueryResultsLayout::new(true, 3);
+        let visible_rows = (0..7).collect::<Vec<_>>();
+        let original = jump_test_frame(23, &visible_rows, layout);
+        let mut jump = SearchJumpModeController::new(
+            true,
+            JumpModeChord::default(),
+            HintAlphabet::default(),
+        );
+        let leader = jump_leader(JumpModeChord::default());
+        assert!(jump.process_key_down(leader, Some(&original), 23).session_transition);
+        let target = search_jump_result_target_id(23, 4);
+        let original_hint = jump.hint_for(&target).unwrap().as_str().to_owned();
+
+        let mut moved = original.clone();
+        let target_geometry = moved
+            .targets
+            .iter_mut()
+            .find(|geometry| geometry.metadata.id() == &target)
+            .unwrap();
+        target_geometry.bounds.origin.x = px(7.0);
+        target_geometry.visible_bounds.origin.x = px(7.0);
+        assert!(!jump.reconcile_frame(Some(&moved)));
+        assert_eq!(jump.hint_for(&target).unwrap().as_str(), original_hint);
+
+        let clipped_population = jump_test_frame(23, &[0, 1, 2, 3], layout);
+        assert!(jump.reconcile_frame(Some(&clipped_population)));
+        assert!(!jump.is_active());
+
+        assert!(jump.start(&original));
+        let new_generation = jump_test_frame(24, &visible_rows, layout);
+        assert!(jump.reconcile_frame(Some(&new_generation)));
+        assert!(!jump.is_active());
+    }
+
+    #[test]
+    fn jump_mode_root_input_deduplicates_text_repeats_and_cancels_without_leaks() {
+        let chord = JumpModeChord::parse("Shift+2").expect("baseline configured chord");
+        let alphabet = HintAlphabet::parse("ZXQ").expect("valid frozen custom alphabet");
+        let layout = ResolvedQueryResultsLayout::new(false, 1);
+        let rows = (0..7).collect::<Vec<_>>();
+        let frame = jump_test_frame(31, &rows, layout);
+        let mut jump = SearchJumpModeController::new(true, chord, alphabet);
+        assert!(jump.should_process_key_down(jump_leader(chord)));
+        assert!(jump.process_key_down(jump_leader(chord), Some(&frame), 31).consumed);
+        let idle_key = physical_keydown(0, b'A' as u16);
+        assert!(!SearchJumpModeController::new(true, chord, HintAlphabet::default())
+            .should_process_key_down(idle_key));
+        assert!(jump.should_process_key_down(idle_key));
+
+        let mut unrelated_shortcut = physical_keydown(0, b'B' as u16);
+        unrelated_shortcut.modifiers.control = true;
+        assert!(!jump.should_process_key_down(unrelated_shortcut));
+        assert!(!jump
+            .process_key_down(unrelated_shortcut, Some(&frame), 31)
+            .consumed);
+        unrelated_shortcut.held = true;
+        assert!(!jump.should_process_key_down(unrelated_shortcut));
+        assert!(!jump
+            .process_key_down(unrelated_shortcut, Some(&frame), 31)
+            .consumed);
+        assert!(!jump.held_owned_vkeys.contains(&u16::from(b'B')));
+
+        let multi_character_hint = jump
+            .target_ids()
+            .iter()
+            .find_map(|target| {
+                jump.hint_for(target)
+                    .filter(|hint| hint.as_str().len() > 1)
+                    .map(|hint| (target.clone(), hint.as_str().to_owned()))
+            })
+            .expect("the constrained alphabet requires a multi-character code");
+        let first_character = multi_character_hint.1.as_bytes()[0];
+        let first = jump.process_key_down(
+            physical_keydown(0, u16::from(first_character)),
+            Some(&frame),
+            31,
+        );
+        assert!(first.consumed);
+        let expected_prefix = char::from(first_character).to_string();
+        assert_eq!(jump.session.as_ref().unwrap().prefix(), expected_prefix);
+        let mut repeated_character = physical_keydown(0, u16::from(first_character));
+        repeated_character.held = true;
+        assert!(jump.should_process_key_down(repeated_character));
+        assert!(jump
+            .process_key_down(repeated_character, Some(&frame), 31)
+            .consumed);
+        assert_eq!(jump.session.as_ref().unwrap().prefix(), expected_prefix);
+
+        let mut modified_enter = physical_keydown(0, 0x0D);
+        modified_enter.modifiers.control = true;
+        assert!(jump.should_process_key_down(modified_enter));
+        assert!(jump
+            .process_key_down(modified_enter, Some(&frame), 31)
+            .consumed);
+        let mut held_modified_enter = modified_enter;
+        held_modified_enter.held = true;
+        assert!(jump.should_process_key_down(held_modified_enter));
+        assert!(jump
+            .process_key_down(held_modified_enter, Some(&frame), 31)
+            .consumed);
+        let mut alt_enter = physical_keydown(0, 0x0D);
+        alt_enter.modifiers.alt = true;
+        assert!(jump.should_process_key_down(alt_enter));
+        assert!(jump
+            .process_key_down(alt_enter, Some(&frame), 31)
+            .consumed);
+        let mut held_alt_enter = alt_enter;
+        held_alt_enter.held = true;
+        assert!(jump
+            .process_key_down(held_alt_enter, Some(&frame), 31)
+            .consumed);
+        let mut control_shift_enter = physical_keydown(0, 0x0D);
+        control_shift_enter.modifiers.control = true;
+        control_shift_enter.modifiers.shift = true;
+        assert!(jump.should_process_key_down(control_shift_enter));
+        assert!(jump
+            .process_key_down(control_shift_enter, Some(&frame), 31)
+            .consumed);
+        let mut control_space = physical_keydown(0, 0x20);
+        control_space.modifiers.control = true;
+        assert!(jump.should_process_key_down(control_space));
+        assert!(jump
+            .process_key_down(control_space, Some(&frame), 31)
+            .consumed);
+        let mut held_control_space = control_space;
+        held_control_space.held = true;
+        assert!(jump.should_process_key_down(held_control_space));
+        assert!(jump
+            .process_key_down(held_control_space, Some(&frame), 31)
+            .consumed);
+        let mut modified_space = physical_keydown(0, 0x20);
+        modified_space.modifiers.alt = true;
+        assert!(!jump.should_process_key_down(modified_space));
+        assert!(!jump
+            .process_key_down(modified_space, Some(&frame), 31)
+            .consumed);
+        let mut held_modified_space = modified_space;
+        held_modified_space.held = true;
+        assert!(!jump
+            .process_key_down(held_modified_space, Some(&frame), 31)
+            .consumed);
+        let mut alt_shift_space = physical_keydown(0, 0x20);
+        alt_shift_space.modifiers.alt = true;
+        alt_shift_space.modifiers.shift = true;
+        assert!(jump.should_process_key_down(alt_shift_space));
+        assert!(jump
+            .process_key_down(alt_shift_space, Some(&frame), 31)
+            .consumed);
+        assert!(jump.is_active());
+        assert_eq!(jump.session.as_ref().unwrap().prefix(), expected_prefix);
+
+        let alt_space_chord = JumpModeChord::parse("Alt+Space").unwrap();
+        let mut native_leader_jump =
+            SearchJumpModeController::new(true, alt_space_chord, HintAlphabet::default());
+        assert!(native_leader_jump.should_process_key_down(jump_leader(alt_space_chord)));
+        let native_start = native_leader_jump.process_key_down(
+            jump_leader(alt_space_chord),
+            Some(&frame),
+            31,
+        );
+        assert!(!native_start.consumed);
+        assert!(native_start.session_transition && native_leader_jump.is_active());
+        let native_toggle = native_leader_jump.process_key_down(
+            jump_leader(alt_space_chord),
+            Some(&frame),
+            31,
+        );
+        assert!(!native_toggle.consumed);
+        assert!(native_toggle.session_transition && !native_leader_jump.is_active());
+
+        assert!(jump
+            .process_key_down(physical_keydown(0, 0x08), Some(&frame), 31)
+            .consumed);
+        assert_eq!(jump.session.as_ref().unwrap().prefix(), "");
+        let mut held_backspace = physical_keydown(0, 0x08);
+        held_backspace.held = true;
+        assert!(jump
+            .process_key_down(held_backspace, Some(&frame), 31)
+            .consumed);
+        assert_eq!(jump.session.as_ref().unwrap().prefix(), "");
+
+        let cancelled = jump.process_key_down(
+            physical_keydown(0, 0x1B),
+            Some(&frame),
+            31,
+        );
+        assert!(cancelled.consumed && cancelled.session_transition);
+        assert!(!jump.is_active());
+        let mut held_escape = physical_keydown(0, 0x1B);
+        held_escape.held = true;
+        assert!(jump
+            .process_key_down(held_escape, Some(&frame), 31)
+            .consumed);
+        assert!(!jump
+            .process_key_down(physical_keydown(0, b'C' as u16), Some(&frame), 31)
+            .consumed);
+
+        assert!(jump.process_key_down(jump_leader(chord), Some(&frame), 31).consumed);
+        let toggled_off = jump.process_key_down(jump_leader(chord), Some(&frame), 31);
+        assert!(toggled_off.consumed && toggled_off.session_transition);
+        assert!(!jump.is_active());
+        assert_eq!(multi_character_hint.0.generation(), TargetGeneration(31));
     }
 
     fn completion_catalog(
@@ -8061,6 +9624,9 @@ mod tests {
                 query_autocomplete,
                 page_jump: 2,
                 query_results_layout: QueryResultsLayoutSettings::default(),
+                jump_mode_enabled: true,
+                jump_mode_activation_chord: JumpModeChord::default(),
+                jump_mode_hint_alphabet: HintAlphabet::default(),
                 usage: HashMap::new(),
                 folder_aliases_lc: HashMap::new(),
                 bookmark_aliases_lc: HashMap::new(),
@@ -8085,6 +9651,9 @@ mod tests {
                     cols: 3,
                     ..QueryResultsLayoutSettings::default()
                 },
+                jump_mode_enabled: true,
+                jump_mode_activation_chord: JumpModeChord::default(),
+                jump_mode_hint_alphabet: HintAlphabet::default(),
                 usage: HashMap::new(),
                 folder_aliases_lc: HashMap::new(),
                 bookmark_aliases_lc: HashMap::new(),
@@ -8121,6 +9690,9 @@ mod tests {
                     respect_plugin_capability: false,
                     ..QueryResultsLayoutSettings::default()
                 },
+                jump_mode_enabled: true,
+                jump_mode_activation_chord: JumpModeChord::default(),
+                jump_mode_hint_alphabet: HintAlphabet::default(),
                 usage: HashMap::new(),
                 folder_aliases_lc: HashMap::new(),
                 bookmark_aliases_lc: HashMap::new(),
@@ -8803,6 +10375,9 @@ mod tests {
                 query_autocomplete: true,
                 page_jump: 2,
                 query_results_layout: QueryResultsLayoutSettings::default(),
+                jump_mode_enabled: true,
+                jump_mode_activation_chord: JumpModeChord::default(),
+                jump_mode_hint_alphabet: HintAlphabet::default(),
                 usage: HashMap::new(),
                 folder_aliases_lc: HashMap::new(),
                 bookmark_aliases_lc: HashMap::new(),
@@ -8864,6 +10439,9 @@ mod tests {
             query_autocomplete: true,
             page_jump: 2,
             query_results_layout: QueryResultsLayoutSettings::default(),
+            jump_mode_enabled: true,
+            jump_mode_activation_chord: JumpModeChord::default(),
+            jump_mode_hint_alphabet: HintAlphabet::default(),
             usage: HashMap::new(),
             folder_aliases_lc: HashMap::new(),
             bookmark_aliases_lc: HashMap::new(),
@@ -9160,10 +10738,19 @@ mod tests {
         ));
 
         let marker =
-            fresh_search_enter_marker(true, "enter", Modifiers::default(), false, 7, "hash".into())
+            fresh_search_enter_marker(
+                true,
+                "enter",
+                Modifiers::default(),
+                false,
+                7,
+                "hash".into(),
+                11,
+            )
                 .unwrap();
         assert_eq!(marker.generation, 7);
         assert_eq!(marker.query, "hash");
+        assert_eq!(marker.jump_mode_revision, 11);
     }
 
     #[test]

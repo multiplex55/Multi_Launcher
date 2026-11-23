@@ -1,6 +1,6 @@
 use crate::coordinate_tool::settings::CoordinateToolPreferences;
 use crate::gui::Panel;
-use crate::gui::jump_mode::config::{HintAlphabet, JumpModeChord};
+use crate::launcher::jump_mode::config::{HintAlphabet, JumpModeChord};
 use crate::hotkey::Key;
 use crate::hotkey::{Hotkey, parse_hotkey};
 use crate::settings::defaults::*;

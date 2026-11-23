@@ -27,6 +27,7 @@ pub struct NativeKeydownReceipt {
     pub scan_code: u8,
     pub extended: bool,
     pub modifiers: Modifiers,
+    pub held: bool,
 }
 
 std::thread_local! {
@@ -475,6 +476,7 @@ impl WindowsWindowInner {
                     scan_code: ((lparam.0 as u32 >> 16) & 0xff) as u8,
                     extended: lparam.0 as u32 & (1 << 24) != 0,
                     modifiers,
+                    held: lparam.0 & (0x1 << 30) > 0,
                 });
                 PlatformInput::KeyDown(KeyDownEvent {
                     keystroke,
@@ -1896,6 +1898,7 @@ mod native_keydown_receipt_tests {
             scan_code: 0x50,
             extended: false,
             modifiers: Modifiers::default(),
+            held: false,
         }
     }
 

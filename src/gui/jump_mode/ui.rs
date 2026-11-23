@@ -6243,7 +6243,7 @@ mod tests {
             .hint_map()
             .assignments()
             .iter()
-            .map(|assignment| assignment.hint.as_str().to_owned())
+            .map(|assignment| assignment.hint().as_str().to_owned())
             .collect();
         assert_eq!(assigned, ["Z", "YZ", "YY"]);
 
@@ -6314,9 +6314,9 @@ mod tests {
             .hint_map()
             .assignments()
             .iter()
-            .find(|assignment| assignment.hint.as_str().len() > 1)
+            .find(|assignment| assignment.hint().as_str().len() > 1)
             .unwrap()
-            .hint
+            .hint()
             .as_str()
             .chars()
             .next()
@@ -6465,7 +6465,7 @@ mod tests {
         assert_eq!(session.hint_map().len(), 27);
         assert!(session.hint_map().assignments().iter().all(|assignment| {
             assignment
-                .hint
+                .hint()
                 .as_str()
                 .bytes()
                 .all(|symbol| new_alphabet.contains(symbol))
@@ -6496,9 +6496,9 @@ mod tests {
             .hint_map()
             .assignments()
             .iter()
-            .find(|assignment| assignment.hint.as_str().len() > 1)
+            .find(|assignment| assignment.hint().as_str().len() > 1)
             .expect("27 targets include a multi-character hint")
-            .hint
+            .hint()
             .as_str()
             .chars()
             .next()
@@ -6634,9 +6634,9 @@ mod tests {
             .hint_map()
             .assignments()
             .iter()
-            .find(|assignment| assignment.hint.as_str().len() == 2)
+            .find(|assignment| assignment.hint().as_str().len() == 2)
             .expect("27 targets allocate one two-letter hint")
-            .hint
+            .hint()
             .as_str()
             .to_owned();
         let first_letter = two_letter_hint.chars().next().unwrap();
@@ -6927,9 +6927,9 @@ mod tests {
         let three_letter_hint = long_hint_map
             .assignments()
             .iter()
-            .find(|assignment| assignment.hint.as_str().len() >= 3)
+            .find(|assignment| assignment.hint().as_str().len() >= 3)
             .expect("the large map includes multi-character prefixes")
-            .hint
+            .hint()
             .as_str()
             .to_owned();
         let prefix: String = three_letter_hint.chars().take(2).collect();

@@ -4841,6 +4841,9 @@ fn main() -> anyhow::Result<()> {
             query_autocomplete: settings.query_autocomplete,
             page_jump: settings.page_jump,
             query_results_layout: settings.query_results_layout.clone(),
+            jump_mode_enabled: settings.experimental_jump_mode_enabled,
+            jump_mode_activation_chord: settings.jump_mode_activation_chord,
+            jump_mode_hint_alphabet: settings.jump_mode_hint_alphabet.clone(),
             usage: multi_launcher::usage::load_usage(multi_launcher::usage::USAGE_FILE)
                 .unwrap_or_default(),
             folder_aliases_lc,

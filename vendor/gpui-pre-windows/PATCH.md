@@ -17,7 +17,7 @@ The local changes are limited to:
 - `src/platform.rs` passes the original `MSG.hwnd` into the existing keydown
   translation boundary used by both Windows message pumps.
 - `src/events.rs` captures the actual HWND, virtual key, scan code, extended
-  bit, and pre-normalization modifiers for a keydown. A thread-local RAII scope
+  bit, pre-normalization modifiers, and original held/repeat bit for a keydown. A thread-local RAII scope
   exposes the receipt only during that input callback, hides it in nested
   absent/key-up callbacks, restores its prior scope on return, and provides a
   one-shot accessor.

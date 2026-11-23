@@ -11170,6 +11170,11 @@ impl LauncherApp {
             }
         } else if self.jump_mode_host_input_allowed(ctx, root_visible) {
             use crate::gui::jump_mode::ui::NavigationDialogKind;
+            let plugin_settings_layer = self
+                .plugin_editor
+                .host_open
+                .then(|| self.plugin_settings_host.root_layer())
+                .flatten();
             let windows = crate::gui::jump_mode::ui::NavigationWindows {
                 settings: self
                     .show_settings
@@ -11215,7 +11220,7 @@ impl LauncherApp {
                     }
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
-                    NavigationDialogKind::PluginSettings => self.plugin_settings_host.root_layer(),
+                    NavigationDialogKind::PluginSettings => plugin_settings_layer,
                     NavigationDialogKind::DiagramStudio => self.diagram_studio_dialog.owner_layer_if_root(),
                     NavigationDialogKind::DiagramViewer => self.diagram_studio_dialog.embedded_viewer_layer_if_root(),
                     NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
@@ -11298,7 +11303,7 @@ impl LauncherApp {
                     } else if kind == NavigationDialogKind::CalculationChart {
                         self.calculation_chart_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::PluginSettings {
-                        self.plugin_settings_host.root_layer().map(|_| self.plugin_editor.host_session())
+                        plugin_settings_layer.map(|_| self.plugin_editor.host_session())
                     } else if kind == NavigationDialogKind::DiagramStudio {
                         self.diagram_studio_dialog.owner_layer_if_root().map(|_| self.diagram_studio_dialog.jump_instance())
                     } else if kind == NavigationDialogKind::DiagramViewer {
@@ -68864,6 +68869,10 @@ mod tests {
                 crate::gui::jump_mode::SemanticTargetId::Named(_) => None,
             })
             .collect::<Vec<_>>();
+        assert!(
+            !registered_indices.is_empty(),
+            "the committed root registers visible result targets"
+        );
         assert!(registered_indices.len() < app.results.len());
         assert!(
             !registered_indices.contains(&99),
