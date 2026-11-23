@@ -1,8 +1,8 @@
 use crate::actions::Action;
 use crate::gui::LauncherApp;
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
+use crate::launcher::command_help::{command_prefixes, example_line, matches_filter};
 use eframe::egui;
-use std::collections::HashSet;
 
 #[derive(Default)]
 pub struct HelpWindow {
@@ -300,11 +300,27 @@ impl HelpWindow {
                 let mut show_examples = self.show_examples;
                 let examples_response = ui.checkbox(&mut show_examples, "Show examples");
                 if examples_response.changed() {
-                    match crate::settings::Settings::update(&app.settings_path, |settings| {
-                        settings.show_examples = show_examples;
-                        Ok(())
-                    }) {
-                        Ok(_) => self.show_examples = show_examples,
+                    let request = crate::settings::SettingsBooleanSaveRequest::new(
+                        crate::settings::SettingsBooleanPreference::ShowExamples,
+                        self.show_examples,
+                        show_examples,
+                    );
+                    match crate::settings::Settings::save_boolean_preference_checked(
+                        &app.settings_path,
+                        request,
+                    ) {
+                        Ok(acknowledgement)
+                            if acknowledgement.preference()
+                                == crate::settings::SettingsBooleanPreference::ShowExamples
+                                && acknowledgement.value() == show_examples =>
+                        {
+                            self.show_examples = acknowledgement.value();
+                        }
+                        Ok(_) => app.report_error_message(
+                            "help.settings.save",
+                            "Failed to save help settings: the acknowledged value did not match."
+                                .to_owned(),
+                        ),
                         Err(error) => app.report_error_message(
                             "help.settings.save",
                             format!("Failed to save help settings: {error}"),
@@ -434,53 +450,6 @@ impl HelpWindow {
         #[cfg(not(test))]
         let _ = window_output;
         self.open = open;
-    }
-}
-
-fn matches_filter(
-    filter: &str,
-    name: &str,
-    desc: &str,
-    capabilities: &[String],
-    commands: &[Action],
-) -> bool {
-    if filter.is_empty() {
-        return true;
-    }
-    let filter = filter.to_lowercase();
-    if name.to_lowercase().contains(&filter) || desc.to_lowercase().contains(&filter) {
-        return true;
-    }
-    if capabilities
-        .iter()
-        .any(|cap| cap.to_lowercase().contains(&filter))
-    {
-        return true;
-    }
-    commands.iter().any(|command| {
-        command.label.to_lowercase().contains(&filter)
-            || command.desc.to_lowercase().contains(&filter)
-            || command.action.to_lowercase().contains(&filter)
-    })
-}
-
-fn command_prefixes(commands: &[Action]) -> Vec<String> {
-    let mut prefixes = HashSet::new();
-    for command in commands {
-        if let Some(prefix) = command.label.split_whitespace().next() {
-            prefixes.insert(prefix.to_string());
-        }
-    }
-    let mut out: Vec<String> = prefixes.into_iter().collect();
-    out.sort();
-    out
-}
-
-fn example_line(command: &Action) -> String {
-    if let Some(query) = command.action.strip_prefix("query:") {
-        query.trim().to_string()
-    } else {
-        command.label.clone()
     }
 }
 

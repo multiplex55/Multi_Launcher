@@ -4,6 +4,8 @@
 
 The first [Settings menu and bare typed entry](../gui/settings-main.md#first-native-settings-save) also passed the scoped checkpoint. File Close and both Toast Log actions have native and focused Rust evidence, with G23 ownership for the remaining viewer geometry. [File and Toast Log evidence](../VALIDATION_LOG.md#g05g23-gpui-file-close-and-toast-log)
 
+The first [Command Help checkpoint](../gui/command-help.md#first-native-command-help-checkpoint) passed native and focused Rust verification for Command List, Linking Guide and typed Help, shared filter and acknowledged Show examples for currently installed GPUI providers. The broader catalog, Quick Help and utility geometry remain pending.
+
 ## Objective and dependencies
 
 Recreate the complete launcher interaction in GPUI Kit: opening from the existing global trigger, editing a query, navigating the same results, invoking the same actions, and returning focus according to the existing policy. Preserve the application's compact working layout and command language while applying the agreed visual specification. A search box displaying plausible results is not this goal's acceptance result.

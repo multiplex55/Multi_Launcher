@@ -4839,6 +4839,7 @@ fn main() -> anyhow::Result<()> {
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
             query_autocomplete: settings.query_autocomplete,
+            show_examples: settings.show_examples,
             page_jump: settings.page_jump,
             query_results_layout: settings.query_results_layout.clone(),
             jump_mode_enabled: settings.experimental_jump_mode_enabled,

@@ -71,6 +71,9 @@ use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
 use multi_launcher::launcher::query_history::{QueryHistoryDirection, QueryHistoryNavigator};
+use multi_launcher::launcher::command_help::{
+    CommandHelpProvider, command_prefixes, example_line, matches_filter,
+};
 use multi_launcher::launcher::jump_mode::{
     Hint, HintMap, HintSession, MatchOutcome, SemanticTargetId, SurfaceId,
     TargetGeneration, TargetId, TargetKind, TargetMetadata,
@@ -103,6 +106,7 @@ pub(crate) struct LauncherSearchStartup {
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
     pub query_autocomplete: bool,
+    pub show_examples: bool,
     pub page_jump: usize,
     pub query_results_layout: QueryResultsLayoutSettings,
     pub jump_mode_enabled: bool,
@@ -114,6 +118,8 @@ pub(crate) struct LauncherSearchStartup {
 }
 
 struct LauncherSearchCatalog {
+    providers: InstalledLauncherProviders,
+    command_help_providers: Arc<[CommandHelpProvider]>,
     actions: Vec<Action>,
     cached_entries: Vec<CachedSearchEntry>,
     filter_metadata: Vec<ActionFilterMetadata>,
@@ -124,6 +130,7 @@ struct LauncherSearchCatalog {
     fuzzy_weight: f32,
     usage_weight: f32,
     query_autocomplete: bool,
+    startup_show_examples: bool,
     page_jump: usize,
     query_results_layout: QueryResultsLayoutSettings,
     completion_index: Map<Vec<u8>>,
@@ -132,29 +139,77 @@ struct LauncherSearchCatalog {
     bookmark_aliases_lc: HashMap<String, Option<String>>,
 }
 
+/// The intentionally small, side-effect-free provider collection used by the
+/// initial GPUI launcher. Its contents are policy at this frontend boundary.
+struct InstalledLauncherProviders {
+    hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
+    settings: multi_launcher::plugins::settings::SettingsPlugin,
+    help: multi_launcher::plugins::help::HelpPlugin,
+}
+
+impl Default for InstalledLauncherProviders {
+    fn default() -> Self {
+        Self {
+            hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
+            settings: multi_launcher::plugins::settings::SettingsPlugin,
+            help: multi_launcher::plugins::help::HelpPlugin,
+        }
+    }
+}
+
+impl InstalledLauncherProviders {
+    fn plugins(&self) -> [&dyn multi_launcher::plugin::Plugin; 3] {
+        [
+            &self.hash_generator,
+            &self.settings,
+            &self.help,
+        ]
+    }
+
+    fn cached_commands(&self, enabled_plugins: Option<&HashSet<String>>) -> Vec<Action> {
+        self.plugins()
+            .into_iter()
+            .filter(|provider| {
+                enabled_plugins.is_none_or(|enabled| enabled.contains(provider.name()))
+            })
+            .flat_map(|provider| supported_launcher_search_actions(provider.commands()))
+            .collect()
+    }
+
+    fn command_help_providers(&self) -> Arc<[CommandHelpProvider]> {
+        let mut providers = self
+            .plugins()
+            .into_iter()
+            .map(|provider| CommandHelpProvider {
+                name: provider.name().to_owned(),
+                description: provider.description().to_owned(),
+                capabilities: provider
+                    .capabilities()
+                    .iter()
+                    .map(|capability| (*capability).to_owned())
+                    .collect(),
+                commands: supported_launcher_search_actions(provider.commands()),
+            })
+            .collect::<Vec<_>>();
+        providers.sort_by(|left, right| left.name.cmp(&right.name));
+        providers.into()
+    }
+}
+
 impl LauncherSearchCatalog {
     fn new(
         startup: LauncherSearchStartup,
         enabled_plugins: Option<&HashSet<String>>,
     ) -> Self {
-        let settings_plugin = multi_launcher::plugins::settings::SettingsPlugin;
         // Keep only persisted actions that the installed typed activation
         // boundary can execute without changing their Search payload. Saved
         // typed actions retain the shared local-action admission semantics.
         let actions = supported_launcher_search_actions(startup.actions);
-        let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
-        let mut commands = if enabled_plugins
-            .is_none_or(|enabled| enabled.contains(hash_generator.name()))
-        {
-            supported_launcher_search_actions(hash_generator.commands())
-        } else {
-            Vec::new()
-        };
+        let providers = InstalledLauncherProviders::default();
         // Installed command labels and completion fallbacks follow plugin
         // enablement. Search capability gates provider rows at query time.
-        if enabled_plugins.is_none_or(|enabled| enabled.contains(settings_plugin.name())) {
-            commands.extend(supported_launcher_search_actions(settings_plugin.commands()));
-        }
+        let commands = providers.cached_commands(enabled_plugins);
+        let command_help_providers = providers.command_help_providers();
         let cached_entries = actions.iter().map(CachedSearchEntry::from_action).collect();
         let filter_metadata = actions
             .iter()
@@ -166,6 +221,8 @@ impl LauncherSearchCatalog {
             .collect();
         let completion_index = multi_launcher::completion::build_index(&commands, &actions);
         Self {
+            providers,
+            command_help_providers,
             actions,
             cached_entries,
             filter_metadata,
@@ -176,6 +233,7 @@ impl LauncherSearchCatalog {
             fuzzy_weight: startup.fuzzy_weight,
             usage_weight: startup.usage_weight,
             query_autocomplete: startup.query_autocomplete,
+            startup_show_examples: startup.show_examples,
             page_jump: startup.page_jump,
             query_results_layout: startup.query_results_layout,
             completion_index,
@@ -190,12 +248,11 @@ impl LauncherSearchCatalog {
         query: &str,
         enabled_plugins: Option<&HashSet<String>>,
     ) -> ResolvedQueryResultsLayout {
-        let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
         resolve_query_results_layout(
             query,
             &self.query_results_layout,
             enabled_plugins,
-            [hash_generator],
+            [&self.providers.hash_generator],
             |plugin| plugin.name(),
             |plugin| QueryLayoutPlugin {
                 name: plugin.name(),
@@ -314,6 +371,104 @@ struct SettingsEditorState {
     next_request_id: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CommandHelpSaveAttempt {
+    id: u64,
+    expected_baseline: bool,
+    desired: bool,
+}
+
+struct CommandHelpState {
+    open: bool,
+    show_examples: bool,
+    status: Option<String>,
+    pending: Option<CommandHelpSaveAttempt>,
+    next_request_id: u64,
+}
+
+impl CommandHelpState {
+    fn new(show_examples: bool) -> Self {
+        Self {
+            open: false,
+            show_examples,
+            status: None,
+            pending: None,
+            next_request_id: 0,
+        }
+    }
+
+    fn begin_save(&mut self, desired: bool) -> Option<CommandHelpSaveAttempt> {
+        if !self.open || self.pending.is_some() || desired == self.show_examples {
+            return None;
+        }
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        let attempt = CommandHelpSaveAttempt {
+            id: self.next_request_id,
+            expected_baseline: self.show_examples,
+            desired,
+        };
+        self.pending = Some(attempt);
+        self.status = None;
+        Some(attempt)
+    }
+
+    fn fail_to_start(&mut self, request_id: u64, message: String) {
+        if self.pending.is_some_and(|pending| pending.id == request_id) {
+            self.pending = None;
+            self.status = Some(message);
+        }
+    }
+
+    fn finish_save(
+        &mut self,
+        request_id: u64,
+        result: Result<
+            multi_launcher::settings::SettingsBooleanSaveAcknowledgement,
+            multi_launcher::settings::SettingsBooleanSaveError,
+        >,
+    ) -> Option<bool> {
+        let pending = self.pending.filter(|pending| pending.id == request_id)?;
+        self.pending = None;
+        match result {
+            Ok(acknowledgement)
+                if acknowledgement.preference()
+                    == multi_launcher::settings::SettingsBooleanPreference::ShowExamples
+                    && acknowledgement.value() == pending.desired =>
+            {
+                self.show_examples = acknowledgement.value();
+                self.status = Some("Show examples saved.".to_owned());
+                Some(acknowledgement.value())
+            }
+            Ok(acknowledgement) => {
+                self.status = Some(format!(
+                    "Could not accept Show examples acknowledgement for {:?}={} (requested {}).",
+                    acknowledgement.preference(), acknowledgement.value(), pending.desired
+                ));
+                None
+            }
+            Err(error) => {
+                self.status = Some(format!("Could not save Show examples: {error}"));
+                None
+            }
+        }
+    }
+
+    fn cancel_idle(&mut self) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
+        self.open = false;
+        self.status = None;
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandHelpOpenOrigin {
+    Search,
+    Menu,
+}
+
 impl SettingsEditorState {
     fn new(startup_value: bool) -> Self {
         Self {
@@ -416,14 +571,18 @@ impl SettingsEditorState {
         &mut self,
         request_id: u64,
         result: Result<
-            multi_launcher::settings::QueryAutocompleteSaveAcknowledgement,
-            multi_launcher::settings::QueryAutocompleteSaveError,
+            multi_launcher::settings::SettingsBooleanSaveAcknowledgement,
+            multi_launcher::settings::SettingsBooleanSaveError,
         >,
     ) -> Option<bool> {
         let pending = self.pending.filter(|pending| pending.id == request_id)?;
         self.pending = None;
         match result {
-            Ok(acknowledgement) if acknowledgement.value() == pending.desired => {
+            Ok(acknowledgement)
+                if acknowledgement.preference()
+                    == multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete
+                    && acknowledgement.value() == pending.desired =>
+            {
                 self.baseline = acknowledgement.value();
                 self.draft = acknowledgement.value();
                 self.status = Some("Settings saved.".to_owned());
@@ -431,9 +590,8 @@ impl SettingsEditorState {
             }
             Ok(acknowledgement) => {
                 self.status = Some(format!(
-                    "Settings acknowledged {} instead of the requested value {}.",
-                    acknowledgement.value(),
-                    pending.desired
+                    "Settings Boolean acknowledgement for {:?}={} did not match the requested query-autocomplete value {}.",
+                    acknowledgement.preference(), acknowledgement.value(), pending.desired
                 ));
                 None
             }
@@ -585,9 +743,25 @@ impl RenderOnce for LauncherMenuBar {
         let help_menu = Button::new("launcher-help-menu")
             .label("Help")
             .dropdown_menu(move |menu, _, _| {
+                let command_list_context = help_action_context.clone();
+                let linking_guide_context = help_action_context.clone();
                 let open_action_context = help_action_context.clone();
                 let view_action_context = help_action_context.clone();
                 menu.item(
+                    PopupMenuItem::new("Command List")
+                        .action(Box::new(CommandList))
+                        .on_click(move |_, window, app| {
+                            command_list_context.dispatch_action(&CommandList, window, app);
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Linking Guide (todo/note/cal)")
+                        .action(Box::new(LinkingGuide))
+                        .on_click(move |_, window, app| {
+                            linking_guide_context.dispatch_action(&LinkingGuide, window, app);
+                        }),
+                )
+                .item(
                     PopupMenuItem::new("Open Toast Log")
                         .action(Box::new(OpenToastLog))
                         .disabled(toast_log_open_pending)
@@ -761,6 +935,221 @@ struct SettingsEditorPanel {
     palette: multi_launcher::gui::theme::SemanticPalette,
     settings_focus_handle: FocusHandle,
     settings_owner_focus_handle: FocusHandle,
+}
+
+#[derive(IntoElement)]
+struct CommandHelpPanel {
+    root: WeakEntity<RootWindow>,
+    providers: Arc<[CommandHelpProvider]>,
+    filter_state: Entity<InputState>,
+    filter: String,
+    show_examples: bool,
+    saving: bool,
+    status: Option<String>,
+    width: f32,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+    palette: multi_launcher::gui::theme::SemanticPalette,
+    owner_focus_handle: FocusHandle,
+    close_focus_handle: FocusHandle,
+    scroll: ScrollHandle,
+}
+
+impl RenderOnce for CommandHelpPanel {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        let metrics = self.metrics;
+        let status_color = if self.saving {
+            self.palette.warning
+        } else if self
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Could not") || status.contains("not the requested"))
+        {
+            self.palette.error
+        } else {
+            self.palette.success
+        };
+        // The default Kit Input and Button are each two rems tall. Reserve
+        // the message slot before any receipt so it cannot shift Close.
+        let control_height = 2.0 * window.rem_size().as_f32();
+        let status_height = 2.0 * metrics.line_height;
+        let reserved_height = 2.0 * metrics.window_padding
+            + 2.0 * metrics.panel_padding
+            + metrics.heading_text_size.max(metrics.line_height)
+            + metrics.line_height.max(18.0)
+            + 2.0 * control_height
+            + status_height
+            + 5.0 * metrics.item_spacing_y;
+        let body_height = command_help_viewport_body_height(
+            window.viewport_size().height.as_f32(),
+            reserved_height,
+        );
+        let filtered = self
+            .providers
+            .iter()
+            .filter(|provider| {
+                matches_filter(
+                    &self.filter,
+                    &provider.name,
+                    &provider.description,
+                    &provider.capabilities,
+                    &provider.commands,
+                )
+            })
+            .collect::<Vec<_>>();
+        let filter_is_empty = self.filter.is_empty();
+
+        let checkbox_root = self.root.clone();
+        let show_examples = Checkbox::new("command-help-show-examples")
+            .checked(self.show_examples)
+            .disabled(self.saving)
+            .accessibility_label("Show examples")
+            .on_change(move |state, _, _, app| {
+                let _ = checkbox_root.update(app, |root, cx| {
+                    root.begin_command_help_save(state == CheckboxState::Checked, cx);
+                });
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_x(px(metrics.item_spacing_x))
+                    .child(
+                        CheckboxIndicator::new()
+                            .checked(self.show_examples)
+                            .size(px(18.0))
+                            .rounded(px(3.0))
+                            .border_1()
+                            .border_color(appearance::to_hsla(self.palette.control_border))
+                            .when(self.show_examples, |indicator| {
+                                indicator
+                                    .bg(appearance::to_hsla(self.palette.accent))
+                                    .text_color(appearance::to_hsla(self.palette.primary_text))
+                            })
+                            .text_size(px(metrics.small_text_size))
+                            .items_center()
+                            .justify_center()
+                            .child(if self.show_examples { "✓" } else { "" }),
+                    )
+                    .child(Label::new("Show examples")),
+            );
+
+        let body = div()
+            .id("command-help-content")
+            .flex()
+            .flex_col()
+            .gap_y(px(metrics.item_spacing_y))
+            .w_full()
+            .h(px(body_height))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .children(filtered.iter().map(|provider| {
+                let prefixes = command_prefixes(&provider.commands);
+                let mut section = div()
+                    .id(format!("command-help-provider-{}", provider.name))
+                    .flex()
+                    .flex_col()
+                    .gap_y(px(metrics.item_spacing_y))
+                    .w_full()
+                    .child(Label::new(provider.name.clone()).text_size(px(metrics.heading_text_size)))
+                    .child(Label::new(provider.description.clone()).w_full())
+                    .child(Label::new(if provider.capabilities.is_empty() {
+                        "Capabilities: none".to_owned()
+                    } else {
+                        format!("Capabilities: {}", provider.capabilities.join(", "))
+                    }).w_full())
+                    .child(Label::new(if prefixes.is_empty() {
+                        "Prefixes: none".to_owned()
+                    } else {
+                        format!("Prefixes: {}", prefixes.join(", "))
+                    }).w_full());
+                if provider.commands.is_empty() {
+                    section = section.child(Label::new("Usage: none"));
+                } else {
+                    section = section.child(Label::new("Usage:"));
+                    for (index, command) in provider.commands.iter().enumerate() {
+                        section = section.child(
+                            Label::new(format!("  {}", command.label))
+                                .id(format!("command-help-usage-{index}"))
+                                .w_full()
+                                .text_size(px(metrics.small_text_size)),
+                        );
+                    }
+                    if self.show_examples {
+                        section = section.child(Label::new("Examples:"));
+                        for (index, command) in provider.commands.iter().enumerate() {
+                            section = section.child(
+                                Label::new(format!("  {}", example_line(command)))
+                                    .id(format!("command-help-example-{index}"))
+                                    .w_full()
+                                    .text_size(px(metrics.small_text_size)),
+                            );
+                        }
+                    }
+                }
+                section.child(Label::new("────────────────"))
+            }))
+            .children((filtered.is_empty() && !filter_is_empty)
+                .then(|| Label::new("No commands match the filter.")));
+
+        let close_root = self.root;
+        div()
+            .id("command-help")
+            .track_focus(&self.owner_focus_handle)
+            .key_context("CommandHelp")
+            .flex()
+            .flex_col()
+            .gap_y(px(metrics.item_spacing_y))
+            .w(px(self.width))
+            .p(px(metrics.panel_padding))
+            .bg(appearance::to_hsla(self.palette.panel_surface))
+            .rounded(px(metrics.corner_radius))
+            .text_color(appearance::to_hsla(self.palette.primary_text))
+            .text_size(px(metrics.body_text_size))
+            .line_height(px(metrics.line_height))
+            .child(
+                Label::new("Available commands")
+                    .text_size(px(metrics.heading_text_size))
+                    .line_height(px(metrics.line_height)),
+            )
+            .child(show_examples)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_x(px(metrics.item_spacing_x))
+                    .child(Label::new("Filter:"))
+                    .child(Input::new(&self.filter_state).aria_label("Filter")),
+            )
+            .child(body)
+            .child(
+                div().h(px(status_height)).overflow_hidden().children(
+                    self.saving
+                        .then(|| "Saving Show examples…".to_owned())
+                        .or(self.status)
+                        .map(|status| {
+                            Label::new(status)
+                                .id("command-help-status")
+                                .text_color(appearance::to_hsla(status_color))
+                                .text_size(px(metrics.small_text_size))
+                                .line_height(px(metrics.line_height))
+                        }),
+                ),
+            )
+            .child(
+                Button::new("command-help-close")
+                    .label("Close")
+                    .disabled(self.saving)
+                    .tab_stop(true)
+                    .track_focus(&self.close_focus_handle)
+                    .on_click(move |_, window, app| {
+                        let _ = close_root.update(app, |root, cx| {
+                            root.close_command_help(window, cx, true);
+                        });
+                    }),
+            )
+    }
 }
 
 impl RenderOnce for SettingsEditorPanel {
@@ -962,6 +1351,7 @@ enum InstalledSearchRoute {
     HashOpen,
     QuerySet(CommandOutcome),
     Settings,
+    Help,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1007,6 +1397,7 @@ fn classify_installed_search_command(
             Ok(InstalledSearchRoute::QuerySet(outcome))
         }
         Command::Dialog(DialogCommand::Settings) => Ok(InstalledSearchRoute::Settings),
+        Command::Dialog(DialogCommand::Help) => Ok(InstalledSearchRoute::Help),
         _ => Err(InstalledSearchActionError::Unsupported(
             "The selected launcher action is not an installed Search route.".to_owned(),
         )),
@@ -1052,6 +1443,8 @@ gpui_kit::actions!([
     ToggleCoordinateHudProbe,
     ToggleSettings,
     CloseApplication,
+    CommandList,
+    LinkingGuide,
     OpenToastLog,
     ViewToastLog,
     OpenHashGenerator,
@@ -1222,12 +1615,17 @@ struct RootWindow {
     search_completion: SearchCompletion,
     search_completion_focus_revision: Option<u64>,
     settings_editor: SettingsEditorState,
+    command_help: CommandHelpState,
+    command_help_filter: Entity<InputState>,
     settings_path: String,
     settings_save_workers: SettingsSaveWorkerRegistry,
     settings_save_permit: Option<EffectPermit>,
-    settings_save_token: Option<multi_launcher::settings::QueryAutocompleteSaveToken>,
+    settings_save_token: Option<multi_launcher::settings::SettingsBooleanSaveToken>,
     settings_read_permit: Option<EffectPermit>,
-    settings_close_after_terminal: bool,
+    command_help_save_permit: Option<EffectPermit>,
+    command_help_save_token: Option<multi_launcher::settings::SettingsBooleanSaveToken>,
+    preference_close_after_terminal: bool,
+    preference_close_failed: bool,
     file_menu_open: bool,
     settings_menu_open: bool,
     help_menu_open: bool,
@@ -1244,6 +1642,11 @@ struct RootWindow {
     settings_focus_handle: FocusHandle,
     settings_owner_focus_handle: FocusHandle,
     settings_menu_focus_handle: FocusHandle,
+    command_help_owner_focus_handle: FocusHandle,
+    command_help_close_focus_handle: FocusHandle,
+    command_help_scroll: ScrollHandle,
+    command_help_return_focus: Option<FocusHandle>,
+    command_help_return_scroll_offset: Option<Point<Pixels>>,
     settings_return_focus: Option<FocusHandle>,
     settings_return_scroll_offset: Option<Point<Pixels>>,
     native_window: Option<NativeWindow>,
@@ -2749,7 +3152,17 @@ fn root_tab_traversed_to_search(
         && !context_stack_has_primary(context_stack, "LauncherSearch")
         && !context_stack_has_primary(context_stack, "HashGeneratorWindow")
         && !context_stack_has_primary(context_stack, "SettingsEditor")
+        && !context_stack_has_primary(context_stack, "CommandHelp")
         && !context_stack_has_primary(context_stack, "ToastLogViewer")
+        && !context_stack_has_primary(context_stack, "PopupMenu")
+}
+
+fn command_help_escape_capture_should_close(
+    context_stack: &[KeyContext],
+    help_panel_owns_focus: bool,
+) -> bool {
+    help_panel_owns_focus
+        && !context_stack_has_primary(context_stack, "Input")
         && !context_stack_has_primary(context_stack, "PopupMenu")
 }
 
@@ -2769,6 +3182,10 @@ fn toast_log_viewport_body_height(viewport_height: f32, reserved_height: f32) ->
     (viewport_height - reserved_height).clamp(0.0, 240.0)
 }
 
+fn command_help_viewport_body_height(viewport_height: f32, reserved_height: f32) -> f32 {
+    (viewport_height - reserved_height).clamp(0.0, 280.0)
+}
+
 fn settings_return_focus_is_still_owned(
     settings_owner_has_focus: bool,
     restart_is_fenced: bool,
@@ -2778,10 +3195,11 @@ fn settings_return_focus_is_still_owned(
 
 const ROOT_SCROLL_SEARCH_ITEM: usize = 0;
 const ROOT_SCROLL_SETTINGS_ITEM: usize = 1;
+const LINKING_GUIDE_FILTER: &str = "todo note cal @note: @todo:";
 const SETTINGS_DIRTY_RESTART_STATUS: &str =
     "Save or Cancel the dirty Settings preference before restarting in egui.";
-const SETTINGS_COMMIT_CLOSE_STATUS: &str =
-    "The Settings save is committing; Multi Launcher will close after it finishes.";
+const PREFERENCE_COMMIT_CLOSE_STATUS: &str =
+    "A Settings preference is committing; Multi Launcher will close after it finishes.";
 const TOAST_LOG_OPEN_PENDING_STATUS: &str =
     "Wait for the Toast Log open request to finish before closing Multi Launcher.";
 
@@ -2790,7 +3208,7 @@ enum RootCloseBlocker {
     HashClipboard(&'static str),
     HashFilePicker,
     ToastLogOpen,
-    SettingsSave,
+    BooleanPreferenceSave,
 }
 
 fn root_close_blocker(
@@ -2798,6 +3216,7 @@ fn root_close_blocker(
     file_picker_pending: bool,
     toast_log_open_pending: bool,
     settings_save_pending: bool,
+    command_help_save_pending: bool,
 ) -> Option<RootCloseBlocker> {
     if let Some(message) = clipboard_message {
         Some(RootCloseBlocker::HashClipboard(message))
@@ -2805,8 +3224,8 @@ fn root_close_blocker(
         Some(RootCloseBlocker::HashFilePicker)
     } else if toast_log_open_pending {
         Some(RootCloseBlocker::ToastLogOpen)
-    } else if settings_save_pending {
-        Some(RootCloseBlocker::SettingsSave)
+    } else if settings_save_pending || command_help_save_pending {
+        Some(RootCloseBlocker::BooleanPreferenceSave)
     } else {
         None
     }
@@ -3619,6 +4038,7 @@ struct RestartDrafts {
     hash: HashDraft,
     hash_window_open: bool,
     settings: SettingsRestartDraft,
+    show_examples: bool,
 }
 
 struct RestartSnapshot {
@@ -4466,6 +4886,12 @@ impl RootWindow {
                     .to_owned(),
             );
         }
+        if self.command_help.pending.is_some() {
+            return Err(
+                "The Show examples preference save is still pending. Wait for its acknowledgement before restarting in egui."
+                    .to_owned(),
+            );
+        }
         if self.settings_editor.open && self.settings_editor.is_dirty() {
             return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned());
         }
@@ -4645,6 +5071,7 @@ impl RootWindow {
                 hash: hash_draft,
                 hash_window_open,
                 settings: self.settings_editor.restart_draft(),
+                show_examples: self.command_help.show_examples,
             },
             hash_work,
             child_windows,
@@ -5120,6 +5547,266 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn command_help_scroll_item(&self) -> usize {
+        ROOT_SCROLL_SETTINGS_ITEM
+            + usize::from(self.settings_editor.open)
+            + usize::from(self.toast_log_viewer.open)
+    }
+
+    fn open_command_help(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        origin: CommandHelpOpenOrigin,
+        filter_seed: Option<&str>,
+    ) {
+        if self.restart_admission.is_fenced() {
+            self.restart_status =
+                Some("GPUI is closing; Command Help can no longer be opened.".to_owned());
+            cx.notify();
+            return;
+        }
+
+        if let Some(filter) = filter_seed {
+            let filter = filter.to_owned();
+            self.command_help_filter.update(cx, |state, cx| {
+                state.replace_all(filter, window, cx);
+            });
+        }
+        if self.command_help.open {
+            if origin == CommandHelpOpenOrigin::Menu && self.help_menu_open {
+                self.root_menu_action_routed_focus = true;
+            }
+            self.root_scroll
+                .scroll_to_top_of_item(self.command_help_scroll_item());
+            self.command_help_filter
+                .focus_handle(cx)
+                .focus(window, cx);
+            cx.notify();
+            return;
+        }
+
+        let return_focus = match origin {
+            CommandHelpOpenOrigin::Search => window
+                .focused(cx)
+                .filter(|focus| self.focus_handle.contains(focus, window))
+                .unwrap_or_else(|| self.query.focus_handle(cx)),
+            CommandHelpOpenOrigin::Menu => self
+                .root_menu_previous_focus
+                .clone()
+                .filter(|focus| self.focus_handle.contains(focus, window))
+                .unwrap_or_else(|| self.query.focus_handle(cx)),
+        };
+        self.command_help.open = true;
+        self.command_help.status = None;
+        self.command_help_return_focus = Some(return_focus);
+        self.command_help_return_scroll_offset = Some(self.root_scroll.offset());
+        if origin == CommandHelpOpenOrigin::Menu && self.help_menu_open {
+            self.root_menu_action_routed_focus = true;
+        }
+        self.fresh_search_enter = None;
+        self.root_scroll
+            .scroll_to_top_of_item(self.command_help_scroll_item());
+        self.command_help_filter
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_command_help(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        restore_origin: bool,
+    ) {
+        if !self.command_help.open {
+            return;
+        }
+        if self.command_help.pending.is_some() {
+            self.command_help.status = Some(
+                "Wait for the Show examples save to finish before closing Command Help."
+                    .to_owned(),
+            );
+            self.command_help_filter
+                .focus_handle(cx)
+                .focus(window, cx);
+            cx.notify();
+            return;
+        }
+        let restore_origin = restore_origin
+            && self
+                .command_help_owner_focus_handle
+                .contains_focused(window, cx)
+            && !self.restart_admission.is_fenced();
+        if !self.command_help.cancel_idle() {
+            return;
+        }
+        let return_focus = self.command_help_return_focus.take();
+        let return_scroll_offset = self.command_help_return_scroll_offset.take();
+        if restore_origin {
+            let return_focus_is_live = return_focus
+                .as_ref()
+                .is_some_and(|focus| self.focus_handle.contains(focus, window));
+            if return_focus_is_live {
+                if let Some(offset) = return_scroll_offset {
+                    self.root_scroll.set_offset(offset);
+                }
+                if let Some(focus) = return_focus {
+                    focus.focus(window, cx);
+                }
+            } else {
+                self.root_scroll
+                    .scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
+                self.query.focus_handle(cx).focus(window, cx);
+            }
+        } else {
+            self.command_help_return_focus = None;
+            self.command_help_return_scroll_offset = None;
+        }
+        cx.notify();
+    }
+
+    fn begin_command_help_save(&mut self, desired: bool, cx: &mut Context<Self>) {
+        if !self.command_help.open {
+            return;
+        }
+        let Some(operation) = self.restart_admission.admit() else {
+            self.command_help.status =
+                Some("GPUI is closing; Show examples cannot be saved.".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(attempt) = self.command_help.begin_save(desired) else {
+            drop(operation);
+            return;
+        };
+        let request = multi_launcher::settings::SettingsBooleanSaveRequest::new(
+            multi_launcher::settings::SettingsBooleanPreference::ShowExamples,
+            attempt.expected_baseline,
+            attempt.desired,
+        );
+        let (receiver, token) = match self
+            .settings_save_workers
+            .begin_boolean_preference_save(self.settings_path.clone(), request)
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.command_help.fail_to_start(
+                    attempt.id,
+                    format!("Could not start Show examples save: {error}"),
+                );
+                drop(operation);
+                cx.notify();
+                return;
+            }
+        };
+        self.command_help_save_permit = Some(operation);
+        self.command_help_save_token = Some(token);
+        cx.notify();
+
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = loop {
+                match receiver.try_recv() {
+                    Ok(result) => break result,
+                    Err(TryRecvError::Disconnected) => {
+                        break Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
+                            "Settings writer ended without an acknowledgement.".into(),
+                        ));
+                    }
+                    Err(TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                }
+            };
+            let _ = root.update(cx, |root, cx| {
+                root.finish_command_help_save(attempt.id, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_command_help_save(
+        &mut self,
+        request_id: u64,
+        result: Result<
+            multi_launcher::settings::SettingsBooleanSaveAcknowledgement,
+            multi_launcher::settings::SettingsBooleanSaveError,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .command_help
+            .pending
+            .is_some_and(|pending| pending.id == request_id)
+        {
+            return;
+        }
+        let canceled = matches!(&result, Err(multi_launcher::settings::SettingsBooleanSaveError::Cancelled));
+        let failed = result.is_err() && !canceled;
+        self.command_help.finish_save(request_id, result);
+        if let Some(token) = self.command_help_save_token.take() {
+            self.settings_save_workers
+                .acknowledge_boolean_preference_save(token.id());
+        }
+        self.command_help_save_permit.take();
+        clear_stale_settings_restart_status(
+            &mut self.restart_status,
+            !self.settings_editor.is_dirty() && self.command_help.pending.is_none(),
+        );
+        self.finish_deferred_preference_close(failed, cx);
+        cx.notify();
+    }
+
+    fn finish_deferred_preference_close(&mut self, failed: bool, cx: &mut Context<Self>) {
+        if !self.preference_close_after_terminal {
+            return;
+        }
+        self.preference_close_failed |= failed;
+        let another_pending = self.settings_editor.pending.is_some() || self.command_help.pending.is_some();
+        if another_pending {
+            return;
+        }
+        self.preference_close_after_terminal = false;
+        let close_failed = std::mem::take(&mut self.preference_close_failed);
+        if close_failed {
+            if self.restart_status.as_deref() == Some(PREFERENCE_COMMIT_CLOSE_STATUS) {
+                self.restart_status = None;
+            }
+        } else {
+            self.request_quit(cx);
+        }
+    }
+
+    fn prepare_boolean_preference_close(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut pending = false;
+        let mut cancellation_accepted = true;
+        if self.settings_editor.pending.is_some() {
+            pending = true;
+            cancellation_accepted &= self
+                .settings_save_token
+                .as_ref()
+                .is_some_and(|token| token.request_cancel());
+        }
+        if self.command_help.pending.is_some() {
+            pending = true;
+            cancellation_accepted &= self
+                .command_help_save_token
+                .as_ref()
+                .is_some_and(|token| token.request_cancel());
+        }
+        if !pending || cancellation_accepted {
+            return true;
+        }
+        self.preference_close_after_terminal = true;
+        self.preference_close_failed = false;
+        self.restart_status = Some(PREFERENCE_COMMIT_CLOSE_STATUS.to_owned());
+        cx.notify();
+        false
+    }
+
     fn open_settings_editor(
         &mut self,
         window: &mut Window,
@@ -5161,10 +5848,10 @@ impl RootWindow {
         self.root_scroll
             .scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
         self.settings_focus_handle.focus(window, cx);
-        let receiver = match self
-            .settings_save_workers
-            .begin_query_autocomplete_read(self.settings_path.clone())
-        {
+        let receiver = match self.settings_save_workers.begin_boolean_preference_read(
+            self.settings_path.clone(),
+            multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete,
+        ) {
             Ok(receiver) => receiver,
             Err(error) => {
                 self.settings_editor.finish_read(attempt, Err(error));
@@ -5324,11 +6011,12 @@ impl RootWindow {
             drop(operation);
             return;
         };
-        let request = multi_launcher::settings::QueryAutocompleteSaveRequest::new(
+        let request = multi_launcher::settings::SettingsBooleanSaveRequest::new(
+            multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete,
             attempt.expected_baseline,
             attempt.desired,
         );
-        let (receiver, token) = match self.settings_save_workers.begin_query_autocomplete_save(
+        let (receiver, token) = match self.settings_save_workers.begin_boolean_preference_save(
             self.settings_path.clone(),
             request,
         ) {
@@ -5350,7 +6038,7 @@ impl RootWindow {
                 match receiver.try_recv() {
                     Ok(result) => break result,
                     Err(TryRecvError::Disconnected) => {
-                        break Err(multi_launcher::settings::QueryAutocompleteSaveError::Store(
+                        break Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
                             "Settings writer ended without an acknowledgement.".into(),
                         ));
                     }
@@ -5372,8 +6060,8 @@ impl RootWindow {
         &mut self,
         request_id: u64,
         result: Result<
-            multi_launcher::settings::QueryAutocompleteSaveAcknowledgement,
-            multi_launcher::settings::QueryAutocompleteSaveError,
+            multi_launcher::settings::SettingsBooleanSaveAcknowledgement,
+            multi_launcher::settings::SettingsBooleanSaveError,
         >,
         cx: &mut Context<Self>,
     ) {
@@ -5384,11 +6072,15 @@ impl RootWindow {
         {
             return;
         }
-        let save_failed = result.is_err();
+        let canceled = matches!(
+            &result,
+            Err(multi_launcher::settings::SettingsBooleanSaveError::Cancelled)
+        );
+        let save_failed = result.is_err() && !canceled;
         let acknowledged = self.settings_editor.finish_save(request_id, result);
         if let Some(token) = self.settings_save_token.take() {
             self.settings_save_workers
-                .acknowledge_query_autocomplete_save(token.id());
+                .acknowledge_boolean_preference_save(token.id());
         }
         self.settings_save_permit.take();
         if let Some(value) = acknowledged {
@@ -5398,32 +6090,15 @@ impl RootWindow {
                 .reset_for_query(&self.search_catalog, &query);
             clear_stale_settings_restart_status(&mut self.restart_status, true);
         }
-        let close_after_terminal = std::mem::take(&mut self.settings_close_after_terminal);
+        self.finish_deferred_preference_close(save_failed, cx);
         cx.notify();
-        if close_after_terminal {
-            if save_failed {
-                if self.restart_status.as_deref() == Some(SETTINGS_COMMIT_CLOSE_STATUS) {
-                    self.restart_status = None;
-                    cx.notify();
-                }
-            } else {
-                // Re-enter the guarded quit path: clipboard or picker work may
-                // have started while the irrevocable Settings write finished.
-                self.request_quit(cx);
-            }
-        }
     }
 
     fn refresh_launcher_results(&mut self, query: String) {
         self.retire_search_jump_mode();
-        let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
-        let settings_plugin = multi_launcher::plugins::settings::SettingsPlugin;
         let provider_actions = supported_launcher_search_actions(
             multi_launcher::plugin::search_filtered_plugins(
-                [
-                    &hash_generator as &dyn multi_launcher::plugin::Plugin,
-                    &settings_plugin as &dyn multi_launcher::plugin::Plugin,
-                ],
+                self.search_catalog.providers.plugins(),
                 &query,
                 self.enabled_plugins.as_ref(),
                 self.enabled_capabilities.as_ref(),
@@ -5823,6 +6498,7 @@ impl RootWindow {
             &installed_invocation.route,
             InstalledSearchRoute::Settings
         );
+        let help_open = matches!(&installed_invocation.route, InstalledSearchRoute::Help);
         let Some(operation) = self.restart_admission.admit() else {
             if query_set {
                 self.launcher_search_error =
@@ -5830,6 +6506,9 @@ impl RootWindow {
             } else if settings_open {
                 self.launcher_search_error =
                     Some("GPUI is closing; Settings can no longer be opened.".to_owned());
+            } else if help_open {
+                self.launcher_search_error =
+                    Some("GPUI is closing; Command Help can no longer be opened.".to_owned());
             } else {
                 self.hash_open_error =
                     Some("GPUI is closing; new utility operations are disabled.".to_owned());
@@ -5859,6 +6538,10 @@ impl RootWindow {
             InstalledSearchRoute::Settings => {
                 drop(operation);
                 self.open_settings_editor(window, cx, SettingsOpenOrigin::Search);
+            }
+            InstalledSearchRoute::Help => {
+                drop(operation);
+                self.open_command_help(window, cx, CommandHelpOpenOrigin::Search, None);
             }
         }
         // Hash Open and Settings preserve the launcher query and results.
@@ -7410,6 +8093,7 @@ impl RootWindow {
             self.hash_file_picker_pending.load(Ordering::Acquire),
             self.toast_log_external_open_pending,
             self.settings_editor.pending.is_some(),
+            self.command_help.pending.is_some(),
         );
         match blocker {
             Some(RootCloseBlocker::HashClipboard(message)) => {
@@ -7424,21 +8108,14 @@ impl RootWindow {
             Some(RootCloseBlocker::ToastLogOpen) => {
                 self.restart_status = Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
             }
-            Some(RootCloseBlocker::SettingsSave) => {
-                if !self
-                    .settings_save_token
-                    .as_ref()
-                    .is_some_and(|token| token.request_cancel())
-                {
-                    self.settings_close_after_terminal = true;
-                    self.restart_status = Some(SETTINGS_COMMIT_CLOSE_STATUS.to_owned());
-                    cx.notify();
+            Some(RootCloseBlocker::BooleanPreferenceSave) => {
+                if !self.prepare_boolean_preference_close(cx) {
                     return;
                 }
             }
             None => {}
         }
-        if blocker.is_some_and(|blocker| blocker != RootCloseBlocker::SettingsSave) {
+        if blocker.is_some_and(|blocker| blocker != RootCloseBlocker::BooleanPreferenceSave) {
             cx.notify();
             return;
         }
@@ -7846,6 +8523,21 @@ impl Render for RootWindow {
             close_focus_handle: self.toast_log_focus_handle.clone(),
             scroll: self.toast_log_scroll.clone(),
         });
+        let command_help_panel = self.command_help.open.then(|| CommandHelpPanel {
+            root: cx.entity().downgrade(),
+            providers: Arc::clone(&self.search_catalog.command_help_providers),
+            filter_state: self.command_help_filter.clone(),
+            filter: self.command_help_filter.read(cx).value().to_string(),
+            show_examples: self.command_help.show_examples,
+            saving: self.command_help.pending.is_some(),
+            status: self.command_help.status.clone(),
+            width: root_controls_width,
+            metrics,
+            palette,
+            owner_focus_handle: self.command_help_owner_focus_handle.clone(),
+            close_focus_handle: self.command_help_close_focus_handle.clone(),
+            scroll: self.command_help_scroll.clone(),
+        });
         let root_controls = div()
             .flex()
             .flex_col()
@@ -7995,6 +8687,7 @@ impl Render for RootWindow {
                 !search_content_can_overflow
                     && settings_editor_panel.is_none()
                     && toast_log_viewer_panel.is_none()
+                && command_help_panel.is_none()
                     && docked_hash.is_none(),
                 |this| {
                     // Center the ordinary root only when its content fits.
@@ -8037,6 +8730,24 @@ impl Render for RootWindow {
                 {
                     root.cancel_settings_editor(window, cx, true);
                     cx.stop_propagation();
+                } else if root.command_help.open
+                    && command_help_escape_capture_should_close(
+                        &window.context_stack(),
+                        root.command_help_owner_focus_handle.contains_focused(window, cx),
+                    )
+                {
+                    root.close_command_help(window, cx, true);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_action(cx.listener(|root, _: &gpui_kit::base::input::Escape, window, cx| {
+                if root.command_help.open
+                    && root
+                        .command_help_owner_focus_handle
+                        .contains_focused(window, cx)
+                {
+                    root.close_command_help(window, cx, true);
+                    cx.stop_propagation();
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusDockedHashResize, window, cx| {
@@ -8074,6 +8785,17 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &ToggleSettings, window, cx| {
                 this.toggle_settings_editor(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &CommandList, window, cx| {
+                this.open_command_help(window, cx, CommandHelpOpenOrigin::Menu, None);
+            }))
+            .on_action(cx.listener(|this, _: &LinkingGuide, window, cx| {
+                this.open_command_help(
+                    window,
+                    cx,
+                    CommandHelpOpenOrigin::Menu,
+                    Some(LINKING_GUIDE_FILTER),
+                );
+            }))
             .on_action(cx.listener(|this, _: &CloseApplication, _, cx| {
                 this.request_quit(cx);
             }))
@@ -8099,6 +8821,13 @@ impl Render for RootWindow {
                 div()
                     .flex_shrink_0()
                     .child(toast_log_viewer_panel),
+            );
+        }
+        if let Some(command_help_panel) = command_help_panel {
+            root_scroll = root_scroll.child(
+                div()
+                    .flex_shrink_0()
+                    .child(command_help_panel),
             );
         }
         if let Some(docked_hash_frame) = docked_hash_frame {
@@ -9713,9 +10442,15 @@ pub(crate) fn run_foundation_window(
             let search_catalog_for_root = launcher_search_catalog;
             let settings_editor_for_root =
                 SettingsEditorState::new(search_catalog_for_root.query_autocomplete);
+            let command_help_for_root =
+                CommandHelpState::new(search_catalog_for_root.startup_show_examples);
+            let command_help_filter =
+                cx.new(|cx| InputState::new(window, cx).placeholder("Filter commands"));
             let settings_focus_handle = cx.focus_handle();
             let settings_owner_focus_handle = cx.focus_handle();
             let settings_menu_focus_handle = cx.focus_handle();
+            let command_help_owner_focus_handle = cx.focus_handle();
+            let command_help_close_focus_handle = cx.focus_handle();
             let toast_log_focus_handle = cx.focus_handle();
             let toast_log_owner_focus_handle = cx.focus_handle();
             let initial_result_layout =
@@ -9741,12 +10476,17 @@ pub(crate) fn run_foundation_window(
                 search_completion: SearchCompletion::default(),
                 search_completion_focus_revision: None,
                 settings_editor: settings_editor_for_root,
+                command_help: command_help_for_root,
+                command_help_filter,
                 settings_path: settings_path_for_root.clone(),
                 settings_save_workers: settings_save_workers_for_root.clone(),
                 settings_save_permit: None,
                 settings_save_token: None,
                 settings_read_permit: None,
-                settings_close_after_terminal: false,
+                command_help_save_permit: None,
+                command_help_save_token: None,
+                preference_close_after_terminal: false,
+                preference_close_failed: false,
                 file_menu_open: false,
                 settings_menu_open: false,
                 help_menu_open: false,
@@ -9763,6 +10503,11 @@ pub(crate) fn run_foundation_window(
                 settings_focus_handle,
                 settings_owner_focus_handle,
                 settings_menu_focus_handle,
+                command_help_owner_focus_handle,
+                command_help_close_focus_handle,
+                command_help_scroll: ScrollHandle::new(),
+                command_help_return_focus: None,
+                command_help_return_scroll_offset: None,
                 settings_return_focus: None,
                 settings_return_scroll_offset: None,
                 native_window: None,
@@ -9976,6 +10721,23 @@ pub(crate) fn run_foundation_window(
             appearance_subscription_sink
                 .borrow_mut()
                 .push(search_subscription);
+            let command_help_filter_subscription = root.update(cx, |root, cx| {
+                let filter = root.command_help_filter.clone();
+                cx.subscribe(
+                    &filter,
+                    |_: &mut RootWindow,
+                     _: Entity<InputState>,
+                     event: &InputEvent,
+                     cx: &mut Context<RootWindow>| {
+                        if matches!(event, InputEvent::Change) {
+                            cx.notify();
+                        }
+                    },
+                )
+            });
+            appearance_subscription_sink
+                .borrow_mut()
+                .push(command_help_filter_subscription);
             let tab_completion_subscription = root.update(cx, |_, cx| {
                 cx.observe_keystrokes(|root, event, window, cx| {
                     if root_tab_traversed_to_search(
@@ -10027,40 +10789,20 @@ pub(crate) fn run_foundation_window(
                         picker_pending,
                         root.toast_log_external_open_pending,
                         root.settings_editor.pending.is_some(),
+                        root.command_help.pending.is_some(),
                     )
                 }) else {
                     return false;
                 };
                 match blocker {
                     None => return true,
-                    Some(RootCloseBlocker::SettingsSave) => {
-                        let cancellation_accepted = root_for_window_close
+                    Some(RootCloseBlocker::BooleanPreferenceSave) => {
+                        let close_now = root_for_window_close
                             .update(app, |root, cx| {
-                                let accepted = root
-                                    .settings_save_token
-                                    .as_ref()
-                                    .is_some_and(|token| token.request_cancel());
-                                if accepted {
-                                    root.restart_status = Some(
-                                        "Canceling the pending Settings save before closing Multi Launcher."
-                                            .to_owned(),
-                                    );
-                                } else {
-                                    root.settings_close_after_terminal = true;
-                                    root.restart_status =
-                                        Some(SETTINGS_COMMIT_CLOSE_STATUS.to_owned());
-                                }
-                                cx.notify();
-                                accepted
+                                root.prepare_boolean_preference_close(cx)
                             })
                             .unwrap_or(false);
-                        if cancellation_accepted {
-                            return true;
-                        }
-                        // Preserve the commit-specific status set above. The
-                        // window must stay alive until an irrevocable write has
-                        // reached its terminal result.
-                        return false;
+                        return close_now;
                     }
                     Some(RootCloseBlocker::HashClipboard(message)) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
@@ -10531,7 +11273,8 @@ mod tests {
         DockedHashResizeOrigin, ForegroundIdentity, Frontend, FrontendSelection, FutureContext,
         HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest, HashDraft,
         HashPickerOutcome, HashPresentationMode, HashWakeSignal, InstalledSearchInvocation,
-        InstalledSearchRoute, JumpModeChord, Hint, HintAlphabet, LauncherResultActivationOrigin,
+        InstalledSearchRoute, JumpModeChord, Hint, HintAlphabet, CommandHelpState,
+        LauncherResultActivationOrigin,
         LauncherSearchCatalog, LauncherSearchResults, LauncherSearchStartup, Modifiers,
         PhysicalKeydown, Poll, SearchJumpGeometryDraft, SearchJumpGeometryFrame,
         SearchJumpModeController,
@@ -10553,6 +11296,8 @@ mod tests {
         SettingsEditorState, SettingsReadAttempt,
         RootCloseBlocker, ToastLogViewerState,
         clear_stale_settings_restart_status, clear_toast_log_open_pending_status,
+        command_help_escape_capture_should_close,
+        command_help_viewport_body_height,
         settings_menu_close_needs_trigger_focus, settings_return_focus_is_still_owned,
         root_close_blocker,
         SETTINGS_DIRTY_RESTART_STATUS,
@@ -11141,6 +11886,7 @@ mod tests {
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
                 query_autocomplete,
+                show_examples: false,
                 page_jump: 2,
                 query_results_layout: QueryResultsLayoutSettings::default(),
                 jump_mode_enabled: true,
@@ -11164,6 +11910,7 @@ mod tests {
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
                 query_autocomplete: false,
+                show_examples: false,
                 page_jump: 2,
                 query_results_layout: QueryResultsLayoutSettings {
                     enabled: true,
@@ -11179,7 +11926,6 @@ mod tests {
             },
             Some(&enabled),
         );
-
         assert!(!catalog.resolve_result_layout("hash", Some(&enabled)).grid);
         assert!(catalog.resolve_result_layout("app QMarker", Some(&enabled)).grid);
         assert_eq!(
@@ -11202,6 +11948,7 @@ mod tests {
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
                 query_autocomplete: false,
+                show_examples: false,
                 page_jump: 4,
                 query_results_layout: QueryResultsLayoutSettings {
                     enabled: true,
@@ -11351,6 +12098,7 @@ mod tests {
             fuzzy_weight: 0.25,
             usage_weight: 0.0,
             query_autocomplete: true,
+            show_examples: false,
             page_jump: 2,
             query_results_layout: QueryResultsLayoutSettings::default(),
             jump_mode_enabled: false,
@@ -11462,6 +12210,242 @@ mod tests {
                 .route,
             InstalledSearchRoute::Settings
         ));
+    }
+
+    #[test]
+    fn gpui_provider_collection_drives_search_cache_and_help_without_search_gates() {
+        let providers = super::InstalledLauncherProviders::default();
+        let enabled = HashSet::from([
+            "hash_generator".to_owned(),
+            "settings".to_owned(),
+            "help".to_owned(),
+        ]);
+        let capabilities = enabled
+            .iter()
+            .map(|name| (name.clone(), vec!["search".to_owned()]))
+            .collect::<HashMap<_, _>>();
+        let help_results = multi_launcher::plugin::search_filtered_plugins(
+            providers.plugins(),
+            "help",
+            Some(&enabled),
+            Some(&capabilities),
+        );
+        assert_eq!(help_results.len(), 1);
+        assert!(matches!(
+            parse_installed_search_invocation(help_results[0].clone(), ActivationSource::Enter)
+                .expect("the installed Help provider uses typed activation")
+                .route,
+            InstalledSearchRoute::Help
+        ));
+
+        let help_capability_disabled = HashMap::from([
+            ("hash_generator".to_owned(), vec!["search".to_owned()]),
+            ("settings".to_owned(), vec!["search".to_owned()]),
+            ("help".to_owned(), Vec::<String>::new()),
+        ]);
+        assert!(multi_launcher::plugin::search_filtered_plugins(
+            providers.plugins(),
+            "help",
+            Some(&enabled),
+            Some(&help_capability_disabled),
+        )
+        .is_empty());
+
+        let catalog = LauncherSearchCatalog::new(
+            LauncherSearchStartup {
+                actions: Vec::new(),
+                match_exact: true,
+                fuzzy_weight: 0.75,
+                usage_weight: 0.0,
+                query_autocomplete: false,
+                show_examples: true,
+                page_jump: 2,
+                query_results_layout: QueryResultsLayoutSettings::default(),
+                jump_mode_enabled: false,
+                jump_mode_activation_chord: JumpModeChord::default(),
+                jump_mode_hint_alphabet: HintAlphabet::default(),
+                usage: HashMap::new(),
+                folder_aliases_lc: HashMap::new(),
+                bookmark_aliases_lc: HashMap::new(),
+            },
+            Some(&enabled),
+        );
+        assert!(catalog.startup_show_examples);
+        let cached_actions = catalog
+            .commands
+            .iter()
+            .map(|action| action.action.as_str())
+            .collect::<HashSet<_>>();
+        assert!(cached_actions.contains("query:hash"));
+        assert!(cached_actions.contains("settings:dialog"));
+        assert!(cached_actions.contains("query:help"));
+        assert!(!cached_actions.contains("dashboard:settings"));
+        assert!(!cached_actions.contains("theme:dialog"));
+
+        let help_names = catalog
+            .command_help_providers
+            .iter()
+            .map(|provider| provider.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(help_names, ["hash_generator", "help", "settings"]);
+        let settings_help = catalog
+            .command_help_providers
+            .iter()
+            .find(|provider| provider.name == "settings")
+            .expect("installed Settings appears in Help regardless of search gating");
+        assert_eq!(settings_help.commands.len(), 1);
+        assert_eq!(settings_help.commands[0].action, "settings:dialog");
+
+        let disabled_catalog = LauncherSearchCatalog::new(
+            LauncherSearchStartup {
+                actions: vec![saved_action("Saved Help", "help:show", None)],
+                match_exact: true,
+                fuzzy_weight: 0.75,
+                usage_weight: 0.0,
+                query_autocomplete: false,
+                show_examples: false,
+                page_jump: 2,
+                query_results_layout: QueryResultsLayoutSettings::default(),
+                jump_mode_enabled: false,
+                jump_mode_activation_chord: JumpModeChord::default(),
+                jump_mode_hint_alphabet: HintAlphabet::default(),
+                usage: HashMap::new(),
+                folder_aliases_lc: HashMap::new(),
+                bookmark_aliases_lc: HashMap::new(),
+            },
+            Some(&HashSet::new()),
+        );
+        assert!(disabled_catalog.commands.is_empty());
+        assert_eq!(disabled_catalog.command_help_providers.len(), 3);
+        assert_eq!(disabled_catalog.actions.len(), 1);
+        assert!(matches!(
+            parse_installed_search_invocation(
+                disabled_catalog.actions[0].clone(),
+                ActivationSource::Enter
+            )
+            .expect("saved typed Help follows local-action admission")
+            .route,
+            InstalledSearchRoute::Help
+        ));
+    }
+
+    #[test]
+    fn command_help_show_examples_publishes_only_acknowledged_values_and_allows_retry() {
+        let mut help = CommandHelpState::new(false);
+        assert!(help.begin_save(true).is_none(), "a closed panel cannot write");
+        help.open = true;
+        let failed_attempt = help.begin_save(true).expect("open panel starts a preference save");
+        assert!(!help.show_examples, "the draft checkbox does not publish before the receipt");
+        assert!(!help.cancel_idle(), "a pending write retains the panel");
+        assert_eq!(
+            help.finish_save(
+                failed_attempt.id + 1,
+                Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
+                    "stale receipt".to_owned()
+                )),
+            ),
+            None,
+            "an obsolete acknowledgement cannot release the active save"
+        );
+        assert!(help.pending.is_some());
+        assert_eq!(
+            help.finish_save(
+                failed_attempt.id,
+                Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
+                    "write failed".to_owned()
+                )),
+            ),
+            None
+        );
+        assert!(!help.show_examples);
+        assert!(help.pending.is_none());
+        assert!(help.open);
+        assert!(help.status.as_deref().unwrap().contains("write failed"));
+
+        let retry = help.begin_save(true).expect("a failed value can be retried");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(&path, br#"{"show_examples":false}"#).unwrap();
+        let acknowledgement = multi_launcher::settings::Settings::save_boolean_preference_checked(
+            &path,
+            multi_launcher::settings::SettingsBooleanSaveRequest::new(
+                multi_launcher::settings::SettingsBooleanPreference::ShowExamples,
+                retry.expected_baseline,
+                retry.desired,
+            ),
+        )
+        .unwrap();
+        assert_eq!(help.finish_save(retry.id, Ok(acknowledgement)), Some(true));
+        assert!(help.show_examples);
+        assert_eq!(help.status.as_deref(), Some("Show examples saved."));
+        assert!(help.pending.is_none());
+        assert!(help.cancel_idle());
+        assert!(!help.open);
+    }
+
+    #[test]
+    fn settings_editor_rejects_acknowledgement_for_another_boolean_preference() {
+        let mut editor = SettingsEditorState::new(true);
+        editor.open_with_baseline(true);
+        editor.draft = false;
+        let attempt = editor.begin_save().expect("dirty Settings admits a save");
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(&path, br#"{"show_examples":false}"#).unwrap();
+        let acknowledgement = multi_launcher::settings::Settings::save_boolean_preference_checked(
+            &path,
+            multi_launcher::settings::SettingsBooleanSaveRequest::new(
+                multi_launcher::settings::SettingsBooleanPreference::ShowExamples,
+                false,
+                false,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(editor.finish_save(attempt.id, Ok(acknowledgement)), None);
+        assert_eq!(editor.baseline, true);
+        assert_eq!(editor.draft, false);
+        assert!(editor.is_dirty());
+        assert!(editor.pending.is_none());
+        assert!(editor.status.as_deref().unwrap().contains("ShowExamples"));
+    }
+
+    #[test]
+    fn command_help_body_height_stays_within_the_available_viewport() {
+        assert_eq!(command_help_viewport_body_height(100.0, 140.0), 0.0);
+        assert_eq!(command_help_viewport_body_height(260.0, 140.0), 120.0);
+        assert_eq!(command_help_viewport_body_height(900.0, 140.0), 280.0);
+    }
+
+    #[test]
+    fn command_help_rejects_acknowledgement_for_query_autocomplete() {
+        let mut help = CommandHelpState::new(false);
+        help.open = true;
+        let attempt = help.begin_save(true).expect("open panel admits the save");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(&path, br#"{"query_autocomplete":false}"#).unwrap();
+        let acknowledgement = multi_launcher::settings::Settings::save_boolean_preference_checked(
+            &path,
+            multi_launcher::settings::SettingsBooleanSaveRequest::new(
+                multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete,
+                false,
+                true,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(help.finish_save(attempt.id, Ok(acknowledgement)), None);
+        assert!(!help.show_examples);
+        assert!(help.open);
+        assert!(help.pending.is_none());
+        assert!(help.status.as_deref().unwrap().contains("QueryAutocomplete"));
+    }
+
+    #[test]
+    fn linking_guide_keeps_the_egui_filter_seed() {
+        assert_eq!(super::LINKING_GUIDE_FILTER, "todo note cal @note: @todo:");
     }
 
     #[test]
@@ -12036,6 +13020,7 @@ mod tests {
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
                 query_autocomplete: true,
+                show_examples: false,
                 page_jump: 2,
                 query_results_layout: QueryResultsLayoutSettings::default(),
                 jump_mode_enabled: true,
@@ -12100,6 +13085,7 @@ mod tests {
             fuzzy_weight: 0.25,
             usage_weight: 0.0,
             query_autocomplete: true,
+            show_examples: false,
             page_jump: 2,
             query_results_layout: QueryResultsLayoutSettings::default(),
             jump_mode_enabled: true,
@@ -12329,6 +13315,15 @@ mod tests {
             KeyContext::parse("RootWindow").expect("valid root key context"),
             KeyContext::parse("ToastLogViewer").expect("valid Toast Log viewer context"),
         ];
+        let command_help = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("CommandHelp").expect("valid Command Help context"),
+        ];
+        let input = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("CommandHelp").expect("valid Command Help context"),
+            KeyContext::parse("Input").expect("valid input context"),
+        ];
         assert!(root_tab_traversed_to_search(
             "tab",
             Modifiers::default(),
@@ -12345,6 +13340,24 @@ mod tests {
             true,
             false,
         ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &command_help,
+            true,
+            false,
+        ));
+        assert!(command_help_escape_capture_should_close(&command_help, true));
+        assert!(!command_help_escape_capture_should_close(&command_help, false));
+        assert!(
+            !command_help_escape_capture_should_close(&input, true),
+            "a more-specific input receives Escape before the Command Help owner"
+        );
+        assert!(
+            !command_help_escape_capture_should_close(&popup, true),
+            "a more-specific popup receives Escape before the Command Help owner"
+        );
         assert!(!root_tab_traversed_to_search(
             "tab",
             Modifiers::default(),
@@ -12498,21 +13511,25 @@ mod tests {
     #[test]
     fn root_close_paths_wait_for_toast_log_open_and_clear_only_its_status() {
         assert_eq!(
-            root_close_blocker(None, false, true, false),
+            root_close_blocker(None, false, true, false, false),
             Some(RootCloseBlocker::ToastLogOpen),
             "the external OS handoff remains a close blocker until its receipt"
         );
         assert_eq!(
-            root_close_blocker(None, false, true, true),
+            root_close_blocker(None, false, true, true, true),
             Some(RootCloseBlocker::ToastLogOpen),
             "the same pending predicate applies before a Settings save can claim close"
         );
         assert_eq!(
-            root_close_blocker(None, false, false, true),
-            Some(RootCloseBlocker::SettingsSave)
+            root_close_blocker(None, false, false, true, false),
+            Some(RootCloseBlocker::BooleanPreferenceSave)
         );
         assert_eq!(
-            root_close_blocker(None, false, false, false),
+            root_close_blocker(None, false, false, false, true),
+            Some(RootCloseBlocker::BooleanPreferenceSave)
+        );
+        assert_eq!(
+            root_close_blocker(None, false, false, false, false),
             None,
             "read-only viewer requests do not delay close"
         );
@@ -12545,7 +13562,7 @@ mod tests {
         assert_eq!(
             editor.finish_save(
                 attempt.id + 1,
-                Err(multi_launcher::settings::QueryAutocompleteSaveError::Store(
+                Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
                     "stale receipt".into()
                 )),
             ),
@@ -12554,9 +13571,13 @@ mod tests {
         );
         assert_eq!(editor.pending, Some(attempt));
 
-        let acknowledgement = multi_launcher::settings::Settings::save_query_autocomplete_checked(
+        let acknowledgement = multi_launcher::settings::Settings::save_boolean_preference_checked(
             &path,
-            multi_launcher::settings::QueryAutocompleteSaveRequest::new(true, false),
+            multi_launcher::settings::SettingsBooleanSaveRequest::new(
+                multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete,
+                true,
+                false,
+            ),
         )
         .unwrap();
         assert_eq!(editor.finish_save(attempt.id, Ok(acknowledgement)), Some(false));
@@ -12658,7 +13679,7 @@ mod tests {
         assert_eq!(
             editor.finish_save(
                 attempt.id,
-                Err(multi_launcher::settings::QueryAutocompleteSaveError::Store(
+                Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
                     "write failed".into()
                 )),
             ),

@@ -8,17 +8,56 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QueryAutocompleteSaveRequest {
+pub enum SettingsBooleanPreference {
+    QueryAutocomplete,
+    ShowExamples,
+}
+
+impl SettingsBooleanPreference {
+    fn key(self) -> &'static str {
+        match self {
+            Self::QueryAutocomplete => "query_autocomplete",
+            Self::ShowExamples => "show_examples",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::QueryAutocomplete => "query autocomplete",
+            Self::ShowExamples => "Show examples",
+        }
+    }
+
+    fn get(self, settings: &Settings) -> bool {
+        match self {
+            Self::QueryAutocomplete => settings.query_autocomplete,
+            Self::ShowExamples => settings.show_examples,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettingsBooleanSaveRequest {
+    preference: SettingsBooleanPreference,
     expected_baseline: bool,
     desired: bool,
 }
 
-impl QueryAutocompleteSaveRequest {
-    pub fn new(expected_baseline: bool, desired: bool) -> Self {
+impl SettingsBooleanSaveRequest {
+    pub fn new(
+        preference: SettingsBooleanPreference,
+        expected_baseline: bool,
+        desired: bool,
+    ) -> Self {
         Self {
+            preference,
             expected_baseline,
             desired,
         }
+    }
+
+    pub fn preference(self) -> SettingsBooleanPreference {
+        self.preference
     }
 
     pub fn expected_baseline(self) -> bool {
@@ -35,15 +74,15 @@ const SAVE_WAITING_FOR_SETTINGS: u8 = 1;
 const SAVE_CANCELED: u8 = 2;
 const SAVE_COMMITTING: u8 = 3;
 
-/// A registry-owned cancellation fence for one query-autocomplete write.
+/// A registry-owned cancellation fence for one Settings Boolean write.
 /// Cancellation wins only until the worker claims its atomic commit boundary.
 #[derive(Clone, Debug)]
-pub struct QueryAutocompleteSaveToken {
+pub struct SettingsBooleanSaveToken {
     id: u64,
     state: Arc<AtomicU8>,
 }
 
-impl QueryAutocompleteSaveToken {
+impl SettingsBooleanSaveToken {
     pub(crate) fn new(id: u64) -> Self {
         Self {
             id,
@@ -146,12 +185,17 @@ impl QueryAutocompleteSaveToken {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QueryAutocompleteSaveAcknowledgement {
+pub struct SettingsBooleanSaveAcknowledgement {
+    preference: SettingsBooleanPreference,
     value: bool,
     persisted: bool,
 }
 
-impl QueryAutocompleteSaveAcknowledgement {
+impl SettingsBooleanSaveAcknowledgement {
+    pub fn preference(self) -> SettingsBooleanPreference {
+        self.preference
+    }
+
     pub fn value(self) -> bool {
         self.value
     }
@@ -162,26 +206,35 @@ impl QueryAutocompleteSaveAcknowledgement {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum QueryAutocompleteSaveError {
+pub enum SettingsBooleanSaveError {
     Cancelled,
-    Conflict { expected: bool, actual: bool },
+    Conflict {
+        preference: SettingsBooleanPreference,
+        expected: bool,
+        actual: bool,
+    },
     Store(String),
 }
 
-impl std::fmt::Display for QueryAutocompleteSaveError {
+impl std::fmt::Display for SettingsBooleanSaveError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => formatter.write_str("query autocomplete save was canceled"),
-            Self::Conflict { expected, actual } => write!(
+            Self::Cancelled => formatter.write_str("Settings Boolean save was canceled"),
+            Self::Conflict {
+                preference,
+                expected,
+                actual,
+            } => write!(
                 formatter,
-                "query autocomplete changed from the editor baseline ({expected}) to {actual}"
+                "{} changed from the saved baseline ({expected}) to {actual}",
+                preference.label()
             ),
             Self::Store(message) => formatter.write_str(message),
         }
     }
 }
 
-impl std::error::Error for QueryAutocompleteSaveError {}
+impl std::error::Error for SettingsBooleanSaveError {}
 
 static SETTINGS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -249,54 +302,56 @@ impl Settings {
         load_effective(path)
     }
 
-    /// Acknowledge one GPUI-owned Search & Results preference without
+    /// Acknowledge one GPUI-owned Boolean preference without
     /// reserializing any of the other Settings values. Both the typed
     /// baseline check and raw JSON patch share the canonical Settings lock.
-    pub fn save_query_autocomplete_checked(
+    pub fn save_boolean_preference_checked(
         path: impl AsRef<Path>,
-        request: QueryAutocompleteSaveRequest,
-    ) -> Result<QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError> {
-        Self::save_query_autocomplete_checked_inner(path.as_ref(), request, None)
+        request: SettingsBooleanSaveRequest,
+    ) -> Result<SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError> {
+        Self::save_boolean_preference_checked_inner(path.as_ref(), request, None)
     }
 
-    pub(crate) fn save_query_autocomplete_checked_cancellable(
+    pub(crate) fn save_boolean_preference_checked_cancellable(
         path: impl AsRef<Path>,
-        request: QueryAutocompleteSaveRequest,
-        token: &QueryAutocompleteSaveToken,
-    ) -> Result<QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError> {
+        request: SettingsBooleanSaveRequest,
+        token: &SettingsBooleanSaveToken,
+    ) -> Result<SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError> {
         if !token.mark_waiting_for_settings() {
-            return Err(QueryAutocompleteSaveError::Cancelled);
+            return Err(SettingsBooleanSaveError::Cancelled);
         }
-        Self::save_query_autocomplete_checked_inner(path.as_ref(), request, Some(token))
+        Self::save_boolean_preference_checked_inner(path.as_ref(), request, Some(token))
     }
 
-    fn save_query_autocomplete_checked_inner(
+    fn save_boolean_preference_checked_inner(
         path: &Path,
-        request: QueryAutocompleteSaveRequest,
-        token: Option<&QueryAutocompleteSaveToken>,
-    ) -> Result<QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError> {
+        request: SettingsBooleanSaveRequest,
+        token: Option<&SettingsBooleanSaveToken>,
+    ) -> Result<SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError> {
         let _transaction = transaction_guard();
-        if token.is_some_and(QueryAutocompleteSaveToken::is_canceled) {
-            return Err(QueryAutocompleteSaveError::Cancelled);
+        if token.is_some_and(SettingsBooleanSaveToken::is_canceled) {
+            return Err(SettingsBooleanSaveError::Cancelled);
         }
         let source_bytes = read_exact_bytes(path)
-            .map_err(|error| QueryAutocompleteSaveError::Store(error.to_string()))?;
+            .map_err(|error| SettingsBooleanSaveError::Store(error.to_string()))?;
         let source_settings = parse_effective_settings(path, &source_bytes)?;
-        let actual = source_settings.query_autocomplete;
+        let actual = request.preference.get(&source_settings);
 
         // A second writer may already have committed the requested value.
         // That state is an acknowledgement, and does not require a rewrite.
         if actual == request.desired {
-            if token.is_some_and(QueryAutocompleteSaveToken::is_canceled) {
-                return Err(QueryAutocompleteSaveError::Cancelled);
+            if token.is_some_and(SettingsBooleanSaveToken::is_canceled) {
+                return Err(SettingsBooleanSaveError::Cancelled);
             }
-            return Ok(QueryAutocompleteSaveAcknowledgement {
+            return Ok(SettingsBooleanSaveAcknowledgement {
+                preference: request.preference,
                 value: actual,
                 persisted: false,
             });
         }
         if actual != request.expected_baseline {
-            return Err(QueryAutocompleteSaveError::Conflict {
+            return Err(SettingsBooleanSaveError::Conflict {
+                preference: request.preference,
                 expected: request.expected_baseline,
                 actual,
             });
@@ -306,7 +361,7 @@ impl Settings {
             // A missing or empty store starts with the full effective defaults.
             // A sparse JSON object can have different deserialization defaults.
             serde_json::to_vec(&source_settings).map_err(|error| {
-                QueryAutocompleteSaveError::Store(format!(
+                SettingsBooleanSaveError::Store(format!(
                     "failed to serialize default Settings for {}: {error}",
                     path.display()
                 ))
@@ -319,37 +374,39 @@ impl Settings {
                 &raw_source,
             )
             .map_err(|error| {
-                QueryAutocompleteSaveError::Store(format!(
+                SettingsBooleanSaveError::Store(format!(
                     "failed to preserve raw Settings values from {}: {error}",
                     path.display()
                 ))
             })?;
         let raw_value = serde_json::value::RawValue::from_string(request.desired.to_string())
-            .map_err(|error| QueryAutocompleteSaveError::Store(error.to_string()))?;
-        raw_settings.insert("query_autocomplete".to_owned(), raw_value);
+            .map_err(|error| SettingsBooleanSaveError::Store(error.to_string()))?;
+        raw_settings.insert(request.preference.key().to_owned(), raw_value);
         if token.is_some_and(|token| !token.begin_irrevocable_commit()) {
-            return Err(QueryAutocompleteSaveError::Cancelled);
+            return Err(SettingsBooleanSaveError::Cancelled);
         }
         save_json_atomic(path, &raw_settings)
-            .map_err(|error| QueryAutocompleteSaveError::Store(error.to_string()))?;
+            .map_err(|error| SettingsBooleanSaveError::Store(error.to_string()))?;
 
         // Read the committed typed value back before returning an
         // acknowledgement to the editor.
         let committed_bytes = std::fs::read(path).map_err(|error| {
-            QueryAutocompleteSaveError::Store(format!(
+            SettingsBooleanSaveError::Store(format!(
                 "failed to verify Settings write at {}: {error}",
                 path.display()
             ))
         })?;
         let committed = parse_effective_settings(path, &committed_bytes)?;
-        if committed.query_autocomplete != request.desired {
-            return Err(QueryAutocompleteSaveError::Store(
-                "query autocomplete did not match the requested Settings value after writing"
-                    .to_owned(),
-            ));
+        let committed_value = request.preference.get(&committed);
+        if committed_value != request.desired {
+            return Err(SettingsBooleanSaveError::Store(format!(
+                "{} did not match the requested Settings value after writing",
+                request.preference.label()
+            )));
         }
-        Ok(QueryAutocompleteSaveAcknowledgement {
-            value: committed.query_autocomplete,
+        Ok(SettingsBooleanSaveAcknowledgement {
+            preference: request.preference,
+            value: committed_value,
             persisted: true,
         })
     }
@@ -395,12 +452,12 @@ impl Settings {
 fn parse_effective_settings(
     path: &Path,
     bytes: &[u8],
-) -> Result<Settings, QueryAutocompleteSaveError> {
+) -> Result<Settings, SettingsBooleanSaveError> {
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(Settings::default());
     }
     serde_json::from_slice(bytes).map_err(|error| {
-        QueryAutocompleteSaveError::Store(format!(
+        SettingsBooleanSaveError::Store(format!(
             "failed to parse Settings from {}: {error}",
             path.display()
         ))
@@ -442,8 +499,8 @@ fn load_effective(path: impl AsRef<Path>) -> anyhow::Result<Settings> {
 #[cfg(test)]
 mod tests {
     use super::{
-        QueryAutocompleteSaveAcknowledgement, QueryAutocompleteSaveError,
-        QueryAutocompleteSaveRequest, QueryAutocompleteSaveToken, Settings,
+        SettingsBooleanPreference, SettingsBooleanSaveAcknowledgement,
+        SettingsBooleanSaveError, SettingsBooleanSaveRequest, SettingsBooleanSaveToken, Settings,
         settings_file_sha256, transaction_guard,
     };
     use crate::common::persistence::{LoadState, PersistenceError};
@@ -640,15 +697,17 @@ mod tests {
         let source = format!("{{\"query_autocomplete\":true,\"opaque_extension\":{opaque}}}");
         std::fs::write(&path, source).unwrap();
 
-        let acknowledgement = Settings::save_query_autocomplete_checked(
+        let preference = SettingsBooleanPreference::QueryAutocomplete;
+        let acknowledgement = Settings::save_boolean_preference_checked(
             &path,
-            QueryAutocompleteSaveRequest::new(true, false),
+            SettingsBooleanSaveRequest::new(preference, true, false),
         )
         .unwrap();
 
         assert_eq!(
             acknowledgement,
-            QueryAutocompleteSaveAcknowledgement {
+            SettingsBooleanSaveAcknowledgement {
+                preference,
                 value: false,
                 persisted: true,
             }
@@ -669,15 +728,17 @@ mod tests {
         let source = br#"{ "query_autocomplete": false, "opaque": 1234567890123456789012345 }"#;
         std::fs::write(&path, source).unwrap();
 
-        let acknowledgement = Settings::save_query_autocomplete_checked(
+        let preference = SettingsBooleanPreference::QueryAutocomplete;
+        let acknowledgement = Settings::save_boolean_preference_checked(
             &path,
-            QueryAutocompleteSaveRequest::new(true, false),
+            SettingsBooleanSaveRequest::new(preference, true, false),
         )
         .unwrap();
 
         assert_eq!(
             acknowledgement,
-            QueryAutocompleteSaveAcknowledgement {
+            SettingsBooleanSaveAcknowledgement {
+                preference,
                 value: false,
                 persisted: false,
             }
@@ -697,9 +758,13 @@ mod tests {
         expected.query_autocomplete = desired;
 
         for path in [&missing, &empty] {
-            let acknowledgement = Settings::save_query_autocomplete_checked(
+            let acknowledgement = Settings::save_boolean_preference_checked(
                 path,
-                QueryAutocompleteSaveRequest::new(baseline, desired),
+                SettingsBooleanSaveRequest::new(
+                    SettingsBooleanPreference::QueryAutocomplete,
+                    baseline,
+                    desired,
+                ),
             )
             .unwrap();
             assert_eq!(acknowledgement.value(), desired);
@@ -712,14 +777,117 @@ mod tests {
 
         let sparse = directory.path().join("sparse.json");
         std::fs::write(&sparse, b"{}").unwrap();
-        Settings::save_query_autocomplete_checked(
+        Settings::save_boolean_preference_checked(
             &sparse,
-            QueryAutocompleteSaveRequest::new(baseline, desired),
+            SettingsBooleanSaveRequest::new(
+                SettingsBooleanPreference::QueryAutocomplete,
+                baseline,
+                desired,
+            ),
         )
         .unwrap();
         let stored: serde_json::Value =
             serde_json::from_slice(&std::fs::read(sparse).unwrap()).unwrap();
         assert_eq!(stored, serde_json::json!({ "query_autocomplete": desired }));
+    }
+
+    #[test]
+    fn show_examples_write_preserves_defaults_and_unowned_raw_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, b" \r\n\t").unwrap();
+        let preference = SettingsBooleanPreference::ShowExamples;
+        for path in [&missing, &empty] {
+            let acknowledgement = Settings::save_boolean_preference_checked(
+                path,
+                SettingsBooleanSaveRequest::new(preference, false, true),
+            )
+            .unwrap();
+            assert_eq!(acknowledgement.preference(), preference);
+            assert!(acknowledgement.value());
+            assert!(acknowledgement.persisted());
+            let saved = Settings::read_current(path).unwrap();
+            assert!(saved.show_examples);
+            assert_eq!(saved.help_hotkey, Settings::default().help_hotkey);
+            assert_eq!(saved.offscreen_pos, Settings::default().offscreen_pos);
+        }
+
+        let opaque = r#"{ "integer": 9007199254740993123456789, "nested": [true, null] }"#;
+        let path = directory.path().join("opaque.json");
+        std::fs::write(
+            &path,
+            format!(r#"{{"show_examples":false,"opaque_extension":{opaque}}}"#),
+        )
+        .unwrap();
+        Settings::save_boolean_preference_checked(
+            &path,
+            SettingsBooleanSaveRequest::new(preference, false, true),
+        )
+        .unwrap();
+        let raw = serde_json::from_slice::<BTreeMap<String, Box<serde_json::value::RawValue>>>(
+            &std::fs::read(path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(raw["opaque_extension"].get(), opaque);
+    }
+
+    #[test]
+    fn concurrent_boolean_preference_saves_preserve_each_other() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let opaque = r#"{ "signed": -9223372036854775809123, "nested": [9007199254740993123456789] }"#;
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"query_autocomplete":true,"show_examples":false,"opaque_extension":{opaque}}}"#
+            ),
+        )
+        .unwrap();
+        let workers = crate::SettingsSaveWorkerRegistry::default();
+        let (query_rx, _) = workers
+            .begin_boolean_preference_save(
+                path.to_string_lossy().into_owned(),
+                SettingsBooleanSaveRequest::new(
+                    SettingsBooleanPreference::QueryAutocomplete,
+                    true,
+                    false,
+                ),
+            )
+            .unwrap();
+        let (examples_rx, _) = workers
+            .begin_boolean_preference_save(
+                path.to_string_lossy().into_owned(),
+                SettingsBooleanSaveRequest::new(
+                    SettingsBooleanPreference::ShowExamples,
+                    false,
+                    true,
+                ),
+            )
+            .unwrap();
+
+        let query = query_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        let examples = examples_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(query.preference(), SettingsBooleanPreference::QueryAutocomplete);
+        assert!(!query.value());
+        assert_eq!(examples.preference(), SettingsBooleanPreference::ShowExamples);
+        assert!(examples.value());
+        assert!(workers.join_all_checked().is_clean());
+
+        let saved = Settings::read_current(&path).unwrap();
+        assert!(!saved.query_autocomplete);
+        assert!(saved.show_examples);
+        let raw = serde_json::from_slice::<BTreeMap<String, Box<serde_json::value::RawValue>>>(
+            &std::fs::read(&path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(raw["opaque_extension"].get(), opaque);
     }
 
     #[test]
@@ -731,9 +899,13 @@ mod tests {
         let settings_lock = transaction_guard();
         let workers = crate::SettingsSaveWorkerRegistry::default();
         let (receipt_rx, token) = workers
-            .begin_query_autocomplete_save(
+            .begin_boolean_preference_save(
                 path.to_string_lossy().into_owned(),
-                QueryAutocompleteSaveRequest::new(true, false),
+                SettingsBooleanSaveRequest::new(
+                    SettingsBooleanPreference::QueryAutocomplete,
+                    true,
+                    false,
+                ),
             )
             .unwrap();
 
@@ -747,7 +919,7 @@ mod tests {
 
         assert_eq!(
             receipt_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Err(QueryAutocompleteSaveError::Cancelled)
+            Err(SettingsBooleanSaveError::Cancelled)
         );
         let shutdown = workers.join_all_checked();
         assert!(shutdown.is_clean(), "{:?}", shutdown.failure_summary());
@@ -756,7 +928,7 @@ mod tests {
 
     #[test]
     fn query_autocomplete_save_token_rejects_cancel_after_commit_claim() {
-        let token = QueryAutocompleteSaveToken::new(1);
+        let token = SettingsBooleanSaveToken::new(1);
         assert!(token.begin_irrevocable_commit());
         assert!(!token.request_cancel());
     }
@@ -769,19 +941,23 @@ mod tests {
         std::fs::write(&path, source).unwrap();
         let workers = crate::SettingsSaveWorkerRegistry::default();
         let (receipt_rx, _token) = workers
-            .begin_query_autocomplete_save(
+            .begin_boolean_preference_save(
                 path.to_string_lossy().into_owned(),
-                QueryAutocompleteSaveRequest::new(true, false),
+                SettingsBooleanSaveRequest::new(
+                    SettingsBooleanPreference::QueryAutocomplete,
+                    true,
+                    false,
+                ),
             )
             .unwrap();
         assert!(matches!(
             receipt_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Err(QueryAutocompleteSaveError::Store(_))
+            Err(SettingsBooleanSaveError::Store(_))
         ));
 
         let shutdown = workers.join_all_checked();
         let failure = shutdown.failure_summary().unwrap();
-        assert!(failure.contains("query autocomplete save request 1"));
+        assert!(failure.contains("Settings Boolean save request 1"));
         assert!(failure.contains("failed to parse Settings"));
         assert_eq!(std::fs::read(&path).unwrap(), source);
     }
@@ -793,12 +969,17 @@ mod tests {
         let conflicting = br#"{ "query_autocomplete": false, "opaque": 123 }"#;
         std::fs::write(&path, conflicting).unwrap();
         assert_eq!(
-            Settings::save_query_autocomplete_checked(
+            Settings::save_boolean_preference_checked(
                 &path,
-                QueryAutocompleteSaveRequest::new(true, true),
+                SettingsBooleanSaveRequest::new(
+                    SettingsBooleanPreference::QueryAutocomplete,
+                    true,
+                    true,
+                ),
             )
             .unwrap_err(),
-            QueryAutocompleteSaveError::Conflict {
+            SettingsBooleanSaveError::Conflict {
+                preference: SettingsBooleanPreference::QueryAutocomplete,
                 expected: true,
                 actual: false,
             }
@@ -808,11 +989,15 @@ mod tests {
         let malformed = b"{broken";
         std::fs::write(&path, malformed).unwrap();
         assert!(matches!(
-            Settings::save_query_autocomplete_checked(
+            Settings::save_boolean_preference_checked(
                 &path,
-                QueryAutocompleteSaveRequest::new(true, false),
+                SettingsBooleanSaveRequest::new(
+                    SettingsBooleanPreference::QueryAutocomplete,
+                    true,
+                    false,
+                ),
             ),
-            Err(QueryAutocompleteSaveError::Store(_))
+            Err(SettingsBooleanSaveError::Store(_))
         ));
         assert_eq!(std::fs::read(&path).unwrap(), malformed);
     }

@@ -1,3 +1,4 @@
+pub mod command_help;
 pub mod jump_mode;
 pub mod query_history;
 pub mod query_results_layout;
