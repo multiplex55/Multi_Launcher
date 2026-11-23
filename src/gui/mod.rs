@@ -271,7 +271,7 @@ use crate::clipboard_modify::coordinator::{
     ImmediateCompletionEvent, ImmediateExecutionCoordinator,
 };
 use crate::clipboard_modify::runtime::{ClipboardModifyRuntime, clipboard_service};
-use crate::common::query::{ActionFilterMetadata, action_matches_filters, split_action_filters};
+use crate::common::query::{ActionFilterMetadata, action_matches_filters};
 use crate::dashboard::config::DashboardConfig;
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use crate::dashboard::{
@@ -4771,74 +4771,21 @@ impl LauncherApp {
     }
 
     fn should_use_grid_layout(&self) -> bool {
-        if !self.query_results_layout.enabled {
-            return false;
-        }
-
-        // Global grid mode when capability gating is disabled.
-        if !self.query_results_layout.respect_plugin_capability {
-            return true;
-        }
-
-        let trimmed = self.query.trim();
-        if trimmed.is_empty() {
-            return false;
-        }
-
-        let (filtered_query, _) = split_action_filters(trimmed);
-        let query_head = filtered_query
-            .split_whitespace()
-            .next()
-            .map(str::to_ascii_lowercase);
-
-        let mut prefixed_matches = Vec::new();
-        for plugin in self.plugins.iter() {
-            if let Some(enabled) = self.enabled_plugins.as_ref()
-                && !enabled.contains(plugin.name())
-            {
-                continue;
-            }
-
-            let prefixes = plugin.query_prefixes();
-            if prefixes.is_empty() {
-                continue;
-            }
-            let Some(head) = query_head.as_deref() else {
-                continue;
-            };
-            if prefixes
-                .iter()
-                .any(|prefix| prefix.eq_ignore_ascii_case(head))
-            {
-                prefixed_matches.push(plugin);
-            }
-        }
-
-        // No plugin-prefixed context: use the configured grid layout.
-        if prefixed_matches.is_empty() {
-            return true;
-        }
-
-        // Ambiguous/mixed plugin context: safely fall back to list mode.
-        if prefixed_matches.len() != 1 {
-            return false;
-        }
-
-        let plugin = &**prefixed_matches[0];
-        if self
-            .query_results_layout
-            .plugin_opt_out
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(plugin.name()))
-        {
-            return false;
-        }
-
-        let capabilities = plugin.capabilities();
-        if capabilities.contains(&CAP_FORCE_LIST_RESULTS) {
-            return false;
-        }
-        capabilities.contains(&CAP_GRID_RESULTS_COMPATIBLE)
+        crate::launcher::query_results_layout::resolve_query_results_layout(
+            &self.query,
+            &self.query_results_layout,
+            self.enabled_plugins.as_ref(),
+            self.plugins.iter(),
+            |plugin| plugin.name(),
+            |plugin| {
+                crate::launcher::query_results_layout::QueryLayoutPlugin {
+                    name: plugin.name(),
+                    query_prefixes: plugin.query_prefixes(),
+                    capabilities: plugin.capabilities(),
+                }
+            },
+        )
+        .grid
     }
 
     pub fn recompute_query_results_layout(&mut self) {
@@ -4848,84 +4795,32 @@ impl LauncherApp {
     /// Handle a keyboard navigation key. Returns the index of a selected
     /// action when `Enter` is pressed and a selection is available.
     pub fn handle_key(&mut self, key: egui::Key) -> Option<usize> {
-        let cols = self.query_results_layout.cols.max(1);
-        let move_to = |current: usize, delta: isize, max: usize| -> usize {
-            current.saturating_add_signed(delta).min(max)
+        use crate::launcher::query_results_layout::{
+            QuerySelectionMove, ResolvedQueryResultsLayout, move_query_selection,
         };
 
-        match key {
-            egui::Key::ArrowDown | egui::Key::Num2 => {
-                if !self.results.is_empty() {
-                    let max = self.results.len() - 1;
-                    self.selected = match self.selected {
-                        Some(i) if self.resolved_grid_layout => {
-                            Some(move_to(i, cols as isize, max))
-                        }
-                        Some(i) if i < max => Some(i + 1),
-                        Some(i) => Some(i),
-                        None => Some(0),
-                    };
-                }
-                None
-            }
-            egui::Key::ArrowUp | egui::Key::Num8 => {
-                if !self.results.is_empty() {
-                    let max = self.results.len() - 1;
-                    self.selected = match self.selected {
-                        Some(0) | None => None,
-                        Some(i) if self.resolved_grid_layout => {
-                            Some(move_to(i, -(cols as isize), max))
-                        }
-                        Some(i) if i > 0 => Some(i - 1),
-                        Some(i) => Some(i.min(max)),
-                    };
-                }
-                None
-            }
-            egui::Key::ArrowRight | egui::Key::Num6 => {
-                if self.resolved_grid_layout && !self.results.is_empty() {
-                    let max = self.results.len() - 1;
-                    self.selected = match self.selected {
-                        Some(i) if i < max => Some(i + 1),
-                        Some(i) => Some(i),
-                        None => Some(0),
-                    };
-                }
-                None
-            }
-            egui::Key::ArrowLeft | egui::Key::Num4 => {
-                if self.resolved_grid_layout && !self.results.is_empty() {
-                    self.selected = match self.selected {
-                        Some(i) if i > 0 => Some(i - 1),
-                        Some(i) => Some(i),
-                        None => Some(0),
-                    };
-                }
-                None
-            }
-            egui::Key::PageDown => {
-                if !self.results.is_empty() {
-                    let max = self.results.len() - 1;
-                    self.selected = match self.selected {
-                        Some(i) => Some(i.saturating_add(self.page_jump).min(max)),
-                        None => Some(0),
-                    };
-                }
-                None
-            }
-            egui::Key::PageUp => {
-                if !self.results.is_empty() {
-                    let max = self.results.len() - 1;
-                    self.selected = match self.selected {
-                        Some(i) => Some(i.saturating_sub(self.page_jump).min(max)),
-                        None => Some(0),
-                    };
-                }
-                None
-            }
-            egui::Key::Enter => self.current_actionable_result_index(),
-            _ => None,
-        }
+        let movement = match key {
+            egui::Key::ArrowDown | egui::Key::Num2 => QuerySelectionMove::Down,
+            egui::Key::ArrowUp | egui::Key::Num8 => QuerySelectionMove::Up,
+            egui::Key::ArrowRight | egui::Key::Num6 => QuerySelectionMove::Right,
+            egui::Key::ArrowLeft | egui::Key::Num4 => QuerySelectionMove::Left,
+            egui::Key::PageDown => QuerySelectionMove::PageDown,
+            egui::Key::PageUp => QuerySelectionMove::PageUp,
+            egui::Key::Enter => return self.current_actionable_result_index(),
+            _ => return None,
+        };
+
+        self.selected = move_query_selection(
+            self.selected,
+            self.results.len(),
+            ResolvedQueryResultsLayout::new(
+                self.resolved_grid_layout,
+                self.query_results_layout.cols,
+            ),
+            self.page_jump,
+            movement,
+        );
+        None
     }
 
     /// Shared target rule for normal Enter and the keyboard Action Sheet.

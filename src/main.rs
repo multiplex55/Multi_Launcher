@@ -4839,6 +4839,8 @@ fn main() -> anyhow::Result<()> {
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
             query_autocomplete: settings.query_autocomplete,
+            page_jump: settings.page_jump,
+            query_results_layout: settings.query_results_layout.clone(),
             usage: multi_launcher::usage::load_usage(multi_launcher::usage::USAGE_FILE)
                 .unwrap_or_default(),
             folder_aliases_lc,

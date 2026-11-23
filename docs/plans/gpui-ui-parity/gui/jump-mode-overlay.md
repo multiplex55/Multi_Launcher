@@ -8,4 +8,4 @@ G05 owns `jump-mode-overlay`. Jump Mode is an optional overlay for the exact cur
 
 Select `jump_mode_root_result_hints_select_without_activation_in_list_and_grid_then_fresh_enter_activates_full_action`, `jump_mode_root_result_registry_is_empty_while_context_menu_owns_input`, `jump_mode_root_input_deduplicates_text_repeats_and_cancels_without_leaks` and `jump_mode_owned_viewport_binding_is_exact_and_mismatched_context_cannot_steal_input`.
 
-Native and GPUI remain pending.
+`G05-EGUI-GRID-JUMP-HINT-ACTIVATION` verified real visible Grid hints, exact row highlight and scroll reveal, unchanged Search through the hint input, and a distinct fresh Enter applying the selected Action. `G05-EGUI-GRID-JUMP-ACTIVE-CANCEL` verified Escape cancellation after observing the active overlay. List, additional owned popup paths and GPUI remain pending. [Validation log](../VALIDATION_LOG.md#g05-native-root-grid-jump-mode-baseline)

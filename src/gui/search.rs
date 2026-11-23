@@ -1648,6 +1648,7 @@ mod tests {
         clipboard_modify::actions::{
             ClipboardModifyActionPayload, ClipboardModifySectionPayload, decode_action_payload,
         },
+        common::query::split_action_filters,
         plugin::PluginManager,
         plugins::clipboard_modify::ClipboardModifyPlugin,
         settings::Settings,

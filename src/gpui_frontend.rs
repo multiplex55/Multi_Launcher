@@ -21,7 +21,9 @@ use std::{
 use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::IndexPath;
-use gpui_kit::component::input::{IndentInline, InputEvent, MoveDown, MoveUp};
+use gpui_kit::component::input::{
+    IndentInline, InputEvent, MoveDown, MoveLeft, MovePageDown, MovePageUp, MoveRight, MoveUp,
+};
 use gpui_kit::component::{
     WindowExt as _,
     button::Button,
@@ -65,10 +67,14 @@ use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
 use multi_launcher::launcher::query_history::{QueryHistoryDirection, QueryHistoryNavigator};
+use multi_launcher::launcher::query_results_layout::{
+    QueryLayoutPlugin, QuerySelectionMove, ResolvedQueryResultsLayout, move_query_selection,
+    resolve_query_results_layout,
+};
 use multi_launcher::plugin::Plugin as _;
 use multi_launcher::settings::{
-    AppliedWindowSize, NativeWindowGeometry, PreferredWindowSize, RememberedPresentation,
-    UtilityDialogSizes, UtilityPresentations, UtilityToolKey,
+    AppliedWindowSize, NativeWindowGeometry, PreferredWindowSize, QueryResultsLayoutSettings,
+    RememberedPresentation, UtilityDialogSizes, UtilityPresentations, UtilityToolKey,
 };
 use multi_launcher::utility_geometry_binding::{
     CheckedNativeWindow, NativeGeometryBinding, NativeGeometrySlot, NativeGeometryStamp,
@@ -87,6 +93,8 @@ pub(crate) struct LauncherSearchStartup {
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
     pub query_autocomplete: bool,
+    pub page_jump: usize,
+    pub query_results_layout: QueryResultsLayoutSettings,
     pub usage: HashMap<String, u32>,
     pub folder_aliases_lc: HashMap<String, Option<String>>,
     pub bookmark_aliases_lc: HashMap<String, Option<String>>,
@@ -103,6 +111,8 @@ struct LauncherSearchCatalog {
     fuzzy_weight: f32,
     usage_weight: f32,
     query_autocomplete: bool,
+    page_jump: usize,
+    query_results_layout: QueryResultsLayoutSettings,
     completion_index: Map<Vec<u8>>,
     usage: HashMap<String, u32>,
     folder_aliases_lc: HashMap<String, Option<String>>,
@@ -146,11 +156,33 @@ impl LauncherSearchCatalog {
             fuzzy_weight: startup.fuzzy_weight,
             usage_weight: startup.usage_weight,
             query_autocomplete: startup.query_autocomplete,
+            page_jump: startup.page_jump,
+            query_results_layout: startup.query_results_layout,
             completion_index,
             usage: startup.usage,
             folder_aliases_lc: startup.folder_aliases_lc,
             bookmark_aliases_lc: startup.bookmark_aliases_lc,
         }
+    }
+
+    fn resolve_result_layout(
+        &self,
+        query: &str,
+        enabled_plugins: Option<&HashSet<String>>,
+    ) -> ResolvedQueryResultsLayout {
+        let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
+        resolve_query_results_layout(
+            query,
+            &self.query_results_layout,
+            enabled_plugins,
+            [hash_generator],
+            |plugin| plugin.name(),
+            |plugin| QueryLayoutPlugin {
+                name: plugin.name(),
+                query_prefixes: plugin.query_prefixes(),
+                capabilities: plugin.capabilities(),
+            },
+        )
     }
 
     fn compose(
@@ -535,6 +567,7 @@ struct RootWindow {
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_catalog: LauncherSearchCatalog,
     launcher_results: LauncherSearchResults,
+    launcher_results_scroll: ScrollHandle,
     query_history: QueryHistoryNavigator,
     fresh_search_enter: Option<FreshSearchEnter>,
     search_completion: SearchCompletion,
@@ -593,39 +626,49 @@ struct LauncherSearchResults {
     query: String,
     actions: Vec<multi_launcher::actions::Action>,
     selected: Option<usize>,
+    layout: ResolvedQueryResultsLayout,
+    page_jump: usize,
 }
 
 impl LauncherSearchResults {
-    fn replace(&mut self, query: String, actions: Vec<multi_launcher::actions::Action>) {
+    fn replace(
+        &mut self,
+        query: String,
+        actions: Vec<multi_launcher::actions::Action>,
+        layout: ResolvedQueryResultsLayout,
+        page_jump: usize,
+    ) {
         self.generation = self.generation.wrapping_add(1).max(1);
         self.query = query;
         self.actions = actions;
         self.selected = None;
+        self.layout = layout;
+        self.page_jump = page_jump;
     }
 
-    fn select_down(&mut self) -> bool {
-        if self.actions.is_empty() {
-            return false;
-        }
-        let next = match self.selected {
-            Some(index) if index < self.actions.len() => {
-                Some((index + 1).min(self.actions.len() - 1))
-            }
-            _ => Some(0),
-        };
+    fn move_selection(&mut self, movement: QuerySelectionMove) -> bool {
+        let next = move_query_selection(
+            self.selected,
+            self.actions.len(),
+            self.layout,
+            self.page_jump,
+            movement,
+        );
         let changed = self.selected != next;
         self.selected = next;
         changed
     }
 
-    fn select_up(&mut self) -> bool {
-        let next = match self.selected {
-            Some(index) if index > 0 && index < self.actions.len() => Some(index - 1),
-            _ => None,
-        };
-        let changed = self.selected != next;
-        self.selected = next;
-        changed
+    fn can_capture_lateral_move(&self) -> bool {
+        // The current Search layout owns plain lateral moves in Grid mode even
+        // when there are no results to select. In List mode the input owns them.
+        self.layout.grid
+    }
+
+    fn selected_scroll_child(&self) -> Option<usize> {
+        self.selected
+            .filter(|index| *index < self.actions.len())
+            .map(|index| self.layout.scroll_child_for(index))
     }
 
     fn enter_target(&self, current_query: &str) -> Option<(u64, usize)> {
@@ -654,6 +697,66 @@ impl LauncherSearchResults {
 
 fn launcher_result_row_id(generation: u64, absolute_index: usize) -> String {
     format!("launcher-search-result-row-{generation}-{absolute_index}")
+}
+
+fn launcher_result_grid_row_id(generation: u64, first_absolute_index: usize) -> String {
+    format!("launcher-search-grid-row-{generation}-{first_absolute_index}")
+}
+
+fn launcher_results_viewport_max_height(window_height: f32) -> f32 {
+    (window_height * 0.45).clamp(72.0, 360.0)
+}
+
+fn render_launcher_result_cell(
+    action: &Action,
+    generation: u64,
+    absolute_index: usize,
+    selected: bool,
+    palette: multi_launcher::gui::theme::SemanticPalette,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+    cx: &mut Context<RootWindow>,
+) -> impl IntoElement {
+    div()
+        .id(launcher_result_row_id(generation, absolute_index))
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .w_full()
+        .min_w(px(0.0))
+        .gap_y(px(metrics.item_spacing_y))
+        .p(px(metrics.panel_padding))
+        .rounded(px(metrics.corner_radius))
+        .bg(appearance::to_hsla(if selected {
+            palette.selection_fill
+        } else {
+            palette.panel_surface
+        }))
+        .text_color(appearance::to_hsla(palette.primary_text))
+        .role(Role::Button)
+        .aria_label(format!("{}: {}", action.label, action.desc))
+        .tab_stop(false)
+        .on_click(cx.listener(move |root, event: &ClickEvent, window, cx| {
+            root.activate_launcher_result(
+                generation,
+                absolute_index,
+                result_click_source(event.is_keyboard()),
+                LauncherResultActivationOrigin::ResultWidget,
+                window,
+                cx,
+            );
+        }))
+        .child(
+            Label::new(action.label.clone())
+                .id("launcher-search-result-label")
+                .text_size(px(metrics.body_text_size))
+                .line_height(px(metrics.line_height)),
+        )
+        .child(
+            Label::new(action.desc.clone())
+                .id("launcher-search-result-description")
+                .text_size(px(metrics.small_text_size))
+                .line_height(px(metrics.line_height)),
+        )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3115,8 +3218,13 @@ impl RootWindow {
             self.enabled_capabilities.as_ref(),
         );
         let actions = self.search_catalog.compose(&query, provider_actions);
-        self.launcher_results.replace(query, actions);
+        let layout = self
+            .search_catalog
+            .resolve_result_layout(&query, self.enabled_plugins.as_ref());
+        self.launcher_results
+            .replace(query, actions, layout, self.search_catalog.page_jump);
         self.fresh_search_enter = None;
+        self.launcher_results_scroll = ScrollHandle::new();
         // Query replacement can change the list height while the root is
         // scrolled near the end. Keep the Search field at the leading edge
         // whenever a tall result set overflows the shared root scroller.
@@ -3289,20 +3397,30 @@ impl RootWindow {
         true
     }
 
-    fn move_search_selection_down(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+    fn move_search_selection(
+        &mut self,
+        movement: QuerySelectionMove,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(_operation) = self.search_input_operation(window, cx) else {
             return false;
         };
-        self.launcher_results.select_down();
-        cx.notify();
-        true
-    }
+        if self.launcher_results.query != self.query.read(cx).value().to_string() {
+            return false;
+        }
+        if matches!(movement, QuerySelectionMove::Left | QuerySelectionMove::Right)
+            && !self.launcher_results.can_capture_lateral_move()
+        {
+            return false;
+        }
 
-    fn move_search_selection_up(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
-        let Some(_operation) = self.search_input_operation(window, cx) else {
-            return false;
-        };
-        self.launcher_results.select_up();
+        let changed = self.launcher_results.move_selection(movement);
+        if changed
+            && let Some(row) = self.launcher_results.selected_scroll_child()
+        {
+            self.launcher_results_scroll.scroll_to_item(row);
+        }
         cx.notify();
         true
     }
@@ -4978,6 +5096,78 @@ impl Render for RootWindow {
             .collect::<Vec<_>>();
         let search_content_can_overflow =
             self.launcher_results.actions.len() > 1 || !completion_preview.is_empty();
+        let result_layout = self.launcher_results.layout;
+        let result_generation = self.launcher_results.generation;
+        let result_count = self.launcher_results.actions.len();
+        let result_row_count = result_layout.row_count(result_count);
+        let result_columns = result_layout.columns.max(1);
+        let result_rows = (0..result_row_count)
+            .map(|row_index| {
+                let first_index = if result_layout.grid {
+                    row_index * result_columns
+                } else {
+                    row_index
+                };
+                let end_index = if result_layout.grid {
+                    first_index.saturating_add(result_columns).min(result_count)
+                } else {
+                    first_index.saturating_add(1).min(result_count)
+                };
+
+                if result_layout.grid {
+                    let mut row = div()
+                        .id(launcher_result_grid_row_id(result_generation, first_index))
+                        .flex()
+                        .flex_row()
+                        .flex_shrink_0()
+                        .gap_x(px(metrics.item_spacing_x))
+                        .w_full();
+                    for absolute_index in first_index..end_index {
+                        let action = &self.launcher_results.actions[absolute_index];
+                        row = row.child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .child(render_launcher_result_cell(
+                                    action,
+                                    result_generation,
+                                    absolute_index,
+                                    self.launcher_results.selected == Some(absolute_index),
+                                    palette,
+                                    metrics,
+                                    cx,
+                                )),
+                        );
+                    }
+                    let missing_columns = result_columns.saturating_sub(end_index - first_index);
+                    if missing_columns > 0 {
+                        let omitted_gaps = missing_columns.saturating_sub(1);
+                        row = row.child(
+                            div()
+                                .flex_1()
+                                .flex_grow(missing_columns as f32)
+                                .flex_basis(px(metrics.item_spacing_x * omitted_gaps as f32))
+                                .min_w(px(0.0)),
+                        );
+                    }
+                    row.into_any_element()
+                } else {
+                    let action = &self.launcher_results.actions[first_index];
+                    render_launcher_result_cell(
+                        action,
+                        result_generation,
+                        first_index,
+                        self.launcher_results.selected == Some(first_index),
+                        palette,
+                        metrics,
+                        cx,
+                    )
+                    .into_any_element()
+                }
+            })
+            .collect::<Vec<_>>();
+        let results_viewport_height =
+            launcher_results_viewport_max_height(window.bounds().size.height.as_f32());
         let docked_hash_frame = docked_hash.as_ref().map(|(view, mount_generation)| {
             let session_epoch = self
                 .hash_session
@@ -5143,12 +5333,32 @@ impl Render for RootWindow {
                         }
                     }))
                     .capture_action(cx.listener(|root, _: &MoveDown, window, cx| {
-                        if root.move_search_selection_down(window, cx) {
+                        if root.move_search_selection(QuerySelectionMove::Down, window, cx) {
                             cx.stop_propagation();
                         }
                     }))
                     .capture_action(cx.listener(|root, _: &MoveUp, window, cx| {
-                        if root.move_search_selection_up(window, cx) {
+                        if root.move_search_selection(QuerySelectionMove::Up, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|root, _: &MoveLeft, window, cx| {
+                        if root.move_search_selection(QuerySelectionMove::Left, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|root, _: &MoveRight, window, cx| {
+                        if root.move_search_selection(QuerySelectionMove::Right, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|root, _: &MovePageUp, window, cx| {
+                        if root.move_search_selection(QuerySelectionMove::PageUp, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|root, _: &MovePageDown, window, cx| {
+                        if root.move_search_selection(QuerySelectionMove::PageDown, window, cx) {
                             cx.stop_propagation();
                         }
                     }))
@@ -5198,51 +5408,18 @@ impl Render for RootWindow {
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
             }))
-            .children(self.launcher_results.actions.iter().enumerate().map(
-                |(index, action)| {
-                    let generation = self.launcher_results.generation;
-                    let selected = self.launcher_results.selected == Some(index);
-                    div()
-                        .id(launcher_result_row_id(generation, index))
-                        .flex()
-                        .flex_col()
-                        .gap_y(px(metrics.item_spacing_y))
-                        .w_full()
-                        .p(px(metrics.panel_padding))
-                        .rounded(px(metrics.corner_radius))
-                        .bg(appearance::to_hsla(if selected {
-                            palette.selection_fill
-                        } else {
-                            palette.panel_surface
-                        }))
-                        .text_color(appearance::to_hsla(palette.primary_text))
-                        .role(Role::Button)
-                        .aria_label(format!("{}: {}", action.label, action.desc))
-                        .tab_stop(false)
-                        .on_click(cx.listener(move |root, event: &ClickEvent, window, cx| {
-                            root.activate_launcher_result(
-                                generation,
-                                index,
-                                result_click_source(event.is_keyboard()),
-                                LauncherResultActivationOrigin::ResultWidget,
-                                window,
-                                cx,
-                            );
-                        }))
-                        .child(
-                            Label::new(action.label.clone())
-                                .id("launcher-search-result-label")
-                                .text_size(px(metrics.body_text_size))
-                                .line_height(px(metrics.line_height)),
-                        )
-                        .child(
-                            Label::new(action.desc.clone())
-                                .id("launcher-search-result-description")
-                                .text_size(px(metrics.small_text_size))
-                                .line_height(px(metrics.line_height)),
-                        )
-                },
-            ))
+            .children((result_count > 0).then(|| {
+                div()
+                    .id("launcher-search-results")
+                    .flex()
+                    .flex_col()
+                    .gap_y(px(metrics.item_spacing_y))
+                    .w_full()
+                    .max_h(px(results_viewport_height))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.launcher_results_scroll)
+                    .children(result_rows)
+            }))
             .child(
                 Label::new("Ctrl+Enter: open or dismiss the retained window")
                     .text_size(px(metrics.small_text_size))
@@ -5339,8 +5516,13 @@ impl Render for RootWindow {
         let mut body = div()
             .flex()
             .flex_col()
+            .flex_shrink_0()
             .gap_y(px(metrics.section_spacing))
             .w(px(root_controls_width))
+            .when(!search_content_can_overflow && docked_hash.is_none(), |this| {
+                // Center the ordinary root only when its content fits.
+                this.my_auto()
+            })
             .child(root_controls);
         if let Some(docked_hash_frame) = docked_hash_frame {
             body = body.child(docked_hash_frame);
@@ -5348,17 +5530,16 @@ impl Render for RootWindow {
 
         let mut root_scroll = div()
             .id("multi-launcher-root-scroll")
+            .role(Role::Group)
             .flex()
+            .flex_col()
             .size_full()
             .p(px(metrics.window_padding))
             .overflow_y_scroll()
             .items_center()
-            .justify_center()
+            .justify_start()
             .track_scroll(&self.root_scroll)
-            .when(search_content_can_overflow, |this| this.items_start())
-            .when(docked_hash.is_some(), |this| {
-                this.justify_start().items_start()
-            })
+            .when(docked_hash.is_some(), |this| this.items_start())
             .track_focus(&self.focus_handle)
             .key_context("RootWindow")
             .on_action(cx.listener(|this, _: &FocusDockedHashResize, window, cx| {
@@ -6977,6 +7158,11 @@ pub(crate) fn run_foundation_window(
             focus_handle.focus(window, cx);
             let resize_focus_handle = cx.focus_handle();
             let search_catalog_for_root = launcher_search_catalog;
+            let initial_result_layout =
+                search_catalog_for_root.resolve_result_layout("", enabled_plugins.as_ref());
+            let mut initial_launcher_results = LauncherSearchResults::default();
+            initial_launcher_results.layout = initial_result_layout;
+            initial_launcher_results.page_jump = search_catalog_for_root.page_jump;
             let root = cx.new(move |_| RootWindow {
                 root_window: None,
                 listener_slot: Arc::clone(&listener_slot_for_root),
@@ -6985,7 +7171,8 @@ pub(crate) fn run_foundation_window(
                 enabled_plugins: enabled_plugins.clone(),
                 enabled_capabilities: enabled_capabilities.clone(),
                 search_catalog: search_catalog_for_root,
-                launcher_results: LauncherSearchResults::default(),
+                launcher_results: initial_launcher_results,
+                launcher_results_scroll: ScrollHandle::new(),
                 query_history:
                     QueryHistoryNavigator::default(),
                 fresh_search_enter: None,
@@ -7631,7 +7818,8 @@ mod tests {
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
         is_fresh_plain_search_enter, keyboard_docked_resize_preview,
-        launcher_result_activation_is_current, launcher_result_row_id,
+        launcher_result_activation_is_current, launcher_result_grid_row_id,
+        launcher_result_row_id, launcher_results_viewport_max_height,
         parse_installed_search_invocation, pointer_docked_resize_preview, query_set_outcome_text,
         result_click_source, root_search_focus_is_current, root_tab_traversed_to_search,
         search_completion_session_is_current, search_input_is_current, selection_from_args,
@@ -7640,8 +7828,9 @@ mod tests {
     use gpui_kit::{KeyContext, point, px};
     use multi_launcher::{
         hash_generator::{HashAlgorithm, parse_expected_digest},
+        launcher::query_results_layout::{QuerySelectionMove, ResolvedQueryResultsLayout},
         plugin::Plugin as _,
-        settings::RememberedPresentation,
+        settings::{QueryResultsLayoutSettings, RememberedPresentation},
     };
     use std::collections::{HashMap, HashSet};
     use std::ffi::OsString;
@@ -7691,12 +7880,81 @@ mod tests {
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
                 query_autocomplete,
+                page_jump: 2,
+                query_results_layout: QueryResultsLayoutSettings::default(),
                 usage: HashMap::new(),
                 folder_aliases_lc: HashMap::new(),
                 bookmark_aliases_lc: HashMap::new(),
             },
             enabled_plugins,
         )
+    }
+
+    #[test]
+    fn gpui_grid_policy_uses_startup_settings_and_installed_hash_metadata() {
+        let enabled = HashSet::from(["hash_generator".to_owned()]);
+        let catalog = LauncherSearchCatalog::new(
+            LauncherSearchStartup {
+                actions: Vec::new(),
+                match_exact: true,
+                fuzzy_weight: 0.75,
+                usage_weight: 0.0,
+                query_autocomplete: false,
+                page_jump: 2,
+                query_results_layout: QueryResultsLayoutSettings {
+                    enabled: true,
+                    cols: 3,
+                    ..QueryResultsLayoutSettings::default()
+                },
+                usage: HashMap::new(),
+                folder_aliases_lc: HashMap::new(),
+                bookmark_aliases_lc: HashMap::new(),
+            },
+            Some(&enabled),
+        );
+
+        assert!(!catalog.resolve_result_layout("hash", Some(&enabled)).grid);
+        assert!(catalog.resolve_result_layout("app QMarker", Some(&enabled)).grid);
+        assert_eq!(
+            catalog
+                .resolve_result_layout("app QMarker", Some(&enabled))
+                .columns,
+            3
+        );
+        assert_eq!(catalog.page_jump, 2);
+        assert!(
+            catalog
+                .resolve_result_layout("hash", Some(&HashSet::new()))
+                .grid
+        );
+
+        let globally_gridded = LauncherSearchCatalog::new(
+            LauncherSearchStartup {
+                actions: Vec::new(),
+                match_exact: true,
+                fuzzy_weight: 0.75,
+                usage_weight: 0.0,
+                query_autocomplete: false,
+                page_jump: 4,
+                query_results_layout: QueryResultsLayoutSettings {
+                    enabled: true,
+                    cols: 2,
+                    respect_plugin_capability: false,
+                    ..QueryResultsLayoutSettings::default()
+                },
+                usage: HashMap::new(),
+                folder_aliases_lc: HashMap::new(),
+                bookmark_aliases_lc: HashMap::new(),
+            },
+            Some(&enabled),
+        );
+        assert!(
+            globally_gridded
+                .resolve_result_layout("hash", Some(&enabled))
+                .grid
+        );
+        assert_eq!(globally_gridded.page_jump, 4);
+        assert!(globally_gridded.resolve_result_layout("", Some(&enabled)).grid);
     }
 
     fn saved_hash_action(label: &str) -> multi_launcher::actions::Action {
@@ -7802,15 +8060,25 @@ mod tests {
             args: Some("beta argument".into()),
         };
         let mut results = LauncherSearchResults::default();
-        results.replace("hash".into(), vec![first.clone()]);
+        results.replace(
+            "hash".into(),
+            vec![first.clone()],
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
         let sole_generation = results.generation;
         assert_eq!(results.enter_target("hash"), Some((sole_generation, 0)));
 
-        results.replace("hash".into(), vec![first.clone(), second.clone()]);
+        results.replace(
+            "hash".into(),
+            vec![first.clone(), second.clone()],
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
         let rendered_generation = results.generation;
         assert_eq!(results.enter_target("hash"), None);
-        assert!(results.select_down());
-        assert!(results.select_down());
+        assert!(results.move_selection(QuerySelectionMove::Down));
+        assert!(results.move_selection(QuerySelectionMove::Down));
         assert_eq!(results.enter_target("hash"), Some((rendered_generation, 1)));
         assert_eq!(
             results.resolve_action(rendered_generation, 1, "hash"),
@@ -7826,7 +8094,12 @@ mod tests {
         assert_eq!(invocation.original_action, second);
         assert_eq!(invocation.source, ActivationSource::Enter);
 
-        results.replace("hash changed".into(), vec![first]);
+        results.replace(
+            "hash changed".into(),
+            vec![first],
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
         assert_eq!(results.selected, None);
         assert_eq!(
             results.resolve_action(rendered_generation, 0, "hash changed"),
@@ -7836,7 +8109,12 @@ mod tests {
         assert_eq!(results.enter_target("hash"), None);
 
         let stale_generation = results.generation;
-        results.replace("hash changed".into(), vec![hash_action()]);
+        results.replace(
+            "hash changed".into(),
+            vec![hash_action()],
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
         assert_eq!(
             results.resolve_action(stale_generation, 0, "hash changed"),
             None,
@@ -7855,28 +8133,115 @@ mod tests {
         };
         let actions = vec![first, second];
         let mut results = LauncherSearchResults::default();
-        results.replace("app QMarker".into(), actions.clone());
+        results.replace(
+            "app QMarker".into(),
+            actions.clone(),
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
 
-        assert!(!results.select_up());
-        assert!(results.select_down());
+        assert!(!results.move_selection(QuerySelectionMove::Up));
+        assert!(results.move_selection(QuerySelectionMove::Down));
         assert_eq!(results.selected, Some(0));
-        assert!(results.select_down());
+        assert!(results.move_selection(QuerySelectionMove::Down));
         assert_eq!(results.selected, Some(1));
-        assert!(!results.select_down());
+        assert!(!results.move_selection(QuerySelectionMove::Down));
         assert_eq!(results.selected, Some(1));
-        assert!(results.select_up());
+        assert!(results.move_selection(QuerySelectionMove::Up));
         assert_eq!(results.selected, Some(0));
-        assert!(results.select_up());
+        assert!(results.move_selection(QuerySelectionMove::Up));
         assert_eq!(results.selected, None);
         assert_eq!(results.enter_target("app QMarker"), None);
 
         let previous_generation = results.generation;
-        assert!(results.select_down());
+        assert!(results.move_selection(QuerySelectionMove::Down));
         assert_eq!(results.selected, Some(0));
-        results.replace("app QMarker".into(), actions);
+        results.replace(
+            "app QMarker".into(),
+            actions,
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
         assert_eq!(results.generation, previous_generation + 1);
         assert_eq!(results.selected, None);
         assert_eq!(results.enter_target("app QMarker"), None);
+    }
+
+    #[test]
+    fn launcher_search_grid_moves_page_jumps_and_partial_row_identity_are_absolute() {
+        let actions = (0..7)
+            .map(|index| multi_launcher::actions::Action {
+                label: format!("Grid row {index}"),
+                desc: "Grid navigation fixture".into(),
+                action: "hash:open".into(),
+                args: Some(format!("row {index}")),
+            })
+            .collect::<Vec<_>>();
+        let layout = ResolvedQueryResultsLayout::new(true, 3);
+        let mut results = LauncherSearchResults::default();
+        results.replace("app GridFixture".into(), actions.clone(), layout, 2);
+
+        assert_eq!(results.layout.row_count(actions.len()), 3);
+        assert_eq!(results.selected_scroll_child(), None);
+        assert!(!results.move_selection(QuerySelectionMove::Up));
+        assert!(results.move_selection(QuerySelectionMove::Down));
+        assert_eq!(results.selected, Some(0));
+        assert_eq!(results.selected_scroll_child(), Some(0));
+        assert!(results.move_selection(QuerySelectionMove::Right));
+        assert_eq!(results.selected, Some(1));
+        assert!(results.move_selection(QuerySelectionMove::Down));
+        assert_eq!(results.selected, Some(4));
+        assert_eq!(results.selected_scroll_child(), Some(1));
+        assert!(results.move_selection(QuerySelectionMove::PageDown));
+        assert_eq!(results.selected, Some(6));
+        assert_eq!(results.selected_scroll_child(), Some(2));
+        let (generation, index) = results
+            .enter_target("app GridFixture")
+            .expect("page navigation selects an exact current result");
+        assert_eq!(index, 6);
+        assert_eq!(
+            results.resolve_action(generation, index, "app GridFixture"),
+            Some(actions[6].clone())
+        );
+        assert!(!results.move_selection(QuerySelectionMove::PageDown));
+        assert!(results.move_selection(QuerySelectionMove::PageUp));
+        assert_eq!(results.selected, Some(4));
+        assert!(results.move_selection(QuerySelectionMove::Up));
+        assert_eq!(results.selected, Some(1));
+        assert!(results.move_selection(QuerySelectionMove::Left));
+        assert_eq!(results.selected, Some(0));
+
+        assert_eq!(
+            launcher_result_grid_row_id(generation, 6),
+            "launcher-search-grid-row-1-6"
+        );
+        assert_ne!(
+            launcher_result_grid_row_id(generation, 6),
+            launcher_result_grid_row_id(generation + 1, 6)
+        );
+        assert_eq!(launcher_results_viewport_max_height(200.0), 90.0);
+    }
+
+    #[test]
+    fn grid_claims_empty_lateral_moves_while_list_leaves_them_to_search() {
+        let mut results = LauncherSearchResults::default();
+        results.replace(
+            "app Empty".into(),
+            Vec::new(),
+            ResolvedQueryResultsLayout::new(true, 3),
+            2,
+        );
+        assert!(results.can_capture_lateral_move());
+        assert!(!results.move_selection(QuerySelectionMove::Right));
+
+        results.replace(
+            "hash".into(),
+            vec![hash_action()],
+            ResolvedQueryResultsLayout::new(false, 3),
+            2,
+        );
+        assert!(!results.can_capture_lateral_move());
+        assert_eq!(results.selected, None);
     }
 
     #[test]
@@ -7999,6 +8364,8 @@ mod tests {
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
                 query_autocomplete: true,
+                page_jump: 2,
+                query_results_layout: QueryResultsLayoutSettings::default(),
                 usage: HashMap::new(),
                 folder_aliases_lc: HashMap::new(),
                 bookmark_aliases_lc: HashMap::new(),
@@ -8017,10 +8384,15 @@ mod tests {
             "same command strings do not collapse actions with distinct arguments"
         );
         let mut results = LauncherSearchResults::default();
-        results.replace("app QMarker".into(), composed);
+        results.replace(
+            "app QMarker".into(),
+            composed,
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
         assert_eq!(results.enter_target("app QMarker"), None);
-        assert!(results.select_down());
-        assert!(results.select_down());
+        assert!(results.move_selection(QuerySelectionMove::Down));
+        assert!(results.move_selection(QuerySelectionMove::Down));
         let (generation, index) = results
             .enter_target("app QMarker")
             .expect("Down selects the second persisted row for fresh Enter");
@@ -8053,6 +8425,8 @@ mod tests {
             fuzzy_weight: 0.25,
             usage_weight: 0.0,
             query_autocomplete: true,
+            page_jump: 2,
+            query_results_layout: QueryResultsLayoutSettings::default(),
             usage: HashMap::new(),
             folder_aliases_lc: HashMap::new(),
             bookmark_aliases_lc: HashMap::new(),
