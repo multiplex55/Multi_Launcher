@@ -4838,6 +4838,7 @@ fn main() -> anyhow::Result<()> {
             match_exact: settings.match_exact,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
+            query_autocomplete: settings.query_autocomplete,
             usage: multi_launcher::usage::load_usage(multi_launcher::usage::USAGE_FILE)
                 .unwrap_or_default(),
             folder_aliases_lc,

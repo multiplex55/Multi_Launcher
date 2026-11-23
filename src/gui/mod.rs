@@ -4739,31 +4739,35 @@ impl LauncherApp {
         if !self.query_autocomplete || self.suggestions.is_empty() {
             return false;
         }
-        let suggestion = if tab {
-            self.suggestions.get(self.autocomplete_index).cloned()
-        } else {
-            self.suggestions.first().cloned()
+        let suggestion_index = if tab { self.autocomplete_index } else { 0 };
+        let Some(suggestion) = crate::completion::checked_tab_candidate(
+            &self.suggestions,
+            suggestion_index,
+            &self.query,
+        )
+        .map(str::to_owned)
+        else {
+            return false;
         };
-        if let Some(s) = suggestion
-            && s != self.query.to_lowercase()
+
+        let old_suggestions = tab.then(|| self.suggestions.clone());
+        let old_index = self.autocomplete_index;
+        self.track_c_query_observer.begin_from(
+            self.track_c_query_observer.tentative_start(),
+            track_c_query_observer::Origin::Suggestion,
+            &suggestion,
+        );
+        self.query = suggestion;
+        self.move_cursor_end = true;
+        self.search();
+        if let Some(old_suggestions) = old_suggestions
+            && let Some(next_index) =
+                crate::completion::next_tab_index(old_index, old_suggestions.len())
         {
-            let old_suggestions = self.suggestions.clone();
-            let old_index = self.autocomplete_index;
-            self.track_c_query_observer.begin_from(
-                self.track_c_query_observer.tentative_start(),
-                track_c_query_observer::Origin::Suggestion,
-                &s,
-            );
-            self.query = s;
-            self.move_cursor_end = true;
-            self.search();
-            if tab && !old_suggestions.is_empty() {
-                self.suggestions = old_suggestions;
-                self.autocomplete_index = (old_index + 1) % self.suggestions.len();
-            }
-            return true;
+            self.suggestions = old_suggestions;
+            self.autocomplete_index = next_index;
         }
-        false
+        true
     }
 
     fn should_use_grid_layout(&self) -> bool {

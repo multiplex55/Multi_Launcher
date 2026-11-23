@@ -21,7 +21,7 @@ use std::{
 use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::IndexPath;
-use gpui_kit::component::input::{InputEvent, MoveDown, MoveUp};
+use gpui_kit::component::input::{IndentInline, InputEvent, MoveDown, MoveUp};
 use gpui_kit::component::{
     WindowExt as _,
     button::Button,
@@ -64,6 +64,7 @@ use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
 use multi_launcher::launcher::query_history::{QueryHistoryDirection, QueryHistoryNavigator};
+use multi_launcher::plugin::Plugin as _;
 use multi_launcher::settings::{
     AppliedWindowSize, NativeWindowGeometry, PreferredWindowSize, RememberedPresentation,
     UtilityDialogSizes, UtilityPresentations, UtilityToolKey,
@@ -77,12 +78,14 @@ use multi_launcher::utility_presentation::{UtilityPresentationStore, UtilityPres
 use multi_launcher::utility_size::{
     PhysicalWindowRect, UtilityNativeGeometrySample, UtilitySizeStore,
 };
+use fst::Map;
 
 pub(crate) struct LauncherSearchStartup {
     pub actions: Vec<Action>,
     pub match_exact: bool,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
+    pub query_autocomplete: bool,
     pub usage: HashMap<String, u32>,
     pub folder_aliases_lc: HashMap<String, Option<String>>,
     pub bookmark_aliases_lc: HashMap<String, Option<String>>,
@@ -96,21 +99,35 @@ struct LauncherSearchCatalog {
     match_exact: bool,
     fuzzy_weight: f32,
     usage_weight: f32,
+    query_autocomplete: bool,
+    completion_index: Map<Vec<u8>>,
     usage: HashMap<String, u32>,
     folder_aliases_lc: HashMap<String, Option<String>>,
     bookmark_aliases_lc: HashMap<String, Option<String>>,
 }
 
 impl LauncherSearchCatalog {
-    fn new(startup: LauncherSearchStartup) -> Self {
+    fn new(
+        startup: LauncherSearchStartup,
+        enabled_plugins: Option<&HashSet<String>>,
+    ) -> Self {
         // The GPUI slice currently has one installed typed result route. Keep
         // only persisted actions that the real activation boundary can parse.
         let actions = supported_hash_search_actions(startup.actions);
+        let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
+        let commands = if enabled_plugins
+            .is_none_or(|enabled| enabled.contains(hash_generator.name()))
+        {
+            hash_generator.commands()
+        } else {
+            Vec::new()
+        };
         let cached_entries = actions.iter().map(CachedSearchEntry::from_action).collect();
         let filter_metadata = actions
             .iter()
             .map(ActionFilterMetadata::from_action)
             .collect();
+        let completion_index = multi_launcher::completion::build_index(&commands, &actions);
         Self {
             actions,
             cached_entries,
@@ -119,6 +136,8 @@ impl LauncherSearchCatalog {
             match_exact: startup.match_exact,
             fuzzy_weight: startup.fuzzy_weight,
             usage_weight: startup.usage_weight,
+            query_autocomplete: startup.query_autocomplete,
+            completion_index,
             usage: startup.usage,
             folder_aliases_lc: startup.folder_aliases_lc,
             bookmark_aliases_lc: startup.bookmark_aliases_lc,
@@ -160,6 +179,62 @@ impl LauncherSearchCatalog {
             None,
         )
         .actions
+    }
+}
+
+#[derive(Default)]
+struct SearchCompletion {
+    suggestions: Vec<String>,
+    next_index: usize,
+    pending_change: Option<PendingCompletionChange>,
+}
+
+struct PendingCompletionChange {
+    expected_query: String,
+    next_index: usize,
+}
+
+impl SearchCompletion {
+    fn reset_for_query(&mut self, catalog: &LauncherSearchCatalog, query: &str) {
+        self.pending_change = None;
+        self.next_index = 0;
+        self.suggestions = if catalog.query_autocomplete {
+            multi_launcher::completion::single_line_suggestions(
+                &catalog.completion_index,
+                query,
+                5,
+            )
+        } else {
+            Vec::new()
+        };
+    }
+
+    fn apply_change(&mut self, catalog: &LauncherSearchCatalog, query: &str) {
+        match self.pending_change.take() {
+            Some(pending) if pending.expected_query == query => {
+                self.next_index = pending.next_index;
+            }
+            _ => self.reset_for_query(catalog, query),
+        }
+    }
+
+    fn begin_replacement(&mut self, query: &str) -> Option<String> {
+        if self.pending_change.is_some() {
+            return None;
+        }
+        let candidate = multi_launcher::completion::checked_tab_candidate(
+            &self.suggestions,
+            self.next_index,
+            query,
+        )?
+        .to_owned();
+        let next_index =
+            multi_launcher::completion::next_tab_index(self.next_index, self.suggestions.len())?;
+        self.pending_change = Some(PendingCompletionChange {
+            expected_query: candidate.clone(),
+            next_index,
+        });
+        Some(candidate)
     }
 }
 
@@ -348,6 +423,8 @@ struct RootWindow {
     launcher_results: LauncherSearchResults,
     query_history: QueryHistoryNavigator,
     fresh_search_enter: Option<FreshSearchEnter>,
+    search_completion: SearchCompletion,
+    search_completion_focus_revision: Option<u64>,
     native_window: Option<NativeWindow>,
     focus_handle: FocusHandle,
     resize_focus_handle: FocusHandle,
@@ -820,6 +897,34 @@ fn search_input_is_current(
     window_active: bool,
 ) -> bool {
     root_visible && lifecycle_active && root_window_matches && search_focused && window_active
+}
+
+fn search_completion_session_is_current(session_revision: Option<u64>, revision: u64) -> bool {
+    session_revision == Some(revision)
+}
+
+fn context_stack_has_primary(context_stack: &[KeyContext], name: &str) -> bool {
+    context_stack.iter().any(|context| {
+        context
+            .primary()
+            .is_some_and(|entry| entry.key.as_ref() == name && entry.value.is_none())
+    })
+}
+
+fn root_tab_traversed_to_search(
+    key: &str,
+    modifiers: Modifiers,
+    action_present: bool,
+    context_stack: &[KeyContext],
+    search_focused_after_dispatch: bool,
+) -> bool {
+    key == "tab"
+        && modifiers == Modifiers::default()
+        && action_present
+        && search_focused_after_dispatch
+        && context_stack_has_primary(context_stack, "RootWindow")
+        && !context_stack_has_primary(context_stack, "LauncherSearch")
+        && !context_stack_has_primary(context_stack, "HashGeneratorWindow")
 }
 
 impl HashWindowState {
@@ -2938,6 +3043,79 @@ impl RootWindow {
         )
     }
 
+    fn accept_search_completion(
+        &mut self,
+        require_focus_session: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.search_catalog.query_autocomplete {
+            return false;
+        }
+        let Some(_operation) = self.search_input_operation(window, cx) else {
+            return false;
+        };
+        let visibility_revision = self
+            .root_visibility
+            .request_revision
+            .load(Ordering::Acquire);
+        if require_focus_session
+            && !search_completion_session_is_current(
+                self.search_completion_focus_revision,
+                visibility_revision,
+            )
+        {
+            return false;
+        }
+
+        let current_query = self.query.read(cx).value().to_string();
+        if self.launcher_results.query != current_query {
+            return false;
+        }
+        let Some(completed_query) = self.search_completion.begin_replacement(&current_query) else {
+            return false;
+        };
+        self.query.update(cx, |state, cx| {
+            state.replace_all(completed_query, window, cx);
+        });
+        true
+    }
+
+    fn record_search_completion_pointer_press(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_input_operation(window, cx).is_some() {
+            self.search_completion_focus_revision = Some(
+                self.root_visibility
+                    .request_revision
+                    .load(Ordering::Acquire),
+            );
+        }
+    }
+
+    fn revoke_search_completion_focus(&mut self) {
+        self.search_completion_focus_revision = None;
+    }
+
+    fn grant_search_completion_focus_after_show(
+        &mut self,
+        revision: u64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.root_visibility.request_revision.load(Ordering::Acquire) != revision
+            || !self.root_visibility.visible.load(Ordering::Acquire)
+            || self.restart_admission.admit().is_none()
+            || !self.search_input_is_live(window, cx)
+        {
+            return false;
+        }
+        self.search_completion_focus_revision = Some(revision);
+        true
+    }
+
     fn navigate_search_history(
         &mut self,
         direction: QueryHistoryDirection,
@@ -4581,7 +4759,21 @@ impl Render for RootWindow {
         } else {
             HASH_ROOT_CONTROLS_WIDTH
         };
-        let multirow_results = self.launcher_results.actions.len() > 1;
+        let completion_preview = self
+            .search_completion
+            .suggestions
+            .iter()
+            .enumerate()
+            .map(|(index, suggestion)| {
+                if index == self.search_completion.next_index {
+                    format!("› {suggestion}")
+                } else {
+                    suggestion.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let search_content_can_overflow =
+            self.launcher_results.actions.len() > 1 || !completion_preview.is_empty();
         let docked_hash_frame = docked_hash.as_ref().map(|(view, mount_generation)| {
             let session_epoch = self
                 .hash_session
@@ -4741,6 +4933,11 @@ impl Render for RootWindow {
                 div()
                     .id("launcher-search-input")
                     .key_context("LauncherSearch")
+                    .capture_action(cx.listener(|root, _: &IndentInline, window, cx| {
+                        if root.accept_search_completion(true, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
                     .capture_action(cx.listener(|root, _: &MoveDown, window, cx| {
                         if root.move_search_selection_down(window, cx) {
                             cx.stop_propagation();
@@ -4775,12 +4972,21 @@ impl Render for RootWindow {
                     .on_key_up(cx.listener(|root, event, _, _| {
                         root.record_search_key_up(event);
                     }))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|root, _, window, cx| {
+                        root.record_search_completion_pointer_press(window, cx);
+                    }))
                     .child(
                         Input::new(&self.query)
                             .aria_label("Search")
                             .readonly(self.restart_admission.is_fenced()),
                     ),
             )
+            .children(completion_preview.into_iter().enumerate().map(|(index, preview)| {
+                Label::new(preview)
+                    .id(format!("launcher-search-completion-{index}"))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
             .children(self.launcher_results.actions.iter().enumerate().map(
                 |(index, action)| {
                     let generation = self.launcher_results.generation;
@@ -4937,7 +5143,7 @@ impl Render for RootWindow {
             .items_center()
             .justify_center()
             .track_scroll(&self.root_scroll)
-            .when(multirow_results, |this| this.items_start())
+            .when(search_content_can_overflow, |this| this.items_start())
             .when(docked_hash.is_some(), |this| {
                 this.justify_start().items_start()
             })
@@ -6366,7 +6572,8 @@ pub(crate) fn run_foundation_window(
     saved_utility_sizes: UtilityDialogSizes,
     settings_save_workers: SettingsSaveWorkerRegistry,
 ) -> Result<Option<RestartPlan>, String> {
-    let launcher_search_catalog = LauncherSearchCatalog::new(search_startup);
+    let launcher_search_catalog =
+        LauncherSearchCatalog::new(search_startup, enabled_plugins.as_ref());
     let hash_tool_key = UtilityToolKey::parse("hash-generator")
         .map_err(|error| format!("Hash Generator has no stable presentation key: {error}"))?;
     let utility_presentations = UtilityPresentationStore::new(
@@ -6570,6 +6777,8 @@ pub(crate) fn run_foundation_window(
                 query_history:
                     QueryHistoryNavigator::default(),
                 fresh_search_enter: None,
+                search_completion: SearchCompletion::default(),
+                search_completion_focus_revision: None,
                 native_window: None,
                 focus_handle,
                 resize_focus_handle,
@@ -6628,6 +6837,8 @@ pub(crate) fn run_foundation_window(
                             InputEvent::Change => {
                                 let query_text = query.read(cx).value().to_string();
                                 root.query_history.synchronize(&query_text);
+                                root.search_completion
+                                    .apply_change(&root.search_catalog, &query_text);
                                 root.refresh_launcher_results(query_text);
                                 cx.notify();
                             }
@@ -6691,7 +6902,10 @@ pub(crate) fn run_foundation_window(
                                 })
                                 .detach();
                             }
-                            InputEvent::Blur => root.fresh_search_enter = None,
+                            InputEvent::Blur => {
+                                root.fresh_search_enter = None;
+                                root.revoke_search_completion_focus();
+                            }
                             _ => {}
                         }
                     },
@@ -6700,6 +6914,32 @@ pub(crate) fn run_foundation_window(
             appearance_subscription_sink
                 .borrow_mut()
                 .push(search_subscription);
+            let tab_completion_subscription = root.update(cx, |_, cx| {
+                cx.observe_keystrokes(|root, event, window, cx| {
+                    if root_tab_traversed_to_search(
+                        &event.keystroke.key,
+                        event.keystroke.modifiers,
+                        event.action.is_some(),
+                        &event.context_stack,
+                        root.search_input_is_live(window, cx),
+                    ) {
+                        root.accept_search_completion(false, window, cx);
+                    }
+                })
+            });
+            appearance_subscription_sink
+                .borrow_mut()
+                .push(tab_completion_subscription);
+            let activation_subscription = root.update(cx, |_, cx| {
+                cx.observe_window_activation(window, |root, window, _| {
+                    if !window.is_window_active() {
+                        root.revoke_search_completion_focus();
+                    }
+                })
+            });
+            appearance_subscription_sink
+                .borrow_mut()
+                .push(activation_subscription);
             let subscription = root.update(cx, |root, cx| {
                 let resize_focus_handle = root.resize_focus_handle.clone();
                 cx.on_blur(&resize_focus_handle, window, |root, _, cx| {
@@ -6889,14 +7129,14 @@ pub(crate) fn run_foundation_window(
                         break;
                     };
 
-                    let (revision, desired_visible, hash_focus_generation) =
+                    let (revision, desired_visible, hash_focus_generation, hotkey_toggle) =
                         if let Some(requested_visible) = visibility.take_requested_visible() {
                             let hash_focus_generation = visibility.take_requested_hash_focus();
                             let (revision, visible) = visibility.set_visible(requested_visible);
-                            (revision, visible, hash_focus_generation)
+                            (revision, visible, hash_focus_generation, false)
                         } else if trigger.take() {
                             let (revision, visible) = visibility.next_toggle();
-                            (revision, visible, None)
+                            (revision, visible, None, true)
                         } else {
                             continue;
                         };
@@ -6915,6 +7155,8 @@ pub(crate) fn run_foundation_window(
                         &root_view,
                         &mut *cx,
                         |root, window, cx| {
+                            root.revoke_search_completion_focus();
+                            let mut search_focus_selected = false;
                             if desired_visible {
                                 let docked_mount_generation = match &root.hash_window {
                                     HashWindowState::Docked {
@@ -6931,6 +7173,7 @@ pub(crate) fn run_foundation_window(
                                 } else {
                                     None
                                 };
+                                search_focus_selected = hash_view.is_none();
                                 if let Some(view) = hash_view {
                                     view.update(cx, |tool, cx| {
                                         tool.focus_editable(window, cx);
@@ -6941,13 +7184,21 @@ pub(crate) fn run_foundation_window(
                             } else {
                                 root.cancel_docked_hash_preview();
                             }
-                            root.native_window
+                            (root.native_window, search_focus_selected)
                         },
                     );
-                    if !matches!(query_window, Ok(Some(current)) if current == native_window) {
-                        tracing::warn!("GPUI root window closed before hotkey presentation");
-                        cx.update(|cx| cx.quit());
-                        break;
+                    let search_focus_selected = match query_window {
+                        Ok((Some(current), search_focus_selected)) if current == native_window => {
+                            search_focus_selected
+                        }
+                        _ => {
+                            tracing::warn!("GPUI root window closed before hotkey presentation");
+                            cx.update(|cx| cx.quit());
+                            break;
+                        }
+                    };
+                    if !visibility.is_current(revision, desired_visible) {
+                        continue;
                     }
 
                     let foreground_before_transition = current_foreground_identity();
@@ -6996,6 +7247,39 @@ pub(crate) fn run_foundation_window(
                                 );
                             })
                             .await;
+                    }
+                    if hotkey_toggle
+                        && desired_visible
+                        && search_focus_selected
+                        && show_request_is_current
+                        && visibility.is_current(revision, true)
+                    {
+                        let foreground = cx
+                            .background_executor()
+                            .spawn(async { current_foreground_identity() })
+                            .await;
+                        if foreground == Some(native_window.identity)
+                            && visibility.is_current(revision, true)
+                        {
+                            let _ = cx.update(|app| {
+                                let _ = update_kit_window_content(
+                                    root_window,
+                                    &root_view,
+                                    app,
+                                    |root, window, cx| {
+                                        if root.native_window == Some(native_window)
+                                            && visibility.is_current(revision, true)
+                                            && current_foreground_identity()
+                                                == Some(native_window.identity)
+                                        {
+                                            root.grant_search_completion_focus_after_show(
+                                                revision, window, cx,
+                                            );
+                                        }
+                                    },
+                                );
+                            });
+                        }
                     }
                 }
             })
@@ -7124,6 +7408,7 @@ mod tests {
         HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest, HashDraft,
         HashPickerOutcome, HashPresentationMode, HashWakeSignal, LauncherSearchCatalog,
         LauncherSearchResults, LauncherSearchStartup, Modifiers, Poll, PreferredWindowSize,
+        SearchCompletion,
         classify_hash_picker_result, dispatch_hash_search_invocation,
         docked_hash_available_size, docked_hash_fit, docked_hash_focus_is_current,
         docked_hash_resize_accessibility_label, docked_hash_resize_identity_matches,
@@ -7132,15 +7417,16 @@ mod tests {
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
         is_fresh_plain_search_enter, keyboard_docked_resize_preview, launcher_result_row_id,
         parse_hash_search_invocation, pointer_docked_resize_preview, result_click_source,
-        root_search_focus_is_current, search_input_is_current, selection_from_args,
+        root_search_focus_is_current, root_tab_traversed_to_search,
+        search_completion_session_is_current, search_input_is_current, selection_from_args,
         single_line_history_queries, supported_hash_search_actions,
     };
-    use gpui_kit::{point, px};
+    use gpui_kit::{KeyContext, point, px};
     use multi_launcher::{
         hash_generator::{HashAlgorithm, parse_expected_digest},
         settings::RememberedPresentation,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::OsString;
     use std::future::Future;
     use std::path::PathBuf;
@@ -7174,6 +7460,35 @@ mod tests {
         .into_iter()
         .next()
         .expect("the built-in Hash Generator route is installed")
+    }
+
+    fn completion_catalog(
+        actions: Vec<multi_launcher::actions::Action>,
+        query_autocomplete: bool,
+        enabled_plugins: Option<&HashSet<String>>,
+    ) -> LauncherSearchCatalog {
+        LauncherSearchCatalog::new(
+            LauncherSearchStartup {
+                actions,
+                match_exact: true,
+                fuzzy_weight: 0.75,
+                usage_weight: 0.0,
+                query_autocomplete,
+                usage: HashMap::new(),
+                folder_aliases_lc: HashMap::new(),
+                bookmark_aliases_lc: HashMap::new(),
+            },
+            enabled_plugins,
+        )
+    }
+
+    fn saved_hash_action(label: &str) -> multi_launcher::actions::Action {
+        multi_launcher::actions::Action {
+            label: label.into(),
+            desc: "Hash generator fixture".into(),
+            action: "hash:open".into(),
+            args: None,
+        }
     }
 
     #[test]
@@ -7304,15 +7619,19 @@ mod tests {
             action: "query:settings".into(),
             args: None,
         };
-        let catalog = LauncherSearchCatalog::new(LauncherSearchStartup {
-            actions: vec![alpha.clone(), beta.clone(), unsupported.clone()],
-            match_exact: true,
-            fuzzy_weight: 0.75,
-            usage_weight: 0.0,
-            usage: HashMap::new(),
-            folder_aliases_lc: HashMap::new(),
-            bookmark_aliases_lc: HashMap::new(),
-        });
+        let catalog = LauncherSearchCatalog::new(
+            LauncherSearchStartup {
+                actions: vec![alpha.clone(), beta.clone(), unsupported.clone()],
+                match_exact: true,
+                fuzzy_weight: 0.75,
+                usage_weight: 0.0,
+                query_autocomplete: true,
+                usage: HashMap::new(),
+                folder_aliases_lc: HashMap::new(),
+                bookmark_aliases_lc: HashMap::new(),
+            },
+            None,
+        );
 
         assert_eq!(catalog.actions, vec![alpha.clone(), beta.clone()]);
         let composed = catalog.compose("app QMarker", Vec::new());
@@ -7342,6 +7661,166 @@ mod tests {
             "clearing GPUI Search keeps the existing blank result scope"
         );
         assert_eq!(supported_hash_search_actions(vec![unsupported]), Vec::new());
+    }
+
+    #[test]
+    fn gpui_completion_uses_admitted_actions_and_enabled_hash_commands() {
+        let alpha = saved_hash_action("G05 Comp 東 Alpha");
+        let beta = saved_hash_action("G05 Comp 東 Beta");
+        let unsupported = multi_launcher::actions::Action {
+            label: "G05 Comp 東 Unsupported".into(),
+            desc: "Other route".into(),
+            action: "query:settings".into(),
+            args: None,
+        };
+        let catalog =
+            completion_catalog(vec![alpha.clone(), beta.clone(), unsupported], true, None);
+
+        assert_eq!(
+            multi_launcher::completion::suggestions(
+                &catalog.completion_index,
+                "app g05 comp 東",
+                5,
+            ),
+            vec!["app g05 comp 東 alpha", "app g05 comp 東 beta"]
+        );
+        assert_eq!(
+            multi_launcher::completion::suggestions(&catalog.completion_index, "h", 5),
+            vec!["hash"],
+            "the enabled Hash command label remains in the completion index"
+        );
+
+        let disabled = HashSet::new();
+        let disabled_catalog = completion_catalog(vec![alpha, beta], true, Some(&disabled));
+        assert!(multi_launcher::completion::suggestions(
+            &disabled_catalog.completion_index,
+            "h",
+            5,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn gpui_completion_preserves_its_cycle_edit_and_history_reset_rules() {
+        let catalog = completion_catalog(
+            vec![
+                saved_hash_action("G05 Comp 東 Alpha"),
+                saved_hash_action("G05 Comp 東 Beta"),
+                multi_launcher::actions::Action {
+                    label: "G05 Comp 東 Multiline\r\nLabel".into(),
+                    desc: "Not representable by the pinned Search editor".into(),
+                    action: "hash:open".into(),
+                    args: None,
+                },
+            ],
+            true,
+            None,
+        );
+        let draft = "app g05 comp 東";
+        let alpha = "app g05 comp 東 alpha";
+        let beta = "app g05 comp 東 beta";
+        let mut completion = SearchCompletion::default();
+        completion.reset_for_query(&catalog, draft);
+
+        assert_eq!(
+            completion.suggestions,
+            vec![alpha.to_owned(), beta.to_owned()],
+            "the GPUI picker excludes a CR/LF candidate it cannot represent exactly"
+        );
+        assert_eq!(completion.begin_replacement(draft), Some(alpha.into()));
+        completion.apply_change(&catalog, alpha);
+        assert_eq!(completion.next_index, 1);
+        assert_eq!(completion.begin_replacement(alpha), Some(beta.into()));
+        completion.apply_change(&catalog, beta);
+        assert_eq!(completion.next_index, 0, "the sequence wraps after Beta");
+
+        // The ordinary Change event for an equal-text history recall has no
+        // completion receipt, so it starts from the newly recalled query.
+        completion.apply_change(&catalog, beta);
+        assert!(completion.suggestions.is_empty());
+        assert_eq!(completion.next_index, 0, "equal-text history recall resets the cycle");
+        assert!(completion.begin_replacement("app g05 comp missing").is_none());
+        assert!(completion.pending_change.is_none());
+
+        completion.reset_for_query(&catalog, draft);
+        assert_eq!(completion.begin_replacement(draft), Some(alpha.into()));
+        completion.apply_change(&catalog, alpha);
+        assert_eq!(completion.begin_replacement(alpha), Some(beta.into()));
+        completion.apply_change(&catalog, beta);
+        assert_eq!(completion.begin_replacement(beta), Some(alpha.into()));
+        completion.apply_change(&catalog, alpha);
+        let accepted = alpha;
+        completion.apply_change(&catalog, &format!("{accepted}β"));
+        assert!(completion.suggestions.is_empty());
+        assert_eq!(completion.next_index, 0, "a user edit clears the accepted sequence");
+    }
+
+    #[test]
+    fn gpui_completion_respects_the_setting_and_declines_without_candidates() {
+        let catalog = completion_catalog(Vec::new(), false, None);
+        let mut completion = SearchCompletion::default();
+        completion.reset_for_query(&catalog, "h");
+        assert!(completion.suggestions.is_empty());
+        assert!(completion.begin_replacement("h").is_none());
+        assert!(completion.pending_change.is_none());
+        assert!(search_completion_session_is_current(Some(8), 8));
+        assert!(!search_completion_session_is_current(Some(8), 9));
+        assert!(!search_completion_session_is_current(None, 8));
+    }
+
+    #[test]
+    fn post_dispatch_completion_requires_plain_root_tab_into_search() {
+        let root = [KeyContext::parse("RootWindow").expect("valid root key context")];
+        let search = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("LauncherSearch").expect("valid search key context"),
+        ];
+        let utility = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("HashGeneratorWindow").expect("valid Hash key context"),
+        ];
+        assert!(root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &root,
+            true,
+        ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::shift(),
+            true,
+            &root,
+            true,
+        ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &search,
+            true,
+        ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &utility,
+            true,
+        ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            false,
+            &root,
+            true,
+        ));
+        assert!(!root_tab_traversed_to_search(
+            "tab",
+            Modifiers::default(),
+            true,
+            &root,
+            false,
+        ));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # G05 — Main launcher, query interaction, results, and help
 
-**Status:** First [real Search result activation](../gui/launcher.md#first-gpui-result-activation-checkpoint), [shared scoring](../gui/launcher.md#shared-candidate-scoring-and-provider-discovery), [shared result composition](../gui/launcher.md#shared-composition-and-persisted-app-results) and [single-line Search history and list keyboard navigation](../gui/launcher.md#search-history-and-list-keyboard-navigation) have scoped Windows and Rust evidence. [Tab completion](../gui/launcher.md#tab-completion) follows the bounded G04 compact viewport correction. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
+**Status:** Shared scoring and composition, Hash result activation, single-line history and list arrows, and [pointer and traversal Tab completion](../gui/launcher.md#tab-completion) have scoped Windows and Rust evidence. The acknowledged global hotkey association is still pending. [Saved Query Set activation](../gui/launcher.md#saved-query-set-activation) follows. **Owner:** G05 frontend implementer, coordinating shared command/input changes with G02–G04. Work stays on the single migration branch established by G00.
 
 ## Objective and dependencies
 
