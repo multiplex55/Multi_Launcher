@@ -79,6 +79,45 @@ fn startup_index_coordinator_for_owner() -> Result<
     multi_launcher::indexer::coordinator::IndexCoordinator::new()
 }
 
+fn load_gpui_search_aliases() -> (
+    HashMap<String, Option<String>>,
+    HashMap<String, Option<String>>,
+) {
+    let folders = multi_launcher::plugins::folders::load_folders(
+        multi_launcher::plugins::folders::FOLDERS_FILE,
+    )
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "folder aliases startup retained invalid persisted file");
+        Vec::new()
+    });
+    let folder_aliases_lc = folders
+        .into_iter()
+        .map(|folder| {
+            (
+                folder.path,
+                folder.alias.map(|alias| alias.to_lowercase()),
+            )
+        })
+        .collect();
+    let bookmarks = multi_launcher::plugins::bookmarks::load_bookmarks(
+        multi_launcher::plugins::bookmarks::BOOKMARKS_FILE,
+    )
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "bookmark aliases startup retained invalid persisted file");
+        Vec::new()
+    });
+    let bookmark_aliases_lc = bookmarks
+        .into_iter()
+        .map(|bookmark| {
+            (
+                bookmark.url,
+                bookmark.alias.map(|alias| alias.to_lowercase()),
+            )
+        })
+        .collect();
+    (folder_aliases_lc, bookmark_aliases_lc)
+}
+
 fn build_viewport_with_icon(settings: &Settings, icon_bytes: &[u8]) -> egui::ViewportBuilder {
     let (w, h) = settings.window_size.unwrap_or((400, 220));
     let mut viewport = egui::ViewportBuilder::default()
@@ -4780,11 +4819,35 @@ fn main() -> anyhow::Result<()> {
             "settings startup used temporary defaults without replacing the persisted file"
         );
     }
+    let actions_timer = multi_launcher::performance::Timer::start();
+    let startup_actions = load_startup_actions("actions.json");
+    let actions_vec = startup_actions.actions;
+    let startup_actions_diagnostic = startup_actions.diagnostic;
+    tracing::debug!("{} actions loaded", actions_vec.len());
+    if let Some(diagnostic) = startup_actions_diagnostic.as_ref() {
+        tracing::error!(
+            error = %diagnostic,
+            "actions startup used a temporary empty list without replacing the persisted file"
+        );
+    }
+    actions_timer.finish("startup.action_load");
     if frontend == gpui_frontend::Frontend::Gpui {
+        let (folder_aliases_lc, bookmark_aliases_lc) = load_gpui_search_aliases();
+        let search_startup = gpui_frontend::LauncherSearchStartup {
+            actions: actions_vec,
+            match_exact: settings.match_exact,
+            fuzzy_weight: settings.fuzzy_weight,
+            usage_weight: settings.usage_weight,
+            usage: multi_launcher::usage::load_usage(multi_launcher::usage::USAGE_FILE)
+                .unwrap_or_default(),
+            folder_aliases_lc,
+            bookmark_aliases_lc,
+        };
         let restart_plan = match gpui_frontend::run_foundation_window(
             settings.hotkey(),
             settings.enabled_plugins.clone(),
             settings.enabled_capabilities.clone(),
+            search_startup,
             settings.coordinate_tool.clone(),
             settings.theme.clone(),
             "settings.json".to_owned(),
@@ -4829,19 +4892,6 @@ fn main() -> anyhow::Result<()> {
     {
         multi_launcher::plugins::mouse_gestures::apply_runtime_settings(cfg);
     }
-    let actions_timer = multi_launcher::performance::Timer::start();
-    let startup_actions = load_startup_actions("actions.json");
-    let actions_vec = startup_actions.actions;
-    let startup_actions_diagnostic = startup_actions.diagnostic;
-    tracing::debug!("{} actions loaded", actions_vec.len());
-    if let Some(diagnostic) = startup_actions_diagnostic.as_ref() {
-        tracing::error!(
-            error = %diagnostic,
-            "actions startup used a temporary empty list without replacing the persisted file"
-        );
-    }
-    actions_timer.finish("startup.action_load");
-
     let initial_sequence_document_revision = multi_launcher::paste_sequence::SequenceStore::new(
         multi_launcher::paste_sequence::PASTE_SEQUENCES_FILE,
     )

@@ -32,6 +32,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use fuzzy_matcher::skim::SkimMatcherV2;
 
 #[cfg(windows)]
 use std::ffi::c_void;
@@ -41,13 +42,16 @@ use crate::gpui_restart::{
     EffectPermit, HashWork, RestartAdmission, RestartBlocker, RestartContext, RestartPlan,
 };
 use multi_launcher::SettingsSaveWorkerRegistry;
+use multi_launcher::actions::Action;
+use multi_launcher::actions::search::{CachedSearchEntry, ReadOnlySearchInput, compose_read_only_results};
+use multi_launcher::common::query::ActionFilterMetadata;
 use multi_launcher::clipboard_modify::clipboard::{
     ArboardClipboardBackend, ClipboardBackend, ClipboardError,
 };
 use multi_launcher::commands::handlers::handle_hash_generator;
 use multi_launcher::commands::{
     ActivationSource, Command, CommandInvocation, CommandOutcome, HashGeneratorCommand,
-    parse_command,
+    parse_action, parse_command,
 };
 use multi_launcher::coordinate_tool::{
     CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
@@ -71,6 +75,103 @@ use multi_launcher::utility_presentation::{UtilityPresentationStore, UtilityPres
 use multi_launcher::utility_size::{
     PhysicalWindowRect, UtilityNativeGeometrySample, UtilitySizeStore,
 };
+
+pub(crate) struct LauncherSearchStartup {
+    pub actions: Vec<Action>,
+    pub match_exact: bool,
+    pub fuzzy_weight: f32,
+    pub usage_weight: f32,
+    pub usage: HashMap<String, u32>,
+    pub folder_aliases_lc: HashMap<String, Option<String>>,
+    pub bookmark_aliases_lc: HashMap<String, Option<String>>,
+}
+
+struct LauncherSearchCatalog {
+    actions: Vec<Action>,
+    cached_entries: Vec<CachedSearchEntry>,
+    filter_metadata: Vec<ActionFilterMetadata>,
+    matcher: SkimMatcherV2,
+    match_exact: bool,
+    fuzzy_weight: f32,
+    usage_weight: f32,
+    usage: HashMap<String, u32>,
+    folder_aliases_lc: HashMap<String, Option<String>>,
+    bookmark_aliases_lc: HashMap<String, Option<String>>,
+}
+
+impl LauncherSearchCatalog {
+    fn new(startup: LauncherSearchStartup) -> Self {
+        // The GPUI slice currently has one installed typed result route. Keep
+        // only persisted actions that the real activation boundary can parse.
+        let actions = supported_hash_search_actions(startup.actions);
+        let cached_entries = actions.iter().map(CachedSearchEntry::from_action).collect();
+        let filter_metadata = actions
+            .iter()
+            .map(ActionFilterMetadata::from_action)
+            .collect();
+        Self {
+            actions,
+            cached_entries,
+            filter_metadata,
+            matcher: SkimMatcherV2::default(),
+            match_exact: startup.match_exact,
+            fuzzy_weight: startup.fuzzy_weight,
+            usage_weight: startup.usage_weight,
+            usage: startup.usage,
+            folder_aliases_lc: startup.folder_aliases_lc,
+            bookmark_aliases_lc: startup.bookmark_aliases_lc,
+        }
+    }
+
+    fn compose(
+        &self,
+        raw_query: &str,
+        provider_actions: Vec<Action>,
+    ) -> Vec<Action> {
+        // GPUI currently has no ordinary empty-query catalog or command cache.
+        // Clearing Search therefore restores its existing blank result state.
+        if raw_query.trim().is_empty() {
+            return Vec::new();
+        }
+        compose_read_only_results(
+            ReadOnlySearchInput {
+                raw_query,
+                command_cache: &[],
+                local_actions: &self.actions,
+                local_cached_entries: &self.cached_entries,
+                local_filter_metadata: &self.filter_metadata,
+                folder_aliases_lc: &self.folder_aliases_lc,
+                bookmark_aliases_lc: &self.bookmark_aliases_lc,
+                matcher: &self.matcher,
+                match_exact: self.match_exact,
+                fuzzy_weight: self.fuzzy_weight,
+                collect_search_stats: false,
+                collect_candidate_count: false,
+                usage: &self.usage,
+                usage_weight: self.usage_weight,
+                provider_results: provider_actions
+                    .into_iter()
+                    .map(|action| (action, 0.0))
+                    .collect(),
+            },
+            |_| {},
+            None,
+        )
+        .actions
+    }
+}
+
+fn supported_hash_search_actions(actions: Vec<Action>) -> Vec<Action> {
+    actions
+        .into_iter()
+        .filter(|action| {
+            matches!(
+                parse_action(action),
+                Ok(Command::HashGenerator(HashGeneratorCommand::Open))
+            )
+        })
+        .collect()
+}
 
 gpui_kit::actions!([
     ToggleSecondaryWindow,
@@ -231,6 +332,7 @@ struct RootWindow {
     query: Entity<InputState>,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
+    search_catalog: LauncherSearchCatalog,
     launcher_results: LauncherSearchResults,
     fresh_search_enter: Option<FreshSearchEnter>,
     native_window: Option<NativeWindow>,
@@ -333,6 +435,10 @@ impl LauncherSearchResults {
         }
         self.actions.get(index).cloned()
     }
+}
+
+fn launcher_result_row_id(generation: u64, absolute_index: usize) -> String {
+    format!("launcher-search-result-row-{generation}-{absolute_index}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2738,14 +2844,19 @@ impl RootWindow {
 
     fn refresh_launcher_results(&mut self, query: String) {
         let hash_generator = multi_launcher::plugins::hash_generator::HashGeneratorPlugin;
-        let actions = multi_launcher::plugin::search_filtered_plugins(
+        let provider_actions = multi_launcher::plugin::search_filtered_plugins(
             [&hash_generator as &dyn multi_launcher::plugin::Plugin],
             &query,
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
+        let actions = self.search_catalog.compose(&query, provider_actions);
         self.launcher_results.replace(query, actions);
         self.fresh_search_enter = None;
+        // Query replacement can change the list height while the root is
+        // scrolled near the end. Keep the Search field at the leading edge
+        // whenever a tall result set overflows the shared root scroller.
+        self.root_scroll.scroll_to_top_of_item(0);
     }
 
     fn record_search_key_down(
@@ -4373,6 +4484,7 @@ impl Render for RootWindow {
         } else {
             HASH_ROOT_CONTROLS_WIDTH
         };
+        let multirow_results = self.launcher_results.actions.len() > 1;
         let docked_hash_frame = docked_hash.as_ref().map(|(view, mount_generation)| {
             let session_epoch = self
                 .hash_session
@@ -4553,7 +4665,7 @@ impl Render for RootWindow {
                     let generation = self.launcher_results.generation;
                     let selected = self.launcher_results.selected == Some(index);
                     div()
-                        .id("launcher-search-result-row")
+                        .id(launcher_result_row_id(generation, index))
                         .flex()
                         .flex_col()
                         .gap_y(px(metrics.item_spacing_y))
@@ -4704,6 +4816,7 @@ impl Render for RootWindow {
             .items_center()
             .justify_center()
             .track_scroll(&self.root_scroll)
+            .when(multirow_results, |this| this.items_start())
             .when(docked_hash.is_some(), |this| {
                 this.justify_start().items_start()
             })
@@ -6117,6 +6230,7 @@ pub(crate) fn run_foundation_window(
     hotkey: multi_launcher::hotkey::Hotkey,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
+    search_startup: LauncherSearchStartup,
     coordinate_tool_preferences: CoordinateToolPreferences,
     theme_settings: multi_launcher::settings::ThemeSettings,
     settings_path: String,
@@ -6124,6 +6238,7 @@ pub(crate) fn run_foundation_window(
     saved_utility_sizes: UtilityDialogSizes,
     settings_save_workers: SettingsSaveWorkerRegistry,
 ) -> Result<Option<RestartPlan>, String> {
+    let launcher_search_catalog = LauncherSearchCatalog::new(search_startup);
     let hash_tool_key = UtilityToolKey::parse("hash-generator")
         .map_err(|error| format!("Hash Generator has no stable presentation key: {error}"))?;
     let utility_presentations = UtilityPresentationStore::new(
@@ -6312,13 +6427,15 @@ pub(crate) fn run_foundation_window(
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window, cx);
             let resize_focus_handle = cx.focus_handle();
-            let root = cx.new(|_| RootWindow {
+            let search_catalog_for_root = launcher_search_catalog;
+            let root = cx.new(move |_| RootWindow {
                 root_window: None,
                 listener_slot: Arc::clone(&listener_slot_for_root),
                 root_visibility: visibility_for_root.clone(),
                 query,
                 enabled_plugins: enabled_plugins.clone(),
                 enabled_capabilities: enabled_capabilities.clone(),
+                search_catalog: search_catalog_for_root,
                 launcher_results: LauncherSearchResults::default(),
                 fresh_search_enter: None,
                 native_window: None,
@@ -6872,18 +6989,20 @@ mod tests {
         ActivationSource, AppliedWindowSize, CommandOutcome, DockedHashResize,
         DockedHashResizeOrigin, Frontend, FrontendSelection, FutureContext,
         HashClipboardPendingKind, HashClipboardPendingState, HashClipboardRequest, HashDraft,
-        HashPickerOutcome, HashPresentationMode, HashWakeSignal, LauncherSearchResults, Modifiers,
-        Poll, PreferredWindowSize, classify_hash_picker_result, dispatch_hash_search_invocation,
+        HashPickerOutcome, HashPresentationMode, HashWakeSignal, LauncherSearchCatalog,
+        LauncherSearchResults, LauncherSearchStartup, Modifiers, Poll, PreferredWindowSize,
+        classify_hash_picker_result, dispatch_hash_search_invocation,
         docked_hash_available_size, docked_hash_fit, docked_hash_focus_is_current,
         docked_hash_resize_accessibility_label, docked_hash_resize_identity_matches,
         docked_resize_commit_size, duplicate_instance_message, fresh_search_enter_marker,
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
-        is_fresh_plain_search_enter, keyboard_docked_resize_preview, parse_hash_search_invocation,
-        pointer_docked_resize_preview, result_click_source, root_search_focus_is_current,
-        selection_from_args,
+        is_fresh_plain_search_enter, keyboard_docked_resize_preview, launcher_result_row_id,
+        parse_hash_search_invocation, pointer_docked_resize_preview, result_click_source,
+        root_search_focus_is_current, selection_from_args, supported_hash_search_actions,
     };
     use gpui_kit::{point, px};
+    use std::collections::HashMap;
     use multi_launcher::{
         hash_generator::{HashAlgorithm, parse_expected_digest},
         settings::RememberedPresentation,
@@ -6930,22 +7049,30 @@ mod tests {
             label: "Second installed route".into(),
             desc: "Fixture row".into(),
             action: "hash:open".into(),
-            args: None,
+            args: Some("beta argument".into()),
         };
         let mut results = LauncherSearchResults::default();
         results.replace("hash".into(), vec![first.clone()]);
         let sole_generation = results.generation;
         assert_eq!(results.enter_target("hash"), Some((sole_generation, 0)));
 
-        results.replace("hash".into(), vec![first.clone(), second]);
+        results.replace("hash".into(), vec![first.clone(), second.clone()]);
         let rendered_generation = results.generation;
         assert_eq!(results.enter_target("hash"), None);
         assert!(results.select_down());
-        assert_eq!(results.enter_target("hash"), Some((rendered_generation, 0)));
+        assert!(results.select_down());
+        assert_eq!(results.enter_target("hash"), Some((rendered_generation, 1)));
         assert_eq!(
-            results.resolve_action(rendered_generation, 0, "hash"),
-            Some(first.clone())
+            results.resolve_action(rendered_generation, 1, "hash"),
+            Some(second.clone())
         );
+        let selected = results
+            .resolve_action(rendered_generation, 1, "hash")
+            .expect("the selected absolute row resolves in its current generation");
+        let invocation = parse_hash_search_invocation(selected, ActivationSource::Enter)
+            .expect("the persisted row resolves through the installed typed route");
+        assert_eq!(invocation.original_action, second);
+        assert_eq!(invocation.source, ActivationSource::Enter);
 
         results.replace("hash changed".into(), vec![first]);
         assert_eq!(results.selected, None);
@@ -6955,6 +7082,80 @@ mod tests {
             "a row rendered for an older result generation must not activate"
         );
         assert_eq!(results.enter_target("hash"), None);
+
+        let stale_generation = results.generation;
+        results.replace("hash changed".into(), vec![hash_action()]);
+        assert_eq!(
+            results.resolve_action(stale_generation, 0, "hash changed"),
+            None,
+            "replacement at the same query and index still rejects the old row generation"
+        );
+    }
+
+    #[test]
+    fn gpui_app_catalog_keeps_distinct_hash_arguments_and_omits_unsupported_rows() {
+        let alpha = multi_launcher::actions::Action {
+            label: "Alpha QMarker".into(),
+            desc: "Hash generator".into(),
+            action: "hash:open".into(),
+            args: Some("alpha argument".into()),
+        };
+        let beta = multi_launcher::actions::Action {
+            label: "Beta QMarker".into(),
+            desc: "Hash generator".into(),
+            action: "hash:open".into(),
+            args: Some("beta argument".into()),
+        };
+        let unsupported = multi_launcher::actions::Action {
+            label: "Unsupported QMarker".into(),
+            desc: "Other feature".into(),
+            action: "query:settings".into(),
+            args: None,
+        };
+        let catalog = LauncherSearchCatalog::new(LauncherSearchStartup {
+            actions: vec![alpha.clone(), beta.clone(), unsupported.clone()],
+            match_exact: true,
+            fuzzy_weight: 0.75,
+            usage_weight: 0.0,
+            usage: HashMap::new(),
+            folder_aliases_lc: HashMap::new(),
+            bookmark_aliases_lc: HashMap::new(),
+        });
+
+        assert_eq!(catalog.actions, vec![alpha.clone(), beta.clone()]);
+        let composed = catalog.compose("app QMarker", Vec::new());
+        assert_eq!(
+            composed,
+            vec![alpha.clone(), beta.clone()],
+            "same command strings do not collapse actions with distinct arguments"
+        );
+        let mut results = LauncherSearchResults::default();
+        results.replace("app QMarker".into(), composed);
+        assert_eq!(results.enter_target("app QMarker"), None);
+        assert!(results.select_down());
+        assert!(results.select_down());
+        let (generation, index) = results
+            .enter_target("app QMarker")
+            .expect("Down selects the second persisted row for fresh Enter");
+        assert_eq!(index, 1);
+        let action = results
+            .resolve_action(generation, index, "app QMarker")
+            .expect("the current query, generation and absolute position resolve Beta");
+        let invocation = parse_hash_search_invocation(action, ActivationSource::Enter)
+            .expect("Beta resolves through the installed typed Hash Open route");
+        assert_eq!(invocation.original_action, beta);
+        assert_eq!(invocation.source, ActivationSource::Enter);
+        assert!(
+            catalog.compose("", Vec::new()).is_empty(),
+            "clearing GPUI Search keeps the existing blank result scope"
+        );
+        assert_eq!(supported_hash_search_actions(vec![unsupported]), Vec::new());
+    }
+
+    #[test]
+    fn launcher_row_ids_include_generation_and_absolute_position() {
+        assert_ne!(launcher_result_row_id(9, 0), launcher_result_row_id(9, 1));
+        assert_ne!(launcher_result_row_id(9, 1), launcher_result_row_id(10, 1));
     }
 
     #[test]
@@ -6999,7 +7200,8 @@ mod tests {
 
     #[test]
     fn search_activation_preserves_source_and_dispatches_hash_open_once() {
-        let action = hash_action();
+        let mut action = hash_action();
+        action.args = Some("retained action arguments".into());
         assert_eq!(result_click_source(true), ActivationSource::Enter);
         assert_eq!(result_click_source(false), ActivationSource::Click);
         for source in [ActivationSource::Enter, ActivationSource::Click] {

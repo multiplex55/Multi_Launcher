@@ -982,128 +982,6 @@ impl LauncherApp {
         }
     }
 
-    fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {
-        let telemetry_enabled = crate::performance::enabled();
-        #[cfg(test)]
-        let c2a_observer = c2a_search_observer::current();
-        #[cfg(test)]
-        let c2a_observer_active = c2a_observer.is_some();
-        let mut timer = crate::performance::track_c::Timer::start_if(
-            crate::performance::track_c::Phase::SearchScoreAndCloneHits,
-            telemetry_enabled,
-        );
-        let (filtered_query, filters) = split_action_filters(query);
-        let filtered_query = filtered_query.trim();
-        let filtered_query_lc = filtered_query.to_lowercase();
-        let query = filtered_query;
-        let query_lc = filtered_query_lc.as_str();
-
-        let mut res = Vec::new();
-        let mut candidates_scored = 0_usize;
-        #[cfg(test)]
-        let (mut c2a_catalog_visits, mut c2a_filter_passes, mut c2a_score_attempts) =
-            (0_u64, 0_u64, 0_u64);
-        #[cfg(test)]
-        let (mut c2a_clone_count, mut c2a_clone_bytes, mut c2a_clone_strings) =
-            (0_u64, 0_u64, 0_u64);
-        if query.is_empty() {
-            for (i, a) in self.actions.iter().enumerate() {
-                #[cfg(test)]
-                if c2a_observer_active {
-                    c2a_catalog_visits = c2a_catalog_visits.saturating_add(1);
-                }
-                if action_matches_filters(&self.action_filter_metadata[i], &filters) {
-                    #[cfg(test)]
-                    if c2a_observer_active {
-                        c2a_filter_passes = c2a_filter_passes.saturating_add(1);
-                        c2a_clone_count = c2a_clone_count.saturating_add(1);
-                        c2a_clone_bytes = c2a_clone_bytes
-                            .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                        c2a_clone_strings = c2a_clone_strings
-                            .saturating_add(c2a_search_observer::action_payload_strings(a));
-                    }
-                    let cloned = a.clone();
-                    res.push((cloned, 0.0));
-                }
-            }
-        } else {
-            for (i, a) in self.actions.iter().enumerate() {
-                #[cfg(test)]
-                if c2a_observer_active {
-                    c2a_catalog_visits = c2a_catalog_visits.saturating_add(1);
-                }
-                if !action_matches_filters(&self.action_filter_metadata[i], &filters) {
-                    continue;
-                }
-
-                #[cfg(test)]
-                if c2a_observer_active {
-                    c2a_filter_passes = c2a_filter_passes.saturating_add(1);
-                    c2a_score_attempts = c2a_score_attempts.saturating_add(1);
-                }
-
-                if telemetry_enabled {
-                    candidates_scored = candidates_scored.saturating_add(1);
-                }
-                let cached = &self.action_cache[i];
-                let exact_match_mode = self.is_exact_match_mode();
-                let alias_match = exact_match_mode && self.alias_matches_lc(&a.action, query_lc);
-                if let Some(score) = cached.score_candidate(
-                    a,
-                    query,
-                    query_lc,
-                    exact_match_mode,
-                    alias_match,
-                    &self.matcher,
-                    self.fuzzy_weight,
-                ) {
-                    #[cfg(test)]
-                    if c2a_observer_active {
-                        c2a_clone_count = c2a_clone_count.saturating_add(1);
-                        c2a_clone_bytes = c2a_clone_bytes
-                            .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                        c2a_clone_strings = c2a_clone_strings
-                            .saturating_add(c2a_search_observer::action_payload_strings(a));
-                    }
-                    let cloned = a.clone();
-                    res.push((cloned, score));
-                }
-            }
-        }
-        #[cfg(test)]
-        if let Some(observer) = c2a_observer {
-            observer.add(
-                c2a_search_observer::Metric::LocalCatalogVisits,
-                c2a_catalog_visits,
-            );
-            observer.add(
-                c2a_search_observer::Metric::LocalFilterPasses,
-                c2a_filter_passes,
-            );
-            observer.add(
-                c2a_search_observer::Metric::LocalScoreAttempts,
-                c2a_score_attempts,
-            );
-            observer.add(c2a_search_observer::Metric::LocalHits, res.len() as u64);
-            observer.add(
-                c2a_search_observer::Metric::LocalActionClones,
-                c2a_clone_count,
-            );
-            observer.add(
-                c2a_search_observer::Metric::LocalCloneLogicalBytes,
-                c2a_clone_bytes,
-            );
-            observer.add(
-                c2a_search_observer::Metric::LocalCloneStrings,
-                c2a_clone_strings,
-            );
-        }
-        timer.set_work_units(self.actions.len());
-        timer.set_search_counts(candidates_scored, res.len());
-        timer.finish(crate::performance::track_c::Outcome::Completed);
-        res
-    }
-
     fn search_plugins_for(
         &self,
         raw_query: &str,
@@ -1368,13 +1246,28 @@ impl LauncherApp {
         let trimmed = raw_query.trim();
         let trimmed_lc = trimmed.to_lowercase();
         if trimmed.is_empty() {
-            let mut results = self.command_cache.clone();
-            results.extend(self.actions.iter().map(|action| Action {
-                label: format!("app {}", action.label),
-                desc: action.desc.clone(),
-                action: action.action.clone(),
-                args: action.args.clone(),
-            }));
+            let results = crate::actions::search::compose_read_only_results(
+                crate::actions::search::ReadOnlySearchInput {
+                    raw_query,
+                    command_cache: &self.command_cache,
+                    local_actions: &self.actions,
+                    local_cached_entries: &self.action_cache,
+                    local_filter_metadata: &self.action_filter_metadata,
+                    folder_aliases_lc: &self.folder_aliases_lc,
+                    bookmark_aliases_lc: &self.bookmark_aliases_lc,
+                    matcher: &self.matcher,
+                    match_exact: self.match_exact,
+                    fuzzy_weight: self.fuzzy_weight,
+                    collect_search_stats: false,
+                    collect_candidate_count: false,
+                    usage: &self.usage,
+                    usage_weight: self.usage_weight,
+                    provider_results: Vec::new(),
+                },
+                |_| {},
+                None,
+            )
+            .actions;
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
                 actions: results,
@@ -1479,31 +1372,98 @@ impl LauncherApp {
         #[cfg(test)]
         let c2a_observer = c2a_search_observer::current();
         let trimmed = raw_query.trim();
-        let trimmed_lc = trimmed.to_lowercase();
-        if trimmed.is_empty() {
-            let mut results = self.command_cache.clone();
-            #[cfg(test)]
-            let mut c2a_catalog_bytes = 0_u64;
-            #[cfg(test)]
-            let mut c2a_catalog_strings = 0_u64;
-            results.extend(self.actions.iter().map(|action| {
+        let telemetry_enabled = crate::performance::enabled();
+        #[cfg(test)]
+        let instrumentation_enabled = telemetry_enabled || c2a_observer.is_some();
+        #[cfg(not(test))]
+        let instrumentation_enabled = telemetry_enabled;
+        #[cfg(test)]
+        let collect_search_stats = c2a_observer.is_some();
+        #[cfg(not(test))]
+        let collect_search_stats = false;
+        #[cfg(test)]
+        let mut instrumentation = EguiReadOnlySearchInstrumentation::new(
+            telemetry_enabled,
+            self.actions.len(),
+            c2a_observer.clone(),
+        );
+        #[cfg(not(test))]
+        let mut instrumentation =
+            EguiReadOnlySearchInstrumentation::new(telemetry_enabled, self.actions.len());
+        let mut composition_observer: Option<
+            &mut dyn crate::actions::search::ReadOnlySearchObserver,
+        > = instrumentation_enabled.then_some(&mut instrumentation);
+        #[cfg(test)]
+        let (mut c2a_clone_count, mut c2a_clone_bytes, mut c2a_clone_strings) =
+            (0_u64, 0_u64, 0_u64);
+        #[cfg(test)]
+        let mut c2a_empty_browse_catalog_bytes = 0_u64;
+        #[cfg(test)]
+        let mut c2a_empty_browse_catalog_strings = 0_u64;
+        #[cfg(test)]
+        if trimmed.is_empty() && c2a_observer.is_some() {
+            for action in self.actions.iter() {
+                c2a_empty_browse_catalog_bytes = c2a_empty_browse_catalog_bytes
+                    .saturating_add(c2a_search_observer::action_payload_bytes(action))
+                    .saturating_add(4); // `app ` prefix in the materialized label.
+                c2a_empty_browse_catalog_strings = c2a_empty_browse_catalog_strings
+                    .saturating_add(c2a_search_observer::action_payload_strings(action));
+            }
+        }
+        let composition = crate::actions::search::compose_read_only_results(
+            crate::actions::search::ReadOnlySearchInput {
+                raw_query,
+                command_cache: &self.command_cache,
+                local_actions: &self.actions,
+                local_cached_entries: &self.action_cache,
+                local_filter_metadata: &self.action_filter_metadata,
+                folder_aliases_lc: &self.folder_aliases_lc,
+                bookmark_aliases_lc: &self.bookmark_aliases_lc,
+                matcher: &self.matcher,
+                match_exact: self.match_exact,
+                fuzzy_weight: self.fuzzy_weight,
+                collect_search_stats,
+                collect_candidate_count: telemetry_enabled,
+                usage: &self.usage,
+                usage_weight: self.usage_weight,
+                provider_results: plugin_results,
+            },
+            |action| {
                 #[cfg(test)]
                 if c2a_observer.is_some() {
-                    c2a_catalog_bytes = c2a_catalog_bytes
-                        .saturating_add(c2a_search_observer::action_payload_bytes(action))
-                        .saturating_add(4); // `app ` prefix in the materialized label.
-                    c2a_catalog_strings = c2a_catalog_strings
+                    c2a_clone_count = c2a_clone_count.saturating_add(1);
+                    c2a_clone_bytes = c2a_clone_bytes
+                        .saturating_add(c2a_search_observer::action_payload_bytes(action));
+                    c2a_clone_strings = c2a_clone_strings
                         .saturating_add(c2a_search_observer::action_payload_strings(action));
                 }
-                Action {
-                    label: format!("app {}", action.label),
-                    desc: action.desc.clone(),
-                    action: action.action.clone(),
-                    args: action.args.clone(),
-                }
-            }));
-            #[cfg(test)]
-            if let Some(observer) = c2a_observer {
+                #[cfg(not(test))]
+                let _ = action;
+            },
+            composition_observer.take(),
+        );
+        let state = if trimmed.is_empty() {
+            LauncherSearchState::Results
+        } else if provider_pending
+            || start_revision != provider_revision
+            || !catalog_versions_stable
+        {
+            LauncherSearchState::Pending
+        } else if composition.actions.is_empty() {
+            LauncherSearchState::NoResults
+        } else {
+            LauncherSearchState::Results
+        };
+        #[cfg(test)]
+        if let Some(observer) = c2a_observer {
+            if trimmed.is_empty() {
+                observer.set(c2a_search_observer::Metric::LocalCatalogVisits, 0);
+                observer.set(c2a_search_observer::Metric::LocalFilterPasses, 0);
+                observer.set(c2a_search_observer::Metric::LocalScoreAttempts, 0);
+                observer.set(c2a_search_observer::Metric::LocalHits, 0);
+                observer.set(c2a_search_observer::Metric::LocalActionClones, 0);
+                observer.set(c2a_search_observer::Metric::LocalCloneLogicalBytes, 0);
+                observer.set(c2a_search_observer::Metric::LocalCloneStrings, 0);
                 observer.set(c2a_search_observer::Metric::ProviderActionsRetainedMoved, 0);
                 observer.set(c2a_search_observer::Metric::SortInputLen, 0);
                 observer.set(c2a_search_observer::Metric::FinalScoredEntriesMoved, 0);
@@ -1512,106 +1472,75 @@ impl LauncherApp {
                 observer.set(c2a_search_observer::Metric::FinalLocalCloneStrings, 0);
                 observer.set(
                     c2a_search_observer::Metric::EmptyBrowseCommandCacheCloned,
-                    self.command_cache.len() as u64,
+                    composition.stats.empty_browse_command_cache_cloned as u64,
                 );
                 observer.set(
                     c2a_search_observer::Metric::EmptyBrowseCatalogMaterialized,
-                    self.actions.len() as u64,
+                    composition.stats.empty_browse_catalog_materialized as u64,
                 );
                 observer.set(
                     c2a_search_observer::Metric::EmptyBrowseLogicalBytes,
                     observer
                         .empty_cache_bytes()
-                        .saturating_add(c2a_catalog_bytes),
+                        .saturating_add(c2a_empty_browse_catalog_bytes),
                 );
                 observer.set(
                     c2a_search_observer::Metric::EmptyBrowseStrings,
                     observer
                         .empty_cache_strings()
-                        .saturating_add(c2a_catalog_strings),
+                        .saturating_add(c2a_empty_browse_catalog_strings),
+                );
+                observer.set(c2a_search_observer::Metric::SortNanoseconds, 0);
+            } else {
+                observer.add(
+                    c2a_search_observer::Metric::LocalCatalogVisits,
+                    composition.stats.local.catalog_visits as u64,
+                );
+                observer.add(
+                    c2a_search_observer::Metric::LocalFilterPasses,
+                    composition.stats.local.filter_passes as u64,
+                );
+                observer.add(
+                    c2a_search_observer::Metric::LocalScoreAttempts,
+                    composition.stats.local.score_attempts as u64,
+                );
+                observer.add(
+                    c2a_search_observer::Metric::LocalHits,
+                    composition.stats.local.hits as u64,
+                );
+                observer.add(
+                    c2a_search_observer::Metric::LocalActionClones,
+                    c2a_clone_count,
+                );
+                observer.add(
+                    c2a_search_observer::Metric::LocalCloneLogicalBytes,
+                    c2a_clone_bytes,
+                );
+                observer.add(
+                    c2a_search_observer::Metric::LocalCloneStrings,
+                    c2a_clone_strings,
                 );
                 observer.set(
-                    c2a_search_observer::Metric::FinalOutputCount,
-                    results.len() as u64,
+                    c2a_search_observer::Metric::ProviderActionsRetainedMoved,
+                    composition.stats.provider_actions_retained_moved as u64,
                 );
-                observer.set(c2a_search_observer::Metric::OutcomeState, 1);
+                observer.set(
+                    c2a_search_observer::Metric::SortInputLen,
+                    composition.stats.sort_input_len as u64,
+                );
+                observer.set(
+                    c2a_search_observer::Metric::FinalScoredEntriesMoved,
+                    composition.stats.final_scored_entries_moved as u64,
+                );
+                // The final pass moves owned Action values and makes no extra
+                // catalog clones after local candidate collection.
+                observer.set(c2a_search_observer::Metric::FinalLocalActionClones, 0);
+                observer.set(c2a_search_observer::Metric::FinalLocalCloneLogicalBytes, 0);
+                observer.set(c2a_search_observer::Metric::FinalLocalCloneStrings, 0);
             }
-            return LauncherSearchOutcome {
-                state: LauncherSearchState::Results,
-                actions: results,
-                provider_revision,
-                result_catalog_versions,
-                result_catalog_versions_stable: catalog_versions_stable,
-                provider_deferral: ProviderSearchDeferral::None,
-            };
-        }
-        let search_actions =
-            trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{APP_PREFIX} "));
-        let action_query = if search_actions {
-            trimmed.split_once(' ').map(|value| value.1).unwrap_or("")
-        } else {
-            ""
-        };
-        let mut scored = Vec::new();
-        if !trimmed_lc.starts_with("g ") && search_actions {
-            scored.extend(self.search_actions(action_query, &action_query.to_lowercase()));
-        }
-        #[cfg(test)]
-        let c2a_provider_actions_retained_moved = plugin_results.len() as u64;
-        scored.extend(plugin_results);
-        #[cfg(test)]
-        let c2a_sort_input_len = scored.len() as u64;
-        self.apply_usage_weight(&mut scored);
-        #[cfg(test)]
-        let c2a_sort_started = c2a_observer.as_ref().map(|_| std::time::Instant::now());
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        #[cfg(test)]
-        if let (Some(observer), Some(started)) = (c2a_observer.as_ref(), c2a_sort_started) {
-            observer.add(
-                c2a_search_observer::Metric::SortNanoseconds,
-                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            );
-        }
-        let mut materialize_timer = crate::performance::track_c::Timer::start(
-            crate::performance::track_c::Phase::SearchMoveResults,
-        );
-        let materialized = scored.len();
-        let actions: Vec<Action> = scored.into_iter().map(|(action, _)| action).collect();
-        materialize_timer.set_work_units(materialized);
-        materialize_timer.finish(crate::performance::track_c::Outcome::Completed);
-        let state = if provider_pending
-            || start_revision != provider_revision
-            || !catalog_versions_stable
-        {
-            LauncherSearchState::Pending
-        } else if actions.is_empty() {
-            LauncherSearchState::NoResults
-        } else {
-            LauncherSearchState::Results
-        };
-        #[cfg(test)]
-        if let Some(observer) = c2a_observer {
-            observer.set(
-                c2a_search_observer::Metric::ProviderActionsRetainedMoved,
-                c2a_provider_actions_retained_moved,
-            );
-            observer.set(
-                c2a_search_observer::Metric::SortInputLen,
-                c2a_sort_input_len,
-            );
-            observer.set(
-                c2a_search_observer::Metric::FinalScoredEntriesMoved,
-                materialized as u64,
-            );
-            // Eager scoring already owns every hit Action. The final pass
-            // transfers those values into the result vector; it does not clone
-            // a catalog Action a second time.
-            observer.set(c2a_search_observer::Metric::FinalLocalActionClones, 0);
-            observer.set(c2a_search_observer::Metric::FinalLocalCloneLogicalBytes, 0);
-            observer.set(c2a_search_observer::Metric::FinalLocalCloneStrings, 0);
             observer.set(
                 c2a_search_observer::Metric::FinalOutputCount,
-                actions.len() as u64,
+                composition.actions.len() as u64,
             );
             observer.set(
                 c2a_search_observer::Metric::OutcomeState,
@@ -1624,7 +1553,7 @@ impl LauncherApp {
         }
         LauncherSearchOutcome {
             state,
-            actions,
+            actions: composition.actions,
             provider_revision,
             result_catalog_versions,
             result_catalog_versions_stable: catalog_versions_stable,
@@ -1636,11 +1565,83 @@ impl LauncherApp {
     pub(super) fn search_read_only(&self, raw_query: &str) -> Vec<Action> {
         self.search_read_only_outcome(raw_query).actions
     }
+}
 
-    fn apply_usage_weight(&self, res: &mut Vec<(Action, f32)>) {
-        for (result, score) in res.iter_mut() {
-            *score +=
-                self.usage.get(&result.action).cloned().unwrap_or(0) as f32 * self.usage_weight;
+struct EguiReadOnlySearchInstrumentation {
+    telemetry_enabled: bool,
+    catalog_len: usize,
+    score_timer: Option<crate::performance::track_c::Timer>,
+    materialize_timer: Option<crate::performance::track_c::Timer>,
+    #[cfg(test)]
+    observer: Option<c2a_search_observer::Handle>,
+}
+
+impl EguiReadOnlySearchInstrumentation {
+    fn new(
+        telemetry_enabled: bool,
+        catalog_len: usize,
+        #[cfg(test)] observer: Option<c2a_search_observer::Handle>,
+    ) -> Self {
+        Self {
+            telemetry_enabled,
+            catalog_len,
+            score_timer: None,
+            materialize_timer: None,
+            #[cfg(test)]
+            observer,
+        }
+    }
+}
+
+impl crate::actions::search::ReadOnlySearchObserver for EguiReadOnlySearchInstrumentation {
+    fn local_search_started(&mut self) {
+        self.score_timer = Some(crate::performance::track_c::Timer::start_if(
+            crate::performance::track_c::Phase::SearchScoreAndCloneHits,
+            self.telemetry_enabled,
+        ));
+    }
+
+    fn local_search_completed(&mut self, stats: crate::actions::search::LocalActionSearchStats) {
+        if let Some(mut timer) = self.score_timer.take() {
+            timer.set_work_units(self.catalog_len);
+            timer.set_search_counts(stats.score_attempts, stats.hits);
+            timer.finish(crate::performance::track_c::Outcome::Completed);
+        }
+    }
+
+    fn measure_sort(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.observer.is_some()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    fn sort_completed(&mut self, elapsed: std::time::Duration) {
+        #[cfg(test)]
+        if let Some(observer) = &self.observer {
+            observer.add(
+                c2a_search_observer::Metric::SortNanoseconds,
+                elapsed.as_nanos().min(u64::MAX as u128) as u64,
+            );
+        }
+        #[cfg(not(test))]
+        let _ = elapsed;
+    }
+
+    fn materialization_started(&mut self) {
+        self.materialize_timer = Some(crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::SearchMoveResults,
+        ));
+    }
+
+    fn materialization_completed(&mut self, entries_moved: usize) {
+        if let Some(mut timer) = self.materialize_timer.take() {
+            timer.set_work_units(entries_moved);
+            timer.finish(crate::performance::track_c::Outcome::Completed);
         }
     }
 }

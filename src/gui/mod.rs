@@ -354,7 +354,7 @@ pub(super) fn radial_placement_viewport_id() -> egui::ViewportId {
 }
 
 /// Prefix used to search user saved applications.
-pub const APP_PREFIX: &str = "app";
+pub const APP_PREFIX: &str = crate::actions::search::APP_PREFIX;
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
         if (scale - 1.0).abs() > f32::EPSILON {
