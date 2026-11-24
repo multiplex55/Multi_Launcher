@@ -432,23 +432,191 @@ where
     names
 }
 
+/// Borrowed provider data used by the Favorites authoring controls.
+pub enum FavoritePickerSource<'a> {
+    Plugin(&'a dyn Plugin),
+    Folders(&'a [super::folders::FolderEntry]),
+    Bookmarks(&'a [super::bookmarks::BookmarkEntry]),
+}
+
+impl FavoritePickerSource<'_> {
+    fn search(&self, query: &str) -> Vec<Action> {
+        match self {
+            Self::Plugin(plugin) => plugin.search(query),
+            Self::Folders(entries) => super::folders::query_folder_entries(query, entries),
+            Self::Bookmarks(entries) => super::bookmarks::query_bookmark_entries(query, entries),
+        }
+    }
+
+    /// List choices with the same literal filter used by the existing picker.
+    pub fn choices(&self, filter: &str) -> Vec<Action> {
+        let actions = match self {
+            Self::Plugin(plugin) if plugin.name() != "folders" && plugin.name() != "bookmarks" => {
+                plugin.commands()
+            }
+            Self::Plugin(plugin) if plugin.name() == "folders" => {
+                self.search(&format!("f {filter}"))
+            }
+            Self::Folders(_) => self.search(&format!("f {filter}")),
+            Self::Plugin(_) | Self::Bookmarks(_) => self.search(&format!("bm {filter}")),
+        };
+        let filter = filter.trim().to_lowercase();
+        actions
+            .into_iter()
+            .filter(|action| {
+                filter.is_empty()
+                    || action.label.to_lowercase().contains(&filter)
+                    || action.desc.to_lowercase().contains(&filter)
+                    || action.action.to_lowercase().contains(&filter)
+            })
+            .collect()
+    }
+
+    /// Return only command and arguments; the caller retains the authored label.
+    pub fn pick(&self, choice: &Action, existing_args: &str) -> (String, Option<String>) {
+        let args = (!existing_args.trim().is_empty()).then(|| existing_args.to_owned());
+        if let Some(query) = choice.action.strip_prefix("query:") {
+            let query = join_command_args(query, args.as_deref());
+            if let Some(result) = self.search(&query).into_iter().next() {
+                (result.action, result.args)
+            } else {
+                (query, None)
+            }
+        } else {
+            (choice.action.clone(), args)
+        }
+    }
+
+    /// Resolve the final joined fields using the first result, or retain the fields.
+    pub fn resolve(&self, command: &str, args: Option<&str>) -> (String, Option<String>) {
+        let query = join_command_args(command, args);
+        if let Some(result) = self.search(&query).into_iter().next() {
+            (result.action, result.args)
+        } else {
+            (command.to_owned(), args.map(str::to_owned))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FavoritePickerCategory {
+    Folders,
+    Bookmarks,
+}
+
+/// Owned source data can be sent to a worker and borrowed for projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FavoritePickerSnapshot {
+    Folders {
+        entries: Vec<super::folders::FolderEntry>,
+        present: bool,
+    },
+    Bookmarks {
+        entries: Vec<super::bookmarks::BookmarkEntry>,
+        present: bool,
+    },
+}
+
+impl FavoritePickerSnapshot {
+    pub fn source(&self) -> FavoritePickerSource<'_> {
+        match self {
+            Self::Folders { entries, .. } => FavoritePickerSource::Folders(entries),
+            Self::Bookmarks { entries, .. } => FavoritePickerSource::Bookmarks(entries),
+        }
+    }
+
+    pub fn is_present(&self) -> bool {
+        match self {
+            Self::Folders { present, .. } | Self::Bookmarks { present, .. } => *present,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum FavoritePickerSourceError {
+    Removed(PathBuf),
+    Load(PersistenceError),
+}
+
+impl std::fmt::Display for FavoritePickerSourceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Removed(path) => write!(
+                formatter,
+                "{} was removed; retaining last-good source",
+                path.display()
+            ),
+            Self::Load(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for FavoritePickerSourceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Removed(_) => None,
+            Self::Load(error) => Some(error),
+        }
+    }
+}
+
+/// Read canonical source data. A removed source after a present read is an error,
+/// allowing the draft owner to retain its own last-good snapshot.
+pub fn load_favorite_picker_snapshot(
+    category: FavoritePickerCategory,
+    path: impl AsRef<Path>,
+    previously_present: bool,
+) -> Result<FavoritePickerSnapshot, FavoritePickerSourceError> {
+    let path = path.as_ref();
+    match category {
+        FavoritePickerCategory::Folders => {
+            let state =
+                super::folders::load_folders_typed(path).map_err(FavoritePickerSourceError::Load)?;
+            match state {
+                LoadState::Missing if previously_present => {
+                    Err(FavoritePickerSourceError::Removed(path.to_owned()))
+                }
+                LoadState::Missing => Ok(FavoritePickerSnapshot::Folders {
+                    entries: super::folders::default_folders(),
+                    present: false,
+                }),
+                LoadState::Empty => Ok(FavoritePickerSnapshot::Folders {
+                    entries: super::folders::default_folders(),
+                    present: true,
+                }),
+                LoadState::Loaded(entries) => Ok(FavoritePickerSnapshot::Folders {
+                    entries,
+                    present: true,
+                }),
+            }
+        }
+        FavoritePickerCategory::Bookmarks => {
+            let state = super::bookmarks::load_bookmarks_typed(path)
+                .map_err(FavoritePickerSourceError::Load)?;
+            match state {
+                LoadState::Missing if previously_present => {
+                    Err(FavoritePickerSourceError::Removed(path.to_owned()))
+                }
+                LoadState::Missing => Ok(FavoritePickerSnapshot::Bookmarks {
+                    entries: Vec::new(),
+                    present: false,
+                }),
+                LoadState::Empty => Ok(FavoritePickerSnapshot::Bookmarks {
+                    entries: Vec::new(),
+                    present: true,
+                }),
+                LoadState::Loaded(entries) => Ok(FavoritePickerSnapshot::Bookmarks {
+                    entries,
+                    present: true,
+                }),
+            }
+        }
+    }
+}
+
 /// List a provider's authorable choices using the Favorites picker's literal filter.
 pub fn favorite_picker_choices(plugin: &dyn Plugin, filter: &str) -> Vec<Action> {
-    let actions = match plugin.name() {
-        "folders" => plugin.search(&format!("f {filter}")),
-        "bookmarks" => plugin.search(&format!("bm {filter}")),
-        _ => plugin.commands(),
-    };
-    let filter = filter.trim().to_lowercase();
-    actions
-        .into_iter()
-        .filter(|action| {
-            filter.is_empty()
-                || action.label.to_lowercase().contains(&filter)
-                || action.desc.to_lowercase().contains(&filter)
-                || action.action.to_lowercase().contains(&filter)
-        })
-        .collect()
+    FavoritePickerSource::Plugin(plugin).choices(filter)
 }
 
 /// Fill command and arguments from a picker choice without executing it.
@@ -457,35 +625,16 @@ pub fn favorite_picker_pick(
     choice: &Action,
     existing_args: &str,
 ) -> (String, Option<String>) {
-    let args = (!existing_args.trim().is_empty()).then(|| existing_args.to_owned());
-    if let Some(query) = choice.action.strip_prefix("query:") {
-        let query = join_command_args(query, args.as_deref());
-        if let Some(result) = plugin.search(&query).into_iter().next() {
-            (result.action, result.args)
-        } else {
-            (query, None)
-        }
-    } else {
-        (choice.action.clone(), args)
-    }
+    FavoritePickerSource::Plugin(plugin).pick(choice, existing_args)
 }
 
 /// Resolve a command and optional arguments against a plugin's search results.
-///
-/// The `command` and `args` are concatenated and passed to `plugin.search`.
-/// If the plugin returns a result, its `action` and `args` are used; otherwise
-/// the original `command` and `args` are returned unchanged.
 pub fn resolve_with_plugin(
     plugin: &dyn Plugin,
     command: &str,
     args: Option<&str>,
 ) -> (String, Option<String>) {
-    let query = join_command_args(command, args);
-    if let Some(res) = plugin.search(&query).into_iter().next() {
-        (res.action, res.args)
-    } else {
-        (command.to_string(), args.map(|s| s.to_string()))
-    }
+    FavoritePickerSource::Plugin(plugin).resolve(command, args)
 }
 
 pub fn join_command_args(command: &str, args: Option<&str>) -> String {
@@ -915,6 +1064,64 @@ mod tests {
             *miss.queries.lock().unwrap(),
             vec!["find existing", "find existing"]
         );
+    }
+
+    #[test]
+    fn borrowed_picker_filters_picks_and_resolves_final_fields() {
+        use super::FavoritePickerSource;
+        use crate::plugins::{bookmarks::BookmarkEntry, folders::FolderEntry};
+        let folders = vec![
+            FolderEntry { label: "First".into(), path: "C:/first".into(), alias: Some("Atlas Alias".into()) },
+            FolderEntry { label: "Second".into(), path: "C:/second".into(), alias: None },
+        ];
+        let source = FavoritePickerSource::Folders(&folders);
+        let choices = source.choices(" atlas ");
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].label, "Atlas Alias");
+        assert_eq!(source.pick(&choices[0], "  retained  "), ("C:/first".into(), Some("  retained  ".into())));
+        assert_eq!(choices[0].label, "Atlas Alias");
+        assert_eq!(source.resolve("f list  ", Some("  Atlas Alias")), ("C:/first".into(), None));
+        assert_eq!(source.resolve("unknown ", Some("  argument")), ("unknown ".into(), Some("  argument".into())));
+        let bookmarks = vec![BookmarkEntry { url: "http://example.invalid/path".into(), alias: Some("Atlas Web".into()) }];
+        let source = FavoritePickerSource::Bookmarks(&bookmarks);
+        assert_eq!(source.choices("")[0].action, "bookmark:dialog");
+        assert_eq!(source.choices("atlas")[0].action, "http://example.invalid/path");
+        assert_eq!(source.resolve("bm list", Some("Atlas Web")), ("http://example.invalid/path".into(), None));
+        let query = picker_action("untouched", "", "query:bm list", None);
+        assert_eq!(source.pick(&query, "Atlas Web"), ("http://example.invalid/path".into(), None));
+        assert_eq!(query.label, "untouched");
+    }
+
+    #[test]
+    fn picker_snapshot_tracks_presence_and_canonical_source_errors() {
+        use super::{FavoritePickerCategory as Category, FavoritePickerSnapshot as Snapshot, FavoritePickerSourceError as Error, load_favorite_picker_snapshot as load};
+        let dir = tempfile::tempdir().unwrap();
+        for category in [Category::Folders, Category::Bookmarks] {
+            let path = dir.path().join(format!("{category:?}.json"));
+            let first = load(category, &path, false).unwrap();
+            assert!(!first.is_present());
+            assert!(!load(category, &path, first.is_present()).unwrap().is_present());
+            std::fs::write(&path, " \n").unwrap();
+            let empty = load(category, &path, false).unwrap();
+            assert!(empty.is_present());
+            std::fs::remove_file(&path).unwrap();
+            assert!(matches!(load(category, &path, empty.is_present()), Err(Error::Removed(_))));
+            std::fs::write(&path, "[]").unwrap();
+            let explicit = load(category, &path, false).unwrap();
+            assert!(explicit.is_present());
+            match explicit {
+                Snapshot::Folders { entries, .. } => assert!(entries.is_empty()),
+                Snapshot::Bookmarks { entries, .. } => assert!(entries.is_empty()),
+            }
+            std::fs::write(&path, "{broken").unwrap();
+            assert!(matches!(load(category, &path, true), Err(Error::Load(_))));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        }
+        let path = dir.path().join("legacy.json");
+        std::fs::write(&path, r#"["http://legacy.invalid/path"]"#).unwrap();
+        let legacy = load(Category::Bookmarks, &path, false).unwrap();
+        assert_eq!(legacy.source().resolve("bm list", Some("legacy")), ("http://legacy.invalid/path".into(), None));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"["http://legacy.invalid/path"]"#);
     }
 
     #[test]
