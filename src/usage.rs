@@ -34,6 +34,28 @@ pub fn load_usage(path: &str) -> anyhow::Result<HashMap<String, u32>> {
     Ok(list.into_iter().map(|e| (e.action, e.count)).collect())
 }
 
+/// Increment one action in the canonical store and return its saved count.
+pub fn record_usage(path: &str, action: &str) -> anyhow::Result<u32> {
+    let _permit = crate::common::repair_watch::require_path_read(Path::new(path))?;
+    let _transaction = transaction_guard();
+    let mut list = match load_usage_typed_unfenced(path)? {
+        LoadState::Missing | LoadState::Empty => Vec::new(),
+        LoadState::Loaded(list) => list,
+    };
+    let count = if let Some(entry) = list.iter_mut().rev().find(|entry| entry.action == action) {
+        entry.count = entry.count.saturating_add(1);
+        entry.count
+    } else {
+        list.push(UsageEntry {
+            action: action.to_owned(),
+            count: 1,
+        });
+        1
+    };
+    save_json_atomic_replaceable(path, &list)?;
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +72,59 @@ mod tests {
         let invalid = b"not usage";
         std::fs::write(&path, invalid).unwrap();
         assert!(save_usage(path_str, &HashMap::new()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn record_usage_preserves_latest_unrelated_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let path_str = path.to_str().unwrap();
+        save_usage(path_str, &HashMap::from([("other".to_owned(), 7)])).unwrap();
+        assert_eq!(record_usage(path_str, "target").unwrap(), 1);
+        assert_eq!(record_usage(path_str, "other").unwrap(), 8);
+        assert_eq!(
+            load_usage(path_str).unwrap(),
+            HashMap::from([("target".to_owned(), 1), ("other".to_owned(), 8),])
+        );
+    }
+
+    #[test]
+    fn record_usage_updates_last_duplicate_and_saturates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let path_str = path.to_str().unwrap();
+        let mut entries = vec![
+            UsageEntry {
+                action: "target".into(),
+                count: 3,
+            },
+            UsageEntry {
+                action: "other".into(),
+                count: 6,
+            },
+            UsageEntry {
+                action: "target".into(),
+                count: u32::MAX - 1,
+            },
+        ];
+        save_json_atomic_replaceable(&path, &entries).unwrap();
+        assert_eq!(record_usage(path_str, "target").unwrap(), u32::MAX);
+        entries[2].count = u32::MAX;
+        assert_eq!(record_usage(path_str, "target").unwrap(), u32::MAX);
+        assert_eq!(
+            load_usage_typed(path_str).unwrap(),
+            LoadState::Loaded(entries)
+        );
+    }
+
+    #[test]
+    fn record_usage_refuses_malformed_existing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let invalid = b"not usage";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(record_usage(path.to_str().unwrap(), "target").is_err());
         assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }
