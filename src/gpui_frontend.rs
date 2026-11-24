@@ -229,7 +229,7 @@ impl LauncherSearchCatalog {
         // Keep only persisted actions that the installed typed activation
         // boundary can execute without changing their Search payload. Saved
         // typed actions retain the shared local-action admission semantics.
-        let actions = supported_launcher_search_actions(startup.actions);
+        let actions = supported_saved_search_actions(startup.actions);
         let providers = InstalledLauncherProviders::default();
         // Installed command labels and completion fallbacks follow plugin
         // enablement. Search capability gates provider rows at query time.
@@ -278,7 +278,7 @@ impl LauncherSearchCatalog {
     }
 
     fn replace_saved_actions(&mut self, rows: Vec<Action>) -> bool {
-        let actions = supported_launcher_search_actions(rows);
+        let actions = supported_saved_search_actions(rows);
         if self.actions == actions {
             return false;
         }
@@ -1673,6 +1673,18 @@ fn supported_launcher_search_actions(actions: Vec<Action>) -> Vec<Action> {
                 classify_installed_search_command(&command, ActivationSource::Click).is_ok()
             }
             Err(_) => false,
+        })
+        .collect()
+}
+
+fn supported_saved_search_actions(actions: Vec<Action>) -> Vec<Action> {
+    actions
+        .into_iter()
+        .filter(|action| {
+            parse_action(action).is_ok_and(|command| {
+                external_launch::ordinary_external(&command).is_some()
+                    || classify_installed_search_command(&command, ActivationSource::Click).is_ok()
+            })
         })
         .collect()
 }
@@ -7700,6 +7712,12 @@ impl RootWindow {
         if !self.launcher_result_activation_is_live(origin, window, cx) {
             return;
         }
+        if let Some(command) = external_launch::saved_external(&action)
+            && self.search_catalog.actions.contains(&action)
+        {
+            self.start_external_launch(action, command, query, source, window, cx);
+            return;
+        }
         let installed_invocation = match parse_installed_search_invocation(action, source) {
             Ok(installed_invocation) => installed_invocation,
             Err(InstalledSearchActionError::QuerySet(error)) => {
@@ -11519,9 +11537,30 @@ struct RootVisibility {
     #[cfg(windows)]
     request_sender: Arc<Mutex<Option<Sender<()>>>>,
     #[cfg(windows)]
-    requested_visible: Arc<Mutex<Option<bool>>>,
+    requested_visible: Arc<Mutex<Option<RootVisibilityRequest>>>,
     #[cfg(windows)]
     requested_hash_focus: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Copy)]
+enum RootVisibilityRequest {
+    Set(bool),
+    HideAfterExternalLaunch(u64),
+}
+
+impl RootVisibilityRequest {
+    fn is_current(self, revision: u64, visible: bool, newer_pending: bool) -> bool {
+        match self {
+            Self::Set(_) => true,
+            Self::HideAfterExternalLaunch(expected) => {
+                expected == revision && visible && !newer_pending
+            }
+        }
+    }
+
+    fn superseded_by_hotkey(self, take_hotkey: impl FnOnce() -> bool) -> bool {
+        matches!(self, Self::HideAfterExternalLaunch(_)) && take_hotkey()
+    }
 }
 
 impl RootVisibility {
@@ -11547,13 +11586,28 @@ impl RootVisibility {
     }
 
     fn request_visible(&self, visible: bool) -> bool {
+        self.queue_visible(RootVisibilityRequest::Set(visible))
+    }
+
+    fn request_external_hide(&self, revision: u64) -> bool {
+        self.queue_visible(RootVisibilityRequest::HideAfterExternalLaunch(revision))
+    }
+
+    fn queue_visible(&self, request: RootVisibilityRequest) -> bool {
         #[cfg(windows)]
         {
             if !self.active.load(Ordering::Acquire) {
                 return false;
             }
             if let Ok(mut pending) = self.requested_visible.lock() {
-                *pending = Some(visible);
+                if !request.is_current(
+                    self.request_revision.load(Ordering::Acquire),
+                    self.visible.load(Ordering::Acquire),
+                    pending.is_some(),
+                ) {
+                    return false;
+                }
+                *pending = Some(request);
             } else {
                 return false;
             }
@@ -11571,7 +11625,7 @@ impl RootVisibility {
         }
         #[cfg(not(windows))]
         {
-            let _ = visible;
+            let _ = request;
             false
         }
     }
@@ -11600,11 +11654,28 @@ impl RootVisibility {
     }
 
     #[cfg(windows)]
-    fn take_requested_visible(&self) -> Option<bool> {
+    fn take_requested_visible(&self) -> Option<RootVisibilityRequest> {
         self.requested_visible
             .lock()
             .ok()
             .and_then(|mut pending| pending.take())
+    }
+
+    #[cfg(windows)]
+    fn accept_requested_visible(&self, request: RootVisibilityRequest) -> Option<(u64, bool)> {
+        let pending = self.requested_visible.lock().ok()?;
+        if !request.is_current(
+            self.request_revision.load(Ordering::Acquire),
+            self.visible.load(Ordering::Acquire),
+            pending.is_some(),
+        ) {
+            return None;
+        }
+        let visible = match request {
+            RootVisibilityRequest::Set(visible) => visible,
+            RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
+        };
+        Some(self.set_visible(visible))
     }
 
     #[cfg(windows)]
@@ -12656,12 +12727,18 @@ pub(crate) fn run_foundation_window(
                         );
                     }
 
+                    let hotkey_for_conditional = requested_visible
+                        .is_some_and(|request| request.superseded_by_hotkey(|| trigger.take()));
+                    let accepted_visible = if hotkey_for_conditional {
+                        None
+                    } else {
+                        requested_visible.and_then(|request| visibility.accept_requested_visible(request))
+                    };
                     let (revision, desired_visible, hash_focus_generation, hotkey_toggle) =
-                        if let Some(requested_visible) = requested_visible {
+                        if let Some((revision, visible)) = accepted_visible {
                             let hash_focus_generation = visibility.take_requested_hash_focus();
-                            let (revision, visible) = visibility.set_visible(requested_visible);
                             (revision, visible, hash_focus_generation, false)
-                        } else if trigger.take() {
+                        } else if hotkey_for_conditional || trigger.take() {
                             let (revision, visible) = visibility.next_toggle();
                             (revision, visible, None, true)
                         } else {
@@ -13584,7 +13661,7 @@ mod tests {
         };
         let first = action("Saved Alpha", "hash:open");
         let second = action("Saved Beta", "hash:open");
-        let unsupported = action("Ordinary App", "C:\\app.exe");
+        let unsupported = action("Ordinary App", "https://example.com");
         let mut catalog = completion_catalog(vec![first.clone()], true, None);
         let query = "app saved";
         let mut completion = SearchCompletion::default();
@@ -13609,6 +13686,19 @@ mod tests {
                 .any(|value| value.contains("saved beta"))
         );
         assert!(!catalog.replace_saved_actions(vec![second, first]));
+    }
+
+    #[test]
+    fn saved_executables_are_admitted_without_opening_the_provider_gate() {
+        let action = multi_launcher::actions::Action {
+            label: "Saved Tool".into(),
+            desc: String::new(),
+            action: r"C:\Tools\tool.exe".into(),
+            args: Some("--exact".into()),
+        };
+        let catalog = completion_catalog(vec![action.clone()], true, None);
+        assert_eq!(catalog.actions, vec![action.clone()]);
+        assert!(supported_launcher_search_actions(vec![action]).is_empty());
     }
 
     #[test]
