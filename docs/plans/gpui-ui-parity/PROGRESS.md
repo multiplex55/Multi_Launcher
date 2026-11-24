@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G05 compact launcher width passed 12 focused tests and the Windows replay. The compact Grid and List retained Search, navigation and action identity. The pinned Favorites toolbar, Settings companion and independent docked Hash grip worked at compact width. The preceding G04/G06 Settings correction preserved unrelated values through independent native Pop Out and resize. G06 folder and bookmark authoring is next. There are 219 source-backed GUI records and zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Compact width evidence](VALIDATION_LOG.md#g05-compact-launcher-width) · [Utility Settings evidence](VALIDATION_LOG.md#g04-and-g06-utility-settings-preservation)
+G06 folder and bookmark Favorites authoring passed 20 focused tests and the Windows replay. Native Pick preserved the authored Folder Label and Args. Bookmark Save resolved the exact stored URL, and explicit egui read both committed records from the same store. Source failure kept the draft and supported Category retry or Clear. G05 compact width and the G04/G06 utility Settings correction have their scoped evidence. The first Add App form is next. There are 219 source-backed GUI records and zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Favorites provider evidence](VALIDATION_LOG.md#g06-folder-and-bookmark-favorites-authoring) · [Compact width evidence](VALIDATION_LOG.md#g05-compact-launcher-width)
 
 ## Execution kickoff
 
