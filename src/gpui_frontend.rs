@@ -4030,20 +4030,46 @@ fn create_hash_generator_view(
         source_popup.borrow_mut().bind(cx.entity().downgrade(), source_trigger);
         algorithm_popup.borrow_mut().bind(cx.entity().downgrade(), algorithm_trigger);
         let source_popup_for_dismiss = Rc::clone(&source_popup);
-        let source_dismiss = cx.subscribe(&source_for_subscription, move |_: &mut HashGeneratorWindow, _, _: &DismissEvent, _| {
-            source_popup_for_dismiss.borrow_mut().dismiss();
-        });
+        let source_dismiss = cx.subscribe(
+            &source_for_subscription,
+            move |this: &mut HashGeneratorWindow, _, _: &DismissEvent, cx| {
+                let epoch = source_popup_for_dismiss.borrow().epoch;
+                source_popup_for_dismiss.borrow_mut().dismiss();
+                if this.jump.scope
+                    == Some(hash_jump::HashJumpScope::Popup(
+                        hash_jump_select::HashPopupKind::Source,
+                        epoch,
+                    ))
+                {
+                    this.jump.retire();
+                    cx.notify();
+                }
+            },
+        );
         let algorithm_popup_for_dismiss = Rc::clone(&algorithm_popup);
-        let algorithm_dismiss = cx.subscribe(&algorithm_for_subscription, move |_: &mut HashGeneratorWindow, _, _: &DismissEvent, _| {
-            algorithm_popup_for_dismiss.borrow_mut().dismiss();
-        });
+        let algorithm_dismiss = cx.subscribe(
+            &algorithm_for_subscription,
+            move |this: &mut HashGeneratorWindow, _, _: &DismissEvent, cx| {
+                let epoch = algorithm_popup_for_dismiss.borrow().epoch;
+                algorithm_popup_for_dismiss.borrow_mut().dismiss();
+                if this.jump.scope
+                    == Some(hash_jump::HashJumpScope::Popup(
+                        hash_jump_select::HashPopupKind::Algorithm,
+                        epoch,
+                    ))
+                {
+                    this.jump.retire();
+                    cx.notify();
+                }
+            },
+        );
         let jump = hash_jump::HashJump::new(jump_controller, cx);
         let focus_handle = cx.focus_handle();
         let focus_out = cx.on_focus_out(
             &focus_handle,
             window,
             |this: &mut HashGeneratorWindow, _, window, cx| {
-                if !this.focus_handle.contains_focused(window, cx) && this.jump.controller.retire()
+                if !this.focus_handle.contains_focused(window, cx) && this.hash_popup_scope(window, cx).is_none() && this.jump.retire()
                 {
                     cx.notify();
                 }
@@ -4051,7 +4077,7 @@ fn create_hash_generator_view(
         );
         let activation =
             cx.observe_window_activation(window, |this: &mut HashGeneratorWindow, window, cx| {
-                if !window.is_window_active() && this.jump.controller.retire() {
+                if !window.is_window_active() && this.jump.retire() {
                     cx.notify();
                 }
             });
@@ -10349,13 +10375,22 @@ impl HashGeneratorWindow {
         if receipt.virtual_key == 0x1b {
             self.jump.controller.release_fresh_key(receipt);
         }
+        if let Some(consumed) = self.handle_popup_jump_keydown(receipt, window, cx) {
+            return consumed;
+        }
         if !self.is_current_mount() || !self.hash_jump_owns_input(window, cx) {
-            if self.jump.controller.retire() {
+            if self.jump.retire() {
                 cx.notify();
             }
             return false;
         }
-        let (consumed, repaint, target) = self.jump.key(receipt, self.mount_generation);
+        let frame = Rc::clone(&self.jump.frame);
+        let (consumed, repaint, target) = self.jump.key(
+            receipt,
+            hash_jump::HashJumpScope::Main,
+            frame.borrow().as_ref(),
+            self.mount_generation,
+        );
         if let Some(target) = target {
             let current = self.jump.frame.borrow().as_ref().is_some_and(|frame| {
                 frame.generation == self.mount_generation && frame.has_target(&target)
@@ -10517,10 +10552,16 @@ impl Render for HashGeneratorWindow {
             HashInputMode::Clipboard => "Clipboard",
         };
         let algorithm_name = algorithm.name();
-        if self.jump.controller.is_active()
-            && (!can_interact || !self.hash_jump_owns_input(window, cx))
-        {
-            self.jump.controller.retire();
+        if let Some(scope) = self.jump.scope {
+            let scope_current = match scope {
+                hash_jump::HashJumpScope::Main => self.hash_jump_owns_input(window, cx),
+                hash_jump::HashJumpScope::Popup(kind, epoch) => self
+                    .hash_popup_scope(window, cx)
+                    .is_some_and(|(current, opening, _)| current == kind && opening == epoch),
+            };
+            if !can_interact || !scope_current {
+                self.jump.retire();
+            }
         }
         let generation = self.mount_generation;
         let jump_draft = self
@@ -10550,7 +10591,7 @@ impl Render for HashGeneratorWindow {
             .key_context("HashGeneratorWindow")
             .when(self.jump.controller.is_active(), |this| {
                 this.capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                    if this.jump.controller.retire() {
+                    if this.jump.retire() {
                         cx.notify();
                     }
                 }))
@@ -10558,7 +10599,8 @@ impl Render for HashGeneratorWindow {
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape"
                     && event.keystroke.modifiers == Modifiers::default()
-                    && this.handle_escape(window, cx)
+                    && ((this.hash_popup_scope(window, cx).is_some() && this.jump.controller.owns_key(0x1b))
+                        || this.handle_escape(window, cx))
                 {
                     cx.stop_propagation();
                 }
@@ -10823,9 +10865,10 @@ impl Render for HashGeneratorWindow {
             .children(jump_draft.map(|draft| jump_geometry_publisher(
                 draft, jump_frame, cx.entity().downgrade(), expected_generation, expected_ids, alphabet, metrics,
                 |owner, frame, window, cx, geometry_changed| {
+                    if matches!(owner.jump.scope, Some(hash_jump::HashJumpScope::Popup(..))) { return; }
                     let retired = if owner.is_current_mount() && owner.hash_jump_owns_input(window, cx) {
-                        owner.jump.controller.reconcile_frame(Some(frame))
-                    } else { owner.jump.controller.retire() };
+                        owner.jump.reconcile_frame(Some(frame))
+                    } else { owner.jump.retire() };
                     if retired || (geometry_changed && owner.jump.controller.is_active() && frame.matches_active_session) { cx.notify(); }
                 },
             )))
@@ -11815,24 +11858,30 @@ pub(crate) fn run_foundation_window(
                             return;
                         };
                         let is_hash = context_stack_has_primary(&event.context_stack, "HashGeneratorWindow");
-                        if is_hash {
-                            let _ = root.update(cx, |root, cx| {
+                        if is_hash || context_stack_has_primary(&event.context_stack, "List") {
+                            let owned = root.update(cx, |root, cx| {
                                 let (view, native, event_window_matches, visible) = match &root.hash_window {
                                     HashWindowState::Docked { view, .. } => (view.clone(), root.native_window,
                                         root.root_window.is_some_and(|root_window| root_window.window_id() == window.window_handle().window_id()),
                                         root.root_visibility.active.load(Ordering::Acquire) && root.root_visibility.visible.load(Ordering::Acquire)),
                                     HashWindowState::Popout { view, window: hash_window, .. } => (view.clone(), view.read(cx).native_window,
                                         hash_window.window_id() == window.window_handle().window_id(), true),
-                                    HashWindowState::Closed => return,
+                                    HashWindowState::Closed => return false,
                                 };
-                                let Some(native) = native.filter(|native| native_window_is_valid(*native)) else { return; };
+                                let Some(native) = native.filter(|native| native_window_is_valid(*native)) else { return false; };
                                 if !visible || !event_window_matches || receipt.hwnd != native.identity.hwnd
-                                    || current_foreground_identity() != Some(native.identity) { return; }
+                                    || current_foreground_identity() != Some(native.identity)
+                                    || (!is_hash && view.read(cx).hash_popup_scope(window, cx).is_none()) {
+                                    return false;
+                                }
                                 view.update(cx, |view, cx| {
                                     if view.handle_jump_keydown(receipt, window, cx) { cx.stop_propagation(); }
                                 });
-                            });
-                            return;
+                                true
+                            }).unwrap_or(false);
+                            if is_hash || owned {
+                                return;
+                            }
                         }
                         if !context_stack_has_primary(&event.context_stack, "LauncherSearch") { return; }
                         let _ = root.update(cx, |root, cx| {
@@ -12981,6 +13030,19 @@ mod tests {
         assert!(!state.allows(HashControl::File));
         state.current = false;
         assert!(!state.allows(HashControl::Expected));
+    }
+
+    #[test]
+    fn hash_popup_cursor_direction_handles_unselected_and_current_rows() {
+        use super::hash_jump_select::{CursorMove, cursor_move};
+        assert_eq!(cursor_move(None, 0), Some(CursorMove::Down));
+        let mut cursor = Some(0);
+        assert_eq!(cursor_move(cursor, 2), Some(CursorMove::Down));
+        cursor = Some(1);
+        assert_eq!(cursor_move(cursor, 2), Some(CursorMove::Down));
+        cursor = Some(2);
+        assert_eq!(cursor_move(cursor, 2), None);
+        assert_eq!(cursor_move(cursor, 0), Some(CursorMove::Up));
     }
 
     #[test]

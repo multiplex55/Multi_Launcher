@@ -444,7 +444,14 @@ impl JumpModeController {
 pub(super) struct JumpGeometryElement<E> {
     inner: E,
     pub(super) metadata: TargetMetadata,
-    draft: Rc<RefCell<JumpGeometryDraft>>,
+    collector: GeometryCollector,
+}
+
+type GeometryObserver = Box<dyn FnMut(Option<JumpTargetGeometry>, &Window, &mut App)>;
+
+enum GeometryCollector {
+    Draft(Rc<RefCell<JumpGeometryDraft>>),
+    Observer(GeometryObserver),
 }
 
 impl<E> JumpGeometryElement<E> {
@@ -456,7 +463,19 @@ impl<E> JumpGeometryElement<E> {
         Self {
             inner,
             metadata,
-            draft,
+            collector: GeometryCollector::Draft(draft),
+        }
+    }
+
+    pub(super) fn observe(
+        inner: E,
+        metadata: TargetMetadata,
+        observer: impl FnMut(Option<JumpTargetGeometry>, &Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            inner,
+            metadata,
+            collector: GeometryCollector::Observer(Box::new(observer)),
         }
     }
 }
@@ -509,10 +528,15 @@ impl<E: Element> Element for JumpGeometryElement<E> {
         let prepaint = self
             .inner
             .prepaint(id, inspector_id, bounds.clone(), layout, window, cx);
-        if let Some(target) =
-            clipped_jump_geometry(self.metadata.clone(), bounds, window.content_mask().bounds)
-        {
-            self.draft.borrow_mut().targets.push(target);
+        let target =
+            clipped_jump_geometry(self.metadata.clone(), bounds, window.content_mask().bounds);
+        match &mut self.collector {
+            GeometryCollector::Draft(draft) => {
+                if let Some(target) = target {
+                    draft.borrow_mut().targets.push(target);
+                }
+            }
+            GeometryCollector::Observer(observer) => observer(target, window, cx),
         }
         prepaint
     }
@@ -662,6 +686,10 @@ pub(super) struct JumpBadgePlacement {
     pub(super) height: f32,
 }
 
+pub(super) fn jump_badge_height(metrics: multi_launcher::gui::theme::ThemeMetrics) -> f32 {
+    metrics.line_height.max(metrics.small_text_size) + 4.0
+}
+
 pub(super) fn jump_badge_placement(
     target: &JumpTargetGeometry,
     hint: &Hint,
@@ -674,7 +702,7 @@ pub(super) fn jump_badge_placement(
     let visible_right = visible_left + target.visible_bounds.size.width.as_f32();
     let visible_bottom = visible_top + target.visible_bounds.size.height.as_f32();
     let width = (hint.as_str().len() as f32 * metrics.small_text_size * 0.72 + 6.0).max(10.0);
-    let height = metrics.line_height.max(metrics.small_text_size) + 4.0;
+    let height = jump_badge_height(metrics);
     if visible_right - visible_left < width || visible_bottom - visible_top < height {
         return None;
     }

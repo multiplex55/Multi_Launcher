@@ -1,5 +1,6 @@
 use super::{
     HashInputMode, HashPresentationMode, PhysicalKeydown,
+    hash_jump_select::HashPopupKind,
     jump_mode::{
         JumpGeometryDraft, JumpGeometryElement, JumpGeometryFrame, JumpModeController,
         jump_hint_badge,
@@ -149,8 +150,15 @@ impl HashJumpRender<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HashJumpScope {
+    Main,
+    Popup(HashPopupKind, u64),
+}
+
 pub(super) struct HashJump {
     pub controller: JumpModeController,
+    pub scope: Option<HashJumpScope>,
     pub frame: Rc<RefCell<Option<JumpGeometryFrame>>>,
     pub clipboard: FocusHandle,
     pub file: FocusHandle,
@@ -169,6 +177,7 @@ impl HashJump {
     ) -> Self {
         Self {
             controller,
+            scope: None,
             frame: Rc::new(RefCell::new(None)),
             clipboard: cx.focus_handle(),
             file: cx.focus_handle(),
@@ -246,17 +255,34 @@ impl HashJump {
     pub fn key(
         &mut self,
         receipt: PhysicalKeydown,
+        scope: HashJumpScope,
+        frame: Option<&JumpGeometryFrame>,
         generation: u64,
     ) -> (bool, bool, Option<TargetId>) {
-        let frame = self.frame.borrow();
-        let retired = self.controller.reconcile_frame(frame.as_ref());
-        let outcome = self
-            .controller
-            .process_key_down(receipt, frame.as_ref(), generation);
+        let retired = if self.scope.is_some_and(|previous| previous != scope) {
+            self.retire()
+        } else {
+            self.reconcile_frame(frame)
+        };
+        let outcome = self.controller.process_key_down(receipt, frame, generation);
+        self.scope = self.controller.is_active().then_some(scope);
         (
             outcome.consumed,
             outcome.repaint || retired,
             outcome.selected_target,
         )
+    }
+
+    pub fn retire(&mut self) -> bool {
+        self.scope = None;
+        self.controller.retire()
+    }
+
+    pub fn reconcile_frame(&mut self, frame: Option<&JumpGeometryFrame>) -> bool {
+        let retired = self.controller.reconcile_frame(frame);
+        if retired {
+            self.scope = None;
+        }
+        retired
     }
 }
