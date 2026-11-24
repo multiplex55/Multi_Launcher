@@ -2,6 +2,7 @@ use std::pin::Pin;
 #[cfg(windows)]
 use std::sync::mpsc::{Receiver, Sender, channel};
 mod action_sheet;
+mod add_action;
 mod appearance;
 mod favorites;
 
@@ -2192,6 +2193,7 @@ struct RootWindow {
     search_completion: SearchCompletion,
     search_completion_focus_revision: Option<u64>,
     settings_editor: SettingsEditorState,
+    app_editor: add_action::AppEditorState,
     command_help: CommandHelpState,
     command_help_filter: Entity<InputState>,
     quick_help: QuickHelpState,
@@ -9796,6 +9798,15 @@ impl Render for RootWindow {
             close_focus_handle: self.quick_help_close_focus_handle.clone(),
             scroll: self.quick_help_scroll.clone(),
         });
+        let app_editor_panel = self.app_editor.open.then(|| {
+            add_action::AppEditorPanel::new(
+                cx.entity().downgrade(),
+                &self.app_editor,
+                root_controls_width,
+                metrics,
+                palette,
+            )
+        });
         let root_controls = div()
             .flex()
             .flex_col()
@@ -9997,7 +10008,8 @@ impl Render for RootWindow {
                     && toast_log_viewer_panel.is_none()
                     && command_help_panel.is_none()
                     && quick_help_panel.is_none()
-                    && docked_hash.is_none(),
+                    && docked_hash.is_none()
+                    && app_editor_panel.is_none(),
                 |this| {
                     // Center the ordinary root only when its content fits.
                     this.my_auto()
@@ -10025,7 +10037,9 @@ impl Render for RootWindow {
                 {
                     return;
                 }
-                if quick_help_escape_capture_should_close(
+                if root.app_editor_escape(window, cx) {
+                    cx.stop_propagation();
+                } else if quick_help_escape_capture_should_close(
                     &window.context_stack(),
                     root.result_favorites.owns_focus(window, cx),
                 ) && !context_stack_has_primary(&window.context_stack(), "List") {
@@ -10064,7 +10078,9 @@ impl Render for RootWindow {
                 }
             }))
             .on_action(cx.listener(|root, _: &gpui_kit::base::input::Escape, window, cx| {
-                  if quick_help_escape_capture_should_close(
+                  if root.app_editor_escape(window, cx) {
+                      cx.stop_propagation();
+                  } else if quick_help_escape_capture_should_close(
                       &window.context_stack(),
                       root.result_favorites.owns_focus(window, cx),
                   ) && !context_stack_has_primary(&window.context_stack(), "List") {
@@ -10188,6 +10204,9 @@ impl Render for RootWindow {
             self.favorites_panel(root_controls_width, metrics, palette, cx)
                 .map(|panel| div().flex_shrink_0().child(panel)),
         );
+        if let Some(panel) = app_editor_panel {
+            root_scroll = root_scroll.child(div().flex_shrink_0().child(panel));
+        }
         // The absolute Search observer still has a layout slot, so keep it after the pane anchors.
         if let (Some(draft), Some(target_ids)) = (jump_geometry_draft, jump_target_ids) {
             root_scroll = root_scroll.child(search_jump_geometry_publisher(
@@ -11882,7 +11901,7 @@ pub(crate) fn run_foundation_window(
             let mut initial_launcher_results = LauncherSearchResults::default();
             initial_launcher_results.layout = initial_result_layout;
             initial_launcher_results.page_jump = search_catalog_for_root.page_jump;
-            let root = cx.new(move |_| RootWindow {
+            let root = cx.new(move |cx| RootWindow {
                 root_window: None,
                 listener_slot: Arc::clone(&listener_slot_for_root),
                 root_visibility: visibility_for_root.clone(),
@@ -11906,6 +11925,7 @@ pub(crate) fn run_foundation_window(
                 search_completion: SearchCompletion::default(),
                 search_completion_focus_revision: None,
                 settings_editor: settings_editor_for_root,
+                app_editor: add_action::AppEditorState::new(cx),
                 command_help: command_help_for_root,
                 command_help_filter,
                 quick_help: QuickHelpState::default(),
