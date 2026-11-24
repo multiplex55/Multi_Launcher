@@ -3490,10 +3490,12 @@ impl DockedHashResizePayload {
     }
 }
 
-fn launcher_column_width(viewport_width: f32, window_padding: f32) -> f32 {
-    (viewport_width - 2.0 * window_padding)
+fn launcher_column_width(viewport_width: f32, window_padding: f32, scale: f32) -> f32 {
+    let available = ((viewport_width * scale).floor() / scale
+        - 2.0 * launcher_snapped_length(window_padding, scale))
         .max(1.0)
-        .min(LAUNCHER_PREFERRED_COLUMN_WIDTH)
+        .min(LAUNCHER_PREFERRED_COLUMN_WIDTH);
+    launcher_snapped_length(available, scale)
 }
 
 fn docked_hash_available_size(
@@ -9363,9 +9365,11 @@ impl Render for RootWindow {
             } => Some((view.clone(), *mount_generation)),
             _ => None,
         };
+        let scale = window.scale_factor();
         let root_controls_width = launcher_column_width(
             window.viewport_size().width.as_f32(),
             metrics.window_padding,
+            scale,
         );
         let completion_preview = self
             .search_completion
@@ -9395,13 +9399,7 @@ impl Render for RootWindow {
         let jump_session_generation = self.search_jump_mode.session_generation();
         let result_row_count = result_layout.row_count(result_count);
         let result_columns = result_layout.columns.max(1);
-        let scale = window.scale_factor();
-        let snapped_root_width = launcher_snapped_length(root_controls_width, scale).min(
-            (window.viewport_size().width.as_f32()
-                - 2.0 * launcher_snapped_length(metrics.window_padding, scale))
-                .max(0.0),
-        );
-        let result_width = (snapped_root_width
+        let result_width = (root_controls_width
             - 2.0 * launcher_snapped_length(metrics.panel_padding, scale))
             .max(0.0);
         let (result_gap, grid_cell_width) = launcher_result_grid_geometry(
@@ -15735,10 +15733,13 @@ mod tests {
 
     #[test]
     fn launcher_column_width_fits_viewport_padding_and_preserves_preferred_width() {
-        assert_eq!(launcher_column_width(800.0, 12.0), 520.0);
-        assert_eq!(launcher_column_width(544.0, 12.0), 520.0);
-        assert_eq!(launcher_column_width(400.0, 12.0), 376.0);
-        assert_eq!(launcher_column_width(20.0, 12.0), 1.0);
+        assert_eq!(launcher_column_width(800.0, 12.0, 1.0), 520.0);
+        assert_eq!(launcher_column_width(544.0, 12.0, 1.0), 520.0);
+        assert_eq!(launcher_column_width(400.0, 12.0, 1.0), 376.0);
+        assert_eq!(launcher_column_width(20.0, 12.0, 1.0), 1.0);
+        assert_eq!(launcher_column_width(400.0, 8.0, 1.2), 460.0 / 1.2);
+        assert_eq!(launcher_column_width(800.0, 8.0, 1.2), 520.0);
+        assert_eq!(launcher_column_width(10.0, 8.0, 1.2), 1.0 / 1.2);
     }
 
     #[test]
