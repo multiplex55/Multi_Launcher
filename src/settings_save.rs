@@ -4992,6 +4992,86 @@ mod tests {
     }
 
     #[test]
+    fn utility_workers_preserve_raw_settings_and_siblings() {
+        use crate::settings::utility_dialog_sizes::{PreferredWindowSize, UtilitySizeMutation};
+        use std::collections::BTreeMap;
+
+        type RawObject = BTreeMap<String, Box<serde_json::value::RawValue>>;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let source = r#"{ "opaque": { "large": 1234567890123456789012345, "escaped": "\u0061" }, "utility_dialog_sizes": { "version": 2, "entries": { "diff": { "state": "reset" }, "file-preview": { "state": "reset", "native": null } } }, "utility_presentations": { "version": 1, "entries": { "hash-generator": "docked", "batch-rename": "p\u006fpout" } } }"#;
+        std::fs::write(&path, source).unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let size_key = UtilityToolKey::parse("diff").unwrap();
+        let presentation_key = UtilityToolKey::parse("hash-generator").unwrap();
+        let size = PreferredWindowSize::new(900.0, 700.0).unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+
+        assert_eq!(
+            workers
+                .queue_utility_size_mutation(
+                    path_text.clone(),
+                    size_key,
+                    UtilitySizeMutation::Set(size)
+                )
+                .unwrap(),
+            UtilitySizeRevision(1)
+        );
+        assert_eq!(
+            workers
+                .queue_utility_presentation(
+                    path_text,
+                    presentation_key,
+                    RememberedPresentation::Popout
+                )
+                .unwrap(),
+            1
+        );
+        workers.join_all_checked().ensure_clean().unwrap();
+        assert_eq!(
+            workers.drain_utility_size_acknowledgements(),
+            vec![UtilitySizeAcknowledgement {
+                key: size_key,
+                revision: UtilitySizeRevision(1),
+                preference: UtilitySizePreference::Preferred(size),
+                native_geometry: None,
+                affects_size: true,
+            }]
+        );
+        assert_eq!(
+            workers.drain_utility_presentation_acks(),
+            vec![(presentation_key, 1, RememberedPresentation::Popout)]
+        );
+
+        let saved = Settings::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved.utility_dialog_sizes.preferred(size_key), Some(size));
+        assert_eq!(
+            saved.utility_presentations.get(presentation_key),
+            Some(RememberedPresentation::Popout)
+        );
+        let root: RawObject = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            root["opaque"].get(),
+            r#"{ "large": 1234567890123456789012345, "escaped": "\u0061" }"#
+        );
+        let sizes: RawObject = serde_json::from_str(root["utility_dialog_sizes"].get()).unwrap();
+        let size_entries: RawObject = serde_json::from_str(sizes["entries"].get()).unwrap();
+        assert_eq!(
+            size_entries["file-preview"].get(),
+            r#"{ "state": "reset", "native": null }"#
+        );
+        let presentations: RawObject =
+            serde_json::from_str(root["utility_presentations"].get()).unwrap();
+        let presentation_entries: RawObject =
+            serde_json::from_str(presentations["entries"].get()).unwrap();
+        assert_eq!(
+            presentation_entries["batch-rename"].get(),
+            r#""p\u006fpout""#
+        );
+    }
+
+    #[test]
     fn utility_presentation_newer_write_wins_inflight_ack_and_shutdown() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
