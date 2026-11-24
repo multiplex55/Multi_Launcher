@@ -35,7 +35,7 @@ pub(super) struct ResultFavorites {
     draft: Option<FavoriteFields>,
     status: Option<String>,
     pending: Option<Request>,
-    prefill_on_load: bool,
+    pending_prefill: Option<Action>,
     sequence: u64,
 }
 
@@ -57,7 +57,7 @@ impl ResultFavorites {
     pub(super) fn restart_blocker(&self) -> Option<&'static str> {
         if self.save_pending() {
             Some("Wait for the Favorites save to finish before switching to egui.")
-        } else if self.draft.is_some() || self.prefill_on_load {
+        } else if self.draft.is_some() || self.pending_prefill.is_some() {
             Some("Save or cancel the current Favorites draft before switching to egui.")
         } else {
             None
@@ -77,9 +77,15 @@ impl ResultFavorites {
         true
     }
 
+    fn retire_load(&mut self) {
+        if matches!(self.pending, Some(Request::Load(_))) {
+            self.pending = None;
+        }
+    }
+
     fn cancel_draft(&mut self) -> bool {
         let had_draft = self.draft.take().is_some();
-        let was_prefilling = std::mem::take(&mut self.prefill_on_load);
+        let was_prefilling = self.pending_prefill.take().is_some();
         if had_draft {
             self.status = None;
         }
@@ -131,15 +137,55 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_favorites(Some(action), previous_focus, window, cx);
+    }
+
+    pub(super) fn open_favorites_browse(
+        &mut self,
+        previous_focus: Option<FocusHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_favorites(None, previous_focus, window, cx);
+    }
+
+    fn open_favorites(
+        &mut self,
+        action: Option<Action>,
+        previous_focus: Option<FocusHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.restart_admission.is_fenced() {
             return;
         }
         let scroll_item = self.quick_help_scroll_item() + usize::from(self.quick_help.open);
         let state = &mut self.result_favorites;
+        if action.is_none() && state.is_open() {
+            state.return_focus = previous_focus;
+            state.return_offset = Some(self.root_scroll.offset());
+            self.root_scroll.scroll_to_top_of_item(scroll_item);
+            if let Some(owner) = &state.owner {
+                owner.focus(window, cx);
+            }
+            cx.notify();
+            return;
+        }
         if state.restart_blocker().is_some() {
             if state.pending.is_none() {
                 state.status = Some("Finish the current Favorites draft first.".to_owned());
             }
+            self.root_scroll.scroll_to_top_of_item(scroll_item);
+            if let Some(owner) = &state.owner {
+                owner.focus(window, cx);
+            }
+            cx.notify();
+            return;
+        }
+        if state.is_open() && matches!(state.pending, Some(Request::Load(_))) {
+            state.pending_prefill = action;
+            state.return_focus = previous_focus;
+            state.return_offset = Some(self.root_scroll.offset());
             self.root_scroll.scroll_to_top_of_item(scroll_item);
             if let Some(owner) = &state.owner {
                 owner.focus(window, cx);
@@ -152,12 +198,9 @@ impl RootWindow {
         state.return_focus = previous_focus;
         state.return_offset = Some(self.root_scroll.offset());
         state.status = Some("Loading Favorites…".to_owned());
-        let label = FavoriteField::new(&action.label, window, cx);
-        let command = FavoriteField::new(&action.action, window, cx);
-        let args = FavoriteField::new(action.args.as_deref().unwrap_or_default(), window, cx);
+        state.pending_prefill = action;
         let request = Request::Load(state.next());
         state.pending = Some(request);
-        state.prefill_on_load = true;
         self.fresh_search_enter = None;
         self.retire_search_jump_mode();
         self.root_scroll.scroll_to_top_of_item(scroll_item);
@@ -166,23 +209,26 @@ impl RootWindow {
         let task = cx
             .background_executor()
             .spawn(async { load_favs(FAV_FILE) });
-        let root = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| {
+        cx.spawn_in(window, async move |root, cx| {
             let rows = task.await;
-            let _ = root.update(cx, |root, cx| {
+            let _ = root.update_in(cx, |root, window, cx| {
                 let state = &mut root.result_favorites;
                 if !state.consume(request) {
                     return;
                 }
-                let prefill = std::mem::take(&mut state.prefill_on_load);
+                let prefill = state.pending_prefill.take();
                 match rows {
                     Ok(rows) => {
-                        if prefill {
+                        if let Some(action) = prefill {
                             state.draft = Some(FavoriteFields {
                                 draft: prefilled_favorite_draft(&rows, &action),
-                                label,
-                                command,
-                                args,
+                                label: FavoriteField::new(&action.label, window, cx),
+                                command: FavoriteField::new(&action.action, window, cx),
+                                args: FavoriteField::new(
+                                    action.args.as_deref().unwrap_or_default(),
+                                    window,
+                                    cx,
+                                ),
                             });
                         }
                         state.rows = rows.into();
@@ -263,7 +309,7 @@ impl RootWindow {
             let restore = window.is_window_active() && state.owns_focus(window, cx);
             let focus = state.return_focus.take();
             let offset = state.return_offset.take();
-            state.pending = None;
+            state.retire_load();
             state.owner = None;
             state.status = None;
             if restore {
@@ -290,7 +336,7 @@ impl RootWindow {
         let owner = state.owner.as_ref()?;
         let editing = state.draft.is_some();
         let waiting = state.save_pending();
-        let dismiss_label = if editing || state.prefill_on_load {
+        let dismiss_label = if editing || state.pending_prefill.is_some() {
             "Cancel"
         } else {
             "Close"
@@ -412,11 +458,29 @@ mod tests {
     fn result_favorites_cancels_prefill_without_discarding_browse_load() {
         let mut state = ResultFavorites::default();
         state.pending = Some(Request::Load(1));
-        state.prefill_on_load = true;
+        state.pending_prefill = Some(multi_launcher::actions::Action {
+            label: "test".into(),
+            desc: String::new(),
+            action: "test".into(),
+            args: None,
+        });
         assert!(state.restart_blocker().is_some());
         assert!(state.cancel_draft());
-        assert!(!state.prefill_on_load);
+        assert!(state.pending_prefill.is_none());
         assert!(state.restart_blocker().is_none());
+        assert_eq!(state.pending, Some(Request::Load(1)));
         assert!(state.consume(Request::Load(1)));
+    }
+
+    #[test]
+    fn result_favorites_close_reopen_rejects_old_browse_receipt() {
+        let mut state = ResultFavorites::default();
+        let first = Request::Load(state.next());
+        state.pending = Some(first);
+        state.retire_load();
+        let second = Request::Load(state.next());
+        state.pending = Some(second);
+        assert!(!state.consume(first));
+        assert!(state.consume(second));
     }
 }

@@ -68,7 +68,7 @@ use multi_launcher::commands::handlers::{handle_hash_generator, handle_query};
 use multi_launcher::commands::{
     ActivationSource, Command, CommandInvocation, CommandOutcome, DialogCommand,
     FavoriteLogPolicy, HashGeneratorCommand, HistoryPolicy, PendingQueryPolicy, QueryCommand,
-    QueryPolicy, ResultsPolicy, VisibilityPolicy, parse_action, parse_command,
+    QueryPolicy, ResultsPolicy, StorageCommand, VisibilityPolicy, parse_action, parse_command,
 };
 use multi_launcher::coordinate_tool::{
     CoordinateToolController, CoordinateToolPreferences, NativeCoordinateRuntimeFactory,
@@ -162,6 +162,7 @@ struct InstalledLauncherProviders {
     hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
     settings: multi_launcher::plugins::settings::SettingsPlugin,
     help: multi_launcher::plugins::help::HelpPlugin,
+    favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
 }
 
 impl Default for InstalledLauncherProviders {
@@ -170,16 +171,18 @@ impl Default for InstalledLauncherProviders {
             hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
             settings: multi_launcher::plugins::settings::SettingsPlugin,
             help: multi_launcher::plugins::help::HelpPlugin,
+            favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
         }
     }
 }
 
 impl InstalledLauncherProviders {
-    fn plugins(&self) -> [&dyn multi_launcher::plugin::Plugin; 3] {
+    fn plugins(&self) -> [&dyn multi_launcher::plugin::Plugin; 4] {
         [
             &self.hash_generator,
             &self.settings,
             &self.help,
+            &self.favorites,
         ]
     }
 
@@ -1603,6 +1606,7 @@ enum InstalledSearchRoute {
     QuerySet(CommandOutcome),
     Settings,
     Help,
+    FavoritesBrowse,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1649,6 +1653,9 @@ fn classify_installed_search_command(
         }
         Command::Dialog(DialogCommand::Settings) => Ok(InstalledSearchRoute::Settings),
         Command::Dialog(DialogCommand::Help) => Ok(InstalledSearchRoute::Help),
+        Command::Storage(StorageCommand::FavoriteDialog(label)) if label.is_empty() => {
+            Ok(InstalledSearchRoute::FavoritesBrowse)
+        }
         _ => Err(InstalledSearchActionError::Unsupported(
             "The selected launcher action is not an installed Search route.".to_owned(),
         )),
@@ -7544,6 +7551,10 @@ impl RootWindow {
             InstalledSearchRoute::Settings
         );
         let help_open = matches!(&installed_invocation.route, InstalledSearchRoute::Help);
+        let favorites_open = matches!(
+            &installed_invocation.route,
+            InstalledSearchRoute::FavoritesBrowse
+        );
         let Some(operation) = self.restart_admission.admit() else {
             if query_set {
                 self.launcher_search_error =
@@ -7554,6 +7565,9 @@ impl RootWindow {
             } else if help_open {
                 self.launcher_search_error =
                     Some("GPUI is closing; Command Help can no longer be opened.".to_owned());
+            } else if favorites_open {
+                self.launcher_search_error =
+                    Some("GPUI is closing; Favorites can no longer be opened.".to_owned());
             } else {
                 self.hash_open_error =
                     Some("GPUI is closing; new utility operations are disabled.".to_owned());
@@ -7587,6 +7601,11 @@ impl RootWindow {
             InstalledSearchRoute::Help => {
                 drop(operation);
                 self.open_command_help(window, cx, CommandHelpOpenOrigin::Search, None);
+            }
+            InstalledSearchRoute::FavoritesBrowse => {
+                drop(operation);
+                let focus = Some(self.query.focus_handle(cx));
+                self.open_favorites_browse(focus, window, cx);
             }
         }
         // Hash Open and Settings preserve the launcher query and results.
@@ -13510,6 +13529,41 @@ mod tests {
     }
 
     #[test]
+    fn gpui_favorites_browse_admission_and_provider_gates() {
+        let providers = super::InstalledLauncherProviders::default();
+        let enabled = HashSet::from(["favorites".to_owned()]);
+        let search = HashMap::from([("favorites".to_owned(), vec!["search".to_owned()])]);
+        for query in ["fav", " FAV ADD "] {
+            let rows = multi_launcher::plugin::search_filtered_plugins(
+                providers.plugins(), query, Some(&enabled), Some(&search),
+            );
+            assert_eq!(rows.len(), 1);
+            assert!(matches!(
+                parse_installed_search_invocation(rows[0].clone(), ActivationSource::Enter)
+                    .unwrap().route,
+                InstalledSearchRoute::FavoritesBrowse
+            ));
+        }
+        assert!(multi_launcher::plugin::search_filtered_plugins(
+            providers.plugins(), "fav", Some(&HashSet::new()), Some(&search),
+        ).is_empty());
+        let no_search = HashMap::from([("favorites".to_owned(), Vec::<String>::new())]);
+        assert!(multi_launcher::plugin::search_filtered_plugins(
+            providers.plugins(), "fav", Some(&enabled), Some(&no_search),
+        ).is_empty());
+        let commands = providers.cached_commands(Some(&enabled));
+        assert_eq!(commands.len(), 2);
+        assert!(providers.cached_commands(Some(&HashSet::new())).is_empty());
+        for (command, admitted) in [("fav:dialog:", true), ("fav:dialog:name", false)] {
+            let action = saved_action("saved favorite", command, None);
+            assert_eq!(
+                parse_installed_search_invocation(action, ActivationSource::Enter).is_ok(),
+                admitted
+            );
+        }
+    }
+
+    #[test]
     fn gpui_provider_collection_drives_search_cache_and_help_without_search_gates() {
         let providers = super::InstalledLauncherProviders::default();
         let enabled = HashSet::from([
@@ -13584,7 +13638,7 @@ mod tests {
             .iter()
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(help_names, ["hash_generator", "help", "settings"]);
+        assert_eq!(help_names, ["favorites", "hash_generator", "help", "settings"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -13613,7 +13667,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), 3);
+        assert_eq!(disabled_catalog.command_help_providers.len(), 4);
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(

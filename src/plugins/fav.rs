@@ -447,30 +447,81 @@ impl Default for FavPlugin {
     }
 }
 
+fn favorite_dialog_action(label: &str) -> Action {
+    Action {
+        label: if label.is_empty() {
+            "fav: add".into()
+        } else {
+            format!("Add fav {label}")
+        },
+        desc: "Fav".into(),
+        action: format!("fav:dialog:{label}"),
+        args: None,
+    }
+}
+
+fn favorite_browse_action() -> Action {
+    Action {
+        label: "Favorites".into(),
+        ..favorite_dialog_action("")
+    }
+}
+
+/// Stateless Search adapter for the Favorites browse routes.
+pub struct FavBrowsePlugin;
+
+impl Plugin for FavBrowsePlugin {
+    fn search(&self, query: &str) -> Vec<Action> {
+        let query = query.trim();
+        if query.eq_ignore_ascii_case("fav") {
+            vec![favorite_browse_action()]
+        } else if query.eq_ignore_ascii_case("fav add") {
+            vec![favorite_dialog_action("")]
+        } else {
+            Vec::new()
+        }
+    }
+    fn name(&self) -> &str {
+        "favorites"
+    }
+    fn description(&self) -> &str {
+        "Run saved favorite commands (prefix: `fav`)"
+    }
+    fn capabilities(&self) -> &[&str] {
+        &["search"]
+    }
+    fn commands(&self) -> Vec<Action> {
+        favorite_browse_commands()
+    }
+}
+
+fn favorite_browse_commands() -> Vec<Action> {
+    vec![
+        Action {
+            label: "fav".into(),
+            desc: "Fav".into(),
+            action: "query:fav ".into(),
+            args: None,
+        },
+        Action {
+            label: "fav add".into(),
+            desc: "Fav".into(),
+            action: "query:fav add ".into(),
+            args: None,
+        },
+    ]
+}
+
 impl Plugin for FavPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         if trimmed.eq_ignore_ascii_case("fav") {
-            return vec![Action {
-                label: "Favorites".into(),
-                desc: "Fav".into(),
-                action: "fav:dialog:".into(),
-                args: None,
-            }];
+            return vec![favorite_browse_action()];
         }
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "fav add") {
             let label = rest.trim();
-            return vec![Action {
-                label: if label.is_empty() {
-                    "fav: add".into()
-                } else {
-                    format!("Add fav {label}")
-                },
-                desc: "Fav".into(),
-                action: format!("fav:dialog:{label}"),
-                args: None,
-            }];
+            return vec![favorite_dialog_action(label)];
         }
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "fav rm") {
@@ -515,19 +566,8 @@ impl Plugin for FavPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![
-            Action {
-                label: "fav".into(),
-                desc: "Fav".into(),
-                action: "query:fav ".into(),
-                args: None,
-            },
-            Action {
-                label: "fav add".into(),
-                desc: "Fav".into(),
-                action: "query:fav add ".into(),
-                args: None,
-            },
+        let mut commands = favorite_browse_commands();
+        commands.extend([
             Action {
                 label: "fav rm".into(),
                 desc: "Fav".into(),
@@ -540,7 +580,8 @@ impl Plugin for FavPlugin {
                 action: "query:fav list".into(),
                 args: None,
             },
-        ]
+        ]);
+        commands
     }
 }
 
@@ -548,6 +589,21 @@ impl Plugin for FavPlugin {
 mod tests {
     use super::{join_command_args, resolve_with_plugin};
     use crate::{actions::Action, plugin::Plugin};
+
+    #[test]
+    fn favorite_browse_provider_exact_queries_share_egui_results() {
+        use super::{FavBrowsePlugin, favorite_browse_action, favorite_dialog_action};
+        let provider = FavBrowsePlugin;
+        for query in ["fav", " FAV "] {
+            assert_eq!(provider.search(query), vec![favorite_browse_action()]);
+        }
+        for query in ["fav add", " FAV ADD  "] {
+            assert_eq!(provider.search(query), vec![favorite_dialog_action("")]);
+        }
+        for query in ["fav add name", "fav addx", "fav list", "favorite"] {
+            assert!(provider.search(query).is_empty());
+        }
+    }
 
     struct TestPlugin;
 
