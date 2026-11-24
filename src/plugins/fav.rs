@@ -30,6 +30,130 @@ pub struct FavEntry {
     pub args: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrefilledFavoriteOrigin {
+    Existing {
+        index: usize,
+        original: FavEntry,
+    },
+    Append {
+        lookup_label: String,
+        lookup_action: String,
+        lookup_args: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefilledFavoriteDraft {
+    pub label: String,
+    pub action: String,
+    pub args: Option<String>,
+    pub(crate) origin: PrefilledFavoriteOrigin,
+}
+
+#[derive(Debug)]
+pub enum PrefilledFavoriteSaveError {
+    InvalidDraft,
+    StaleTarget,
+    Store(anyhow::Error),
+}
+
+impl std::fmt::Display for PrefilledFavoriteSaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDraft => formatter.write_str("Label and command are required"),
+            Self::StaleTarget => formatter.write_str(
+                "Favorites changed while this prefilled draft was open. Reopen it before saving.",
+            ),
+            Self::Store(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for PrefilledFavoriteSaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error.as_ref()),
+            Self::InvalidDraft | Self::StaleTarget => None,
+        }
+    }
+}
+
+pub fn prefilled_favorite_draft(entries: &[FavEntry], action: &Action) -> PrefilledFavoriteDraft {
+    let exact = entries.iter().position(|entry| {
+        entry.action == action.action && entry.args.as_deref() == action.args.as_deref()
+    });
+    let matching_label = entries
+        .iter()
+        .position(|entry| entry.label.eq_ignore_ascii_case(&action.label));
+    let origin = exact
+        .or(matching_label)
+        .map(|index| PrefilledFavoriteOrigin::Existing {
+            index,
+            original: entries[index].clone(),
+        })
+        .unwrap_or_else(|| PrefilledFavoriteOrigin::Append {
+            lookup_label: action.label.clone(),
+            lookup_action: action.action.clone(),
+            lookup_args: action.args.clone(),
+        });
+
+    PrefilledFavoriteDraft {
+        label: action.label.clone(),
+        action: action.action.clone(),
+        args: action.args.clone(),
+        origin,
+    }
+}
+
+pub fn save_prefilled_favorite(
+    path: &str,
+    draft: PrefilledFavoriteDraft,
+) -> Result<Vec<FavEntry>, PrefilledFavoriteSaveError> {
+    if draft.label.trim().is_empty() || draft.action.trim().is_empty() {
+        return Err(PrefilledFavoriteSaveError::InvalidDraft);
+    }
+
+    let replacement = FavEntry {
+        label: draft.label,
+        action: draft.action,
+        args: draft.args.filter(|args| !args.trim().is_empty()),
+    };
+    let mut stale_target = false;
+    let updated = update_favs(path, |entries| {
+        match draft.origin {
+            PrefilledFavoriteOrigin::Existing { index, original } => {
+                if entries.get(index) != Some(&original) {
+                    stale_target = true;
+                    anyhow::bail!("the prefilled favorite target changed");
+                }
+                entries[index] = replacement;
+            }
+            PrefilledFavoriteOrigin::Append {
+                lookup_label,
+                lookup_action,
+                lookup_args,
+            } => {
+                if entries.iter().any(|entry| {
+                    (entry.action == lookup_action && entry.args == lookup_args)
+                        || entry.label.eq_ignore_ascii_case(&lookup_label)
+                }) {
+                    stale_target = true;
+                    anyhow::bail!("the prefilled favorite append target now exists");
+                }
+                entries.push(replacement);
+            }
+        }
+        Ok(true)
+    });
+
+    match updated {
+        Ok(entries) => Ok(entries),
+        Err(_) if stale_target => Err(PrefilledFavoriteSaveError::StaleTarget),
+        Err(error) => Err(PrefilledFavoriteSaveError::Store(error)),
+    }
+}
+
 pub fn load_favs(path: &str) -> anyhow::Result<Vec<FavEntry>> {
     match load_favs_typed(path)? {
         LoadState::Missing | LoadState::Empty => Ok(Vec::new()),
@@ -495,6 +619,128 @@ mod persistence_tests {
             action: action.into(),
             args: args.map(str::to_owned),
         }
+    }
+
+    fn action(label: &str, command: &str, args: Option<&str>) -> Action {
+        Action {
+            label: label.into(),
+            desc: String::new(),
+            action: command.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn prefilled_draft_matches_exact_optional_args_before_first_label() {
+        let entries = vec![
+            fav("PROJECT", "old", None),
+            fav("other", "cmd", None),
+            fav("exact", "cmd", Some("arg")),
+            fav("project", "later", None),
+        ];
+        let draft = prefilled_favorite_draft(&entries, &action("project", "cmd", Some("arg")));
+        assert!(matches!(
+            draft.origin,
+            PrefilledFavoriteOrigin::Existing { index: 2, .. }
+        ));
+        let draft =
+            prefilled_favorite_draft(&entries, &action("project", "cmd", Some("different")));
+        assert!(matches!(
+            draft.origin,
+            PrefilledFavoriteOrigin::Existing { index: 0, .. }
+        ));
+        let draft = prefilled_favorite_draft(&entries, &action("new", "cmd", None));
+        assert!(matches!(
+            draft.origin,
+            PrefilledFavoriteOrigin::Existing { index: 1, .. }
+        ));
+        let draft = prefilled_favorite_draft(&entries, &action("new", "cmd", Some("")));
+        assert!(matches!(
+            draft.origin,
+            PrefilledFavoriteOrigin::Append { .. }
+        ));
+    }
+
+    #[test]
+    fn prefilled_save_preserves_latest_entries_whitespace_and_publication() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        let path = path.to_str().unwrap();
+        let original = fav("original", "cmd", None);
+        save_favs(path, &[original.clone()]).unwrap();
+        let live = LIVE_FAVS.get_or_create(path, Some(vec![original.clone()]));
+        let mut draft = prefilled_favorite_draft(&[original.clone()], &action("new", "cmd", None));
+        let unrelated = fav("unrelated", "other", None);
+        save_favs(path, &[original, unrelated.clone()]).unwrap();
+        draft.label = "  label  ".into();
+        draft.action = "  command  ".into();
+        draft.args = Some("  args  ".into());
+        let expected = vec![fav("  label  ", "  command  ", Some("  args  ")), unrelated];
+        assert_eq!(save_prefilled_favorite(path, draft).unwrap(), expected);
+        assert_eq!(load_favs(path).unwrap(), expected);
+        assert_eq!(*live.lock().unwrap(), expected);
+
+        let mut append = prefilled_favorite_draft(&expected, &action("append", "new", None));
+        append.args = Some(" \t ".into());
+        let committed = save_prefilled_favorite(path, append).unwrap();
+        assert_eq!(committed.last().unwrap().args, None);
+    }
+
+    #[test]
+    fn prefilled_save_rejects_stale_and_malformed_without_publication() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        let path = path.to_str().unwrap();
+        let original = fav("target", "cmd", None);
+        let other = fav("other", "other", None);
+        let draft = prefilled_favorite_draft(
+            &[original.clone(), other.clone()],
+            &action("target", "cmd", None),
+        );
+        for latest in [
+            vec![fav("changed", "cmd", None), other.clone()],
+            vec![other.clone(), original.clone()],
+        ] {
+            save_favs(path, &latest).unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            let snapshot = LIVE_FAVS.snapshot(path);
+            assert!(matches!(
+                save_prefilled_favorite(path, draft.clone()),
+                Err(PrefilledFavoriteSaveError::StaleTarget)
+            ));
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+            assert_eq!(LIVE_FAVS.snapshot(path), snapshot);
+        }
+        let append = prefilled_favorite_draft(&[], &action("new", "new-cmd", Some("arg")));
+        for conflict in [
+            fav("NEW", "other", None),
+            fav("other", "new-cmd", Some("arg")),
+        ] {
+            save_favs(path, &[conflict]).unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            let snapshot = LIVE_FAVS.snapshot(path);
+            assert!(matches!(
+                save_prefilled_favorite(path, append.clone()),
+                Err(PrefilledFavoriteSaveError::StaleTarget)
+            ));
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+            assert_eq!(LIVE_FAVS.snapshot(path), snapshot);
+        }
+        std::fs::write(path, b"{broken").unwrap();
+        let snapshot = LIVE_FAVS.snapshot(path);
+        assert!(matches!(
+            save_prefilled_favorite(path, append.clone()),
+            Err(PrefilledFavoriteSaveError::Store(_))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), b"{broken");
+        assert_eq!(LIVE_FAVS.snapshot(path), snapshot);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            save_prefilled_favorite(path, append).unwrap(),
+            vec![fav("new", "new-cmd", Some("arg"))]
+        );
     }
 
     #[test]
