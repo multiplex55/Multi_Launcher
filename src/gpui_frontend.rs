@@ -329,7 +329,9 @@ impl LauncherSearchCatalog {
             if (self.match_exact || self.fuzzy_weight <= 0.0) && !provider_term.is_empty() {
                 provider_actions
                     .iter()
-                    .filter(|(provider, _)| provider == "folders" || provider == "bookmarks")
+                    .filter(|(provider, _)| {
+                        external_launch::AssociationKind::from_provider_name(provider).is_some()
+                    })
                     .map(|(_, action)| action.action.as_str())
                     .collect()
             } else {
@@ -347,7 +349,9 @@ impl LauncherSearchCatalog {
         let mut scored_provider_actions = provider_actions
             .into_iter()
             .filter_map(|(provider, action)| {
-                let score = if provider == "folders" || provider == "bookmarks" {
+                let score = if external_launch::AssociationKind::from_provider_name(&provider)
+                    .is_some()
+                {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
                         &action,
@@ -6655,7 +6659,7 @@ impl RootWindow {
         let provider_actions = raw_provider_actions
             .into_iter()
             .filter(|(provider, action)| {
-                if provider == "folders" || provider == "bookmarks" {
+                if external_launch::AssociationKind::from_provider_name(provider).is_some() {
                     external_launch::provider_association_by_name(provider, action).is_some()
                 } else if cfg!(windows) && provider == "downloads_triage" {
                     is_downloads_triage_opener(action)
@@ -7080,7 +7084,7 @@ impl RootWindow {
         else {
             return;
         };
-        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders" || name == "bookmarks")
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if external_launch::AssociationKind::from_provider_name(name).is_some())
         {
             return;
         }
@@ -7383,6 +7387,11 @@ impl RootWindow {
         if let Some((kind, command)) =
             external_launch::provider_association(&result.origin, &result.action)
         {
+            if let external_launch::AssociationKind::Web(provider) = kind {
+                if !provider.is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                    return;
+                }
+            }
             self.start_external_launch(
                 result.action,
                 command,
@@ -13694,6 +13703,45 @@ mod tests {
         assert!(with_commands.compose("ha", Vec::new(), false).is_empty());
     }
 
+    #[test]
+    fn web_provider_projection_uses_stock_postfilter_and_preserves_literal_url() {
+        let enabled = HashSet::from(["reddit".to_owned()]);
+        let catalog = completion_catalog(Vec::new(), true, Some(&enabled));
+        let query = "ReD Café+Tea";
+        let mut raw = multi_launcher::plugin::search_filtered_plugins_with_origin(
+            catalog.providers.plugins(), query, Some(&enabled), None,
+        );
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].1.action, "https://www.reddit.com/search/?q=Caf%C3%A9%2BTea");
+        let exact = raw[0].1.clone();
+        let mut unmatched = exact.clone();
+        unmatched.label = "unrelated".into();
+        unmatched.desc = "unrelated".into();
+        unmatched.action = "https://example.org/unrelated".into();
+        raw.push(("reddit".into(), unmatched));
+        let rows = catalog.compose(query, raw, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, exact);
+        assert_eq!(rows[0].origin, super::LauncherResultOrigin::Provider("reddit".into()));
+    }
+
+    #[test]
+    fn web_provider_filtered_query_obeys_exact_and_fuzzy_postfilter() {
+        let enabled = HashSet::from(["wikipedia".to_owned()]);
+        let mut catalog = completion_catalog(Vec::new(), true, Some(&enabled));
+        let query = "wiki cat kind:https";
+        let raw = multi_launcher::plugin::search_filtered_plugins_with_origin(
+            catalog.providers.plugins(), query, Some(&enabled), None,
+        );
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].1.action, "https://en.wikipedia.org/wiki/Special:Search?search=cat");
+        assert!(catalog.compose(query, raw.clone(), false).is_empty());
+        catalog.match_exact = false;
+        let rows = catalog.compose(query, raw.clone(), false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, raw[0].1);
+    }
+
     #[cfg(windows)]
     #[test]
     fn visibility_deactivation_wakes_idle_and_retires_pending_requests() {
@@ -14356,9 +14404,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["favorites", "file_search", "hash_generator", "help", "settings"]);
+        assert_eq!(help_names, ["favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "wikipedia", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["downloads_triage", "favorites", "file_search", "hash_generator", "help", "settings"]);
+        assert_eq!(help_names, ["downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "wikipedia", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14387,7 +14435,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 6 } else { 5 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 11 } else { 10 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(

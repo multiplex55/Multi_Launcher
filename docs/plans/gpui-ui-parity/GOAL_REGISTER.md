@@ -1,6 +1,6 @@
 # Goal register
 
-G00–G06 execution is underway, with the G23 Toast Log slice paired with G05 launcher menus. The matrix and individual GUI records contain source specifications and scoped native baselines. The current stages below cover the goal implementation and acceptance work. Read the master Goal for shared contracts and the packets for concrete checkpoints.
+G00–G07 have active or completed checkpoints. G11 Downloads Triage has its first checked Inspect route, and the G23 Toast Log slice is paired with G05 launcher menus. The matrix and individual GUI records track source specifications, scoped implementation and native evidence. Read the master Goal for shared contracts and the packets for concrete checkpoints.
 
 The initial program has 27 goals. All remain on **one migration branch**, with one active source writer. Ordering below is a default, not a requirement to block independent work behind an unavailable unrelated native check. Record any resequencing and preserve dependency/evidence ownership.
 
@@ -13,11 +13,11 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | G04 | [GPUI design system and complete Hash Generator pilot](goals/G04-design-system-and-pilot.md) | G01–G03 relevant contracts | In implementation |
 | G05 | [Main launcher, search, navigation, Jump Mode, and universal actions](goals/G05-main-launcher.md) | G00–G04 | In implementation |
 | G06 | [Settings, plugin configuration, authoring, and recovery](goals/G06-settings-and-authoring.md) | G00–G05 | In implementation |
-| G07 | [File Search, previews, filters, and window modes](goals/G07-file-search.md) | G00–G05 | Not started |
+| G07 | [File Search, previews, filters, and window modes](goals/G07-file-search.md) | G00–G05 | In implementation |
 | G08 | [Text, binary, and folder Diff with all child flows](goals/G08-diff.md) | G00–G05; G07 for search handoffs | Not started |
 | G09 | [Batch Rename and Search & Replace](goals/G09-rename-and-replace.md) | G00–G05; shared file contracts | Not started |
 | G10 | [ZIP, duplicate finding, folder size, and file locks](goals/G10-file-utilities.md) | G00–G05; G04 owns Hash Generator | Not started |
-| G11 | [File Operations Center, Downloads Triage, and Explorer Tabs](goals/G11-file-workflows.md) | G00–G05; relevant G07–G10 handoffs | Not started |
+| G11 | [File Operations Center, Downloads Triage, and Explorer Tabs](goals/G11-file-workflows.md) | G00–G05; relevant G07–G10 handoffs | In implementation for Downloads Triage |
 | G12 | [Notes, Markdown Studio, links, export, and printing](goals/G12-notes-and-markdown.md) | G00–G05 | Not started |
 | G13 | [Clipboard history, Clipboard Modify, snippets, and prompts](goals/G13-clipboard-and-snippets.md) | G00–G05 | Not started |
 | G14 | [JSON, XML, Regex, and structured text tooling](goals/G14-structured-text.md) | G00–G05; G13 where clipboard handoffs apply | Not started |

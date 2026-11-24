@@ -1,6 +1,6 @@
 # Hash Generator
 
-G04 owns `hash-generator`. Native egui evidence covers the keyboard route, independent popout, Text calculation, comparison edits, all algorithm options, SHA-1 warnings, Unicode multiline comparison, picker dismissal and empty-path validation. GPUI evidence covers Text, Clipboard and File, both picker owners, streamed progress and live cancellation, compact scrolling, retained Dock and Pop Out, and geometry. `G03-C2B-CLEAN-DRAIN-WINDOWS` also verifies that egui reopened the GPUI-saved popout. Jump Mode, docked accessibility focus, mixed DPI, matched egui Clipboard and remaining provider handoffs stay open. [Validation log](../VALIDATION_LOG.md)
+G04 owns `hash-generator`. Native egui evidence covers the keyboard route, independent popout, Text calculation, comparison edits, all algorithm options, SHA-1 warnings, Unicode multiline comparison, picker dismissal and empty-path validation. GPUI evidence covers Text, Clipboard and File, both picker owners, streamed progress and live cancellation, compact scrolling, retained Dock and Pop Out, geometry, main and dropdown Jump, and the checked File Search and Downloads file handoffs. `G03-C2B-CLEAN-DRAIN-WINDOWS` verifies that egui reopened the GPUI-saved popout. Windows accessibility focus, global invocation, mixed DPI and matched egui Clipboard stay open. [Validation log](../VALIDATION_LOG.md)
 
 ## Routes and host
 

@@ -180,6 +180,17 @@ impl Stamp {
 pub(super) enum AssociationKind {
     Folder,
     Bookmark,
+    Web(super::search_providers::WebProvider),
+}
+
+impl AssociationKind {
+    pub(super) fn from_provider_name(name: &str) -> Option<Self> {
+        match name {
+            "folders" => Some(Self::Folder),
+            "bookmarks" => Some(Self::Bookmark),
+            _ => super::search_providers::WebProvider::from_name(name).map(Self::Web),
+        }
+    }
 }
 
 pub(super) fn provider_association(
@@ -196,11 +207,7 @@ pub(super) fn provider_association_by_name(
     name: &str,
     action: &Action,
 ) -> Option<(AssociationKind, ExternalCommand)> {
-    let kind = match name {
-        "folders" => AssociationKind::Folder,
-        "bookmarks" => AssociationKind::Bookmark,
-        _ => return None,
-    };
+    let kind = AssociationKind::from_provider_name(name)?;
     association_command(kind, action).map(|command| (kind, command))
 }
 
@@ -218,7 +225,7 @@ fn association_command(kind: AssociationKind, action: &Action) -> Option<Externa
     }
     let valid = match kind {
         AssociationKind::Folder => ordinary_path(&command.target, false),
-        AssociationKind::Bookmark => {
+        AssociationKind::Bookmark | AssociationKind::Web(_) => {
             let raw = command.target.as_str();
             let authority = raw
                 .get(..7)
@@ -236,6 +243,7 @@ fn association_command(kind: AssociationKind, action: &Action) -> Option<Externa
                 })
                 && url::Url::parse(raw).is_ok_and(|url| {
                     matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+                        && (!matches!(kind, AssociationKind::Web(_)) || url.scheme() == "https")
                 })
         }
     };
@@ -246,7 +254,13 @@ fn checked_association(
     kind: AssociationKind,
     action: &Action,
     command: &ExternalCommand,
+    query: &str,
 ) -> anyhow::Result<()> {
+    if let AssociationKind::Web(provider) = kind {
+        return checked_web_association_with(provider, action, command, query, |target| {
+            multi_launcher::actions::exec::launch_association(target)
+        });
+    }
     checked_association_with(
         kind,
         action,
@@ -279,6 +293,7 @@ fn checked_association_with(
                 action,
             )?
         }
+        AssociationKind::Web(_) => false,
     };
     anyhow::ensure!(current, "The Search result is stale; refresh and try again");
     if kind == AssociationKind::Folder {
@@ -287,6 +302,24 @@ fn checked_association_with(
             "The folder is unavailable"
         );
     }
+    launch(&command.target)
+}
+
+fn checked_web_association_with(
+    provider: super::search_providers::WebProvider,
+    action: &Action,
+    command: &ExternalCommand,
+    query: &str,
+    launch: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        association_command(AssociationKind::Web(provider), action).as_ref() == Some(command),
+        "Invalid provider target"
+    );
+    anyhow::ensure!(
+        provider.is_current(query, action, None, None),
+        "The Search result is stale; refresh and try again"
+    );
     launch(&command.target)
 }
 
@@ -373,6 +406,7 @@ impl ExternalLaunch {
 struct Host {
     settings: Settings,
     association: Option<AssociationKind>,
+    query: String,
 }
 impl ExternalCommandHost for Host {
     fn execute_external_command(
@@ -381,7 +415,7 @@ impl ExternalCommandHost for Host {
         action: &Action,
     ) -> anyhow::Result<()> {
         if let Some(kind) = self.association {
-            return checked_association(kind, action, command);
+            return checked_association(kind, action, command, &self.query);
         }
         multi_launcher::actions::exec::launch(&command.target, command.args.as_deref())
     }
@@ -400,6 +434,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
     let mut host = Host {
         settings: request.settings.clone(),
         association: request.association,
+        query: request.query.clone(),
     };
     let outcome = CommandBus.dispatch_external(
         &request.command,
@@ -813,6 +848,38 @@ mod tests {
                 association_command(AssociationKind::Bookmark, &action).is_none(),
                 "{invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn web_association_requires_exact_current_stock_row_and_forwards_raw_url() {
+        use super::{checked_web_association_with, provider_association, AssociationKind};
+        use crate::gpui_frontend::{LauncherResultOrigin, search_providers::WebProvider};
+        for (provider, name, query) in [
+            (WebProvider::Reddit, "reddit", "red snow & ice"),
+            (WebProvider::Runescape, "runescape_search", "rs dragon sword"),
+            (WebProvider::Runescape, "runescape_search", "osrs dragon sword"),
+            (WebProvider::Weather, "weather", "weather New York"),
+            (WebProvider::Wikipedia, "wikipedia", "wiki space & time"),
+            (WebProvider::Youtube, "youtube", "yt rust language"),
+        ] {
+            let action = provider.plugin().search(query).remove(0);
+            let origin = LauncherResultOrigin::Provider(name.into());
+            let (kind, command) = provider_association(&origin, &action).unwrap();
+            assert_eq!(kind, AssociationKind::Web(provider));
+            let mut forwarded = None;
+            checked_web_association_with(provider, &action, &command, query, |target| {
+                forwarded = Some(target.to_owned()); Ok(())
+            }).unwrap();
+            assert_eq!(forwarded.as_deref(), Some(action.action.as_str()));
+            assert!(checked_web_association_with(provider, &action, &command, "other query", |_| panic!("stale row launched")).is_err());
+            let mut modified = action.clone();
+            modified.desc.push('!');
+            assert!(checked_web_association_with(provider, &modified, &command, query, |_| panic!("modified row launched")).is_err());
+            modified = action.clone();
+            modified.args = Some(String::new());
+            assert!(provider_association(&origin, &modified).is_none());
+            assert!(provider_association(&LauncherResultOrigin::Saved, &action).is_none());
         }
     }
 

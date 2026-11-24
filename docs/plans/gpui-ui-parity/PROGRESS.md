@@ -19,7 +19,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Trace the committed GPUI accessibility focus through Windows on the current Hash hosts. Native egui Clipboard and mixed DPI remain open for Hash. The matched F2 probe left native delivery and foreground restoration open. |
+| Current next action | Observe the G04 Windows adapter boundary with the owned focus fixture. Then run the focused batch and Windows replay for the checked G05 stock web provider source. Native egui Clipboard and mixed DPI remain open. G01 still needs a known-duration F2 replay with an owned external foreground target. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

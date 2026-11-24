@@ -170,7 +170,7 @@ impl RootWindow {
         else {
             return;
         };
-        if matches!(&action.origin, LauncherResultOrigin::Provider(name) if name == "folders" || name == "bookmarks")
+        if matches!(&action.origin, LauncherResultOrigin::Provider(name) if super::external_launch::AssociationKind::from_provider_name(name).is_some())
         {
             return;
         }

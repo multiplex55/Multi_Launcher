@@ -82,7 +82,9 @@ impl InstalledLauncherProviders {
         Self::with_providers(None, None)
     }
 
-    pub(super) fn plugins(&self) -> impl Iterator<Item = &dyn multi_launcher::plugin::Plugin> {
+    pub(super) fn plugins<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = &'a dyn multi_launcher::plugin::Plugin> {
         [
             Some(&self.hash_generator as &dyn multi_launcher::plugin::Plugin),
             Some(&self.settings as &dyn multi_launcher::plugin::Plugin),
@@ -100,6 +102,11 @@ impl InstalledLauncherProviders {
         ]
         .into_iter()
         .flatten()
+        .chain(
+            WebProvider::ALL
+                .into_iter()
+                .map(|provider| -> &'a dyn multi_launcher::plugin::Plugin { provider.plugin() }),
+        )
     }
 
     pub(super) fn current_search_aliases(
@@ -156,6 +163,58 @@ impl InstalledLauncherProviders {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WebProvider {
+    Reddit,
+    Runescape,
+    Weather,
+    Wikipedia,
+    Youtube,
+}
+
+impl WebProvider {
+    const ALL: [Self; 5] = [
+        Self::Reddit,
+        Self::Runescape,
+        Self::Weather,
+        Self::Wikipedia,
+        Self::Youtube,
+    ];
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "reddit" => Some(Self::Reddit),
+            "runescape_search" => Some(Self::Runescape),
+            "weather" => Some(Self::Weather),
+            "wikipedia" => Some(Self::Wikipedia),
+            "youtube" => Some(Self::Youtube),
+            _ => None,
+        }
+    }
+
+    pub(super) fn plugin(self) -> &'static dyn multi_launcher::plugin::Plugin {
+        match self {
+            Self::Reddit => &multi_launcher::plugins::reddit::RedditPlugin,
+            Self::Runescape => &multi_launcher::plugins::runescape::RunescapeSearchPlugin,
+            Self::Weather => &multi_launcher::plugins::weather::WeatherPlugin,
+            Self::Wikipedia => &multi_launcher::plugins::wikipedia::WikipediaPlugin,
+            Self::Youtube => &multi_launcher::plugins::youtube::YoutubePlugin,
+        }
+    }
+
+    pub fn is_current(
+        self,
+        query: &str,
+        action: &Action,
+        enabled: Option<&HashSet<String>>,
+        caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ) -> bool {
+        multi_launcher::plugin::search_filtered_plugins([self.plugin()], query, enabled, caps)
+            .iter()
+            .any(|row| row == action)
+    }
+}
+
 fn admitted_commands(provider: &dyn multi_launcher::plugin::Plugin) -> Vec<Action> {
     supported_launcher_search_actions(provider.commands())
         .into_iter()
@@ -175,6 +234,25 @@ mod tests {
         plugin::{Plugin, search_filtered_plugins_with_origin},
     };
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn installed_web_providers_use_shared_search_and_capability_gates() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        for (name, query) in [("reddit", "red cat"), ("runescape_search", "rs cat"),
+            ("runescape_search", "osrs cat"), ("weather", "weather London"),
+            ("wikipedia", "wiki cat"), ("youtube", "yt cat")] {
+            let enabled = HashSet::from([name.to_owned()]);
+            let caps = HashMap::from([(name.to_owned(), vec!["search".to_owned()])]);
+            let rows = search_filtered_plugins_with_origin(providers.plugins(), query, Some(&enabled), Some(&caps));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, name);
+            assert!(super::WebProvider::from_name(name).unwrap().is_current(query, &rows[0].1, Some(&enabled), Some(&caps)));
+            assert!(!super::WebProvider::from_name(name).unwrap().is_current(query, &rows[0].1, Some(&HashSet::new()), Some(&caps)));
+            let disabled = HashMap::from([(name.to_owned(), Vec::new())]);
+            assert!(!super::WebProvider::from_name(name).unwrap().is_current(query, &rows[0].1, Some(&enabled), Some(&disabled)));
+        }
+        assert!(super::WebProvider::from_name("web_search").is_none());
+    }
 
     struct Fixture {
         name: &'static str,
