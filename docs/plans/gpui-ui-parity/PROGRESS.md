@@ -1,5 +1,9 @@
 # Progress
 
+## Current checkpoint
+
+G06 compact Favorites and saved pin source has passed the scoped `fast-dev` app and test checks. The combined focused Nextest run and Windows replay are pending. There are 219 source-backed GUI records, with zero fully accepted GPUI product GUIs. Runtime inventory closure, wider Favorites providers, the pin toolbar, and the other G05 and G06 criteria remain open. [Compact Favorites checkpoint](CHECKPOINTS.md#g06-compact-favorites-and-saved-pin)
+
 ## Execution kickoff
 
 | Measure | Current value |

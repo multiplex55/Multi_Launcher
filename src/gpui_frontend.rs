@@ -11428,6 +11428,7 @@ pub(crate) fn run_foundation_window(
     hotkey: Hotkey,
     launcher_hotkey_display: String,
     configured_help_hotkey: Option<String>,
+    favorites_pinned: bool,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_startup: LauncherSearchStartup,
@@ -11677,7 +11678,7 @@ pub(crate) fn run_foundation_window(
                 action_sheet_serial: 0,
                 context_favorite_popup: None,
                 context_favorite_serial: 0,
-                result_favorites: ResultFavorites::default(),
+                result_favorites: ResultFavorites::new(favorites_pinned),
                 launcher_results_scroll: ScrollHandle::new(),
                 query_history:
                     QueryHistoryNavigator::default(),
@@ -12116,6 +12117,9 @@ pub(crate) fn run_foundation_window(
                 root.native_window = native_window;
                 root.root_window = Some(root_window);
                 root.query.focus_handle(cx).focus(window, cx);
+                if !cfg!(windows) || native_window.is_some() {
+                    root.mount_pinned_favorites(window, cx);
+                }
                 Ok::<_, String>(native_window)
             }) {
                 Ok(Ok(native_window)) if !cfg!(windows) || native_window.is_some() => native_window,

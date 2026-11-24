@@ -25,6 +25,7 @@ pub(super) const FAVORITES_WRITE_PENDING: &str =
     "Wait for the Favorites write to finish before closing Multi Launcher.";
 const FAVORITES_RESTART_WRITE_PENDING: &str =
     "Wait for the Favorites write to finish before switching to egui.";
+const PINNED_FAVORITES_RELOAD: &str = "Run fav in Search or restart Multi Launcher to reload.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Request {
@@ -44,10 +45,18 @@ pub(super) struct ResultFavorites {
     pending: Option<Request>,
     pending_draft: Option<OpenDraft>,
     loaded: bool,
+    pinned: bool,
     sequence: u64,
 }
 
 impl ResultFavorites {
+    pub(super) fn new(pinned: bool) -> Self {
+        Self {
+            pinned,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn is_open(&self) -> bool {
         self.owner.is_some()
     }
@@ -70,6 +79,35 @@ impl ResultFavorites {
         } else {
             None
         }
+    }
+
+    fn should_mount_pinned(&self) -> bool {
+        self.pinned && !self.is_open() && self.pending.is_none()
+    }
+
+    fn dismiss(&mut self) -> Dismiss {
+        if self.write_pending() {
+            Dismiss::Blocked
+        } else if self.cancel_draft() {
+            Dismiss::Canceled
+        } else if self.pinned {
+            Dismiss::Blocked
+        } else {
+            Dismiss::Close
+        }
+    }
+
+    fn begin_load(&mut self, action: Option<OpenDraft>) -> Request {
+        self.status = Some("Loading Favorites…".to_owned());
+        self.loaded = false;
+        self.pending_draft = action;
+        let request = Request::Load(self.next());
+        self.pending = Some(request);
+        request
+    }
+
+    fn should_reload_browse(&self) -> bool {
+        self.pinned && !self.loaded && self.draft.is_none() && self.pending.is_none()
     }
 
     fn next(&mut self) -> u64 {
@@ -135,20 +173,36 @@ impl ResultFavorites {
                     WriteKind::Save { .. } => "save",
                     WriteKind::Remove => "remove",
                 };
-                if matches!(error, PrefilledFavoriteSaveError::Store(_)) {
-                    self.loaded = false;
-                    self.status = Some(format!(
-                        "Could not {verb} Favorite: {error}. Close and reopen Favorites to reload."
-                    ));
-                } else if matches!(error, PrefilledFavoriteSaveError::StaleTarget) {
-                    self.status = Some(match operation {
+                let cancel = match operation {
+                    WriteKind::Save { .. } => "Cancel the draft. ",
+                    WriteKind::Remove => "",
+                };
+                self.status = Some(match error {
+                    PrefilledFavoriteSaveError::Store(_) if self.pinned => {
+                        self.loaded = false;
+                        format!("Could not {verb} Favorite: {error}. {cancel}{PINNED_FAVORITES_RELOAD}")
+                    }
+                    PrefilledFavoriteSaveError::Store(_) => {
+                        self.loaded = false;
+                        format!("Could not {verb} Favorite: {error}. Close and reopen Favorites to reload.")
+                    }
+                    PrefilledFavoriteSaveError::StaleTarget if self.pinned => {
+                        self.loaded = false;
+                        let reason = match operation {
+                            WriteKind::Save { .. } => "Favorites changed while this draft was open.",
+                            WriteKind::Remove => "Favorites changed before this row could be removed.",
+                        };
+                        format!("{reason} {cancel}{PINNED_FAVORITES_RELOAD}")
+                    }
+                    PrefilledFavoriteSaveError::StaleTarget => match operation {
                         WriteKind::Remove => "Favorites changed before this row could be removed. Close and reopen Favorites to reload.".to_owned(),
                         WriteKind::Save { prefilled: false } => "Favorites changed while this draft was open. Reopen it before saving.".to_owned(),
                         WriteKind::Save { prefilled: true } => format!("Could not save Favorite: {error}"),
-                    });
-                } else {
-                    self.status = Some(format!("Could not {verb} Favorite: {error}"));
-                }
+                    },
+                    PrefilledFavoriteSaveError::InvalidDraft => {
+                        format!("Could not {verb} Favorite: {error}")
+                    }
+                });
             }
         }
         true
@@ -168,6 +222,13 @@ impl ResultFavorites {
         }
         had_draft || was_prefilling
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Dismiss {
+    Blocked,
+    Canceled,
+    Close,
 }
 
 #[derive(Clone, Copy)]
@@ -298,6 +359,10 @@ impl FavoriteField {
 }
 
 impl RootWindow {
+    fn favorites_scroll_item(&self) -> usize {
+        self.quick_help_scroll_item() + usize::from(self.quick_help.open)
+    }
+
     pub(super) fn open_result_favorites(
         &mut self,
         action: Action,
@@ -308,6 +373,7 @@ impl RootWindow {
         self.open_favorites(
             Some(OpenDraft::Prefilled(action)),
             previous_focus,
+            false,
             window,
             cx,
         );
@@ -319,7 +385,7 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_favorites(None, previous_focus, window, cx);
+        self.open_favorites(None, previous_focus, false, window, cx);
     }
 
     pub(super) fn open_favorites_named(
@@ -329,22 +395,36 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_favorites(Some(OpenDraft::Named(label)), previous_focus, window, cx);
+        self.open_favorites(
+            Some(OpenDraft::Named(label)),
+            previous_focus,
+            false,
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn mount_pinned_favorites(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.result_favorites.should_mount_pinned() {
+            return;
+        }
+        self.open_favorites(None, None, true, window, cx);
     }
 
     fn open_favorites(
         &mut self,
         action: Option<OpenDraft>,
         previous_focus: Option<FocusHandle>,
+        passive: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.restart_admission.is_fenced() {
             return;
         }
-        let scroll_item = self.quick_help_scroll_item() + usize::from(self.quick_help.open);
+        let scroll_item = self.favorites_scroll_item();
         let state = &mut self.result_favorites;
-        if action.is_none() && state.is_open() {
+        if action.is_none() && state.is_open() && !state.should_reload_browse() {
             state.return_focus = previous_focus;
             state.return_offset = Some(self.root_scroll.offset());
             self.root_scroll.scroll_to_top_of_item(scroll_item);
@@ -376,20 +456,20 @@ impl RootWindow {
             cx.notify();
             return;
         }
-        let owner = cx.focus_handle();
+        let owner = state.owner.clone().unwrap_or_else(|| cx.focus_handle());
         state.owner = Some(owner.clone());
         state.browse_scroll.set_offset(point(px(0.0), px(0.0)));
-        state.return_focus = previous_focus;
-        state.return_offset = Some(self.root_scroll.offset());
-        state.status = Some("Loading Favorites…".to_owned());
-        state.loaded = false;
-        state.pending_draft = action;
-        let request = Request::Load(state.next());
-        state.pending = Some(request);
-        self.fresh_search_enter = None;
-        self.retire_search_jump_mode();
-        self.root_scroll.scroll_to_top_of_item(scroll_item);
-        owner.focus(window, cx);
+        if !passive {
+            state.return_focus = previous_focus;
+            state.return_offset = Some(self.root_scroll.offset());
+        }
+        let request = state.begin_load(action);
+        if !passive {
+            self.fresh_search_enter = None;
+            self.retire_search_jump_mode();
+            self.root_scroll.scroll_to_top_of_item(scroll_item);
+            owner.focus(window, cx);
+        }
 
         let task = cx
             .background_executor()
@@ -444,7 +524,16 @@ impl RootWindow {
                         state.rows = rows.into();
                         state.status = None;
                     }
+                    Err(error) if state.pinned => {
+                        state.status = Some(format!(
+                            "Could not load Favorites: {error}. {PINNED_FAVORITES_RELOAD}"
+                        ));
+                    }
                     Err(error) => state.status = Some(format!("Could not load Favorites: {error}")),
+                }
+                if window.is_window_active() && state.owns_focus(window, cx) {
+                    root.root_scroll
+                        .scroll_to_top_of_item(root.favorites_scroll_item());
                 }
                 cx.notify();
             });
@@ -499,6 +588,8 @@ impl RootWindow {
         if let Some(owner) = &state.owner {
             owner.focus(window, cx);
         }
+        self.root_scroll
+            .scroll_to_top_of_item(self.favorites_scroll_item());
         cx.notify();
     }
 
@@ -673,10 +764,11 @@ impl RootWindow {
 
     pub(super) fn dismiss_result_favorites(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = &mut self.result_favorites;
-        if state.write_pending() {
+        let dismissal = state.dismiss();
+        if dismissal == Dismiss::Blocked {
             return;
         }
-        if state.cancel_draft() {
+        if dismissal == Dismiss::Canceled {
             if let Some(owner) = &state.owner {
                 owner.focus(window, cx);
             }
@@ -882,7 +974,8 @@ impl RenderOnce for FavoritesPanel {
             .child(
                 Label::new("Favorites")
                     .id("result-favorites-title")
-                    .text_size(px(metrics.heading_text_size)),
+                    .text_size(px(metrics.heading_text_size))
+                    .line_height(px(metrics.heading_text_size.max(metrics.line_height))),
             );
         if let Some(draft) = &state.draft {
             let mut body = div()
@@ -893,6 +986,7 @@ impl RenderOnce for FavoritesPanel {
                 .w_full()
                 .max_h(px(body_height))
                 .overflow_y_scroll()
+                .occlude()
                 .track_scroll(&draft.scroll)
                 .children(state.status.as_ref().map(|status| {
                     Label::new(status.clone())
@@ -995,6 +1089,7 @@ impl RenderOnce for FavoritesPanel {
                 .w_full()
                 .max_h(px(body_height))
                 .overflow_y_scroll()
+                .occlude()
                 .track_scroll(&state.browse_scroll)
                 .children(state.status.as_ref().map(|status| {
                     Label::new(status.clone())
@@ -1221,5 +1316,33 @@ mod tests {
         state.pending = Some(second);
         assert!(!state.consume(first));
         assert!(state.consume(second));
+    }
+
+    #[test]
+    fn pinned_mount_dismiss_and_recovery_share_state_transitions() {
+        use super::{Dismiss, OpenDraft, PrefilledFavoriteSaveError, WriteKind};
+        let mut state = ResultFavorites::new(true);
+        assert!(state.should_mount_pinned());
+        let first = state.begin_load(None);
+        assert!(!state.should_mount_pinned());
+        assert_eq!(state.dismiss(), Dismiss::Blocked);
+        assert!(state.consume(first));
+        state.loaded = true;
+        state.pending_draft = Some(OpenDraft::Named("draft".into()));
+        assert_eq!(state.dismiss(), Dismiss::Canceled);
+        assert_eq!(state.dismiss(), Dismiss::Blocked);
+        state.pending = Some(Request::Write(10));
+        assert_eq!(state.dismiss(), Dismiss::Blocked);
+        assert!(state.finish_write(
+            Request::Write(10),
+            WriteKind::Remove,
+            Err(PrefilledFavoriteSaveError::StaleTarget),
+        ));
+        assert!(state.should_reload_browse());
+        assert!(state.status.as_deref().unwrap().contains("Run fav in Search"));
+        let reload = state.begin_load(None);
+        assert!(!state.should_reload_browse());
+        assert!(!state.consume(first));
+        assert!(state.consume(reload));
     }
 }

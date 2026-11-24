@@ -4861,6 +4861,7 @@ fn main() -> anyhow::Result<()> {
             launcher_hotkey,
             launcher_hotkey_display,
             settings.help_hotkey.clone(),
+            settings.pinned_panels.contains(&multi_launcher::gui::Panel::FavDialog),
             settings.enabled_plugins.clone(),
             settings.enabled_capabilities.clone(),
             search_startup,
