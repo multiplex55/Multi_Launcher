@@ -11,7 +11,7 @@ pub use model::*;
 pub(crate) use store::LauncherClosePreferences;
 pub use store::{
     SearchCapabilityError, SearchCapabilitySaveAcknowledgement, SearchCapabilitySaveRequest,
-    SearchCapabilitySnapshot, provider_search_capability_enabled,
+    SearchCapabilitySnapshot, provider_capability_enabled, provider_search_capability_enabled,
     SettingsBooleanPreference, SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError,
     SettingsBooleanSaveRequest, SettingsBooleanSaveToken,
 };

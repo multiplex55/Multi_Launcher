@@ -1,7 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugin::PluginManager;
-use crate::settings::Settings;
+use crate::settings::{Settings, provider_capability_enabled as capability_enabled};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -391,20 +391,6 @@ fn set_plugin_enabled(enabled_plugins: &mut Vec<String>, name: &str, enabled: bo
     } else {
         enabled_plugins.retain(|entry| entry != name);
     }
-}
-
-fn capability_enabled(
-    capabilities: Option<&HashMap<String, Vec<String>>>,
-    name: &str,
-    capability: &str,
-) -> bool {
-    if capability == "search" {
-        return crate::settings::provider_search_capability_enabled(capabilities, name);
-    }
-    capabilities.and_then(|map| map.get(name)).map_or_else(
-        || !(name == "folders" && capability == "show_full_path"),
-        |entry| entry.iter().any(|value| value == capability),
-    )
 }
 
 fn set_capability(

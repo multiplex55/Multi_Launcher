@@ -6,6 +6,7 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod file_search;
+mod plugin_editor;
 #[cfg(windows)]
 mod downloads_triage;
 mod favorites;
@@ -834,11 +835,18 @@ impl RenderOnce for LauncherMenuBar {
                 let editor_context = file_action_context.clone();
                 menu.submenu("Apps", window, cx, move |menu, _, _| {
                     let editor_context = editor_context.clone();
+                    let plugin_context = editor_context.clone();
                     menu.item(
                         PopupMenuItem::new("Edit Apps")
                             .action(Box::new(OpenAppEditor))
                             .on_click(move |_, window, app| {
                                 editor_context.dispatch_action(&OpenAppEditor, window, app);
+                            }),
+                    ).item(
+                        PopupMenuItem::new("Edit Plugins")
+                            .action(Box::new(OpenPluginEditor))
+                            .on_click(move |_, window, app| {
+                                plugin_context.dispatch_action(&OpenPluginEditor, window, app);
                             }),
                     )
                 })
@@ -2131,6 +2139,7 @@ gpui_kit::actions!([
     ToggleCoordinateHudProbe,
     ToggleSettings,
     OpenAppEditor,
+    OpenPluginEditor,
     CloseApplication,
     CommandList,
     QuickHelp,
@@ -2314,6 +2323,7 @@ struct RootWindow {
     search_completion_focus_revision: Option<u64>,
     settings_editor: SettingsEditorState,
     app_editor: add_action::AppEditorState,
+    plugin_editor: Option<Entity<plugin_editor::PluginEditorView>>,
     command_help: CommandHelpState,
     command_help_filter: Entity<InputState>,
     quick_help: QuickHelpState,
@@ -3210,6 +3220,53 @@ fn physical_keypad_receipt_direction(receipt: PhysicalKeydown) -> Option<QuerySe
     }
 }
 
+#[cfg(windows)]
+fn intercept_root_pane_escape(
+    root: &WeakEntity<RootWindow>,
+    receipt: PhysicalKeydown,
+    event: &gpui_kit::KeystrokeEvent,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let plugin_editor = context_stack_has_primary(&event.context_stack, "PluginEditorPane");
+    if event.keystroke.key != "escape"
+        || receipt.virtual_key != 0x1b
+        || receipt.modifiers.modified()
+        || (!plugin_editor && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
+    {
+        return false;
+    }
+    let Some(root) = root.upgrade() else {
+        return false;
+    };
+    let root = root.read(cx);
+    if !root.root_visibility.active.load(Ordering::Acquire)
+        || !root.root_visibility.visible.load(Ordering::Acquire)
+        || !root
+            .root_window
+            .is_some_and(|handle| handle.window_id() == window.window_handle().window_id())
+        || !root.native_window.is_some_and(|native| {
+            receipt.hwnd == native.identity.hwnd
+                && native_window_is_valid(native)
+                && current_foreground_identity() == Some(native.identity)
+        })
+    {
+        return false;
+    }
+    if plugin_editor {
+        let view = root.plugin_editor.clone();
+        return view.is_some_and(|view| {
+            view.update(cx, |view, cx| view.handle_escape(window, cx, Some(receipt.held)))
+        });
+    }
+    let view = root.file_search.clone();
+    view.is_some_and(|view| {
+        view.update(cx, |view, cx| {
+            view.handle_escape(window, cx, Some(receipt.held))
+        })
+    })
+}
+
 fn root_tab_traversed_to_search(
     key: &str,
     modifiers: Modifiers,
@@ -3231,6 +3288,7 @@ fn root_tab_traversed_to_search(
         && !context_stack_has_primary(context_stack, "ToastLogViewer")
         && !context_stack_has_primary(context_stack, "FileSearchPane")
         && !context_stack_has_primary(context_stack, "DownloadsTriagePane")
+        && !context_stack_has_primary(context_stack, "PluginEditorPane")
         && !context_stack_has_primary(context_stack, "PopupMenu")
 }
 
@@ -3383,6 +3441,7 @@ enum RootCloseBlocker {
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
+    PluginPreferenceSave,
 }
 
 fn root_close_blocker(
@@ -4308,6 +4367,7 @@ struct RestartDrafts {
     show_examples: bool,
     file_search_open: bool,
     downloads_triage_open: bool,
+    plugin_editor_open: bool,
 }
 
 struct RestartSnapshot {
@@ -4513,6 +4573,9 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.downloads_triage_open {
         names.push("Downloads Triage view and results");
     }
+    if drafts.plugin_editor_open {
+        names.push("Plugin Editor filter");
+    }
     if names.is_empty() {
         return "Restart Multi Launcher in the egui fallback? The GPUI windows will close."
             .to_owned();
@@ -4646,7 +4709,7 @@ impl RootWindow {
         {
             return;
         }
-        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| view.read(cx).open) || self.downloads_triage_open(cx) {
+        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| view.read(cx).open) || self.downloads_triage_open(cx) || self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open) {
             self.root_scroll
                 .scroll_to_top_of_item(self.docked_hash_scroll_item());
         } else {
@@ -5236,6 +5299,9 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
+            return Err("A plugin Search capability save is still pending.".to_owned());
+        }
         if let Some(blocker) = self.app_editor.restart_blocker(cx) {
             return Err(blocker.to_owned());
         }
@@ -5442,6 +5508,7 @@ impl RootWindow {
                 show_examples: self.command_help.show_examples,
                 file_search_open: self.file_search.as_ref().is_some_and(|view| view.read(cx).open),
                 downloads_triage_open: self.downloads_triage_open(cx),
+                plugin_editor_open: self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open),
             },
             hash_work,
             child_windows,
@@ -5945,6 +6012,7 @@ impl RootWindow {
             || self.result_favorites.owns_focus(window, cx)
             || self.file_search.as_ref().is_some_and(|view| view.read(cx).owns_focus(window, cx))
             || self.downloads_triage_owns_focus(window, cx)
+            || self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).owns_focus(window, cx))
         {
             return false;
         }
@@ -7314,6 +7382,28 @@ impl RootWindow {
         let index = self.file_search_scroll_item() + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open));
         self.root_scroll.scroll_to_top_of_item(index);
         self.query_history.reset();
+        cx.notify();
+    }
+
+    fn open_plugin_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.restart_admission.is_fenced() { return; }
+        let view = if let Some(view) = &self.plugin_editor { view.clone() } else {
+            let root = cx.entity().downgrade();
+            let view = cx.new(|cx| plugin_editor::PluginEditorView::new(window, cx, root));
+            self.plugin_editor = Some(view.clone());
+            view
+        };
+        let origin = self.root_menu_previous_focus.clone().filter(|focus| self.focus_handle.contains(focus, window));
+        let scroll = self.root_scroll.offset();
+        view.update(cx, |view, cx| {
+            view.show(origin, scroll, window, cx);
+            let session = view.session();
+            view.focus_filter(session, window, cx);
+        });
+        let index = self.file_search_scroll_item()
+            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.downloads_triage_open(cx));
+        self.root_scroll.scroll_to_top_of_item(index);
         cx.notify();
     }
 
@@ -9088,6 +9178,7 @@ impl RootWindow {
         let blocker = self.current_root_close_blocker(
             hash_clipboard_close_message(self.hash_clipboard_pending.kind()),
             self.hash_file_picker_pending.load(Ordering::Acquire),
+            cx,
         );
         match blocker {
             Some(RootCloseBlocker::HashClipboard(message)) => {
@@ -9110,6 +9201,9 @@ impl RootWindow {
             }
             Some(RootCloseBlocker::ExternalLaunch) => {
                 self.restart_status = Some(external_launch::CLOSE_STATUS.to_owned());
+            }
+            Some(RootCloseBlocker::PluginPreferenceSave) => {
+                self.restart_status = Some("Wait for the plugin Search capability save.".to_owned());
             }
             Some(RootCloseBlocker::BooleanPreferenceSave) => {
                 if !self.prepare_boolean_preference_close(cx) {
@@ -9134,7 +9228,11 @@ impl RootWindow {
         &self,
         clipboard_message: Option<&'static str>,
         file_picker_pending: bool,
+        cx: &App,
     ) -> Option<RootCloseBlocker> {
+        if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
+            return Some(RootCloseBlocker::PluginPreferenceSave);
+        }
         self.external_launch
             .is_pending()
             .then_some(RootCloseBlocker::ExternalLaunch)
@@ -9699,7 +9797,8 @@ impl Render for RootWindow {
                     && docked_hash.is_none()
                     && app_editor_panel.is_none()
                     && self.file_search.as_ref().is_none_or(|view| !view.read(cx).open)
-                    && !self.downloads_triage_open(cx),
+                    && !self.downloads_triage_open(cx)
+                    && self.plugin_editor.as_ref().is_none_or(|view| !view.read(cx).open),
                 |this| {
                     // Center the ordinary root only when its content fits.
                     this.my_auto()
@@ -9825,6 +9924,12 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &ToggleSettings, window, cx| {
                 this.toggle_settings_editor(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenPluginEditor, window, cx| {
+                if !this.restart_admission.is_fenced() {
+                    if this.file_menu_open { this.root_menu_action_routed_focus = true; }
+                    this.open_plugin_editor(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenAppEditor, window, cx| {
                 if !this.restart_admission.is_fenced() {
                     let origin = this.root_menu_previous_focus.clone()
@@ -9913,6 +10018,9 @@ impl Render for RootWindow {
         }
         #[cfg(windows)]
         if let Some(view) = self.downloads_triage.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.plugin_editor.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // The absolute Search observer still has a layout slot, so keep it after the pane anchors.
@@ -11919,6 +12027,7 @@ pub(crate) fn run_foundation_window(
                 search_completion_focus_revision: None,
                 settings_editor: settings_editor_for_root,
                 app_editor: add_action::AppEditorState::new(cx),
+                plugin_editor: None,
                 command_help: command_help_for_root,
                 command_help_filter,
                 quick_help: QuickHelpState::default(),
@@ -12043,7 +12152,7 @@ pub(crate) fn run_foundation_window(
                         let Some(receipt) = receipt else {
                             return;
                         };
-                        if file_search::intercept_escape(&root, receipt, event, window, cx) {
+                        if intercept_root_pane_escape(&root, receipt, event, window, cx) {
                             cx.stop_propagation();
                             return;
                         }
@@ -12311,14 +12420,21 @@ pub(crate) fn run_foundation_window(
                 let clipboard_message =
                     hash_clipboard_close_message(clipboard_pending_for_root_close.kind());
                 let picker_pending = picker_pending_for_root_close.load(Ordering::Acquire);
-                let Ok(blocker) = root_for_window_close.update(app, |root, _| {
+                let Ok(blocker) = root_for_window_close.update(app, |root, cx| {
                     root.retire_context_favorite();
-                    root.current_root_close_blocker(clipboard_message, picker_pending)
+                    root.current_root_close_blocker(clipboard_message, picker_pending, cx)
                 }) else {
                     return false;
                 };
                 match blocker {
                     None => return true,
+                    Some(RootCloseBlocker::PluginPreferenceSave) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status = Some("Wait for the plugin Search capability save.".to_owned());
+                            cx.notify();
+                        });
+                        false
+                    }
                     Some(RootCloseBlocker::BooleanPreferenceSave) => {
                         let close_now = root_for_window_close
                             .update(app, |root, cx| {
@@ -15558,6 +15674,13 @@ mod tests {
             &command_help,
             true,
             false,
+        ));
+        let plugin_editor = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("PluginEditorPane").expect("valid plugin editor context"),
+        ];
+        assert!(!root_tab_traversed_to_search(
+            "tab", Modifiers::default(), true, &plugin_editor, true, false,
         ));
         assert!(command_help_escape_capture_should_close(&command_help, true));
         assert!(!command_help_escape_capture_should_close(&command_help, false));

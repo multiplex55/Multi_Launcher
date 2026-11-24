@@ -13,13 +13,13 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 205 Specified, 13 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 204 Specified, 14 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add the real GPUI Plugin Editor route and checked Search capability controls for the admitted providers. The web provider packet passed scoped tests and matched Windows replay. Fresh Windows SDK queries verified Hash editor native focus in both hosts. Egui Clipboard Load has native evidence, with matched digest and Copy still open alongside mixed DPI. G01 still needs a known-duration F2 replay with an owned external foreground target. |
+| Current next action | Verify the mounted GPUI Plugin Editor Search controls with the combined focused batch and Windows replay. The web provider packet passed scoped tests and matched Windows replay. Fresh Windows SDK queries verified Hash editor native focus in both hosts. Egui Clipboard Load has native evidence, with matched digest and Copy still open alongside mixed DPI. G01 still needs a known-duration F2 replay with an owned external foreground target. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

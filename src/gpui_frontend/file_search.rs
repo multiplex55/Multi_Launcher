@@ -14,46 +14,6 @@ use multi_launcher::file_search::{
 const EVENT_BATCH: usize = 128;
 const MOUNTED_ROWS: usize = 100;
 
-#[cfg(windows)]
-pub(super) fn intercept_escape(
-    root: &WeakEntity<RootWindow>,
-    receipt: PhysicalKeydown,
-    event: &gpui_kit::KeystrokeEvent,
-    window: &mut Window,
-    cx: &mut App,
-) -> bool {
-    if event.keystroke.key != "escape"
-        || receipt.virtual_key != 0x1b
-        || receipt.modifiers.modified()
-        || !context_stack_has_primary(&event.context_stack, "FileSearchPane")
-    {
-        return false;
-    }
-    let Some(root) = root.upgrade() else {
-        return false;
-    };
-    let root = root.read(cx);
-    if !root.root_visibility.active.load(Ordering::Acquire)
-        || !root.root_visibility.visible.load(Ordering::Acquire)
-        || !root
-            .root_window
-            .is_some_and(|handle| handle.window_id() == window.window_handle().window_id())
-        || !root.native_window.is_some_and(|native| {
-            receipt.hwnd == native.identity.hwnd
-                && native_window_is_valid(native)
-                && current_foreground_identity() == Some(native.identity)
-        })
-    {
-        return false;
-    }
-    let view = root.file_search.clone();
-    view.is_some_and(|view| {
-        view.update(cx, |view, cx| {
-            view.handle_escape(window, cx, Some(receipt.held))
-        })
-    })
-}
-
 pub(super) fn current_row(
     open: bool,
     current_generation: u64,
@@ -293,7 +253,7 @@ impl FileSearchView {
             || (self.active.is_some() && self.coordinator.active_status() == SearchStatus::Running)
     }
 
-    fn handle_escape(
+    pub(super) fn handle_escape(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,

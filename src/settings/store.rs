@@ -303,9 +303,21 @@ pub fn provider_search_capability_enabled(
     capabilities: Option<&HashMap<String, Vec<String>>>,
     provider: &str,
 ) -> bool {
+    provider_capability_enabled(capabilities, provider, "search")
+}
+
+/// Resolve an advertised capability against explicit settings and inherited defaults.
+pub fn provider_capability_enabled(
+    capabilities: Option<&HashMap<String, Vec<String>>>,
+    provider: &str,
+    capability: &str,
+) -> bool {
     capabilities
         .and_then(|map| map.get(provider))
-        .is_none_or(|caps| caps.iter().any(|capability| capability == "search"))
+        .map_or_else(
+            || (provider, capability) != ("folders", "show_full_path"),
+            |caps| caps.iter().any(|value| value == capability),
+        )
 }
 
 fn search_capability_snapshot(settings: &Settings, provider: &str) -> SearchCapabilitySnapshot {

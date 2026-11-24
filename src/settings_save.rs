@@ -856,6 +856,34 @@ impl Default for SettingsSaveWorkerRegistry {
 }
 
 impl SettingsSaveWorkerRegistry {
+    /// Read a provider Search capability on the registered Settings worker.
+    pub fn begin_search_capability_read(
+        &self,
+        settings_path: String,
+        provider: String,
+    ) -> Result<Receiver<Result<crate::settings::SearchCapabilitySnapshot, crate::settings::SearchCapabilityError>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        self.spawn(move || {
+            let result = Settings::read_search_capability(settings_path, &provider);
+            let _ = sender.send(result);
+        }).map_err(|error| format!("could not start the Search capability reader: {error}"))?;
+        Ok(receiver)
+    }
+
+    /// Save one provider Search capability on the registered Settings worker.
+    pub fn begin_search_capability_save(
+        &self,
+        settings_path: String,
+        request: crate::settings::SearchCapabilitySaveRequest,
+    ) -> Result<Receiver<Result<crate::settings::SearchCapabilitySaveAcknowledgement, crate::settings::SearchCapabilityError>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        self.spawn(move || {
+            let result = Settings::save_search_capability_checked(settings_path, request);
+            let _ = sender.send(result);
+        }).map_err(|error| format!("could not start the Search capability writer: {error}"))?;
+        Ok(receiver)
+    }
+
     /// Read a Boolean preference on a registered Settings worker.
     /// The caller owns the typed receipt and keeps any admission it needs
     /// until this receiver settles.
