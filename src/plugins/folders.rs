@@ -64,8 +64,28 @@ pub struct FolderEntry {
     pub alias: Option<String>,
 }
 
-const PICKER_MAX_ENTRIES: usize = 4096;
-const PICKER_MAX_BYTES: usize = 1024 * 1024;
+pub(crate) const PICKER_MAX_ENTRIES: usize = 4096;
+pub(crate) const PICKER_MAX_BYTES: usize = 1024 * 1024;
+
+pub(crate) fn picker_within_limits(count: usize, mut lengths: impl Iterator<Item = usize>) -> bool {
+    count <= PICKER_MAX_ENTRIES
+        && lengths
+            .try_fold(0usize, |total, length| total.checked_add(length))
+            .is_some_and(|bytes| bytes <= PICKER_MAX_BYTES)
+}
+
+pub(crate) fn folder_picker_within_limits(entries: &[FolderEntry]) -> bool {
+    picker_within_limits(
+        entries.len(),
+        entries.iter().flat_map(|entry| {
+            [
+                entry.label.len(),
+                entry.path.len(),
+                entry.alias.as_ref().map_or(0, String::len),
+            ]
+        }),
+    )
+}
 
 #[derive(Clone)]
 pub(crate) struct SavedFoldersSnapshot {
@@ -75,16 +95,7 @@ pub(crate) struct SavedFoldersSnapshot {
 }
 
 fn bounded_picker_entries(entries: &[FolderEntry]) -> anyhow::Result<Vec<FolderEntry>> {
-    if entries.len() > PICKER_MAX_ENTRIES {
-        anyhow::bail!("Saved folders exceed the picker limit");
-    }
-    let bytes = entries.iter().try_fold(0usize, |total, entry| {
-        total
-            .checked_add(entry.label.len())?
-            .checked_add(entry.path.len())?
-            .checked_add(entry.alias.as_ref().map_or(0, String::len))
-    });
-    if bytes.is_none_or(|n| n > PICKER_MAX_BYTES) {
+    if !folder_picker_within_limits(entries) {
         anyhow::bail!("Saved folders exceed the picker limit");
     }
     Ok(entries.to_vec())

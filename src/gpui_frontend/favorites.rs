@@ -17,11 +17,15 @@ use multi_launcher::gui::panel_stack::{self, SavedToolbarAction};
 use multi_launcher::gui::theme::{SemanticPalette, ThemeMetrics};
 use multi_launcher::plugins::fav::{
     FAV_FILE, FavEntry, FavoriteRowTarget, ManualFavoriteOrigin, PrefilledFavoriteDraft,
-    PrefilledFavoriteSaveError, favorite_picker_categories, favorite_picker_choices,
+    PrefilledFavoriteSaveError, FavoritePickerCategory, FavoritePickerSnapshot,
+    favorite_picker_categories, favorite_picker_choices, load_favorite_picker_snapshot,
     favorite_picker_pick, favorite_row_target, load_favs, named_favorite_origin,
     prefilled_favorite_draft, remove_favorite_row, resolve_with_plugin, save_manual_favorite,
     save_prefilled_favorite,
 };
+
+use multi_launcher::plugins::bookmarks::BOOKMARKS_FILE;
+use multi_launcher::plugins::folders::FOLDERS_FILE;
 
 use super::{RootWindow, appearance};
 
@@ -288,6 +292,7 @@ enum FavoriteWrite {
     Save {
         origin: DraftOrigin,
         entry: FavEntry,
+        snapshot: Option<Arc<FavoritePickerSnapshot>>,
     },
     Remove(FavoriteRowTarget),
 }
@@ -304,6 +309,92 @@ enum DraftOrigin {
     Manual(ManualFavoriteOrigin),
 }
 
+fn picker_category(name: &str) -> Option<FavoritePickerCategory> {
+    match name {
+        "folders" => Some(FavoritePickerCategory::Folders),
+        "bookmarks" => Some(FavoritePickerCategory::Bookmarks),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct PickerSlot {
+    snapshot: Option<Arc<FavoritePickerSnapshot>>,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct PickerState {
+    folders: PickerSlot,
+    bookmarks: PickerSlot,
+    revision: u64,
+    pending: Option<(FavoritePickerCategory, u64)>,
+}
+
+impl PickerState {
+    fn slot(&self, category: FavoritePickerCategory) -> &PickerSlot {
+        match category {
+            FavoritePickerCategory::Folders => &self.folders,
+            FavoritePickerCategory::Bookmarks => &self.bookmarks,
+        }
+    }
+
+    fn slot_mut(&mut self, category: FavoritePickerCategory) -> &mut PickerSlot {
+        match category {
+            FavoritePickerCategory::Folders => &mut self.folders,
+            FavoritePickerCategory::Bookmarks => &mut self.bookmarks,
+        }
+    }
+
+    fn snapshot(&self, category: FavoritePickerCategory) -> Option<&Arc<FavoritePickerSnapshot>> {
+        self.slot(category).snapshot.as_ref()
+    }
+
+    fn begin(
+        &mut self,
+        category: Option<FavoritePickerCategory>,
+    ) -> Option<(FavoritePickerCategory, u64, bool)> {
+        self.revision = self.revision.wrapping_add(1);
+        self.pending = category.map(|category| (category, self.revision));
+        category.map(|category| {
+            let present = self.snapshot(category).is_some_and(|snapshot| snapshot.is_present());
+            (category, self.revision, present)
+        })
+    }
+
+    fn finish(
+        &mut self,
+        category: FavoritePickerCategory,
+        revision: u64,
+        result: Result<FavoritePickerSnapshot, String>,
+    ) -> bool {
+        if self.pending != Some((category, revision)) {
+            return false;
+        }
+        self.pending = None;
+        let slot = self.slot_mut(category);
+        match result {
+            Ok(snapshot) => {
+                slot.snapshot = Some(Arc::new(snapshot));
+                slot.error = None;
+            }
+            Err(error) => slot.error = Some(error),
+        }
+        true
+    }
+
+    fn status(&self, selected: Option<&String>) -> Option<String> {
+        let category = selected.and_then(|name| picker_category(name))?;
+        if self.pending.is_some_and(|(pending, _)| pending == category) {
+            Some("Loading saved choices…".to_owned())
+        } else {
+            self.slot(category).error.as_ref().map(|error| {
+                format!("Could not load saved choices. {error}. Confirm the category to retry.")
+            })
+        }
+    }
+}
+
 struct FavoriteFields {
     scroll: ScrollHandle,
     origin: DraftOrigin,
@@ -313,6 +404,7 @@ struct FavoriteFields {
     args: FavoriteField,
     category: Entity<SelectState<Vec<String>>>,
     filter: Entity<InputState>,
+    picker: PickerState,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -335,14 +427,8 @@ impl FavoriteFields {
         let category_subscription = cx.subscribe(
             &category,
             |root, source, event: &SelectEvent<Vec<String>>, cx| {
-                if matches!(event, SelectEvent::Confirm(_))
-                    && root
-                        .result_favorites
-                        .draft
-                        .as_ref()
-                        .is_some_and(|draft| draft.category == source)
-                {
-                    cx.notify();
+                if matches!(event, SelectEvent::Confirm(_)) {
+                    root.confirm_favorite_category(source, cx);
                 }
             },
         );
@@ -359,6 +445,7 @@ impl FavoriteFields {
         });
         Self {
             scroll: ScrollHandle::default(),
+            picker: PickerState::default(),
             category,
             filter,
             _subscriptions: vec![category_subscription, filter_subscription],
@@ -406,6 +493,43 @@ impl FavoriteField {
 }
 
 impl RootWindow {
+    fn confirm_favorite_category(
+        &mut self,
+        draft_id: Entity<SelectState<Vec<String>>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = self.result_favorites.draft.as_mut() else { return; };
+        if draft.category != draft_id {
+            return;
+        }
+        let category = draft.category.read(cx).selected_value().and_then(|name| picker_category(name));
+        let request = draft.picker.begin(category);
+        cx.notify();
+        let Some((category, revision, previously_present)) = request else { return; };
+        let task = cx.background_executor().spawn(async move {
+            let path = match category {
+                FavoritePickerCategory::Folders => FOLDERS_FILE,
+                FavoritePickerCategory::Bookmarks => BOOKMARKS_FILE,
+            };
+            load_favorite_picker_snapshot(category, path, previously_present)
+                .map_err(|error| error.to_string())
+        });
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = root.update(cx, |root, cx| {
+                let Some(draft) = root.result_favorites.draft.as_mut() else { return; };
+                let selected = draft.category.read(cx).selected_value().and_then(|name| picker_category(name));
+                if draft.category != draft_id || selected != Some(category) {
+                    return;
+                }
+                if draft.picker.finish(category, revision, result) {
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
+
     fn favorites_scroll_item(&self) -> usize {
         self.quick_help_scroll_item() + usize::from(self.quick_help.open)
     }
@@ -542,8 +666,11 @@ impl RootWindow {
                                     .providers
                                     .plugins()
                                     .into_iter()
-                                    .map(|p| p.name()),
+                                    .map(|p| p.name())
+                                    .chain(["folders", "bookmarks"]),
                             );
+                            let mut categories = categories;
+                            categories.dedup();
                             let (origin, original) = match draft {
                                 OpenDraft::Prefilled(action) => {
                                     let draft = prefilled_favorite_draft(&rows, &action);
@@ -632,8 +759,11 @@ impl RootWindow {
                 .providers
                 .plugins()
                 .into_iter()
-                .map(|p| p.name()),
+                .map(|p| p.name())
+                .chain(["folders", "bookmarks"]),
         );
+        let mut categories = categories;
+        categories.dedup();
         state.draft = Some(FavoriteFields::new(
             DraftOrigin::Manual(origin),
             entry,
@@ -673,9 +803,18 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        let mut snapshot = None;
         {
             if let Some(category) = fields.category.read(cx).selected_value() {
-                if let Some(plugin) = self
+                if let Some(typed) = picker_category(category) {
+                    if fields.picker.pending.is_some() {
+                        return;
+                    }
+                    let Some(source) = fields.picker.snapshot(typed) else {
+                        return;
+                    };
+                    snapshot = Some(source.clone());
+                } else if let Some(plugin) = self
                     .search_catalog
                     .providers
                     .plugins()
@@ -688,7 +827,11 @@ impl RootWindow {
             }
         }
         let origin = fields.origin.clone();
-        self.write_result_favorite(FavoriteWrite::Save { origin, entry }, window, cx);
+        self.write_result_favorite(
+            FavoriteWrite::Save { origin, entry, snapshot },
+            window,
+            cx,
+        );
     }
 
     fn pick_result_favorite(
@@ -697,6 +840,7 @@ impl RootWindow {
         filter: String,
         choice: Action,
         draft_id: Entity<SelectState<Vec<String>>>,
+        picker_revision: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -713,22 +857,23 @@ impl RootWindow {
         {
             return;
         }
-        let Some(plugin) = self
-            .search_catalog
-            .providers
-            .plugins()
-            .into_iter()
-            .find(|p| p.name() == category)
-        else {
-            return;
-        };
-        if !favorite_picker_choices(plugin, &filter).contains(&choice) {
-            return;
-        }
         let args = draft
             .args
             .exact_value(draft.original.args.as_deref().unwrap_or_default(), cx);
-        let (command, args) = favorite_picker_pick(plugin, &choice, &args);
+        let (command, args) = if let Some(typed) = picker_category(&category) {
+            if draft.picker.pending.is_some() || draft.picker.revision != picker_revision {
+                return;
+            }
+            let Some(snapshot) = draft.picker.snapshot(typed) else { return; };
+            let source = snapshot.source();
+            if !source.choices(&filter).contains(&choice) { return; }
+            source.pick(&choice, &args)
+        } else {
+            let Some(plugin) = self.search_catalog.providers.plugins().into_iter()
+                .find(|p| p.name() == category) else { return; };
+            if !favorite_picker_choices(plugin, &filter).contains(&choice) { return; }
+            favorite_picker_pick(plugin, &choice, &args)
+        };
         draft.original.action = draft.command.replace(command, window, cx);
         draft.original.args = Some(draft.args.replace(args.unwrap_or_default(), window, cx));
         cx.notify();
@@ -786,18 +931,25 @@ impl RootWindow {
         let task = cx.background_executor().spawn(async move {
             match write {
                 FavoriteWrite::Save {
-                    origin: DraftOrigin::Prefilled(mut draft),
-                    entry,
+                    origin,
+                    mut entry,
+                    snapshot,
                 } => {
-                    draft.label = entry.label;
-                    draft.action = entry.action;
-                    draft.args = entry.args;
-                    save_prefilled_favorite(FAV_FILE, draft)
+                    if let Some(snapshot) = snapshot {
+                        (entry.action, entry.args) = snapshot
+                            .source()
+                            .resolve(&entry.action, entry.args.as_deref());
+                    }
+                    match origin {
+                        DraftOrigin::Prefilled(mut draft) => {
+                            draft.label = entry.label;
+                            draft.action = entry.action;
+                            draft.args = entry.args;
+                            save_prefilled_favorite(FAV_FILE, draft)
+                        }
+                        DraftOrigin::Manual(origin) => save_manual_favorite(FAV_FILE, origin, entry),
+                    }
                 }
-                FavoriteWrite::Save {
-                    origin: DraftOrigin::Manual(origin),
-                    entry,
-                } => save_manual_favorite(FAV_FILE, origin, entry),
                 FavoriteWrite::Remove(target) => remove_favorite_row(FAV_FILE, target),
             }
         });
@@ -971,19 +1123,17 @@ impl RootWindow {
                 .read(cx)
                 .selected_value()
                 .and_then(|category| {
-                    self.search_catalog
-                        .providers
-                        .plugins()
-                        .into_iter()
-                        .find(|p| p.name() == category)
-                        .map(|plugin| {
-                            let filter = draft.filter.read(cx).value().to_string();
-                            (
-                                category.clone(),
-                                filter.clone(),
-                                favorite_picker_choices(plugin, &filter),
-                            )
-                        })
+                    let filter = draft.filter.read(cx).value().to_string();
+                    let choices = if let Some(typed) = picker_category(category) {
+                        if draft.picker.pending.is_some() { None } else {
+                            draft.picker.snapshot(typed).map(|snapshot| snapshot.source().choices(&filter))
+                        }
+                    } else {
+                        self.search_catalog.providers.plugins().into_iter()
+                            .find(|p| p.name() == category)
+                            .map(|plugin| favorite_picker_choices(plugin, &filter))
+                    };
+                    choices.map(|choices| (category.clone(), filter, choices))
                 });
             FavoritesPanelDraft {
                 scroll: draft.scroll.clone(),
@@ -993,6 +1143,13 @@ impl RootWindow {
                 category: draft.category.clone(),
                 filter: draft.filter.clone(),
                 choices,
+                picker_revision: draft.picker.revision,
+                source_status: draft.picker.status(draft.category.read(cx).selected_value()),
+                source_blocked: draft.category.read(cx).selected_value()
+                    .and_then(|category| picker_category(category))
+                    .is_some_and(|typed| {
+                        draft.picker.pending.is_some() || draft.picker.snapshot(typed).is_none()
+                    }),
             }
         });
         Some(FavoritesPanel {
@@ -1028,6 +1185,9 @@ struct FavoritesPanelDraft {
     category: Entity<SelectState<Vec<String>>>,
     filter: Entity<InputState>,
     choices: Option<(String, String, Vec<Action>)>,
+    picker_revision: u64,
+    source_status: Option<String>,
+    source_blocked: bool,
 }
 
 #[derive(IntoElement)]
@@ -1092,7 +1252,10 @@ impl RenderOnce for FavoritesPanel {
                     Button::new("result-favorites-save")
                         .label("Save")
                         .tab_stop(true)
-                        .disabled(waiting || !state.loaded)
+                        .disabled(
+                            waiting || !state.loaded
+                                || state.draft.as_ref().is_some_and(|draft| draft.source_blocked),
+                        )
                         .on_click({
                             let root = state.root.clone();
                             move |_, window, app| {
@@ -1164,6 +1327,12 @@ impl RenderOnce for FavoritesPanel {
                         .flex_shrink_0()
                         .w_full()
                 }));
+            body = body.children(draft.source_status.as_ref().map(|status| {
+                Label::new(status.clone())
+                    .id("result-favorite-source-status")
+                    .flex_shrink_0()
+                    .w_full()
+            }));
             for (label, field) in [
                 ("Label", &draft.label),
                 ("Command", &draft.command),
@@ -1194,6 +1363,7 @@ impl RenderOnce for FavoritesPanel {
                         .child(Label::new("Category").id("result-favorite-category-label"))
                         .child(
                             Select::new(&draft.category)
+                                .cleanable(true)
                                 .accessibility_label("Category")
                                 .placeholder("Select")
                                 .disabled(disabled),
@@ -1216,6 +1386,7 @@ impl RenderOnce for FavoritesPanel {
                 let category = category.clone();
                 let filter = filter.clone();
                 let draft_id = draft.category.clone();
+                let picker_revision = draft.picker_revision;
                 body = body.child(
                     div()
                         .id("result-favorite-choices")
@@ -1241,6 +1412,7 @@ impl RenderOnce for FavoritesPanel {
                                         filter.clone(),
                                         choice.clone(),
                                         draft_id.clone(),
+                                        picker_revision,
                                         window,
                                         cx,
                                     )
@@ -1502,6 +1674,29 @@ mod tests {
         assert!(state.restart_blocker().is_none());
         assert_eq!(state.pending, Some(Request::Load(1)));
         assert!(state.consume(Request::Load(1)));
+    }
+
+    #[test]
+    fn picker_receipts_reject_late_reads_and_retain_last_good() {
+        use super::{FavoritePickerCategory as Category, FavoritePickerSnapshot as Snapshot, PickerState};
+        let mut picker = PickerState::default();
+        let (_, first, present) = picker.begin(Some(Category::Folders)).unwrap();
+        assert!(!present);
+        let (_, second, _) = picker.begin(Some(Category::Bookmarks)).unwrap();
+        let (_, third, _) = picker.begin(Some(Category::Folders)).unwrap();
+        let missing = Snapshot::Folders { entries: vec![], present: false };
+        assert!(!picker.finish(Category::Folders, first, Ok(missing.clone())));
+        assert!(!picker.finish(Category::Bookmarks, second, Err("late".into())));
+        assert!(picker.finish(Category::Folders, third, Ok(missing.clone())));
+        let (_, fourth, present) = picker.begin(Some(Category::Folders)).unwrap();
+        assert!(!present);
+        assert!(picker.finish(Category::Folders, fourth, Err("malformed".into())));
+        assert_eq!(picker.snapshot(Category::Folders).map(|s| s.as_ref()), Some(&missing));
+        assert!(picker.slot(Category::Folders).error.is_some());
+        assert!(picker.snapshot(Category::Bookmarks).is_none());
+        let (_, fifth, _) = picker.begin(Some(Category::Folders)).unwrap();
+        picker.begin(None);
+        assert!(!picker.finish(Category::Folders, fifth, Ok(missing)));
     }
 
     #[test]

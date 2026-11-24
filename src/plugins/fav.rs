@@ -536,17 +536,17 @@ impl FavoritePickerSnapshot {
 pub enum FavoritePickerSourceError {
     Removed(PathBuf),
     Load(PersistenceError),
+    Limit(FavoritePickerCategory),
 }
 
 impl std::fmt::Display for FavoritePickerSourceError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Removed(path) => write!(
-                formatter,
-                "{} was removed; retaining last-good source",
-                path.display()
-            ),
+            Self::Removed(path) => write!(formatter, "{} was removed", path.display()),
             Self::Load(error) => write!(formatter, "{error}"),
+            Self::Limit(category) => {
+                write!(formatter, "Saved {category:?} entries exceed the picker limit")
+            }
         }
     }
 }
@@ -554,7 +554,7 @@ impl std::fmt::Display for FavoritePickerSourceError {
 impl std::error::Error for FavoritePickerSourceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Removed(_) => None,
+            Self::Removed(_) | Self::Limit(_) => None,
             Self::Load(error) => Some(error),
         }
     }
@@ -568,7 +568,7 @@ pub fn load_favorite_picker_snapshot(
     previously_present: bool,
 ) -> Result<FavoritePickerSnapshot, FavoritePickerSourceError> {
     let path = path.as_ref();
-    match category {
+    let snapshot = match category {
         FavoritePickerCategory::Folders => {
             let state =
                 super::folders::load_folders_typed(path).map_err(FavoritePickerSourceError::Load)?;
@@ -611,7 +611,24 @@ pub fn load_favorite_picker_snapshot(
                 }),
             }
         }
+    }?;
+    let within_limits = match &snapshot {
+        FavoritePickerSnapshot::Folders { entries, .. } => {
+            super::folders::folder_picker_within_limits(entries)
+        }
+        FavoritePickerSnapshot::Bookmarks { entries, .. } => {
+            super::folders::picker_within_limits(
+                entries.len(),
+                entries.iter().flat_map(|entry| {
+                    [entry.url.len(), entry.alias.as_ref().map_or(0, String::len)]
+                }),
+            )
+        }
+    };
+    if !within_limits {
+        return Err(FavoritePickerSourceError::Limit(category));
     }
+    Ok(snapshot)
 }
 
 /// List a provider's authorable choices using the Favorites picker's literal filter.
@@ -1100,10 +1117,22 @@ mod tests {
             let path = dir.path().join(format!("{category:?}.json"));
             let first = load(category, &path, false).unwrap();
             assert!(!first.is_present());
+            match &first {
+                Snapshot::Folders { entries, .. } => {
+                    assert_eq!(*entries, super::super::folders::default_folders());
+                }
+                Snapshot::Bookmarks { entries, .. } => assert!(entries.is_empty()),
+            }
             assert!(!load(category, &path, first.is_present()).unwrap().is_present());
             std::fs::write(&path, " \n").unwrap();
             let empty = load(category, &path, false).unwrap();
             assert!(empty.is_present());
+            match &empty {
+                Snapshot::Folders { entries, .. } => {
+                    assert_eq!(*entries, super::super::folders::default_folders());
+                }
+                Snapshot::Bookmarks { entries, .. } => assert!(entries.is_empty()),
+            }
             std::fs::remove_file(&path).unwrap();
             assert!(matches!(load(category, &path, empty.is_present()), Err(Error::Removed(_))));
             std::fs::write(&path, "[]").unwrap();
@@ -1122,6 +1151,46 @@ mod tests {
         let legacy = load(Category::Bookmarks, &path, false).unwrap();
         assert_eq!(legacy.source().resolve("bm list", Some("legacy")), ("http://legacy.invalid/path".into(), None));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"["http://legacy.invalid/path"]"#);
+    }
+
+    #[test]
+    fn picker_snapshot_rejects_oversized_sources() {
+        use super::super::folders::{PICKER_MAX_BYTES, PICKER_MAX_ENTRIES};
+        use super::{FavoritePickerCategory as Category, FavoritePickerSourceError as Error};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.json");
+        for category in [Category::Folders, Category::Bookmarks] {
+            let entry = match category {
+                Category::Folders => serde_json::json!({"label": "a", "path": "b"}),
+                Category::Bookmarks => serde_json::json!({"url": "a"}),
+            };
+            let entries = vec![entry; PICKER_MAX_ENTRIES];
+            std::fs::write(&path, serde_json::to_vec(&entries).unwrap()).unwrap();
+            assert!(super::load_favorite_picker_snapshot(category, &path, false).is_ok());
+            let mut too_many = entries;
+            too_many.push(too_many[0].clone());
+            std::fs::write(&path, serde_json::to_vec(&too_many).unwrap()).unwrap();
+            assert!(matches!(
+                super::load_favorite_picker_snapshot(category, &path, true),
+                Err(Error::Limit(actual)) if actual == category
+            ));
+            let large = "é".repeat(PICKER_MAX_BYTES / 2);
+            let entry = match category {
+                Category::Folders => serde_json::json!({"label": "", "path": &large}),
+                Category::Bookmarks => serde_json::json!({"url": &large}),
+            };
+            std::fs::write(&path, serde_json::to_vec(&vec![entry]).unwrap()).unwrap();
+            assert!(super::load_favorite_picker_snapshot(category, &path, false).is_ok());
+            let entry = match category {
+                Category::Folders => serde_json::json!({"label": "x", "path": large}),
+                Category::Bookmarks => serde_json::json!({"url": large, "alias": "x"}),
+            };
+            std::fs::write(&path, serde_json::to_vec(&vec![entry]).unwrap()).unwrap();
+            assert!(matches!(
+                super::load_favorite_picker_snapshot(category, &path, true),
+                Err(Error::Limit(actual)) if actual == category
+            ));
+        }
     }
 
     #[test]
