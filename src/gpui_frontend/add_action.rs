@@ -46,11 +46,25 @@ impl CatalogReads {
 }
 
 pub(super) const APP_WRITE_CLOSE_STATUS: &str =
-    "Wait for the Add App save to finish before closing Multi Launcher.";
+    "Wait for the App Editor save to finish before closing Multi Launcher.";
 pub(super) const APP_WRITE_RESTART_STATUS: &str =
-    "Wait for the Add App save to finish before restarting in egui.";
+    "Wait for the App Editor save to finish before restarting in egui.";
 pub(super) const APP_DRAFT_RESTART_STATUS: &str =
-    "Save or Cancel the Add App draft before restarting in egui.";
+    "Save or Cancel the App Editor draft before restarting in egui.";
+
+enum AppWriteError {
+    Stale,
+    Message(String),
+}
+
+fn checked_action_error(error: multi_launcher::actions::CheckedActionError) -> AppWriteError {
+    match error {
+        multi_launcher::actions::CheckedActionError::StaleTarget => AppWriteError::Stale,
+        multi_launcher::actions::CheckedActionError::Store(error) => {
+            AppWriteError::Message(format!("Could not save app changes: {error:#}"))
+        }
+    }
+}
 
 fn clear_app_diagnostic(status: &mut Option<String>) {
     if matches!(
@@ -67,6 +81,8 @@ pub(super) struct AppEditorState {
     filter: Option<Entity<InputState>>,
     filter_subscription: Option<Subscription>,
     catalog: Arc<[CatalogAction]>,
+    catalog_revision: u64,
+    catalog_stale: bool,
     catalog_error: Option<String>,
     reads: CatalogReads,
     catalog_scroll: ScrollHandle,
@@ -104,7 +120,36 @@ impl AddAppWrites {
     }
 }
 
+#[derive(Clone)]
+struct CatalogSelection {
+    revision: u64,
+    index: usize,
+    original: CatalogAction,
+}
+
+impl CatalogSelection {
+    fn target(
+        &self,
+        catalog: &[CatalogAction],
+        revision: u64,
+        stale: bool,
+    ) -> Option<multi_launcher::actions::CustomActionRowTarget> {
+        if stale || revision != self.revision || catalog.get(self.index) != Some(&self.original) {
+            return None;
+        }
+        multi_launcher::actions::custom_action_row_target(catalog, self.index)
+    }
+}
+
+#[derive(Clone)]
+enum DraftMode {
+    Add,
+    Edit(multi_launcher::actions::CustomActionRowTarget),
+}
+
 struct AddAppDraft {
+    mode: DraftMode,
+    baseline: AddAppSnapshot,
     label: Entity<InputState>,
     description: Entity<InputState>,
     path: Entity<InputState>,
@@ -114,6 +159,7 @@ struct AddAppDraft {
     _focus_subscriptions: Vec<Subscription>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct AddAppSnapshot {
     pub(super) label: String,
     pub(super) description: String,
@@ -130,6 +176,8 @@ impl AppEditorState {
             filter: None,
             filter_subscription: None,
             catalog: Arc::from([]),
+            catalog_revision: 0,
+            catalog_stale: false,
             catalog_error: None,
             reads: CatalogReads::default(),
             catalog_scroll: ScrollHandle::new(),
@@ -148,12 +196,24 @@ impl AppEditorState {
             return Some(APP_WRITE_RESTART_STATUS);
         }
         let draft = self.draft.as_ref()?;
-        (draft.show_args
-            || !draft.label.read(cx).value().is_empty()
-            || !draft.description.read(cx).value().is_empty()
-            || !draft.path.read(cx).value().is_empty()
-            || !draft.args.read(cx).value().is_empty())
-        .then_some(APP_DRAFT_RESTART_STATUS)
+        (self.snapshot(cx).as_ref() != Some(&draft.baseline)).then_some(APP_DRAFT_RESTART_STATUS)
+    }
+
+    fn publish_catalog(&mut self, rows: Vec<CatalogAction>) {
+        if self.catalog_stale {
+            self.status = None;
+        }
+        self.catalog_revision = self.catalog_revision.wrapping_add(1).max(1);
+        self.catalog = rows.into();
+        self.catalog_stale = false;
+        self.catalog_error = None;
+    }
+
+    fn target(
+        &self,
+        selection: &CatalogSelection,
+    ) -> Option<multi_launcher::actions::CustomActionRowTarget> {
+        selection.target(&self.catalog, self.catalog_revision, self.catalog_stale)
     }
 
     fn is_current_draft(&self, id: EntityId) -> bool {
@@ -170,27 +230,33 @@ impl AppEditorState {
     }
 
     fn begin_write(&mut self) -> Option<u64> {
-        if self.draft.is_none() {
-            return None;
-        }
         let receipt = self.writes.begin()?;
-        self.status = Some("Saving Add App…".to_owned());
+        self.reads.invalidate();
+        self.status = Some("Saving app changes...".to_owned());
         Some(receipt)
     }
 
-    fn finish_write(&mut self, receipt: u64, result: Result<Vec<CatalogAction>, String>) -> bool {
+    fn finish_write(
+        &mut self,
+        receipt: u64,
+        result: Result<Vec<CatalogAction>, AppWriteError>,
+    ) -> bool {
         if !self.writes.finish(receipt) {
             return false;
         }
         match result {
             Ok(rows) => {
                 self.reads.invalidate();
-                self.catalog = rows.into();
-                self.catalog_error = None;
+                self.publish_catalog(rows);
                 self.draft = None;
                 self.status = None;
             }
-            Err(error) => self.status = Some(error),
+            Err(AppWriteError::Stale) => {
+                self.catalog_stale = true;
+                self.status =
+                    Some("App selection is stale. Cancel or refresh and select it again.".into());
+            }
+            Err(AppWriteError::Message(error)) => self.status = Some(error),
         }
         true
     }
@@ -258,7 +324,7 @@ impl RootWindow {
     }
 
     fn refresh_app_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.app_editor.open {
+        if !self.app_editor.open || self.app_editor.write_pending() {
             return;
         }
         let receipt = self.app_editor.reads.begin();
@@ -275,8 +341,7 @@ impl RootWindow {
                     if root.app_editor.open && root.app_editor.reads.finish(receipt) {
                         match result {
                             Ok(rows) => {
-                                root.app_editor.catalog = rows.into();
-                                root.app_editor.catalog_error = None;
+                                root.app_editor.publish_catalog(rows);
                             }
                             Err(error) => root.app_editor.catalog_error = Some(error),
                         }
@@ -289,16 +354,69 @@ impl RootWindow {
     }
 
     fn new_app_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_app_draft(DraftMode::Add, None, window, cx);
+    }
+
+    fn edit_app(
+        &mut self,
+        selection: CatalogSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.app_editor.open
-            || self.restart_admission.is_fenced()
+            || self.app_editor.write_pending()
             || self.app_editor.draft.is_some()
         {
             return;
         }
-        let label = cx.new(|cx| InputState::new(window, cx));
-        let description = cx.new(|cx| InputState::new(window, cx));
-        let path = cx.new(|cx| InputState::new(window, cx));
-        let args = cx.new(|cx| InputState::new(window, cx));
+        let Some(target) = self.app_editor.target(&selection) else {
+            self.app_editor.status =
+                Some("App selection is stale. Refresh and select it again.".into());
+            cx.notify();
+            return;
+        };
+        self.open_app_draft(
+            DraftMode::Edit(target),
+            Some(selection.original),
+            window,
+            cx,
+        );
+    }
+
+    fn open_app_draft(
+        &mut self,
+        mode: DraftMode,
+        original: Option<CatalogAction>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.app_editor.open
+            || self.restart_admission.is_fenced()
+            || self.app_editor.write_pending()
+            || self.app_editor.draft.is_some()
+        {
+            return;
+        }
+        let baseline = original
+            .map(|row| AddAppSnapshot {
+                label: row.label,
+                description: row.desc,
+                path: row.action,
+                show_args: row.args.is_some(),
+                args: row.args.unwrap_or_default(),
+            })
+            .unwrap_or(AddAppSnapshot {
+                label: String::new(),
+                description: String::new(),
+                path: String::new(),
+                show_args: false,
+                args: String::new(),
+            });
+        let label = cx.new(|cx| InputState::new(window, cx).default_value(baseline.label.clone()));
+        let description =
+            cx.new(|cx| InputState::new(window, cx).default_value(baseline.description.clone()));
+        let path = cx.new(|cx| InputState::new(window, cx).default_value(baseline.path.clone()));
+        let args = cx.new(|cx| InputState::new(window, cx).default_value(baseline.args.clone()));
         let scroll = ScrollHandle::new();
         let draft_id = label.entity_id();
         let handles = [
@@ -347,11 +465,13 @@ impl RootWindow {
             cx.notify();
         }));
         self.app_editor.draft = Some(AddAppDraft {
+            mode,
+            show_args: baseline.show_args,
+            baseline,
             label,
             description,
             path,
             args,
-            show_args: false,
             scroll,
             _focus_subscriptions: subscriptions,
         });
@@ -363,12 +483,96 @@ impl RootWindow {
     }
 
     fn submit_add_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.app_editor.write_pending() {
+        if self.app_editor.write_pending()
+            || (self.app_editor.catalog_stale
+                && matches!(
+                    self.app_editor.draft.as_ref().map(|draft| &draft.mode),
+                    Some(DraftMode::Edit(_))
+                ))
+        {
             return;
         }
         let Some(snapshot) = self.app_editor.snapshot(cx) else {
             return;
         };
+        let Some(mode) = self
+            .app_editor
+            .draft
+            .as_ref()
+            .map(|draft| draft.mode.clone())
+        else {
+            return;
+        };
+        let is_add = matches!(&mode, DraftMode::Add);
+        self.run_app_write(
+            is_add,
+            move || match mode {
+                DraftMode::Add => multi_launcher::actions::AddAction::new(
+                    &snapshot.label,
+                    &snapshot.description,
+                    &snapshot.path,
+                    snapshot.show_args,
+                    &snapshot.args,
+                )
+                .map_err(|error| AppWriteError::Message(error.to_owned()))
+                .and_then(|action| {
+                    action.commit(ACTIONS_FILE).map_err(|error| {
+                        AppWriteError::Message(format!("Could not save app: {error:#}"))
+                    })
+                }),
+                DraftMode::Edit(target) => multi_launcher::actions::EditAction::new(
+                    target,
+                    &snapshot.label,
+                    &snapshot.description,
+                    &snapshot.path,
+                    snapshot.show_args,
+                    &snapshot.args,
+                )
+                .map_err(|error| AppWriteError::Message(error.to_owned()))
+                .and_then(|action| action.commit(ACTIONS_FILE).map_err(checked_action_error)),
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn remove_app(
+        &mut self,
+        selection: CatalogSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.app_editor.open
+            || self.app_editor.write_pending()
+            || self.app_editor.draft.is_some()
+        {
+            return;
+        }
+        let Some(target) = self.app_editor.target(&selection) else {
+            self.app_editor.status =
+                Some("App selection is stale. Refresh and select it again.".into());
+            cx.notify();
+            return;
+        };
+        self.run_app_write(
+            false,
+            move || {
+                multi_launcher::actions::RemoveAction::new(target)
+                    .commit(ACTIONS_FILE)
+                    .map_err(checked_action_error)
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn run_app_write(
+        &mut self,
+        return_to_new: bool,
+        write: impl FnOnce() -> Result<Vec<CatalogAction>, AppWriteError> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(operation) = self.restart_admission.admit() else {
             return;
         };
@@ -376,21 +580,7 @@ impl RootWindow {
             return;
         };
         cx.notify();
-        let task = cx.background_executor().spawn(async move {
-            multi_launcher::actions::AddAction::new(
-                &snapshot.label,
-                &snapshot.description,
-                &snapshot.path,
-                snapshot.show_args,
-                &snapshot.args,
-            )
-            .map_err(str::to_owned)
-            .and_then(|action| {
-                action
-                    .commit(ACTIONS_FILE)
-                    .map_err(|error| format!("Could not save Add App: {error:#}"))
-            })
-        });
+        let task = cx.background_executor().spawn(async move { write() });
         let root = cx.entity().downgrade();
         let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
@@ -411,7 +601,11 @@ impl RootWindow {
                         }
                         clear_app_diagnostic(&mut root.restart_status);
                         if restore {
-                            root.app_editor.new_focus.focus(window, cx);
+                            if return_to_new {
+                                root.app_editor.new_focus.focus(window, cx);
+                            } else if let Some(filter) = &root.app_editor.filter {
+                                filter.focus_handle(cx).focus(window, cx);
+                            }
                         }
                         cx.notify();
                     }
@@ -423,15 +617,26 @@ impl RootWindow {
     }
 
     fn cancel_add_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.app_editor.write_pending() || self.app_editor.draft.take().is_none() {
+        if self.app_editor.write_pending() {
             return;
         }
-        self.app_editor.status = None;
+        let Some(draft) = self.app_editor.draft.take() else {
+            return;
+        };
+        self.app_editor.status = if self.app_editor.catalog_stale {
+            Some("App selection is stale. Refresh and select it again.".into())
+        } else {
+            None
+        };
         clear_app_diagnostic(&mut self.restart_status);
         if self.app_editor.owner_focus.contains_focused(window, cx)
             && !self.restart_admission.is_fenced()
         {
-            self.app_editor.new_focus.focus(window, cx);
+            if matches!(draft.mode, DraftMode::Add) {
+                self.app_editor.new_focus.focus(window, cx);
+            } else if let Some(filter) = &self.app_editor.filter {
+                filter.focus_handle(cx).focus(window, cx);
+            }
         }
         cx.notify();
     }
@@ -448,7 +653,9 @@ impl RootWindow {
         self.app_editor.open = false;
         self.app_editor.reads.invalidate();
         self.app_editor.draft = None;
-        self.app_editor.status = None;
+        if !self.app_editor.catalog_stale {
+            self.app_editor.status = None;
+        }
         let origin = self.app_editor.return_focus.take();
         let offset = self.app_editor.return_scroll.take();
         if restore {
@@ -496,8 +703,10 @@ pub(super) struct AppEditorPanel {
     draft: Option<AddAppPanelDraft>,
     filter: Option<Entity<InputState>>,
     catalog: Arc<[CatalogAction]>,
+    catalog_revision: u64,
     catalog_error: Option<String>,
     catalog_loading: bool,
+    catalog_stale: bool,
     catalog_scroll: ScrollHandle,
     status: Option<String>,
     pending: bool,
@@ -509,6 +718,7 @@ struct AddAppPanelDraft {
     path: Entity<InputState>,
     args: Entity<InputState>,
     show_args: bool,
+    editing: bool,
     scroll: ScrollHandle,
 }
 
@@ -531,8 +741,10 @@ impl AppEditorPanel {
             status: state.status.clone(),
             filter: state.filter.clone(),
             catalog: state.catalog.clone(),
+            catalog_revision: state.catalog_revision,
             catalog_error: state.catalog_error.clone(),
             catalog_loading: state.reads.pending.is_some(),
+            catalog_stale: state.catalog_stale,
             catalog_scroll: state.catalog_scroll.clone(),
             pending: state.write_pending(),
             draft: state.draft.as_ref().map(|draft| AddAppPanelDraft {
@@ -541,6 +753,7 @@ impl AppEditorPanel {
                 path: draft.path.clone(),
                 args: draft.args.clone(),
                 show_args: draft.show_args,
+                editing: matches!(&draft.mode, DraftMode::Edit(_)),
                 scroll: draft.scroll.clone(),
             }),
         }
@@ -698,40 +911,47 @@ impl RenderOnce for AppEditorPanel {
                         }),
                 )
                 .child(div().flex_shrink_0().children(self.status.map(Label::new)));
-            panel = panel.child(Label::new("Add App")).child(body).child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_x(px(metrics.item_spacing_x))
-                    .child(
-                        Button::new("add-app-submit")
-                            .label("Add")
-                            .disabled(self.pending)
-                            .on_click(move |_, window, app| {
-                                let _ = submit_root.update(app, |root, cx| {
-                                    if root.app_editor.is_current_draft(draft_id) {
-                                        root.submit_add_app(window, cx);
-                                    }
-                                });
-                            }),
-                    )
-                    .child(
-                        Button::new("add-app-cancel")
-                            .label("Cancel")
-                            .disabled(self.pending)
-                            .on_click(move |_, window, app| {
-                                let _ = cancel_root.update(app, |root, cx| {
-                                    if root.app_editor.is_current_draft(draft_id) {
-                                        root.cancel_add_app(window, cx);
-                                    }
-                                });
-                            }),
-                    ),
-            );
+            panel = panel
+                .child(Label::new(if draft.editing {
+                    "Edit App"
+                } else {
+                    "Add App"
+                }))
+                .child(body)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_x(px(metrics.item_spacing_x))
+                        .child(
+                            Button::new("add-app-submit")
+                                .label(if draft.editing { "Save" } else { "Add" })
+                                .disabled(self.pending || (draft.editing && self.catalog_stale))
+                                .on_click(move |_, window, app| {
+                                    let _ = submit_root.update(app, |root, cx| {
+                                        if root.app_editor.is_current_draft(draft_id) {
+                                            root.submit_add_app(window, cx);
+                                        }
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("add-app-cancel")
+                                .label("Cancel")
+                                .disabled(self.pending)
+                                .on_click(move |_, window, app| {
+                                    let _ = cancel_root.update(app, |root, cx| {
+                                        if root.app_editor.is_current_draft(draft_id) {
+                                            root.cancel_add_app(window, cx);
+                                        }
+                                    });
+                                }),
+                        ),
+                );
         } else {
             let new_root = self.root.clone();
             let close_root = self.root.clone();
-            let refresh_root = self.root;
+            let refresh_root = self.root.clone();
             let filter_text = self
                 .filter
                 .as_ref()
@@ -743,6 +963,14 @@ impl RenderOnce for AppEditorPanel {
                 .enumerate()
                 .filter(|(_, row)| catalog_matches(row, &filter_text))
                 .map(|(index, row)| {
+                    let selection = CatalogSelection {
+                        revision: self.catalog_revision,
+                        index,
+                        original: row.clone(),
+                    };
+                    let edit_selection = selection.clone();
+                    let edit_root = self.root.clone();
+                    let remove_root = self.root.clone();
                     let mut item = div()
                         .id(("app-catalog-row", index))
                         .flex()
@@ -756,7 +984,34 @@ impl RenderOnce for AppEditorPanel {
                             .child(Label::new("Arguments"))
                             .child(Label::new(args.clone()));
                     }
-                    item
+                    item.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_x(px(metrics.item_spacing_x))
+                            .child(
+                                Button::new(("app-catalog-edit", index))
+                                    .label("Edit")
+                                    .disabled(self.pending || self.catalog_stale)
+                                    .on_click(move |_, window, app| {
+                                        let selection = edit_selection.clone();
+                                        let _ = edit_root.update(app, |root, cx| {
+                                            root.edit_app(selection, window, cx)
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new(("app-catalog-remove", index))
+                                    .label("Remove")
+                                    .disabled(self.pending || self.catalog_stale)
+                                    .on_click(move |_, window, app| {
+                                        let selection = selection.clone();
+                                        let _ = remove_root.update(app, |root, cx| {
+                                            root.remove_app(selection, window, cx)
+                                        });
+                                    }),
+                            ),
+                    )
                 })
                 .collect::<Vec<_>>();
             let reserved_height = 2.0 * metrics.window_padding
@@ -785,26 +1040,34 @@ impl RenderOnce for AppEditorPanel {
                         .children(self.catalog_error.map(Label::new))
                         .children(rows),
                 )
-                .child(Button::new("app-editor-refresh").label("Refresh").on_click(
-                    move |_, window, app| {
-                        let _ = refresh_root
-                            .update(app, |root, cx| root.refresh_app_catalog(window, cx));
-                    },
-                ))
+                .children(self.status.map(Label::new))
+                .child(
+                    Button::new("app-editor-refresh")
+                        .label("Refresh")
+                        .disabled(self.pending)
+                        .on_click(move |_, window, app| {
+                            let _ = refresh_root
+                                .update(app, |root, cx| root.refresh_app_catalog(window, cx));
+                        }),
+                )
                 .child(
                     Button::new("app-editor-new")
                         .label("New App")
+                        .disabled(self.pending)
                         .track_focus(&self.new_focus)
                         .on_click(move |_, window, app| {
                             let _ = new_root.update(app, |root, cx| root.new_app_draft(window, cx));
                         }),
                 )
-                .child(Button::new("app-editor-close").label("Close").on_click(
-                    move |_, window, app| {
-                        let _ =
-                            close_root.update(app, |root, cx| root.close_app_editor(window, cx));
-                    },
-                ));
+                .child(
+                    Button::new("app-editor-close")
+                        .label("Close")
+                        .disabled(self.pending)
+                        .on_click(move |_, window, app| {
+                            let _ = close_root
+                                .update(app, |root, cx| root.close_app_editor(window, cx));
+                        }),
+                );
         }
         panel
     }
@@ -812,7 +1075,10 @@ impl RenderOnce for AppEditorPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddAppWrites, CatalogAction, CatalogReads, catalog_filter, catalog_matches};
+    use super::{
+        AddAppWrites, CatalogAction, CatalogReads, CatalogSelection, catalog_filter,
+        catalog_matches,
+    };
 
     #[test]
     fn add_app_write_accepts_only_live_receipt_once() {
@@ -845,6 +1111,37 @@ mod tests {
         assert!(matches("TOOLS"));
         assert!(!matches(" app "));
         assert!(!matches("secret"));
+    }
+
+    #[test]
+    fn selection_requires_published_revision_and_preserves_duplicate_identity() {
+        let row = CatalogAction {
+            label: "same".into(),
+            desc: "desc".into(),
+            action: "path".into(),
+            args: Some(" exact ".into()),
+        };
+        let rows = vec![row.clone(), row.clone()];
+        let selection = CatalogSelection {
+            revision: 7,
+            index: 1,
+            original: row,
+        };
+        assert!(selection.target(&rows, 8, false).is_none());
+        assert!(selection.target(&rows, 7, true).is_none());
+        let target = selection.target(&rows, 7, false).unwrap();
+        let mut changed = rows.clone();
+        changed.remove(0);
+        assert!(
+            multi_launcher::actions::RemoveAction::new(target.clone())
+                .apply_to(&mut changed)
+                .is_err()
+        );
+        let mut unchanged = rows;
+        multi_launcher::actions::RemoveAction::new(target)
+            .apply_to(&mut unchanged)
+            .unwrap();
+        assert_eq!(unchanged.len(), 1);
     }
 
     #[test]
