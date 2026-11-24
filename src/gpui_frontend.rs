@@ -2387,6 +2387,7 @@ struct RootWindow {
     utility_size_store: Arc<Mutex<UtilitySizeStore>>,
     utility_size_polling: Arc<AtomicBool>,
     hash_docked_preferred_size: PreferredWindowSize,
+    hash_body_viewport: Option<AppliedWindowSize>,
     hash_docked_resize: Arc<Mutex<Option<DockedHashResize>>>,
     hash_geometry_sequence: Arc<AtomicU64>,
     hash_tool_key: UtilityToolKey,
@@ -2614,16 +2615,16 @@ fn search_jump_result_target_id(generation: u64, index: usize) -> TargetId {
     TargetId::root_result(TargetGeneration(generation), index)
 }
 
+fn inner_results_consumed_scroll(previous_offset: f32, max_offset: f32, delta: f32) -> bool {
+    (delta < 0.0 && previous_offset > -max_offset) || (delta > 0.0 && previous_offset < 0.0)
+}
+
 fn launcher_result_row_id(generation: u64, absolute_index: usize) -> String {
     format!("launcher-search-result-row-{generation}-{absolute_index}")
 }
 
 fn launcher_result_grid_row_id(generation: u64, first_absolute_index: usize) -> String {
     format!("launcher-search-grid-row-{generation}-{first_absolute_index}")
-}
-
-fn launcher_results_viewport_max_height(window_height: f32) -> f32 {
-    (window_height * 0.45).clamp(72.0, 360.0)
 }
 
 // GPUI snaps style lengths to device pixels with half ties toward zero.
@@ -2861,7 +2862,6 @@ const HASH_DOCK_MIN_HEIGHT: f32 = 320.0;
 const HASH_DOCK_MAX_DIMENSION: f32 = 8192.0;
 const HASH_DOCK_RESIZE_HANDLE_SIZE: f32 = 26.0;
 const HASH_DOCK_KEYBOARD_RESIZE_STEP: f32 = 16.0;
-const LAUNCHER_PREFERRED_COLUMN_WIDTH: f32 = 520.0;
 
 #[derive(Clone, Copy, Debug)]
 enum DockedHashResizeOrigin {
@@ -2911,23 +2911,20 @@ impl DockedHashResizePayload {
 }
 
 fn launcher_column_width(viewport_width: f32, window_padding: f32, scale: f32) -> f32 {
+    launcher_search_width(viewport_width, window_padding, scale).min(520.0)
+}
+
+fn launcher_search_width(viewport_width: f32, window_padding: f32, scale: f32) -> f32 {
     let available = ((viewport_width * scale).floor() / scale
         - 2.0 * launcher_snapped_length(window_padding, scale))
-        .max(1.0)
-        .min(LAUNCHER_PREFERRED_COLUMN_WIDTH);
+        .max(1.0);
     launcher_snapped_length(available, scale)
 }
 
-fn docked_hash_available_size(
-    viewport_width: f32,
-    viewport_height: f32,
-    window_padding: f32,
-) -> AppliedWindowSize {
-    let content_width = (viewport_width - window_padding * 2.0).max(1.0);
-    let height = (viewport_height - window_padding * 2.0).max(1.0);
+fn docked_hash_available_size(bounds: Bounds<Pixels>) -> AppliedWindowSize {
     AppliedWindowSize {
-        width: content_width,
-        height,
+        width: bounds.size.width.as_f32().max(1.0),
+        height: bounds.size.height.as_f32().max(1.0),
     }
 }
 
@@ -4798,18 +4795,13 @@ impl RootWindow {
         &mut self,
         payload: &DockedHashResizePayload,
         position: Point<Pixels>,
-        window: &Window,
-        window_padding: f32,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) {
         if !self.docked_hash_resize_is_current(payload) {
             return;
         }
-        let available = docked_hash_available_size(
-            window.bounds().size.width.as_f32(),
-            window.bounds().size.height.as_f32(),
-            window_padding,
-        );
+        let available = docked_hash_available_size(self.root_scroll.bounds());
         let visible_size = docked_hash_fit(payload.start_size, available);
         let mut preview = payload
             .preview_extent
@@ -7096,6 +7088,7 @@ impl RootWindow {
             self.launcher_results.move_selection(movement)
         };
         if changed && let Some(row) = self.launcher_results.selected_scroll_child() {
+            self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
             self.launcher_results_scroll.scroll_to_item(row);
         }
         cx.notify();
@@ -7305,6 +7298,7 @@ impl RootWindow {
             return false;
         };
         if let Some(scroll_child) = reveal_row {
+            self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
             self.launcher_results_scroll.scroll_to_item(scroll_child);
         }
         cx.notify();
@@ -7772,6 +7766,7 @@ impl RootWindow {
                     Ok::<(), String>(())
                 })?;
                 panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
+                self.root_scroll.scroll_to_top_of_item(self.docked_hash_scroll_item());
                 return Ok(());
             }
             HashWindowState::Popout { window, view, .. } => {
@@ -7943,6 +7938,9 @@ impl RootWindow {
             }
         }
         panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
+        if mode == HashPresentationMode::Docked {
+            self.root_scroll.scroll_to_top_of_item(self.docked_hash_scroll_item());
+        }
         self.hash_wake_signal.notify();
         self.hash_open_error = None;
         if let Some((native_window, view)) = popout_setup {
@@ -9307,6 +9305,9 @@ impl Render for RootWindow {
             metrics.window_padding,
             scale,
         );
+        let search_width = launcher_search_width(
+            window.viewport_size().width.as_f32(), metrics.window_padding, scale,
+        );
         let completion_preview = self
             .search_completion
             .suggestions
@@ -9320,8 +9321,6 @@ impl Render for RootWindow {
                 }
             })
             .collect::<Vec<_>>();
-        let search_content_can_overflow =
-            self.launcher_results.actions.len() > 1 || !completion_preview.is_empty();
         let result_layout = self.launcher_results.layout;
         let result_generation = self.launcher_results.generation;
         let result_count = self.launcher_results.actions.len();
@@ -9335,7 +9334,7 @@ impl Render for RootWindow {
         let jump_session_generation = self.search_jump_mode.session_generation();
         let result_row_count = result_layout.row_count(result_count);
         let result_columns = result_layout.columns.max(1);
-        let result_width = (root_controls_width
+        let result_width = (search_width
             - 2.0 * launcher_snapped_length(metrics.panel_padding, scale))
             .max(0.0);
         let (result_gap, grid_cell_width) = launcher_result_grid_geometry(
@@ -9430,8 +9429,6 @@ impl Render for RootWindow {
                 }
             })
             .collect::<Vec<_>>();
-        let results_viewport_height =
-            launcher_results_viewport_max_height(window.bounds().size.height.as_f32());
         let docked_hash_frame = docked_hash.as_ref().map(|(view, mount_generation)| {
             let session_epoch = self
                 .hash_session
@@ -9446,11 +9443,7 @@ impl Render for RootWindow {
             };
             let resize_preview = self.docked_hash_resize_preview(*mount_generation, session_epoch);
             let requested_size = resize_preview.unwrap_or(self.hash_docked_preferred_size);
-            let available_size = docked_hash_available_size(
-                window.bounds().size.width.as_f32(),
-                window.bounds().size.height.as_f32(),
-                metrics.window_padding,
-            );
+            let available_size = docked_hash_available_size(self.root_scroll.bounds());
             let current_visible_size =
                 docked_hash_fit(self.hash_docked_preferred_size, available_size);
             let displayed_size = docked_hash_fit(requested_size, available_size);
@@ -9498,7 +9491,6 @@ impl Render for RootWindow {
                             &pointer_payload,
                             event.position,
                             window,
-                            metrics.window_padding,
                             cx,
                         );
                     }),
@@ -9745,11 +9737,12 @@ impl Render for RootWindow {
                 palette,
             )
         });
-        let root_controls = div()
+        let header = div()
             .flex()
             .flex_col()
+            .flex_shrink_0()
             .gap_y(px(metrics.item_spacing_y))
-            .w(px(root_controls_width))
+            .w(px(search_width))
             .max_w_full()
             .p(px(metrics.panel_padding))
             .bg(appearance::to_hsla(palette.panel_surface))
@@ -9759,14 +9752,22 @@ impl Render for RootWindow {
             .line_height(px(metrics.line_height))
             .child(root_menu_bar)
             .child(
-                Label::new("Search")
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_size(px(metrics.heading_text_size))
-                    .line_height(px(metrics.line_height)),
-            )
-            .child(search_field)
+                div().flex().items_center().gap_2().w_full()
+                    .child(gpui_kit::component::Icon::new(gpui_kit::component::IconName::Search))
+                    .child(div().flex_1().min_w(px(0.0)).child(search_field)),
+            );
+        let search_body = div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .max_h_full()
+            .gap_y(px(metrics.item_spacing_y))
+            .w(px(search_width))
+            .max_w_full()
+            .px(px(metrics.panel_padding))
+            .text_color(appearance::to_hsla(palette.primary_text))
+            .text_size(px(metrics.body_text_size))
+            .line_height(px(metrics.line_height))
             .children(self.launcher_search_error.as_ref().map(|error| {
                 Label::new(error.clone())
                     .w_full()
@@ -9793,9 +9794,27 @@ impl Render for RootWindow {
                     .flex_col()
                     .gap_y(px(metrics.item_spacing_y))
                     .w_full()
-                    .max_h(px(results_viewport_height))
+                    .flex_1()
+                    .min_h(px(0.0))
                     .overflow_y_scroll()
                     .track_scroll(&self.launcher_results_scroll)
+                    .on_scroll({
+                        let scroll = self.launcher_results_scroll.clone();
+                        let line_height = px(metrics.line_height);
+                        move |event, _, cx| {
+                            // The built-in scroll listener uses the result element's
+                            // resolved text line height and falls back to x for y=0.
+                            let pixels = event.delta.pixel_delta(line_height);
+                            let delta = if pixels.y.is_zero() { pixels.x } else { pixels.y }.as_f32();
+                            let offset = scroll.offset();
+                            let maximum = scroll.max_offset().y.as_f32();
+                            let previous = (offset.y.as_f32() - delta).clamp(-maximum, 0.0);
+                            scroll.set_offset(point(offset.x, px(offset.y.as_f32().clamp(-maximum, 0.0))));
+                            if inner_results_consumed_scroll(previous, maximum, delta) {
+                                cx.stop_propagation();
+                            }
+                        }
+                    })
                     .children(result_rows)
             }))
             .child(launcher_controls::LauncherUtilityControls::new(
@@ -9805,38 +9824,15 @@ impl Render for RootWindow {
                 palette,
                 docked_hash.is_some(),
             ));
-        let root_controls = root_controls
-            .flex_shrink_0()
-            .when(
-                !search_content_can_overflow
-                    && settings_editor_panel.is_none()
-                    && toast_log_viewer_panel.is_none()
-                    && command_help_panel.is_none()
-                    && quick_help_panel.is_none()
-                    && docked_hash.is_none()
-                    && app_editor_panel.is_none()
-                    && self.file_search.as_ref().is_none_or(|view| !view.read(cx).open)
-                    && !self.downloads_triage_open(cx)
-                    && self.plugin_editor.as_ref().is_none_or(|view| !view.read(cx).open),
-                |this| {
-                    // Center the ordinary root only when its content fits.
-                    this.my_auto()
-                },
-            );
-
-        let mut root_scroll = div()
-            .id("multi-launcher-root-scroll")
+        let mut root_shell = div()
+            .id("multi-launcher-root")
             .role(Role::Group)
             .flex()
             .flex_col()
-            .gap_y(px(metrics.section_spacing))
             .size_full()
             .p(px(metrics.window_padding))
-            .overflow_y_scroll()
             .items_center()
             .justify_start()
-            .track_scroll(&self.root_scroll)
-            .when(docked_hash.is_some(), |this| this.items_start())
             .track_focus(&self.focus_handle)
             .key_context("RootWindow")
             .capture_key_down(cx.listener(|root, event: &KeyDownEvent, window, cx| {
@@ -9986,7 +9982,20 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &RestartWithEgui, window, cx| {
                 this.open_restart_confirmation(window, cx);
             }))
-            .child(root_controls);
+            .child(header);
+        if docked_hash.is_some() {
+            root_shell = root_shell.capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if this.cancel_docked_hash_preview() { cx.notify(); }
+            }));
+        }
+        let mut root_scroll = div()
+            .id("multi-launcher-root-scroll")
+            .flex().flex_col().flex_1().min_h(px(0.0)).w_full()
+            .gap_y(px(metrics.section_spacing))
+            .overflow_y_scroll().items_center().justify_start()
+            .track_scroll(&self.root_scroll)
+            .when(docked_hash.is_some(), |this| this.items_start())
+            .child(search_body);
         if let Some(settings_editor_panel) = settings_editor_panel {
             root_scroll = root_scroll.child(
                 div()
@@ -10018,13 +10027,6 @@ impl Render for RootWindow {
                     .child(quick_help_panel),
             );
         }
-        if docked_hash.is_some() {
-            root_scroll = root_scroll.capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                if this.cancel_docked_hash_preview() {
-                    cx.notify();
-                }
-            }));
-        }
         root_scroll = root_scroll.children(
             self.favorites_panel(root_controls_width, metrics, palette, cx)
                 .map(|panel| div().flex_shrink_0().child(panel)),
@@ -10041,6 +10043,25 @@ impl Render for RootWindow {
         }
         if let Some(view) = self.plugin_editor.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if docked_hash.is_some() {
+            let scroll = self.root_scroll.clone();
+            let owner = cx.entity().downgrade();
+            root_scroll = root_scroll.child(canvas(
+                move |_, window, app| {
+                    let measured = docked_hash_available_size(scroll.bounds());
+                    let owner = owner.clone();
+                    window.defer(app, move |_, app| {
+                        let _ = owner.update(app, |root, cx| {
+                            if root.hash_body_viewport != Some(measured) {
+                                root.hash_body_viewport = Some(measured);
+                                cx.notify();
+                            }
+                        });
+                    });
+                },
+                |_, _, _, _| {},
+            ).absolute().size(px(0.0)));
         }
         // The absolute Search observer still has a layout slot, so keep it after the pane anchors.
         if let (Some(draft), Some(target_ids)) = (jump_geometry_draft, jump_target_ids) {
@@ -10076,7 +10097,7 @@ impl Render for RootWindow {
                 .with_priority(gpui_kit::base::POPUP_PRIORITY)
             })
         });
-        div().size_full().child(root_scroll).children(popup)
+        root_shell.child(root_scroll).children(popup)
     }
 }
 
@@ -12104,6 +12125,7 @@ pub(crate) fn run_foundation_window(
                 utility_size_store: Arc::clone(&utility_sizes_for_root),
                 utility_size_polling: Arc::clone(&utility_size_polling_for_root),
                 hash_docked_preferred_size: hash_docked_preferred_size_for_root,
+                hash_body_viewport: None,
                 hash_docked_resize: Arc::new(Mutex::new(None)),
                 hash_geometry_sequence: Arc::clone(&hash_geometry_sequence_for_root),
                 hash_tool_key,
@@ -13040,7 +13062,7 @@ mod tests {
         keyboard_docked_resize_preview,
         launcher_column_width, launcher_result_activation_is_current, launcher_result_grid_geometry,
         launcher_result_grid_row_id, launcher_result_row_id,
-        launcher_results_viewport_max_height, parse_installed_search_invocation,
+        parse_installed_search_invocation,
         physical_keypad_selection_move, pointer_docked_resize_preview, query_set_outcome_text,
         result_click_source, root_menu_close_should_restore_focus,
         root_search_focus_is_current, root_tab_traversed_to_search,
@@ -14977,7 +14999,6 @@ mod tests {
             launcher_result_grid_row_id(generation, 6),
             launcher_result_grid_row_id(generation + 1, 6)
         );
-        assert_eq!(launcher_results_viewport_max_height(200.0), 90.0);
     }
 
     #[test]
@@ -16453,6 +16474,15 @@ mod tests {
     }
 
     #[test]
+    fn result_wheel_hands_off_only_at_scroll_boundaries() {
+        assert!(super::inner_results_consumed_scroll(0.0, 100.0, -10.0));
+        assert!(super::inner_results_consumed_scroll(-95.0, 100.0, -10.0));
+        assert!(!super::inner_results_consumed_scroll(-100.0, 100.0, -10.0));
+        assert!(super::inner_results_consumed_scroll(-50.0, 100.0, 10.0));
+        assert!(!super::inner_results_consumed_scroll(0.0, 100.0, 10.0));
+    }
+
+    #[test]
     fn launcher_result_grid_geometry_bounds_gaps_and_equal_cells() {
         assert_eq!(launcher_result_grid_geometry(359.0, 3, 6.0, 1.0), (6.0, 115.0));
         assert_eq!(launcher_result_grid_geometry(10.0, 3, 8.0, 1.0), (5.0, 0.0));
@@ -16463,7 +16493,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_column_width_fits_viewport_padding_and_preserves_preferred_width() {
+    fn launcher_column_width_fits_viewport_padding() {
         assert_eq!(launcher_column_width(800.0, 12.0, 1.0), 520.0);
         assert_eq!(launcher_column_width(544.0, 12.0, 1.0), 520.0);
         assert_eq!(launcher_column_width(400.0, 12.0, 1.0), 376.0);
@@ -16471,12 +16501,14 @@ mod tests {
         assert_eq!(launcher_column_width(400.0, 8.0, 1.2), 460.0 / 1.2);
         assert_eq!(launcher_column_width(800.0, 8.0, 1.2), 520.0);
         assert_eq!(launcher_column_width(10.0, 8.0, 1.2), 1.0 / 1.2);
+        assert_eq!(super::launcher_search_width(800.0, 12.0, 1.0), 776.0);
+        assert_eq!(super::launcher_search_width(400.0, 12.0, 1.0), 376.0);
     }
 
     #[test]
     fn docked_hash_fit_is_transient_and_handles_viewports_below_settings_limits() {
         let preferred = PreferredWindowSize::new(620.0, 440.0).unwrap();
-        let available = docked_hash_available_size(40.0, 30.0, 12.0);
+        let available = docked_hash_available_size(Bounds::new(point(px(0.0), px(0.0)), gpui_kit::size(px(16.0), px(6.0))));
         assert_eq!(
             available,
             AppliedWindowSize {

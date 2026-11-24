@@ -935,3 +935,7 @@ The Search capability slice passed all 15 focused tests and the matched Windows 
 ## G05 checked saved-document activation
 
 The real GPUI App Editor saved the literal document path. Search passed it to the shared external worker after checking the current result and the file. All six focused cases passed. Both frontends opened the exact document at the 1516 × 937 baseline and recorded one successful activation each. GPUI refused a missing file, a directory with a document extension and a real Windows junction. Continue the anchored Search layout using the matched captures. [Exact receipts](VALIDATION_LOG.md#g05-checked-saved-document-activation) · [Launcher layout verification](gui/launcher.md#top-centered-query-layout)
+
+## G05 top-centered Search and scroll ownership
+
+Search stays in a responsive header above the results and docked content. Review and the first Windows artifact caught an offscreen Hash dock and two moving scroll offsets. The corrected build revealed docked Hash from an overflowing query, kept wheel movement local until a result boundary, and returned Search navigation to the visible selection. Twelve focused tests and matched 1516 × 937 Windows captures verified the scoped behavior, including Tab, Grid Jump and compact dock scrolling. G05 remains in implementation for broader visual density, spacing, control alignment and workspace parity. [Exact receipts](VALIDATION_LOG.md#g05-top-centered-search-and-scroll-ownership)

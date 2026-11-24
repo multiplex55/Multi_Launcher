@@ -34,6 +34,8 @@ Inspect the live egui root layout in `src/gui/render.rs` before changing the GPU
 
 Compare equivalent states in both frontends at 1516 × 937 pixels on matching display scaling. Capture the primary visual states at that size. Check placement and visibility through result changes, List and Grid scrolling, docked utility scrolling, and resizing. Replay the affected input paths. Use compact and minimum dimensions for supplemental checks and reuse past evidence for unaffected behaviors.
 
+The anchored layout passed its focused Windows replay at 1516 × 937. The fixed header shares keyboard and focus ownership with the scrolling body. List and Grid rows scroll independently and hand wheel input to the body at their boundaries. Docked Hash fits the measured body and remains reachable from a dense query. Result density, foundation controls and exact alignment still differ between the two frontends. [Matched captures and receipts](../VALIDATION_LOG.md#g05-top-centered-search-and-scroll-ownership)
+
 ## First GPUI result activation checkpoint
 
 Use the existing `search_filtered_plugins` boundary behind egui's `PluginManager::search_filtered` with the actual built-in `HashGeneratorPlugin` and committed enabled plugin and capability filters. Library code exposes the narrow call. GPUI startup still avoids constructing an unrelated full plugin runtime. This first synchronous route yields at most one Action and has no ranking work. The G05 shared local and fallback scorer still follows the goal packet.
