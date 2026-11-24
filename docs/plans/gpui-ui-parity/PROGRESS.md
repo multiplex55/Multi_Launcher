@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G05 Folder and Bookmark Search passed 29 focused tests and native activation on the same Windows artifact in GPUI and egui. The replay verified exact targets and accounting, guarded stale and missing rows, and Search capability gating. G02/G05 saved application execution and G06 checked App Editor Edit/Remove retain their scoped evidence. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Provider evidence](VALIDATION_LOG.md#g05-folder-and-bookmark-search-admission) · [Saved application evidence](VALIDATION_LOG.md#g02-and-g05-ordinary-saved-application-execution) · [App Editor evidence](VALIDATION_LOG.md#g06-saved-custom-app-editor-catalog-and-checked-editing)
+G04 Hash main-control Jump passed its focused batch and corrected Windows replay in both hosts. G01/G03 visibility retirement passed ordinary close and checked restart with a live independent Hash window. G05 Folder and Bookmark Search, saved application execution and G06 checked App Editor Edit/Remove retain their scoped evidence. Runtime inventory closure, broader providers, mixed DPI, global invocation and active UI Automation focus remain open. [Hash and retirement evidence](VALIDATION_LOG.md#g01-g03-and-g04-hash-main-control-jump-and-visibility-retirement) · [Provider evidence](VALIDATION_LOG.md#g05-folder-and-bookmark-search-admission) · [App Editor evidence](VALIDATION_LOG.md#g06-saved-custom-app-editor-catalog-and-checked-editing)
 
 ## Execution status
 
@@ -19,7 +19,7 @@ G05 Folder and Bookmark Search passed 29 focused tests and native activation on 
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Complete and verify Hash main-control Jump Mode in Docked and Pop Out. Batch it with the type-checked GPUI visibility retirement fix. The matched F2 probe recorded zero consumed wakes, leaving native delivery and foreground restoration open. |
+| Current next action | Add Hash dropdown-item Jump Mode through the stock Kit Select owner and diagnose stale accessibility focus. Continue the Hash provider dependencies. The matched F2 probe left native delivery and foreground restoration open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
