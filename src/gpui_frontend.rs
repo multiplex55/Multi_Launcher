@@ -7,6 +7,7 @@ mod appearance;
 mod external_launch;
 mod favorites;
 mod hash_jump;
+mod hash_jump_select;
 mod jump_mode;
 mod search_providers;
 
@@ -3818,6 +3819,16 @@ fn create_hash_generator_view(
             .placeholder("Optional expected digest")
     });
 
+    let source_popup = hash_jump_select::PopupCollector::new(
+        hash_jump_select::HashPopupKind::Source,
+        mount_generation,
+        jump_controller.enabled,
+    );
+    let algorithm_popup = hash_jump_select::PopupCollector::new(
+        hash_jump_select::HashPopupKind::Algorithm,
+        mount_generation,
+        jump_controller.enabled,
+    );
     let source_index = HashSourceChoice::from_mode(initial_draft.mode).map(|source| match source {
         HashSourceChoice::Text => 0,
         HashSourceChoice::Clipboard => 1,
@@ -3829,7 +3840,9 @@ fn create_hash_generator_view(
                 HashSourceChoice::Text,
                 HashSourceChoice::Clipboard,
                 HashSourceChoice::File,
-            ],
+            ].into_iter().enumerate().map(|(index, value)| hash_jump_select::HashSelectItem {
+                value, index, collector: Rc::clone(&source_popup),
+            }).collect::<Vec<_>>(),
             source_index.map(|index| IndexPath::new(index)),
             window,
             cx,
@@ -3846,7 +3859,9 @@ fn create_hash_generator_view(
                 HashAlgorithmChoice(HashAlgorithm::Sha256),
                 HashAlgorithmChoice(HashAlgorithm::Sha512),
                 HashAlgorithmChoice(HashAlgorithm::Sha1),
-            ],
+            ].into_iter().enumerate().map(|(index, value)| hash_jump_select::HashSelectItem {
+                value, index, collector: Rc::clone(&algorithm_popup),
+            }).collect::<Vec<_>>(),
             Some(IndexPath::new(algorithm_index)),
             window,
             cx,
@@ -3859,6 +3874,8 @@ fn create_hash_generator_view(
         source.update(cx, |state, cx| state.focus(window, cx));
     }
 
+    let source_trigger = source.read(cx).focus_handle(cx);
+    let algorithm_trigger = algorithm.read(cx).focus_handle(cx);
     let native_geometry_slot = new_native_geometry_slot();
     let native_geometry_stamp = NativeGeometryStamp {
         session_epoch,
@@ -3950,8 +3967,8 @@ fn create_hash_generator_view(
         let source_subscription = cx.subscribe(
             &source_for_subscription,
             |this: &mut HashGeneratorWindow,
-             source: Entity<SelectState<Vec<HashSourceChoice>>>,
-             event: &SelectEvent<Vec<HashSourceChoice>>,
+             source: Entity<SelectState<Vec<hash_jump_select::HashSelectItem<HashSourceChoice>>>>,
+             event: &SelectEvent<Vec<hash_jump_select::HashSelectItem<HashSourceChoice>>>,
              cx: &mut Context<HashGeneratorWindow>| {
                 if this.clipboard_pending.is_copying() || !this.is_current_mount() {
                     return;
@@ -3982,8 +3999,8 @@ fn create_hash_generator_view(
         let algorithm_subscription = cx.subscribe(
             &algorithm_for_subscription,
             |this: &mut HashGeneratorWindow,
-             algorithm: Entity<SelectState<Vec<HashAlgorithmChoice>>>,
-             event: &SelectEvent<Vec<HashAlgorithmChoice>>,
+             algorithm: Entity<SelectState<Vec<hash_jump_select::HashSelectItem<HashAlgorithmChoice>>>>,
+             event: &SelectEvent<Vec<hash_jump_select::HashSelectItem<HashAlgorithmChoice>>>,
              cx: &mut Context<HashGeneratorWindow>| {
                 if this.clipboard_pending.is_copying() || !this.is_current_mount() {
                     return;
@@ -4010,6 +4027,16 @@ fn create_hash_generator_view(
             },
         );
 
+        source_popup.borrow_mut().bind(cx.entity().downgrade(), source_trigger);
+        algorithm_popup.borrow_mut().bind(cx.entity().downgrade(), algorithm_trigger);
+        let source_popup_for_dismiss = Rc::clone(&source_popup);
+        let source_dismiss = cx.subscribe(&source_for_subscription, move |_: &mut HashGeneratorWindow, _, _: &DismissEvent, _| {
+            source_popup_for_dismiss.borrow_mut().dismiss();
+        });
+        let algorithm_popup_for_dismiss = Rc::clone(&algorithm_popup);
+        let algorithm_dismiss = cx.subscribe(&algorithm_for_subscription, move |_: &mut HashGeneratorWindow, _, _: &DismissEvent, _| {
+            algorithm_popup_for_dismiss.borrow_mut().dismiss();
+        });
         let jump = hash_jump::HashJump::new(jump_controller, cx);
         let focus_handle = cx.focus_handle();
         let focus_out = cx.on_focus_out(
@@ -4030,6 +4057,8 @@ fn create_hash_generator_view(
             });
         HashGeneratorWindow {
             jump,
+            source_popup,
+            algorithm_popup,
             text,
             expected,
             source,
@@ -4063,6 +4092,8 @@ fn create_hash_generator_view(
                 expected_subscription,
                 source_subscription,
                 algorithm_subscription,
+                source_dismiss,
+                algorithm_dismiss,
                 focus_out,
                 activation,
             ],
@@ -9746,10 +9777,12 @@ impl Render for RootWindow {
 
 struct HashGeneratorWindow {
     jump: hash_jump::HashJump,
+    source_popup: Rc<RefCell<hash_jump_select::PopupCollector>>,
+    algorithm_popup: Rc<RefCell<hash_jump_select::PopupCollector>>,
     text: Entity<TextareaState>,
     expected: Entity<TextareaState>,
-    source: Entity<SelectState<Vec<HashSourceChoice>>>,
-    algorithm: Entity<SelectState<Vec<HashAlgorithmChoice>>>,
+    source: Entity<SelectState<Vec<hash_jump_select::HashSelectItem<HashSourceChoice>>>>,
+    algorithm: Entity<SelectState<Vec<hash_jump_select::HashSelectItem<HashAlgorithmChoice>>>>,
     focus_handle: FocusHandle,
     session: Arc<Mutex<HashSession>>,
     wake_signal: Arc<HashWakeSignal>,
@@ -12948,6 +12981,18 @@ mod tests {
         assert!(!state.allows(HashControl::File));
         state.current = false;
         assert!(!state.allows(HashControl::Expected));
+    }
+
+    #[test]
+    fn hash_select_popup_targets_are_scoped_by_opening_and_selector() {
+        use super::hash_jump_select::{HashPopupKind, PopupCollector};
+        let source = PopupCollector::new(HashPopupKind::Source, 4, true);
+        let algorithm = PopupCollector::new(HashPopupKind::Algorithm, 4, true);
+        let first = source.borrow().target(0);
+        assert_ne!(first, algorithm.borrow().target(0));
+        source.borrow_mut().dismiss();
+        assert_ne!(first, source.borrow().target(0));
+        assert_ne!(source.borrow().target(0), source.borrow().target(1));
     }
 
     #[test]
