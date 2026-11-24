@@ -41,6 +41,10 @@ The first native round trip exercised Dock and Pop Out with the root visible and
 
 The G05 Action Sheet batch opened one docked Hash from Search, calculated the expected digest through Hash's Ctrl+Enter and closed and restored exact Search through Ctrl+W. Escape in the focused GPUI Text field left Hash open, while the egui Action Sheet Execute baseline closed the tool. Track scoped Escape under HASH-08. [Batch evidence](../VALIDATION_LOG.md#g05-c-and-g06-action-sheet-and-favorites-browse-batch)
 
+### Focused Escape checkpoint
+
+Route plain Escape from the current focused Hash mount to the existing `HashGeneratorWindow::request_close` admission and terminal owner. Keep existing nested Kit selector, modal, native file picker and docked resize-preview Escape ownership. Match the current mount and session and restore Search through the existing close path when appropriate. Verify the recorded docked Text case, nested selector first Escape, resize-preview cancellation and a fresh open. This source change can share the [first pinned toolbar artifact](launcher.md#first-pinned-toolbar-control). The Hash pinned presentation remains with its own utility owner.
+
 ## Clipboard actions
 
 Explicit Load and Copy use `ArboardClipboardBackend`. The read reaches the existing protected reader and its timeout policy. Accepted GPUI operations run outside the UI thread and `HashSession` lock, with one root-owned in-flight operation. `HashSession` owns shared snapshot, error and digest feedback. Load keeps a prior snapshot on failure and invalidates the earlier result only on a changed source. An empty string is a valid loaded snapshot. GPUI shows the byte count and current feedback.

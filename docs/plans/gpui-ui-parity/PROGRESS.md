@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G06 compact Favorites and saved pin source has passed the scoped `fast-dev` app and test checks. The combined focused Nextest run and Windows replay are pending. There are 219 source-backed GUI records, with zero fully accepted GPUI product GUIs. Runtime inventory closure, wider Favorites providers, the pin toolbar, and the other G05 and G06 criteria remain open. [Compact Favorites checkpoint](CHECKPOINTS.md#g06-compact-favorites-and-saved-pin)
+G06 compact Favorites and saved pin passed its 10 focused tests and matched Windows replay from source `40c408bda`. Windows verified two compact sizes, retained draft and picker state through minimize and restore, and checked recovery from stale and malformed stores. Both owned processes exited 0 with exact Settings, Actions and restored Favorites. The next bounded packet is the first pinned toolbar control and the independent Hash Escape correction. There are 219 source-backed GUI records, with zero fully accepted GPUI product GUIs. Runtime inventory closure, wider Favorites providers, launcher width and active UI Automation focus remain open. [Compact Favorites checkpoint](CHECKPOINTS.md#g06-compact-favorites-and-saved-pin) · [Windows and Rust evidence](VALIDATION_LOG.md#g06-compact-favorites-and-saved-pin-batch)
 
 ## Execution kickoff
 
