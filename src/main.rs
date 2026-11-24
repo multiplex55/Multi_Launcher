@@ -4833,6 +4833,13 @@ fn main() -> anyhow::Result<()> {
     actions_timer.finish("startup.action_load");
     if frontend == gpui_frontend::Frontend::Gpui {
         let (folder_aliases_lc, bookmark_aliases_lc) = load_gpui_search_aliases();
+        let launcher_hotkey = settings.hotkey();
+        let launcher_hotkey_display = settings
+            .hotkey
+            .as_deref()
+            .filter(|value| multi_launcher::hotkey::parse_hotkey(value) == Some(launcher_hotkey))
+            .unwrap_or("F2")
+            .to_owned();
         let search_startup = gpui_frontend::LauncherSearchStartup {
             actions: actions_vec,
             match_exact: settings.match_exact,
@@ -4851,7 +4858,9 @@ fn main() -> anyhow::Result<()> {
             bookmark_aliases_lc,
         };
         let restart_plan = match gpui_frontend::run_foundation_window(
-            settings.hotkey(),
+            launcher_hotkey,
+            launcher_hotkey_display,
+            settings.help_hotkey.clone(),
             settings.enabled_plugins.clone(),
             settings.enabled_capabilities.clone(),
             search_startup,

@@ -4,7 +4,7 @@
 
 The first [Settings menu and bare typed entry](../gui/settings-main.md#first-native-settings-save) also passed the scoped checkpoint. File Close and both Toast Log actions have native and focused Rust evidence, with G23 ownership for the remaining viewer geometry. [File and Toast Log evidence](../VALIDATION_LOG.md#g05g23-gpui-file-close-and-toast-log)
 
-The first [Command Help checkpoint](../gui/command-help.md#first-native-command-help-checkpoint) passed native and focused Rust verification for Command List, Linking Guide and typed Help, shared filter and acknowledged Show examples for currently installed GPUI providers. The broader catalog, Quick Help and utility geometry remain pending.
+The first [Command Help checkpoint](../gui/command-help.md#first-native-command-help-checkpoint) passed native and focused Rust verification for Command List, Linking Guide and typed Help, shared filter and acknowledged Show examples for currently installed GPUI providers. [Quick Help](../gui/quick-help.md#first-native-quick-help-checkpoint) is implemented and type-checked. Its scoped tests and native replay await the combined batch. The broader catalog and utility geometry remain pending.
 
 ## Objective and dependencies
 

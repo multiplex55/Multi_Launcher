@@ -70,9 +70,16 @@ use multi_launcher::hash_generator::{
 use multi_launcher::hotkey::HotkeyListener;
 #[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
+use multi_launcher::hotkey::{Hotkey, parse_hotkey};
+use multi_launcher::hotkey::runtime::legacy_virtual_key;
+use multi_launcher::hotkey::validation::{hotkeys_can_cofire, jump_chord_conflict};
 use multi_launcher::launcher::query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 use multi_launcher::launcher::command_help::{
     CommandHelpProvider, command_prefixes, example_line, matches_filter,
+};
+use multi_launcher::launcher::quick_help::{
+    GuideBlock, HelpFilterPeer, QUICK_HELP_GUIDE, QuickHelpProvider, SharedHelpFilter,
+    matches_provider_filter,
 };
 use multi_launcher::launcher::jump_mode::{
     Hint, HintMap, HintSession, MatchOutcome, SemanticTargetId, SurfaceId,
@@ -120,6 +127,7 @@ pub(crate) struct LauncherSearchStartup {
 struct LauncherSearchCatalog {
     providers: InstalledLauncherProviders,
     command_help_providers: Arc<[CommandHelpProvider]>,
+    quick_help_providers: Arc<[QuickHelpProvider]>,
     actions: Vec<Action>,
     cached_entries: Vec<CachedSearchEntry>,
     filter_metadata: Vec<ActionFilterMetadata>,
@@ -210,6 +218,14 @@ impl LauncherSearchCatalog {
         // enablement. Search capability gates provider rows at query time.
         let commands = providers.cached_commands(enabled_plugins);
         let command_help_providers = providers.command_help_providers();
+        let quick_help_providers = command_help_providers
+            .iter()
+            .map(|provider| QuickHelpProvider {
+                name: provider.name.clone(),
+                description: provider.description.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into();
         let cached_entries = actions.iter().map(CachedSearchEntry::from_action).collect();
         let filter_metadata = actions
             .iter()
@@ -223,6 +239,7 @@ impl LauncherSearchCatalog {
         Self {
             providers,
             command_help_providers,
+            quick_help_providers,
             actions,
             cached_entries,
             filter_metadata,
@@ -386,6 +403,11 @@ struct CommandHelpState {
     next_request_id: u64,
 }
 
+#[derive(Default)]
+struct QuickHelpState {
+    open: bool,
+}
+
 impl CommandHelpState {
     fn new(show_examples: bool) -> Self {
         Self {
@@ -467,6 +489,12 @@ impl CommandHelpState {
 enum CommandHelpOpenOrigin {
     Search,
     Menu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuickHelpOpenOrigin {
+    Menu,
+    Shortcut,
 }
 
 impl SettingsEditorState {
@@ -744,6 +772,7 @@ impl RenderOnce for LauncherMenuBar {
             .label("Help")
             .dropdown_menu(move |menu, _, _| {
                 let command_list_context = help_action_context.clone();
+                let quick_help_context = help_action_context.clone();
                 let linking_guide_context = help_action_context.clone();
                 let open_action_context = help_action_context.clone();
                 let view_action_context = help_action_context.clone();
@@ -759,6 +788,13 @@ impl RenderOnce for LauncherMenuBar {
                         .action(Box::new(LinkingGuide))
                         .on_click(move |_, window, app| {
                             linking_guide_context.dispatch_action(&LinkingGuide, window, app);
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Quick Help Overlay")
+                        .action(Box::new(QuickHelp))
+                        .on_click(move |_, window, app| {
+                            quick_help_context.dispatch_action(&QuickHelp, window, app);
                         }),
                 )
                 .item(
@@ -1152,6 +1188,212 @@ impl RenderOnce for CommandHelpPanel {
     }
 }
 
+#[derive(IntoElement)]
+struct QuickHelpPanel {
+    root: WeakEntity<RootWindow>,
+    providers: Arc<[QuickHelpProvider]>,
+    filter_state: Entity<InputState>,
+    filter: String,
+    hotkeys: Arc<[QuickHelpHotkeyLine]>,
+    paste_sequence_summary: String,
+    sequence_starts: Arc<[String]>,
+    status: Option<String>,
+    width: f32,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+    palette: multi_launcher::gui::theme::SemanticPalette,
+    owner_focus_handle: FocusHandle,
+    close_focus_handle: FocusHandle,
+    scroll: ScrollHandle,
+}
+
+impl RenderOnce for QuickHelpPanel {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        let metrics = self.metrics;
+        let control_height = 2.0 * window.rem_size().as_f32();
+        let status_height = self
+            .status
+            .as_ref()
+            .map_or(0.0, |_| 3.0 * metrics.line_height.max(18.0));
+        let reserved_height = 2.0 * metrics.window_padding
+            + 2.0 * metrics.panel_padding
+            + metrics.heading_text_size.max(metrics.line_height)
+            + control_height
+            + control_height
+            + status_height
+            + 5.0 * metrics.item_spacing_y;
+        let body_height = quick_help_viewport_body_height(
+            window.viewport_size().height.as_f32(),
+            reserved_height,
+        );
+        let filter_is_empty = self.filter.is_empty();
+        let providers = self
+            .providers
+            .iter()
+            .enumerate()
+            .filter(|(_, provider)| {
+                matches_provider_filter(&self.filter, &provider.name, &provider.description)
+            })
+            .collect::<Vec<_>>();
+
+        let mut body = div()
+            .id("quick-help-content")
+            .flex()
+            .flex_col()
+            .gap_y(px(metrics.item_spacing_y))
+            .w_full()
+            .h(px(body_height))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll);
+        for (block_index, block) in QUICK_HELP_GUIDE.iter().enumerate() {
+            let block_id = format!("quick-help-guide-block-{block_index:02}");
+            body = match *block {
+                GuideBlock::Heading(text) => body.child(
+                    Label::new(text)
+                        .id(block_id)
+                        .text_size(px(metrics.heading_text_size))
+                        .font_weight(FontWeight::BOLD)
+                        .line_height(px(metrics.line_height)),
+                ),
+                GuideBlock::Paragraph(text) | GuideBlock::WrappedParagraph(text) => {
+                    body.child(Label::new(text).id(block_id).w_full())
+                }
+                GuideBlock::Monospace(text) => body.child(
+                    Label::new(text)
+                        .id(block_id)
+                        .font_family("monospace")
+                        .text_size(px(metrics.small_text_size))
+                        .w_full(),
+                ),
+                GuideBlock::Separator => body.child(
+                    div()
+                        .id(block_id)
+                        .w_full()
+                        .h(px(1.0))
+                        .bg(appearance::to_hsla(self.palette.control_border)),
+                ),
+                GuideBlock::Hotkeys => body.child(
+                    div()
+                        .id(block_id)
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap_y(px(metrics.item_spacing_y))
+                        .children(self.hotkeys.iter().enumerate().map(|(index, line)| {
+                            Label::new(format!("{}: {}", line.label, line.chord))
+                                .id(format!("quick-help-hotkey-{index}"))
+                                .w_full()
+                        })),
+                ),
+                GuideBlock::PasteSequenceSummary => body.child(
+                    div()
+                        .id(block_id)
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap_y(px(metrics.item_spacing_y))
+                        .children(
+                            self.paste_sequence_summary
+                                .lines()
+                                .enumerate()
+                                .map(|(index, line)| {
+                                    Label::new(line.to_owned())
+                                        .id(format!("quick-help-paste-status-{index}"))
+                                        .w_full()
+                                }),
+                        ),
+                ),
+                GuideBlock::SequenceStarts => body.child(
+                    div()
+                        .id(block_id)
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap_y(px(metrics.item_spacing_y))
+                        .children(self.sequence_starts.iter().enumerate().map(
+                            |(index, line)| {
+                                Label::new(line.clone())
+                                    .id(format!("quick-help-sequence-start-{index}"))
+                                    .w_full()
+                            },
+                        )),
+                ),
+                GuideBlock::Providers => body.child(
+                    div()
+                        .id(block_id)
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap_y(px(metrics.item_spacing_y))
+                        .children(providers.iter().map(|(index, provider)| {
+                            Label::new(format!("{}: {}", provider.name, provider.description))
+                                .id(format!("quick-help-provider-{index}-{}", provider.name))
+                                .w_full()
+                        }))
+                        .children((providers.is_empty() && !filter_is_empty).then(|| {
+                            Label::new("No providers match the filter.")
+                                .id("quick-help-provider-empty")
+                                .w_full()
+                        })),
+                ),
+            };
+        }
+
+        let close_root = self.root;
+        div()
+            .id("quick-help")
+            .track_focus(&self.owner_focus_handle)
+            .key_context("QuickHelp")
+            .flex()
+            .flex_col()
+            .gap_y(px(metrics.item_spacing_y))
+            .w(px(self.width))
+            .p(px(metrics.panel_padding))
+            .bg(appearance::to_hsla(self.palette.panel_surface))
+            .rounded(px(metrics.corner_radius))
+            .text_color(appearance::to_hsla(self.palette.primary_text))
+            .text_size(px(metrics.body_text_size))
+            .line_height(px(metrics.line_height))
+            .child(
+                Label::new("Quick Help Overlay")
+                    .text_size(px(metrics.heading_text_size))
+                    .line_height(px(metrics.line_height)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_x(px(metrics.item_spacing_x))
+                    .child(Label::new("Filter:"))
+                    .child(Input::new(&self.filter_state).aria_label("Filter Quick Help providers")),
+            )
+            .child(body)
+            .child(
+                div().h(px(status_height)).overflow_hidden().children(
+                    self.status.map(|status| {
+                        Label::new(status)
+                            .id("quick-help-shortcut-status")
+                            .text_color(appearance::to_hsla(self.palette.error))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                            .w_full()
+                    }),
+                ),
+            )
+            .child(
+                Button::new("quick-help-close")
+                    .label("Close")
+                    .tab_stop(true)
+                    .track_focus(&self.close_focus_handle)
+                    .on_click(move |_, window, app| {
+                        let _ = close_root.update(app, |root, cx| {
+                            root.close_quick_help(window, cx, true);
+                        });
+                    }),
+            )
+    }
+}
+
 impl RenderOnce for SettingsEditorPanel {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let busy = self.saving || self.reading;
@@ -1438,12 +1680,275 @@ fn single_line_history_queries<'a>(queries: impl IntoIterator<Item = &'a str>) -
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum GpuiBoundAction {
+    ToggleSecondaryWindow,
+    ToggleCoordinateHudProbe,
+    OpenHashGenerator,
+    FocusDockedHashResize,
+    RestartWithEgui,
+    SearchHistoryOlder,
+    SearchHistoryNewer,
+    CalculateHash,
+    DockHashGenerator,
+    PopoutHashGenerator,
+    CloseHashGenerator,
+}
+
+#[derive(Clone, Copy)]
+struct GpuiBoundKey {
+    chord: &'static str,
+    context: &'static str,
+    label: &'static str,
+    action: GpuiBoundAction,
+}
+
+// Keep the shortcut shown in Quick Help and optional process-level shortcut
+// collision checks tied to the exact strings registered by GPUI below.
+const GPUI_BOUND_KEYS: &[GpuiBoundKey] = &[
+    GpuiBoundKey {
+        chord: "ctrl-enter",
+        context: "RootWindow",
+        label: "Open or dismiss retained window",
+        action: GpuiBoundAction::ToggleSecondaryWindow,
+    },
+    GpuiBoundKey {
+        chord: "f6",
+        context: "RootWindow",
+        label: "Toggle passive Coordinate HUD",
+        action: GpuiBoundAction::ToggleCoordinateHudProbe,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-g",
+        context: "RootWindow",
+        label: "Open Hash Generator",
+        action: GpuiBoundAction::OpenHashGenerator,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-shift-r",
+        context: "RootWindow",
+        label: "Focus docked Hash resize",
+        action: GpuiBoundAction::FocusDockedHashResize,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-shift-e",
+        context: "RootWindow",
+        label: "Restart in egui",
+        action: GpuiBoundAction::RestartWithEgui,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-up",
+        context: "LauncherSearch",
+        label: "Older query",
+        action: GpuiBoundAction::SearchHistoryOlder,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-down",
+        context: "LauncherSearch",
+        label: "Newer query",
+        action: GpuiBoundAction::SearchHistoryNewer,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-enter",
+        context: "HashGeneratorWindow",
+        label: "Calculate Hash Generator",
+        action: GpuiBoundAction::CalculateHash,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-shift-d",
+        context: "HashGeneratorWindow",
+        label: "Dock Hash Generator",
+        action: GpuiBoundAction::DockHashGenerator,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-shift-p",
+        context: "HashGeneratorWindow",
+        label: "Pop Out Hash Generator",
+        action: GpuiBoundAction::PopoutHashGenerator,
+    },
+    GpuiBoundKey {
+        chord: "ctrl-w",
+        context: "HashGeneratorWindow",
+        label: "Close Hash Generator",
+        action: GpuiBoundAction::CloseHashGenerator,
+    },
+];
+
+fn gpui_key_bindings() -> Vec<KeyBinding> {
+    GPUI_BOUND_KEYS
+        .iter()
+        .map(|binding| match binding.action {
+            GpuiBoundAction::ToggleSecondaryWindow => KeyBinding::new(
+                binding.chord,
+                ToggleSecondaryWindow,
+                Some(binding.context),
+            ),
+            GpuiBoundAction::ToggleCoordinateHudProbe => KeyBinding::new(
+                binding.chord,
+                ToggleCoordinateHudProbe,
+                Some(binding.context),
+            ),
+            GpuiBoundAction::OpenHashGenerator => {
+                KeyBinding::new(binding.chord, OpenHashGenerator, Some(binding.context))
+            }
+            GpuiBoundAction::FocusDockedHashResize => KeyBinding::new(
+                binding.chord,
+                FocusDockedHashResize,
+                Some(binding.context),
+            ),
+            GpuiBoundAction::RestartWithEgui => {
+                KeyBinding::new(binding.chord, RestartWithEgui, Some(binding.context))
+            }
+            GpuiBoundAction::SearchHistoryOlder => {
+                KeyBinding::new(binding.chord, SearchHistoryOlder, Some(binding.context))
+            }
+            GpuiBoundAction::SearchHistoryNewer => {
+                KeyBinding::new(binding.chord, SearchHistoryNewer, Some(binding.context))
+            }
+            GpuiBoundAction::CalculateHash => {
+                KeyBinding::new(binding.chord, CalculateHash, Some(binding.context))
+            }
+            GpuiBoundAction::DockHashGenerator => {
+                KeyBinding::new(binding.chord, DockHashGenerator, Some(binding.context))
+            }
+            GpuiBoundAction::PopoutHashGenerator => {
+                KeyBinding::new(binding.chord, PopoutHashGenerator, Some(binding.context))
+            }
+            GpuiBoundAction::CloseHashGenerator => {
+                KeyBinding::new(binding.chord, CloseHashGenerator, Some(binding.context))
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QuickHelpShortcut {
+    hotkey: Hotkey,
+    display: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QuickHelpShortcutAdmission {
+    shortcut: Option<QuickHelpShortcut>,
+    diagnostic: Option<String>,
+}
+
+fn admit_quick_help_shortcut(
+    configured: Option<&str>,
+    launcher: Hotkey,
+    jump_mode_enabled: bool,
+    jump_chord: JumpModeChord,
+) -> QuickHelpShortcutAdmission {
+    let Some(configured) = configured else {
+        return QuickHelpShortcutAdmission {
+            shortcut: None,
+            diagnostic: None,
+        };
+    };
+    let unavailable = |reason: &str| QuickHelpShortcutAdmission {
+        shortcut: None,
+        diagnostic: Some(format!(
+            "Configured Help shortcut {:?} {reason}; use Help → Quick Help Overlay instead.",
+            configured.trim()
+        )),
+    };
+    let Some(hotkey) = parse_hotkey(configured) else {
+        return unavailable("is invalid");
+    };
+    if hotkeys_can_cofire(hotkey, launcher) {
+        return unavailable("can co-fire with the launcher shortcut");
+    }
+    if legacy_virtual_key(hotkey.key).is_none() {
+        return unavailable("is unsupported by the Windows GPUI listener");
+    }
+    if jump_mode_enabled
+        && jump_chord_conflict(jump_chord, [("Help shortcut", hotkey)]).is_some()
+    {
+        return unavailable(&format!(
+            "conflicts with the enabled Search Jump shortcut {:?}",
+            jump_chord.canonical_text()
+        ));
+    }
+    if let Some(binding) = GPUI_BOUND_KEYS.iter().find(|binding| {
+        parse_gpui_bound_chord(binding.chord)
+            .is_some_and(|local| polling_hotkey_can_cofire_with_exact_binding(hotkey, local))
+    }) {
+        return unavailable(&format!(
+            "can co-fire with GPUI {} ({})",
+            binding.label, binding.chord
+        ));
+    }
+    QuickHelpShortcutAdmission {
+        shortcut: Some(QuickHelpShortcut {
+            hotkey,
+            display: configured.trim().to_owned(),
+        }),
+        diagnostic: None,
+    }
+}
+
+fn parse_gpui_bound_chord(chord: &str) -> Option<Hotkey> {
+    parse_hotkey(&chord.replace('-', "+"))
+}
+
+fn polling_hotkey_can_cofire_with_exact_binding(polling: Hotkey, local: Hotkey) -> bool {
+    polling.key == local.key
+        && (!polling.ctrl || local.ctrl)
+        && (!polling.shift || local.shift)
+        && (!polling.alt || local.alt)
+        && (!polling.alt_gr || local.alt_gr)
+        && (!polling.win || local.win)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QuickHelpHotkeyLine {
+    label: String,
+    chord: String,
+}
+
+fn quick_help_hotkey_lines(
+    launcher_display: &str,
+    help_shortcut: Option<&QuickHelpShortcut>,
+) -> Arc<[QuickHelpHotkeyLine]> {
+    let mut lines = vec![QuickHelpHotkeyLine {
+        label: "Toggle launcher".to_owned(),
+        chord: launcher_display.to_owned(),
+    }];
+    if let Some(shortcut) = help_shortcut {
+        lines.push(QuickHelpHotkeyLine {
+            label: "Help overlay".to_owned(),
+            chord: shortcut.display.clone(),
+        });
+    }
+    lines.extend(GPUI_BOUND_KEYS.iter().map(|binding| QuickHelpHotkeyLine {
+        label: binding.label.to_owned(),
+        chord: display_gpui_chord(binding.chord),
+    }));
+    lines.into()
+}
+
+fn display_gpui_chord(chord: &str) -> String {
+    chord
+        .split('-')
+        .map(|part| match part {
+            "ctrl" => "Ctrl".to_owned(),
+            "shift" => "Shift".to_owned(),
+            "enter" => "Enter".to_owned(),
+            "up" => "Up".to_owned(),
+            "down" => "Down".to_owned(),
+            value => value.to_ascii_uppercase(),
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
 gpui_kit::actions!([
     ToggleSecondaryWindow,
     ToggleCoordinateHudProbe,
     ToggleSettings,
     CloseApplication,
     CommandList,
+    QuickHelp,
     LinkingGuide,
     OpenToastLog,
     ViewToastLog,
@@ -1617,6 +2122,19 @@ struct RootWindow {
     settings_editor: SettingsEditorState,
     command_help: CommandHelpState,
     command_help_filter: Entity<InputState>,
+    quick_help: QuickHelpState,
+    quick_help_filter: Entity<InputState>,
+    shared_help_filter: SharedHelpFilter,
+    pending_help_filter_sync: Option<(HelpFilterPeer, String)>,
+    quick_help_shortcut_diagnostic: Option<String>,
+    quick_help_return_focus: Option<FocusHandle>,
+    quick_help_return_scroll_offset: Option<Point<Pixels>>,
+    quick_help_owner_focus_handle: FocusHandle,
+    quick_help_close_focus_handle: FocusHandle,
+    quick_help_scroll: ScrollHandle,
+    quick_help_hotkeys: Arc<[QuickHelpHotkeyLine]>,
+    quick_help_paste_sequence_summary: String,
+    quick_help_sequence_starts: Arc<[String]>,
     settings_path: String,
     settings_save_workers: SettingsSaveWorkerRegistry,
     settings_save_permit: Option<EffectPermit>,
@@ -3166,6 +3684,61 @@ fn command_help_escape_capture_should_close(
         && !context_stack_has_primary(context_stack, "PopupMenu")
 }
 
+fn quick_help_escape_capture_should_close(
+    context_stack: &[KeyContext],
+    quick_help_owns_focus: bool,
+) -> bool {
+    quick_help_owns_focus
+        && !context_stack_has_primary(context_stack, "PopupMenu")
+        && !context_stack_has_primary(context_stack, "AlertDialog")
+        && !context_stack_has_primary(context_stack, "Dialog")
+}
+
+fn quick_help_event_targets_visible_revision(
+    active: bool,
+    visible: bool,
+    native_window_visible: bool,
+    observed_revision: u64,
+    current_revision: u64,
+) -> bool {
+    active && visible && native_window_visible && observed_revision == current_revision
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct QuickHelpFocusBlockers {
+    menu_open: bool,
+    popup_or_alert_owns_focus: bool,
+    settings_owner_has_focus: bool,
+    toast_log_owner_has_focus: bool,
+    command_help_owner_has_focus: bool,
+    docked_hash_owner_has_focus: bool,
+    hash_resize_owner_has_focus: bool,
+}
+
+impl QuickHelpFocusBlockers {
+    fn blocks_handoff(self) -> bool {
+        self.menu_open
+            || self.popup_or_alert_owns_focus
+            || self.settings_owner_has_focus
+            || self.toast_log_owner_has_focus
+            || self.command_help_owner_has_focus
+            || self.docked_hash_owner_has_focus
+            || self.hash_resize_owner_has_focus
+    }
+}
+
+fn quick_help_focus_change_is_allowed(
+    root_is_foreground: bool,
+    window_is_active: bool,
+    focus_blockers: QuickHelpFocusBlockers,
+    restart_is_fenced: bool,
+) -> bool {
+    root_is_foreground
+        && window_is_active
+        && !focus_blockers.blocks_handoff()
+        && !restart_is_fenced
+}
+
 fn root_menu_close_should_restore_focus(
     another_menu_open: bool,
     current_focus_is_live_in_root: bool,
@@ -3186,6 +3759,10 @@ fn command_help_viewport_body_height(viewport_height: f32, reserved_height: f32)
     (viewport_height - reserved_height).clamp(0.0, 280.0)
 }
 
+fn quick_help_viewport_body_height(viewport_height: f32, reserved_height: f32) -> f32 {
+    (viewport_height - reserved_height).clamp(0.0, 280.0)
+}
+
 fn settings_return_focus_is_still_owned(
     settings_owner_has_focus: bool,
     restart_is_fenced: bool,
@@ -3195,6 +3772,28 @@ fn settings_return_focus_is_still_owned(
 
 const ROOT_SCROLL_SEARCH_ITEM: usize = 0;
 const ROOT_SCROLL_SETTINGS_ITEM: usize = 1;
+
+fn docked_hash_root_scroll_item_index(
+    settings_open: bool,
+    toast_log_open: bool,
+    command_help_open: bool,
+) -> usize {
+    ROOT_SCROLL_SETTINGS_ITEM
+        + usize::from(settings_open)
+        + usize::from(toast_log_open)
+        + usize::from(command_help_open)
+}
+
+fn quick_help_root_scroll_item_index(
+    settings_open: bool,
+    toast_log_open: bool,
+    command_help_open: bool,
+    docked_hash_open: bool,
+) -> usize {
+    docked_hash_root_scroll_item_index(settings_open, toast_log_open, command_help_open)
+        + usize::from(docked_hash_open)
+}
+
 const LINKING_GUIDE_FILTER: &str = "todo note cal @note: @todo:";
 const SETTINGS_DIRTY_RESTART_STATUS: &str =
     "Save or Cancel the dirty Settings preference before restarting in egui.";
@@ -4229,6 +4828,46 @@ fn restart_blocker_message(blocker: RestartBlocker) -> String {
 }
 
 impl RootWindow {
+    fn apply_pending_help_filter_sync(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((source, source_value)) = self.pending_help_filter_sync.take() else {
+            return;
+        };
+        let peer_value = match source {
+            HelpFilterPeer::QuickHelp => {
+                self.command_help_filter.read(cx).value().to_string()
+            }
+            HelpFilterPeer::CommandHelp => self.quick_help_filter.read(cx).value().to_string(),
+        };
+        let Some((peer, value)) = self
+            .shared_help_filter
+            .synchronize(source, &source_value, &peer_value)
+        else {
+            return;
+        };
+        let state = match peer {
+            HelpFilterPeer::QuickHelp => &self.quick_help_filter,
+            HelpFilterPeer::CommandHelp => &self.command_help_filter,
+        };
+        if state.read(cx).value().to_string() != value {
+            state.update(cx, |state, cx| state.replace_all(value, window, cx));
+        }
+    }
+
+    fn seed_shared_help_filter(&mut self, seed: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_help_filter_sync = None;
+        let value = self.shared_help_filter.seed(seed);
+        for state in [&self.command_help_filter, &self.quick_help_filter] {
+            if state.read(cx).value().to_string() != value {
+                let value = value.clone();
+                state.update(cx, |state, cx| state.replace_all(value, window, cx));
+            }
+        }
+    }
+
     fn set_root_menu_open(
         &mut self,
         menu: RootMenuKind,
@@ -4289,7 +4928,12 @@ impl RootWindow {
         {
             return;
         }
-        self.root_scroll.scroll_to_bottom();
+        if self.quick_help.open {
+            self.root_scroll
+                .scroll_to_top_of_item(self.docked_hash_scroll_item());
+        } else {
+            self.root_scroll.scroll_to_bottom();
+        }
         self.resize_focus_handle.focus(window, cx);
         cx.notify();
     }
@@ -5547,6 +6191,167 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn quick_help_scroll_item(&self) -> usize {
+        quick_help_root_scroll_item_index(
+            self.settings_editor.open,
+            self.toast_log_viewer.open,
+            self.command_help.open,
+            self.hash_window.mode() == Some(HashPresentationMode::Docked),
+        )
+    }
+
+    fn docked_hash_scroll_item(&self) -> usize {
+        docked_hash_root_scroll_item_index(
+            self.settings_editor.open,
+            self.toast_log_viewer.open,
+            self.command_help.open,
+        )
+    }
+
+    fn quick_help_focus_change_allowed(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let contexts = window.context_stack();
+        let docked_hash_owner_has_focus = matches!(
+            &self.hash_window,
+            HashWindowState::Docked { view, .. }
+                if view.read(cx).focus_handle.contains_focused(window, cx)
+        );
+        let focus_blockers = QuickHelpFocusBlockers {
+            menu_open: self.file_menu_open || self.settings_menu_open || self.help_menu_open,
+            popup_or_alert_owns_focus: context_stack_has_primary(&contexts, "PopupMenu")
+                || context_stack_has_primary(&contexts, "AlertDialog")
+                || context_stack_has_primary(&contexts, "Dialog"),
+            settings_owner_has_focus: self
+                .settings_owner_focus_handle
+                .contains_focused(window, cx),
+            toast_log_owner_has_focus: self
+                .toast_log_owner_focus_handle
+                .contains_focused(window, cx),
+            command_help_owner_has_focus: self
+                .command_help_owner_focus_handle
+                .contains_focused(window, cx),
+            docked_hash_owner_has_focus,
+            hash_resize_owner_has_focus: self.resize_focus_handle.is_focused(window),
+        };
+        #[cfg(windows)]
+        let root_is_foreground = self
+            .native_window
+            .is_some_and(|native| current_foreground_identity() == Some(native.identity));
+        #[cfg(not(windows))]
+        let root_is_foreground = true;
+        quick_help_focus_change_is_allowed(
+            root_is_foreground,
+            window.is_window_active(),
+            focus_blockers,
+            self.restart_admission.is_fenced(),
+        )
+    }
+
+    fn open_quick_help(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        origin: QuickHelpOpenOrigin,
+        take_focus: bool,
+    ) {
+        if self.restart_admission.is_fenced() {
+            return;
+        }
+        self.apply_pending_help_filter_sync(window, cx);
+        if self.quick_help.open {
+            if take_focus && origin == QuickHelpOpenOrigin::Menu && self.help_menu_open {
+                self.root_menu_action_routed_focus = true;
+            }
+            if take_focus {
+                self.root_scroll
+                    .scroll_to_top_of_item(self.quick_help_scroll_item());
+                self.quick_help_filter
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            }
+            cx.notify();
+            return;
+        }
+
+        let return_focus = match origin {
+            QuickHelpOpenOrigin::Menu => self
+                .root_menu_previous_focus
+                .clone()
+                .filter(|focus| self.focus_handle.contains(focus, window))
+                .or_else(|| Some(self.query.focus_handle(cx))),
+            QuickHelpOpenOrigin::Shortcut => window
+                .focused(cx)
+                .filter(|focus| self.focus_handle.contains(focus, window)),
+        };
+        self.quick_help.open = true;
+        self.fresh_search_enter = None;
+        self.quick_help_return_focus = return_focus;
+        self.quick_help_return_scroll_offset = Some(self.root_scroll.offset());
+        if take_focus && origin == QuickHelpOpenOrigin::Menu && self.help_menu_open {
+            self.root_menu_action_routed_focus = true;
+        }
+        if take_focus {
+            self.root_scroll
+                .scroll_to_top_of_item(self.quick_help_scroll_item());
+            self.quick_help_filter
+                .focus_handle(cx)
+                .focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_quick_help_from_shortcut(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        take_focus: bool,
+    ) {
+        if self.restart_admission.is_fenced() {
+            return;
+        }
+        if self.quick_help.open {
+            self.close_quick_help(window, cx, take_focus);
+        } else {
+            self.open_quick_help(window, cx, QuickHelpOpenOrigin::Shortcut, take_focus);
+        }
+    }
+
+    fn close_quick_help(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        restore_origin: bool,
+    ) {
+        if !self.quick_help.open {
+            return;
+        }
+        let restore_origin = restore_origin
+            && self
+                .quick_help_owner_focus_handle
+                .contains_focused(window, cx)
+            && self.quick_help_focus_change_allowed(window, cx);
+        self.quick_help.open = false;
+        let return_focus = self.quick_help_return_focus.take();
+        let return_scroll_offset = self.quick_help_return_scroll_offset.take();
+        if restore_origin {
+            let return_focus_is_live = return_focus
+                .as_ref()
+                .is_some_and(|focus| self.focus_handle.contains(focus, window));
+            if return_focus_is_live {
+                if let Some(offset) = return_scroll_offset {
+                    self.root_scroll.set_offset(offset);
+                }
+                if let Some(focus) = return_focus {
+                    focus.focus(window, cx);
+                }
+            } else {
+                self.root_scroll
+                    .scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
+                self.query.focus_handle(cx).focus(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
     fn command_help_scroll_item(&self) -> usize {
         ROOT_SCROLL_SETTINGS_ITEM
             + usize::from(self.settings_editor.open)
@@ -5567,11 +6372,9 @@ impl RootWindow {
             return;
         }
 
+        self.apply_pending_help_filter_sync(window, cx);
         if let Some(filter) = filter_seed {
-            let filter = filter.to_owned();
-            self.command_help_filter.update(cx, |state, cx| {
-                state.replace_all(filter, window, cx);
-            });
+            self.seed_shared_help_filter(filter, window, cx);
         }
         if self.command_help.open {
             if origin == CommandHelpOpenOrigin::Menu && self.help_menu_open {
@@ -8130,6 +8933,7 @@ impl RootWindow {
 
 impl Render for RootWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_pending_help_filter_sync(window, cx);
         if !self.file_menu_open && !self.settings_menu_open && !self.help_menu_open {
             // Popovers may transiently report no focus. Keep the last focus
             // that was actually inside the live root focus tree.
@@ -8538,6 +9342,22 @@ impl Render for RootWindow {
             close_focus_handle: self.command_help_close_focus_handle.clone(),
             scroll: self.command_help_scroll.clone(),
         });
+        let quick_help_panel = self.quick_help.open.then(|| QuickHelpPanel {
+            root: cx.entity().downgrade(),
+            providers: Arc::clone(&self.search_catalog.quick_help_providers),
+            filter_state: self.quick_help_filter.clone(),
+            filter: self.quick_help_filter.read(cx).value().to_string(),
+            hotkeys: Arc::clone(&self.quick_help_hotkeys),
+            paste_sequence_summary: self.quick_help_paste_sequence_summary.clone(),
+            sequence_starts: Arc::clone(&self.quick_help_sequence_starts),
+            status: self.quick_help_shortcut_diagnostic.clone(),
+            width: root_controls_width,
+            metrics,
+            palette,
+            owner_focus_handle: self.quick_help_owner_focus_handle.clone(),
+            close_focus_handle: self.quick_help_close_focus_handle.clone(),
+            scroll: self.quick_help_scroll.clone(),
+        });
         let root_controls = div()
             .flex()
             .flex_col()
@@ -8687,7 +9507,8 @@ impl Render for RootWindow {
                 !search_content_can_overflow
                     && settings_editor_panel.is_none()
                     && toast_log_viewer_panel.is_none()
-                && command_help_panel.is_none()
+                    && command_help_panel.is_none()
+                    && quick_help_panel.is_none()
                     && docked_hash.is_none(),
                 |this| {
                     // Center the ordinary root only when its content fits.
@@ -8730,6 +9551,14 @@ impl Render for RootWindow {
                 {
                     root.cancel_settings_editor(window, cx, true);
                     cx.stop_propagation();
+                } else if root.quick_help.open
+                    && quick_help_escape_capture_should_close(
+                        &window.context_stack(),
+                        root.quick_help_owner_focus_handle.contains_focused(window, cx),
+                    )
+                {
+                    root.close_quick_help(window, cx, true);
+                    cx.stop_propagation();
                 } else if root.command_help.open
                     && command_help_escape_capture_should_close(
                         &window.context_stack(),
@@ -8741,7 +9570,15 @@ impl Render for RootWindow {
                 }
             }))
             .on_action(cx.listener(|root, _: &gpui_kit::base::input::Escape, window, cx| {
-                if root.command_help.open
+                if root.quick_help.open
+                    && quick_help_escape_capture_should_close(
+                        &window.context_stack(),
+                        root.quick_help_owner_focus_handle.contains_focused(window, cx),
+                    )
+                {
+                    root.close_quick_help(window, cx, true);
+                    cx.stop_propagation();
+                } else if root.command_help.open
                     && root
                         .command_help_owner_focus_handle
                         .contains_focused(window, cx)
@@ -8788,6 +9625,9 @@ impl Render for RootWindow {
             .on_action(cx.listener(|this, _: &CommandList, window, cx| {
                 this.open_command_help(window, cx, CommandHelpOpenOrigin::Menu, None);
             }))
+            .on_action(cx.listener(|this, _: &QuickHelp, window, cx| {
+                this.open_quick_help(window, cx, QuickHelpOpenOrigin::Menu, true);
+            }))
             .on_action(cx.listener(|this, _: &LinkingGuide, window, cx| {
                 this.open_command_help(
                     window,
@@ -8832,6 +9672,13 @@ impl Render for RootWindow {
         }
         if let Some(docked_hash_frame) = docked_hash_frame {
             root_scroll = root_scroll.child(docked_hash_frame);
+        }
+        if let Some(quick_help_panel) = quick_help_panel {
+            root_scroll = root_scroll.child(
+                div()
+                    .flex_shrink_0()
+                    .child(quick_help_panel),
+            );
         }
         if docked_hash.is_some() {
             root_scroll = root_scroll.capture_any_mouse_down(cx.listener(|this, _, _, cx| {
@@ -10145,6 +10992,36 @@ impl RootVisibility {
             && self.visible.load(Ordering::Acquire) == visible
     }
 
+    #[cfg(windows)]
+    fn current_visible_revision(&self, native_window: NativeWindow) -> Option<u64> {
+        use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsIconic};
+
+        let revision = self.request_revision.load(Ordering::Acquire);
+        let active = self.active.load(Ordering::Acquire);
+        let visible = self.visible.load(Ordering::Acquire);
+        if !active || !visible {
+            return None;
+        }
+        // A minimized HWND retains WS_VISIBLE. Match the backend's displayed
+        // window condition before accepting a Help press or its delivery.
+        let native_window_visible = native_window_is_visible(native_window).unwrap_or(false)
+            && !unsafe { IsIconic(HWND(native_window.identity.hwnd as *mut c_void)) }.as_bool();
+        let current_revision = self.request_revision.load(Ordering::Acquire);
+        quick_help_event_targets_visible_revision(
+            active && self.active.load(Ordering::Acquire),
+            visible && self.visible.load(Ordering::Acquire),
+            native_window_visible,
+            revision,
+            current_revision,
+        )
+        .then_some(revision)
+    }
+
+    #[cfg(windows)]
+    fn is_current_visible_revision(&self, revision: u64, native_window: NativeWindow) -> bool {
+        self.current_visible_revision(native_window) == Some(revision)
+    }
+
     fn revert_if_current(&self, revision: u64, visible: bool) {
         if self.request_revision.load(Ordering::Acquire) == revision
             && self.visible.load(Ordering::Acquire) == visible
@@ -10220,7 +11097,9 @@ fn activate_for_secondary_window(
 }
 
 pub(crate) fn run_foundation_window(
-    hotkey: multi_launcher::hotkey::Hotkey,
+    hotkey: Hotkey,
+    launcher_hotkey_display: String,
+    configured_help_hotkey: Option<String>,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_startup: LauncherSearchStartup,
@@ -10231,6 +11110,18 @@ pub(crate) fn run_foundation_window(
     saved_utility_sizes: UtilityDialogSizes,
     settings_save_workers: SettingsSaveWorkerRegistry,
 ) -> Result<Option<RestartPlan>, String> {
+    let quick_help_shortcut_admission = admit_quick_help_shortcut(
+        configured_help_hotkey.as_deref(),
+        hotkey,
+        search_startup.jump_mode_enabled,
+        search_startup.jump_mode_activation_chord,
+    );
+    let quick_help_hotkey_lines = quick_help_hotkey_lines(
+        &launcher_hotkey_display,
+        quick_help_shortcut_admission.shortcut.as_ref(),
+    );
+    let quick_help_shortcut_diagnostic = quick_help_shortcut_admission.diagnostic.clone();
+    let quick_help_shortcut_for_run = quick_help_shortcut_admission.shortcut.clone();
     let search_jump_mode_for_root = SearchJumpModeController::new(
         search_startup.jump_mode_enabled,
         search_startup.jump_mode_activation_chord,
@@ -10284,6 +11175,7 @@ pub(crate) fn run_foundation_window(
     let settings_save_workers_for_quit = settings_save_workers.clone();
     let restart_admission_for_root = Arc::clone(&restart_admission);
     let restart_admission_for_hotkey = Arc::clone(&restart_admission);
+    let restart_admission_for_quick_help_capture = Arc::clone(&restart_admission);
     let visibility = RootVisibility::new();
     let visibility_for_quit = visibility.clone();
     let visibility_for_root = visibility.clone();
@@ -10339,27 +11231,7 @@ pub(crate) fn run_foundation_window(
             initial_appearance,
             cx,
         );
-        cx.bind_keys([
-            KeyBinding::new("ctrl-enter", ToggleSecondaryWindow, Some("RootWindow")),
-            KeyBinding::new("f6", ToggleCoordinateHudProbe, Some("RootWindow")),
-            KeyBinding::new("ctrl-g", OpenHashGenerator, Some("RootWindow")),
-            KeyBinding::new("ctrl-shift-r", FocusDockedHashResize, Some("RootWindow")),
-            KeyBinding::new("ctrl-shift-e", RestartWithEgui, Some("RootWindow")),
-            KeyBinding::new("ctrl-up", SearchHistoryOlder, Some("LauncherSearch")),
-            KeyBinding::new("ctrl-down", SearchHistoryNewer, Some("LauncherSearch")),
-            KeyBinding::new("ctrl-enter", CalculateHash, Some("HashGeneratorWindow")),
-            KeyBinding::new(
-                "ctrl-shift-d",
-                DockHashGenerator,
-                Some("HashGeneratorWindow"),
-            ),
-            KeyBinding::new(
-                "ctrl-shift-p",
-                PopoutHashGenerator,
-                Some("HashGeneratorWindow"),
-            ),
-            KeyBinding::new("ctrl-w", CloseHashGenerator, Some("HashGeneratorWindow")),
-        ]);
+        cx.bind_keys(gpui_key_bindings());
         let coordinate_hud_probe_closing_for_quit = Arc::clone(&closing_for_app);
         let hash_session_for_quit = Arc::clone(&hash_session_for_quit);
         let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal_for_quit);
@@ -10420,6 +11292,8 @@ pub(crate) fn run_foundation_window(
         let restart_context_for_root = restart_context.clone();
         let theme_settings_for_root = theme_settings.clone();
         let appearance_subscription_sink = Rc::clone(&subscription_sink);
+        let quick_help_hotkeys_for_root = quick_help_hotkey_lines.clone();
+        let quick_help_diagnostic_for_root = quick_help_shortcut_diagnostic.clone();
         let (root_window, root_view) = match open_window(options, cx, move |window, cx| {
             if appearance::should_observe_system(&theme_settings_for_root) {
                 let settings = theme_settings_for_root.clone();
@@ -10446,11 +11320,15 @@ pub(crate) fn run_foundation_window(
                 CommandHelpState::new(search_catalog_for_root.startup_show_examples);
             let command_help_filter =
                 cx.new(|cx| InputState::new(window, cx).placeholder("Filter commands"));
+            let quick_help_filter =
+                cx.new(|cx| InputState::new(window, cx).placeholder("Filter Quick Help providers"));
             let settings_focus_handle = cx.focus_handle();
             let settings_owner_focus_handle = cx.focus_handle();
             let settings_menu_focus_handle = cx.focus_handle();
             let command_help_owner_focus_handle = cx.focus_handle();
             let command_help_close_focus_handle = cx.focus_handle();
+            let quick_help_owner_focus_handle = cx.focus_handle();
+            let quick_help_close_focus_handle = cx.focus_handle();
             let toast_log_focus_handle = cx.focus_handle();
             let toast_log_owner_focus_handle = cx.focus_handle();
             let initial_result_layout =
@@ -10478,6 +11356,20 @@ pub(crate) fn run_foundation_window(
                 settings_editor: settings_editor_for_root,
                 command_help: command_help_for_root,
                 command_help_filter,
+                quick_help: QuickHelpState::default(),
+                quick_help_filter,
+                shared_help_filter: SharedHelpFilter::default(),
+                pending_help_filter_sync: None,
+                quick_help_shortcut_diagnostic: quick_help_diagnostic_for_root,
+                quick_help_return_focus: None,
+                quick_help_return_scroll_offset: None,
+                quick_help_owner_focus_handle,
+                quick_help_close_focus_handle,
+                quick_help_scroll: ScrollHandle::new(),
+                quick_help_hotkeys: quick_help_hotkeys_for_root,
+                quick_help_paste_sequence_summary:
+                    "Playback shortcut status is unavailable in GPUI.".to_owned(),
+                quick_help_sequence_starts: Vec::<String>::new().into(),
                 settings_path: settings_path_for_root.clone(),
                 settings_save_workers: settings_save_workers_for_root.clone(),
                 settings_save_permit: None,
@@ -10725,11 +11617,15 @@ pub(crate) fn run_foundation_window(
                 let filter = root.command_help_filter.clone();
                 cx.subscribe(
                     &filter,
-                    |_: &mut RootWindow,
-                     _: Entity<InputState>,
+                    |root: &mut RootWindow,
+                     filter: Entity<InputState>,
                      event: &InputEvent,
                      cx: &mut Context<RootWindow>| {
                         if matches!(event, InputEvent::Change) {
+                            root.pending_help_filter_sync = Some((
+                                HelpFilterPeer::CommandHelp,
+                                filter.read(cx).value().to_string(),
+                            ));
                             cx.notify();
                         }
                     },
@@ -10738,6 +11634,27 @@ pub(crate) fn run_foundation_window(
             appearance_subscription_sink
                 .borrow_mut()
                 .push(command_help_filter_subscription);
+            let quick_help_filter_subscription = root.update(cx, |root, cx| {
+                let filter = root.quick_help_filter.clone();
+                cx.subscribe(
+                    &filter,
+                    |root: &mut RootWindow,
+                     filter: Entity<InputState>,
+                     event: &InputEvent,
+                     cx: &mut Context<RootWindow>| {
+                        if matches!(event, InputEvent::Change) {
+                            root.pending_help_filter_sync = Some((
+                                HelpFilterPeer::QuickHelp,
+                                filter.read(cx).value().to_string(),
+                            ));
+                            cx.notify();
+                        }
+                    },
+                )
+            });
+            appearance_subscription_sink
+                .borrow_mut()
+                .push(quick_help_filter_subscription);
             let tab_completion_subscription = root.update(cx, |_, cx| {
                 cx.observe_keystrokes(|root, event, window, cx| {
                     if root_tab_traversed_to_search(
@@ -10941,8 +11858,21 @@ pub(crate) fn run_foundation_window(
             let (event_tx, event_rx) = channel();
             visibility.bind_request_sender(event_tx.clone());
             let trigger = Arc::new(HotkeyTrigger::new(hotkey));
+            let quick_help_visibility = visibility.clone();
+            let quick_help_admission = Arc::clone(&restart_admission_for_quick_help_capture);
+            let quick_help_trigger = quick_help_shortcut_for_run.map(|shortcut| {
+                Arc::new(HotkeyTrigger::new_scoped(shortcut.hotkey, move || {
+                    if quick_help_admission.is_fenced() {
+                        None
+                    } else {
+                        quick_help_visibility.current_visible_revision(native_window)
+                    }
+                }))
+            });
+            let mut triggers = vec![Arc::clone(&trigger)];
+            triggers.extend(quick_help_trigger.iter().map(Arc::clone));
             let listener = match HotkeyTrigger::prepare_listener(
-                vec![Arc::clone(&trigger)],
+                triggers,
                 "gpui-frontend",
                 event_tx,
             ) {
@@ -10989,11 +11919,52 @@ pub(crate) fn run_foundation_window(
                         break;
                     }
                     let Some(_operation) = restart_admission_for_hotkey.admit() else {
+                        if let Some(trigger) = quick_help_trigger.as_ref() {
+                            trigger.clear_pending();
+                        }
                         break;
                     };
 
+                    let quick_help_stamp = quick_help_trigger
+                        .as_ref()
+                        .and_then(|trigger| trigger.take_scoped_stamp());
+                    let requested_visible = visibility.take_requested_visible();
+                    if let Some(Some(revision)) = quick_help_stamp
+                        && visibility.is_current_visible_revision(revision, native_window)
+                    {
+                        // The polling edge captured this exact visible native
+                        // root revision. Consume it only while that same window
+                        // and revision remain current before applying queued
+                        // show requests.
+                        let _ = update_kit_window_content(
+                            root_window,
+                            &root_view,
+                            &mut *cx,
+                            |root, window, cx| {
+                                let root_handle_matches = root
+                                    .root_window
+                                    .is_some_and(|handle| {
+                                        handle.window_id() == root_window.window_id()
+                                    });
+                                if root_handle_matches
+                                    && root.native_window == Some(native_window)
+                                    && root
+                                        .root_visibility
+                                        .is_current_visible_revision(revision, native_window)
+                                    && !root.restart_admission.is_fenced()
+                                {
+                                    let take_focus =
+                                        root.quick_help_focus_change_allowed(window, cx);
+                                    root.toggle_quick_help_from_shortcut(
+                                        window, cx, take_focus,
+                                    );
+                                }
+                            },
+                        );
+                    }
+
                     let (revision, desired_visible, hash_focus_generation, hotkey_toggle) =
-                        if let Some(requested_visible) = visibility.take_requested_visible() {
+                        if let Some(requested_visible) = requested_visible {
                             let hash_focus_generation = visibility.take_requested_hash_focus();
                             let (revision, visible) = visibility.set_visible(requested_visible);
                             (revision, visible, hash_focus_generation, false)
@@ -11283,6 +12254,7 @@ mod tests {
         docked_hash_resize_accessibility_label, docked_hash_resize_identity_matches,
         docked_resize_commit_size, duplicate_instance_message, fresh_search_enter_marker,
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
+        admit_quick_help_shortcut,
         hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
         bounds_are_contained_by, clipped_search_jump_geometry, is_fresh_plain_search_enter,
         keyboard_docked_resize_preview,
@@ -11297,6 +12269,11 @@ mod tests {
         RootCloseBlocker, ToastLogViewerState,
         clear_stale_settings_restart_status, clear_toast_log_open_pending_status,
         command_help_escape_capture_should_close,
+        docked_hash_root_scroll_item_index,
+        quick_help_escape_capture_should_close, quick_help_event_targets_visible_revision,
+        quick_help_focus_change_is_allowed, quick_help_viewport_body_height,
+        QuickHelpFocusBlockers, GPUI_BOUND_KEYS,
+        gpui_key_bindings, quick_help_hotkey_lines, quick_help_root_scroll_item_index,
         command_help_viewport_body_height,
         settings_menu_close_needs_trigger_focus, settings_return_focus_is_still_owned,
         root_close_blocker,
@@ -13430,6 +14407,200 @@ mod tests {
             false,
             false,
         ));
+    }
+
+    #[test]
+    fn quick_help_escape_is_scoped_to_its_panel_and_filter() {
+        let quick_help = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("QuickHelp").expect("valid Quick Help key context"),
+        ];
+        let quick_help_input = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("QuickHelp").expect("valid Quick Help key context"),
+            KeyContext::parse("Input").expect("valid input context"),
+        ];
+        let quick_help_popup = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("QuickHelp").expect("valid Quick Help key context"),
+            KeyContext::parse("PopupMenu").expect("valid popup menu context"),
+        ];
+        let quick_help_alert = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("QuickHelp").expect("valid Quick Help key context"),
+            KeyContext::parse("AlertDialog").expect("valid alert dialog key context"),
+        ];
+        let quick_help_dialog = [
+            KeyContext::parse("RootWindow").expect("valid root key context"),
+            KeyContext::parse("QuickHelp").expect("valid Quick Help key context"),
+            KeyContext::parse("Dialog").expect("valid dialog key context"),
+        ];
+        assert!(quick_help_escape_capture_should_close(&quick_help, true));
+        assert!(quick_help_escape_capture_should_close(&quick_help_input, true));
+        assert!(!quick_help_escape_capture_should_close(&quick_help_input, false));
+        assert!(!quick_help_escape_capture_should_close(&quick_help_popup, true));
+        assert!(!quick_help_escape_capture_should_close(&quick_help_alert, true));
+        assert!(!quick_help_escape_capture_should_close(&quick_help_dialog, true));
+    }
+
+    #[test]
+    fn quick_help_shortcut_admission_checks_launcher_jump_and_actual_gpui_bindings() {
+        let launcher = multi_launcher::hotkey::parse_hotkey("F2").unwrap();
+        let default_jump = JumpModeChord::parse("Shift+Space").unwrap();
+        let disabled = admit_quick_help_shortcut(None, launcher, false, default_jump);
+        assert!(disabled.shortcut.is_none());
+        assert!(disabled.diagnostic.is_none());
+
+        let invalid = admit_quick_help_shortcut(Some("NotAKey"), launcher, false, default_jump);
+        assert!(invalid.shortcut.is_none());
+        assert!(invalid
+            .diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("is invalid")));
+
+        let launcher_conflict = admit_quick_help_shortcut(Some("F2"), launcher, false, default_jump);
+        assert!(launcher_conflict.shortcut.is_none());
+        assert!(launcher_conflict
+            .diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("launcher shortcut")));
+
+        let f8 = admit_quick_help_shortcut(Some("F8"), launcher, false, default_jump);
+        assert_eq!(f8.shortcut.as_ref().map(|shortcut| shortcut.display.as_str()), Some("F8"));
+        assert!(f8.diagnostic.is_none());
+
+        let jump_conflict = admit_quick_help_shortcut(
+            Some("F8"),
+            launcher,
+            true,
+            JumpModeChord::parse("F8").unwrap(),
+        );
+        assert!(jump_conflict.shortcut.is_none());
+        assert!(jump_conflict
+            .diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("Search Jump shortcut")));
+
+        let local_conflict = admit_quick_help_shortcut(Some("F6"), launcher, false, default_jump);
+        assert!(local_conflict.shortcut.is_none());
+        assert!(local_conflict
+            .diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("Coordinate HUD")));
+
+        let extra_required_modifier =
+            admit_quick_help_shortcut(Some("Ctrl+Shift+G"), launcher, false, default_jump);
+        assert!(extra_required_modifier.shortcut.is_some());
+        assert!(extra_required_modifier.diagnostic.is_none());
+
+        for polling_chord in ["G", "Ctrl+G"] {
+            let conflict =
+                admit_quick_help_shortcut(Some(polling_chord), launcher, false, default_jump);
+            assert!(conflict.shortcut.is_none(), "{polling_chord} should conflict");
+            assert!(conflict
+                .diagnostic
+                .as_deref()
+                .is_some_and(|message| message.contains("Open Hash Generator")));
+        }
+
+        let modified_local_conflict =
+            admit_quick_help_shortcut(Some("Ctrl+Shift+E"), launcher, false, default_jump);
+        assert!(modified_local_conflict.shortcut.is_none());
+        assert!(modified_local_conflict
+            .diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("Restart in egui")));
+
+        let hotkeys = quick_help_hotkey_lines("F2", f8.shortcut.as_ref());
+        assert!(hotkeys
+            .iter()
+            .any(|line| line.label == "Toggle launcher" && line.chord == "F2"));
+        assert!(hotkeys
+            .iter()
+            .any(|line| line.label == "Help overlay" && line.chord == "F8"));
+        assert!(hotkeys.iter().any(|line| {
+            line.label == "Restart in egui" && line.chord == "Ctrl+Shift+E"
+        }));
+
+        let unsupported = admit_quick_help_shortcut(Some("F13"), launcher, false, default_jump);
+        assert!(unsupported.shortcut.is_none());
+        assert!(unsupported
+            .diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("unsupported by the Windows GPUI listener")));
+        assert_eq!(gpui_key_bindings().len(), GPUI_BOUND_KEYS.len());
+    }
+
+    #[test]
+    fn quick_help_event_requires_the_current_visible_root_and_focus_never_activates_it() {
+        assert!(quick_help_event_targets_visible_revision(true, true, true, 7, 7));
+        assert!(!quick_help_event_targets_visible_revision(false, true, true, 7, 7));
+        assert!(!quick_help_event_targets_visible_revision(true, false, true, 7, 7));
+        assert!(!quick_help_event_targets_visible_revision(true, true, false, 7, 7));
+        assert!(!quick_help_event_targets_visible_revision(true, true, true, 6, 7));
+
+        assert!(quick_help_focus_change_is_allowed(
+            true,
+            true,
+            QuickHelpFocusBlockers::default(),
+            false
+        ));
+        assert!(!quick_help_focus_change_is_allowed(
+            false,
+            false,
+            QuickHelpFocusBlockers::default(),
+            false
+        ));
+        let blockers = [
+            QuickHelpFocusBlockers {
+                menu_open: true,
+                ..QuickHelpFocusBlockers::default()
+            },
+            QuickHelpFocusBlockers {
+                popup_or_alert_owns_focus: true,
+                ..QuickHelpFocusBlockers::default()
+            },
+            QuickHelpFocusBlockers {
+                settings_owner_has_focus: true,
+                ..QuickHelpFocusBlockers::default()
+            },
+            QuickHelpFocusBlockers {
+                toast_log_owner_has_focus: true,
+                ..QuickHelpFocusBlockers::default()
+            },
+            QuickHelpFocusBlockers {
+                command_help_owner_has_focus: true,
+                ..QuickHelpFocusBlockers::default()
+            },
+            QuickHelpFocusBlockers {
+                docked_hash_owner_has_focus: true,
+                ..QuickHelpFocusBlockers::default()
+            },
+            QuickHelpFocusBlockers {
+                hash_resize_owner_has_focus: true,
+                ..QuickHelpFocusBlockers::default()
+            },
+        ];
+        for blocker in blockers {
+            assert!(!quick_help_focus_change_is_allowed(true, true, blocker, false));
+        }
+        assert!(!quick_help_focus_change_is_allowed(
+            true,
+            true,
+            QuickHelpFocusBlockers::default(),
+            true
+        ));
+        assert_eq!(quick_help_viewport_body_height(500.0, 160.0), 280.0);
+        assert_eq!(quick_help_viewport_body_height(220.0, 160.0), 60.0);
+    }
+
+    #[test]
+    fn quick_help_scroll_anchor_follows_optional_docked_hash_and_existing_panels() {
+        assert_eq!(docked_hash_root_scroll_item_index(false, false, false), 1);
+        assert_eq!(quick_help_root_scroll_item_index(false, false, false, false), 1);
+        assert_eq!(quick_help_root_scroll_item_index(false, false, false, true), 2);
+        assert_eq!(docked_hash_root_scroll_item_index(true, true, true), 4);
+        assert_eq!(quick_help_root_scroll_item_index(true, true, true, true), 5);
     }
 
     #[test]

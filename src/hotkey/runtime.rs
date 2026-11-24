@@ -12,12 +12,18 @@ pub struct HotkeyTrigger {
     pub open: Arc<Mutex<bool>>,
     recording_stop_bridge: Option<Arc<crate::recording::RecordingStopHotkeyBridge>>,
     recording_stop_generation: Option<Arc<Mutex<Option<u64>>>>,
+    scoped_route: Option<ScopedHotkeyRoute>,
     pub _key: Key,
     pub _ctrl: bool,
     pub _shift: bool,
     pub _alt: bool,
     pub _alt_gr: bool,
     pub _win: bool,
+}
+
+struct ScopedHotkeyRoute {
+    capture_stamp: Box<dyn Fn() -> Option<u64> + Send + Sync>,
+    pending_stamp: Mutex<Option<Option<u64>>>,
 }
 
 pub struct HotkeyListener {
@@ -42,6 +48,7 @@ impl HotkeyTrigger {
             open: Arc::new(Mutex::new(false)),
             recording_stop_bridge: None,
             recording_stop_generation: None,
+            scoped_route: None,
             _key: hotkey.key,
             _ctrl: hotkey.ctrl,
             _shift: hotkey.shift,
@@ -49,6 +56,20 @@ impl HotkeyTrigger {
             _alt_gr: hotkey.alt_gr,
             _win: hotkey.win,
         }
+    }
+
+    /// Creates a process hotkey route whose press edge captures the current
+    /// scope before sending the listener's ordinary wake notification.
+    pub fn new_scoped(
+        hotkey: Hotkey,
+        capture_stamp: impl Fn() -> Option<u64> + Send + Sync + 'static,
+    ) -> Self {
+        let mut trigger = Self::new(hotkey);
+        trigger.scoped_route = Some(ScopedHotkeyRoute {
+            capture_stamp: Box::new(capture_stamp),
+            pending_stamp: Mutex::new(None),
+        });
+        trigger
     }
 
     pub fn new_recording_stop(
@@ -88,6 +109,7 @@ impl HotkeyTrigger {
             *open = false;
         }
         self.clear_recording_stop_pending();
+        self.clear_scoped_pending();
     }
 
     fn clear_recording_stop_pending(&self) {
@@ -96,6 +118,25 @@ impl HotkeyTrigger {
         {
             *generation = None;
         }
+    }
+
+    fn clear_scoped_pending(&self) {
+        if let Some(route) = self.scoped_route.as_ref()
+            && let Ok(mut pending) = route.pending_stamp.lock()
+        {
+            *pending = None;
+        }
+    }
+
+    /// Returns the press edge's captured scope. The outer option means there
+    /// was a pending edge; an inner `None` means the edge occurred out of scope.
+    pub fn take_scoped_stamp(&self) -> Option<Option<u64>> {
+        self.scoped_route
+            .as_ref()?
+            .pending_stamp
+            .lock()
+            .ok()?
+            .take()
     }
 
     fn fire(&self) -> bool {
@@ -114,6 +155,14 @@ impl HotkeyTrigger {
             }
             *pending = Some(generation);
             true
+        } else if let Some(route) = self.scoped_route.as_ref() {
+            let stamp = (route.capture_stamp)();
+            if let Ok(mut pending) = route.pending_stamp.lock() {
+                *pending = Some(stamp);
+                true
+            } else {
+                false
+            }
         } else if let Ok(mut open) = self.open.lock() {
             *open = true;
             true
@@ -306,6 +355,7 @@ impl HotkeyListener {
     pub fn activate(&self) {
         for trigger in &self.triggers {
             trigger.clear_recording_stop_pending();
+            trigger.clear_scoped_pending();
         }
         self.suppress_first_active_scan
             .store(true, Ordering::Release);
@@ -328,6 +378,7 @@ impl HotkeyListener {
         });
         for trigger in &self.triggers {
             trigger.clear_recording_stop_pending();
+            trigger.clear_scoped_pending();
         }
         join_result
     }
@@ -524,6 +575,103 @@ mod tests {
         let (triggered, fired) = update_trigger_cycle(triggered, true, false);
         assert!(triggered);
         assert!(fired);
+    }
+
+    #[test]
+    fn scoped_hotkey_press_retains_revision_and_explicitly_consumes_out_of_scope_edges() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let in_scope = Arc::new(AtomicBool::new(true));
+        let revision = Arc::new(AtomicU64::new(41));
+        let capture_scope = Arc::clone(&in_scope);
+        let capture_revision = Arc::clone(&revision);
+        let trigger = Arc::new(HotkeyTrigger::new_scoped(
+            crate::hotkey::parse_hotkey("F8").unwrap(),
+            move || {
+                capture_scope
+                    .load(Ordering::Acquire)
+                    .then(|| capture_revision.load(Ordering::Acquire))
+            },
+        ));
+
+        let press_and_release = || {
+            process_test_events(
+                &[Arc::clone(&trigger)],
+                &[EventType::KeyPress(Key::F8), EventType::KeyRelease(Key::F8)],
+            );
+        };
+
+        press_and_release();
+        revision.store(42, Ordering::Release);
+        assert_eq!(trigger.take_scoped_stamp(), Some(Some(41)));
+
+        press_and_release();
+        // A newer edge replaces the unconsumed stamp in the same pending slot.
+        revision.store(43, Ordering::Release);
+        press_and_release();
+        assert_eq!(trigger.take_scoped_stamp(), Some(Some(43)));
+        assert_eq!(trigger.take_scoped_stamp(), None);
+
+        in_scope.store(true, Ordering::Release);
+        press_and_release();
+        in_scope.store(false, Ordering::Release);
+        assert!(trigger.fire());
+        // An out-of-scope press replaces an older unconsumed visible intent.
+        assert_eq!(trigger.take_scoped_stamp(), Some(None));
+        assert_eq!(trigger.take_scoped_stamp(), None);
+    }
+
+    #[test]
+    fn scoped_hotkey_keeps_press_edge_held_fence_and_clears_pending_scope_on_lifecycle() {
+        let trigger = Arc::new(HotkeyTrigger::new_scoped(
+            crate::hotkey::parse_hotkey("F8").unwrap(),
+            || Some(9),
+        ));
+        process_test_events(
+            &[Arc::clone(&trigger)],
+            &[
+                EventType::KeyPress(Key::F8),
+                EventType::KeyPress(Key::F8),
+                EventType::KeyPress(Key::F8),
+            ],
+        );
+        assert_eq!(trigger.take_scoped_stamp(), Some(Some(9)));
+        assert_eq!(trigger.take_scoped_stamp(), None);
+
+        process_test_events(
+            &[Arc::clone(&trigger)],
+            &[EventType::KeyRelease(Key::F8), EventType::KeyPress(Key::F8)],
+        );
+        trigger.clear_pending();
+        assert_eq!(trigger.take_scoped_stamp(), None);
+
+        process_test_events(
+            &[Arc::clone(&trigger)],
+            &[EventType::KeyRelease(Key::F8), EventType::KeyPress(Key::F8)],
+        );
+        let listener = HotkeyListener {
+            stop: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(AtomicBool::new(false)),
+            suppress_first_active_scan: Arc::new(AtomicBool::new(false)),
+            join: None,
+            triggers: vec![Arc::clone(&trigger)],
+        };
+        listener.activate();
+        assert_eq!(trigger.take_scoped_stamp(), None);
+    }
+
+    #[test]
+    fn ordinary_hotkey_trigger_keeps_its_boolean_pending_behavior() {
+        let trigger = Arc::new(HotkeyTrigger::new(
+            crate::hotkey::parse_hotkey("F8").unwrap(),
+        ));
+        process_test_events(
+            &[Arc::clone(&trigger)],
+            &[EventType::KeyPress(Key::F8), EventType::KeyRelease(Key::F8)],
+        );
+        assert!(trigger.take());
+        assert!(!trigger.take());
+        assert_eq!(trigger.take_scoped_stamp(), None);
     }
 
     #[test]
