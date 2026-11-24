@@ -24,6 +24,12 @@ G05 owns `launcher`, the root query and result workflow. The source baseline is 
 
 ## Source and verification
 
+### Top-centered query layout
+
+Inspect the live egui root layout in `src/gui/render.rs` before changing the GPUI layout. Anchor the GPUI query field near the top and horizontally centered. The field stays visible and keeps the same vertical position with zero, few, or overflowing results and while scrolling a docked utility. Results and docked content use the available space beneath the field. Resizing follows egui’s positioning and width behavior. Preserve the existing query focus, keyboard navigation, autocomplete, and Jump Mode contracts.
+
+Compare equivalent states in both frontends at 1516 × 937 pixels on matching display scaling. Capture the primary visual states at that size. Check placement and visibility through result changes, List and Grid scrolling, docked utility scrolling, and resizing. Replay the affected input paths. Use compact and minimum dimensions for supplemental checks and reuse past evidence for unaffected behaviors.
+
 Use `gui/query_navigation.rs`, `native_keyboard.rs`, `gui/render.rs`, `gui/actions.rs`, `gui/command_host.rs` and `help_window.rs` for implementation anchors. `G00-C` records Search text input, Down/Enter, opening Hash Generator and a persisted popout change in a scratch root. `G05-EGUI-QUERY-HISTORY` records both traversal boundaries, exact draft restoration and query-focus gating. The visible completion suggestion stayed unchanged when Tab transferred focus. Source review found that egui can traverse before the late completion check when Search holds widget focus without the retained launcher focus session. The current UI test grants that session with a real primary query pointer event. Verify the native click or launcher hide/show path and account for keyboard-acquired focus in the navigation checkpoint. [Validation log](../VALIDATION_LOG.md)
 
 Current focused library tests include `keyboard_navigation_is_consistent_between_grid_and_list_modes` and `root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection`. Add the affected target in `focus_visibility`, `gui_visibility` or grouped `pure` query autocomplete coverage only when its contract changes. Native evidence must exercise global invocation, editability, physical numpad, window focus, dismissal and handoffs through both selected frontends. Compare representative list/grid and compact layouts under equivalent settings. G05 owns the exact component mapping and the remaining control inventory before the port.

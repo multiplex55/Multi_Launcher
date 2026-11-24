@@ -67,6 +67,8 @@ However, that does not authorize removing controls, changing command prefixes, c
 
 **The target is behavioral and structural parity with a visual refresh.** Reproducing egui’s exact pixels would defeat the reason for introducing GPUI.
 
+Use matching 1516 × 937 pixel windows, display scaling, and application states for the primary parity reference. Compare information density, control positions, spacing, alignment, and workspace. Compact and minimum sizes supplement this reference. Keep Search top-centered and visible above the results and docked content, with its position stable during content changes and scrolling and its sizing responsive to window resizing as in egui.
+
 Existing defects need separate treatment. Record proven baseline bugs and distinguish them from intended behavior. Do not deliberately reproduce a known defect, but do not silently redesign uncertain behavior during the port.
 
 ---

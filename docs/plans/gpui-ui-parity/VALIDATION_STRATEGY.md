@@ -153,6 +153,8 @@ Do not demand a GPUI test binary or feature name before architecture chooses it.
 
 ## 8. Native and visual evidence
 
+Match the egui and GPUI window dimensions at 1516 × 937 pixels, with equivalent display scaling and application state, for primary functional comparisons and screenshots. Record the measured window dimensions and display scaling with each primary capture. Compare information density, control positioning, spacing, alignment, and usable workspace. Compact and minimum sizes are supplemental regression checks. Apply the baseline through the verification fixture while preserving application defaults, minimum sizes, and saved geometry. Keep earlier scoped evidence unless the affected criterion needs fresh verification.
+
 Run native checks in an interactive Windows environment with controlled synthetic fixtures. Headless logic tests, fixture-only harness output and screenshots of mockups do not satisfy native acceptance.
 
 For each GUI specification, identify which native properties actually apply: opening/closing, keyboard/pointer interaction, focus return, modal confirmation, cancel/discard, child/popout lifecycle, resize/scroll, DPI/monitor behavior, hotkeys, selection/caret/IME, drag-and-drop, tray or Windows integration. Do not require every property for every static surface.

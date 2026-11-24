@@ -53,6 +53,8 @@ Run the existing `gui::search::tests` cases `track_c2a_oracle_covers_local_filte
 
 **Owner:** G05 frontend implementer. Implement Kit query editing, composition/caret/selection, results, stable row selection, scrolling, grid/list layouts, metadata, and action dispatch through the authoritative engine. Add notifications/wakeups for actual changes; retain view state across GPUI renders.
 
+Inspect egui’s current root layout and use it as the reference for anchoring GPUI Search at the top center. Keep the query field visible at a stable vertical position through changes in result count and scrolling of results or docked utilities. Use the available space below the field for these surfaces. Match the egui resize behavior and preserve focus, navigation, autocomplete, and Jump Mode. Exercise both frontends at 1516 × 937 pixels with matching display scaling and equivalent states. [Launcher layout verification](../gui/launcher.md#top-centered-query-layout)
+
 **Invariants:** One accepted activation causes one operation; row identity survives filtering and virtualization. Text editing shortcuts are not stolen by result navigation. Rapid input, cancellation, and out-of-order results preserve the latest query.
 
 **Evidence and acceptance:** Compare matched datasets and action traces with the baseline, including no results, errors, long Unicode text, and a large result set. **Commit boundary:** Functional launcher query/result path with targeted checks; secondary sheets may remain explicitly pending.

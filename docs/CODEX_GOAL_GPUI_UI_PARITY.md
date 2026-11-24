@@ -40,6 +40,10 @@ Improve typography, spacing, borders, icons, theme consistency, focus visibility
 
 Pixel-identical egui rendering is not required. Record intentional presentation changes with comparable screenshots and inspect text sizing, small windows, long content, empty/error states, and supported DPI scales.
 
+Use a 1516 × 937 pixel window in both frontends for primary visual and functional parity checks. Match display scaling and application state. Capture primary screenshots at that size and compare information density, control placement, spacing, alignment, and usable workspace. Compact and minimum sizes supplement this baseline. Application defaults, minimum sizes, and saved window geometry retain their existing ownership.
+
+G05 must match the egui launcher’s top-centered query field. Keep it visible at a stable vertical position while results and docked utilities occupy and scroll through the space beneath it. Preserve focus, keyboard navigation, autocomplete, and Jump Mode through scrolling and resizing.
+
 ### PAR-03 — One engine, two complete frontend implementations
 
 The same commands, validation, queries, persistence, document logic, jobs, and external actions must serve both frontends. Extract behavior from egui-owned handlers at its real architectural owner. Do not copy a subsystem into GPUI under different names.
