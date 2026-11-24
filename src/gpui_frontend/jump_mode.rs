@@ -690,6 +690,13 @@ pub(super) fn jump_badge_height(metrics: multi_launcher::gui::theme::ThemeMetric
     metrics.line_height.max(metrics.small_text_size) + 4.0
 }
 
+pub(super) fn jump_badge_width(
+    characters: usize,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+) -> f32 {
+    (characters as f32 * metrics.small_text_size * 0.72 + 6.0).max(10.0)
+}
+
 pub(super) fn jump_badge_placement(
     target: &JumpTargetGeometry,
     hint: &Hint,
@@ -701,7 +708,7 @@ pub(super) fn jump_badge_placement(
     let visible_top = target.visible_bounds.origin.y.as_f32() - target.bounds.origin.y.as_f32();
     let visible_right = visible_left + target.visible_bounds.size.width.as_f32();
     let visible_bottom = visible_top + target.visible_bounds.size.height.as_f32();
-    let width = (hint.as_str().len() as f32 * metrics.small_text_size * 0.72 + 6.0).max(10.0);
+    let width = jump_badge_width(hint.as_str().len(), metrics);
     let height = jump_badge_height(metrics);
     if visible_right - visible_left < width || visible_bottom - visible_top < height {
         return None;

@@ -5,7 +5,7 @@ use super::{
     hash_jump::{HashJump, HashJumpScope},
     jump_mode::{
         JumpGeometryDraft, JumpGeometryElement, JumpGeometryFrame, JumpTargetGeometry,
-        jump_badge_height, jump_hint_badge,
+        jump_badge_height, jump_badge_width, jump_hint_badge,
     },
 };
 #[cfg(windows)]
@@ -186,6 +186,10 @@ where
             .w_full()
             .min_w(px(0.0))
             .min_h(px(jump_badge_height(appearance.metrics)))
+            // Three stock items can require two symbols with a two-key
+            // alphabet. Keep that space beyond the label and before Kit's
+            // separate committed checkmark.
+            .pr(px(jump_badge_width(2, appearance.metrics) + 4.0))
             .child(inner)
             .children(badge)
             .into_any_element();
