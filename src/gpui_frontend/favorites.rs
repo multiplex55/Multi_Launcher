@@ -3,8 +3,9 @@ use std::sync::Arc;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::{
     button::Button,
-    input::{Textarea, TextareaState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     label::Label,
+    select::{Select, SelectEvent, SelectState},
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -12,8 +13,10 @@ use multi_launcher::actions::Action;
 use multi_launcher::gui::theme::{SemanticPalette, ThemeMetrics};
 use multi_launcher::plugins::fav::{
     FAV_FILE, FavEntry, FavoriteRowTarget, ManualFavoriteOrigin, PrefilledFavoriteDraft,
-    PrefilledFavoriteSaveError, favorite_row_target, load_favs, named_favorite_origin,
-    prefilled_favorite_draft, remove_favorite_row, save_manual_favorite, save_prefilled_favorite,
+    PrefilledFavoriteSaveError, favorite_picker_categories, favorite_picker_choices,
+    favorite_picker_pick, favorite_row_target, load_favs, named_favorite_origin,
+    prefilled_favorite_draft, remove_favorite_row, resolve_with_plugin, save_manual_favorite,
+    save_prefilled_favorite,
 };
 
 use super::{RootWindow, appearance};
@@ -188,13 +191,15 @@ enum DraftOrigin {
     Manual(ManualFavoriteOrigin),
 }
 
-#[derive(Clone)]
 struct FavoriteFields {
     origin: DraftOrigin,
     original: FavEntry,
     label: FavoriteField,
     command: FavoriteField,
     args: FavoriteField,
+    category: Entity<SelectState<Vec<String>>>,
+    filter: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
 }
 
 #[derive(Clone)]
@@ -207,10 +212,41 @@ impl FavoriteFields {
     fn new(
         origin: DraftOrigin,
         original: FavEntry,
+        categories: Vec<String>,
         window: &mut Window,
         cx: &mut Context<RootWindow>,
     ) -> Self {
+        let category = cx.new(|cx| SelectState::new(categories, None, window, cx));
+        let filter = cx.new(|cx| InputState::new(window, cx));
+        let category_subscription = cx.subscribe(
+            &category,
+            |root, source, event: &SelectEvent<Vec<String>>, cx| {
+                if matches!(event, SelectEvent::Confirm(_))
+                    && root
+                        .result_favorites
+                        .draft
+                        .as_ref()
+                        .is_some_and(|draft| draft.category == source)
+                {
+                    cx.notify();
+                }
+            },
+        );
+        let filter_subscription = cx.subscribe(&filter, |root, source, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change)
+                && root
+                    .result_favorites
+                    .draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.filter == source)
+            {
+                cx.notify();
+            }
+        });
         Self {
+            category,
+            filter,
+            _subscriptions: vec![category_subscription, filter_subscription],
             label: FavoriteField::new(&original.label, window, cx),
             command: FavoriteField::new(&original.action, window, cx),
             args: FavoriteField::new(original.args.as_deref().unwrap_or_default(), window, cx),
@@ -229,6 +265,18 @@ impl FavoriteField {
         });
         let initial = input.read(cx).value().to_string();
         Self { input, initial }
+    }
+
+    fn replace(
+        &mut self,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<RootWindow>,
+    ) -> String {
+        self.input
+            .update(cx, |input, cx| input.replace_all(value.clone(), window, cx));
+        self.initial = self.input.read(cx).value().to_string();
+        value
     }
 
     fn exact_value(&self, original: &str, cx: &App) -> String {
@@ -349,6 +397,13 @@ impl RootWindow {
                 match rows {
                     Ok(rows) => {
                         if let Some(draft) = prefill {
+                            let categories = favorite_picker_categories(
+                                root.search_catalog
+                                    .providers
+                                    .plugins()
+                                    .into_iter()
+                                    .map(|p| p.name()),
+                            );
                             let (origin, original) = match draft {
                                 OpenDraft::Prefilled(action) => {
                                     let draft = prefilled_favorite_draft(&rows, &action);
@@ -373,7 +428,9 @@ impl RootWindow {
                                     (DraftOrigin::Manual(origin), original)
                                 }
                             };
-                            state.draft = Some(FavoriteFields::new(origin, original, window, cx));
+                            state.draft = Some(FavoriteFields::new(
+                                origin, original, categories, window, cx,
+                            ));
                         }
                         state.loaded = true;
                         state.rows = rows.into();
@@ -416,9 +473,17 @@ impl RootWindow {
                 },
             )
         };
+        let categories = favorite_picker_categories(
+            self.search_catalog
+                .providers
+                .plugins()
+                .into_iter()
+                .map(|p| p.name()),
+        );
         state.draft = Some(FavoriteFields::new(
             DraftOrigin::Manual(origin),
             entry,
+            categories,
             window,
             cx,
         ));
@@ -441,13 +506,75 @@ impl RootWindow {
         let args = fields
             .args
             .exact_value(fields.original.args.as_deref().unwrap_or_default(), cx);
-        let entry = FavEntry {
+        let mut entry = FavEntry {
             label: fields.label.exact_value(&fields.original.label, cx),
             action: fields.command.exact_value(&fields.original.action, cx),
-            args: Some(args),
+            args: (!args.trim().is_empty()).then_some(args),
         };
+        if entry.label.trim().is_empty() || entry.action.trim().is_empty() {
+            state.status = Some("Label and command are required".to_owned());
+            cx.notify();
+            return;
+        }
+        {
+            if let Some(category) = fields.category.read(cx).selected_value() {
+                if let Some(plugin) = self
+                    .search_catalog
+                    .providers
+                    .plugins()
+                    .into_iter()
+                    .find(|p| p.name() == category)
+                {
+                    let args = entry.args.as_deref().filter(|args| !args.trim().is_empty());
+                    (entry.action, entry.args) = resolve_with_plugin(plugin, &entry.action, args);
+                }
+            }
+        }
         let origin = fields.origin.clone();
         self.write_result_favorite(FavoriteWrite::Save { origin, entry }, window, cx);
+    }
+
+    fn pick_result_favorite(
+        &mut self,
+        category: String,
+        filter: String,
+        choice: Action,
+        draft_id: Entity<SelectState<Vec<String>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = &mut self.result_favorites;
+        if !state.is_open() || !state.loaded || state.pending.is_some() {
+            return;
+        }
+        let Some(draft) = state.draft.as_mut() else {
+            return;
+        };
+        if draft.category != draft_id
+            || draft.category.read(cx).selected_value() != Some(&category)
+            || draft.filter.read(cx).value().as_str() != filter
+        {
+            return;
+        }
+        let Some(plugin) = self
+            .search_catalog
+            .providers
+            .plugins()
+            .into_iter()
+            .find(|p| p.name() == category)
+        else {
+            return;
+        };
+        if !favorite_picker_choices(plugin, &filter).contains(&choice) {
+            return;
+        }
+        let args = draft
+            .args
+            .exact_value(draft.original.args.as_deref().unwrap_or_default(), cx);
+        let (command, args) = favorite_picker_pick(plugin, &choice, &args);
+        draft.original.action = draft.command.replace(command, window, cx);
+        draft.original.args = Some(draft.args.replace(args.unwrap_or_default(), window, cx));
+        cx.notify();
     }
 
     fn remove_result_favorite(
@@ -504,22 +631,13 @@ impl RootWindow {
                 } => {
                     draft.label = entry.label;
                     draft.action = entry.action;
-                    draft.args = Some(entry.args.unwrap_or_default());
+                    draft.args = entry.args;
                     save_prefilled_favorite(FAV_FILE, draft)
                 }
                 FavoriteWrite::Save {
                     origin: DraftOrigin::Manual(origin),
-                    mut entry,
-                } => {
-                    if entry
-                        .args
-                        .as_ref()
-                        .is_some_and(|args| args.trim().is_empty())
-                    {
-                        entry.args = None;
-                    }
-                    save_manual_favorite(FAV_FILE, origin, entry)
-                }
+                    entry,
+                } => save_manual_favorite(FAV_FILE, origin, entry),
                 FavoriteWrite::Remove(target) => remove_favorite_row(FAV_FILE, target),
             }
         });
@@ -658,6 +776,72 @@ impl RootWindow {
                                 .readonly(waiting),
                         ),
                 );
+            }
+            let disabled = waiting || !state.loaded;
+            panel = panel
+                .child(Label::new("Category").id("result-favorite-category-label"))
+                .child(
+                    Select::new(&draft.category)
+                        .accessibility_label("Category")
+                        .placeholder("Select")
+                        .disabled(disabled),
+                )
+                .child(Label::new("Filter").id("result-favorite-filter-label"))
+                .child(
+                    Input::new(&draft.filter)
+                        .aria_label("Filter")
+                        .tab_index(0)
+                        .readonly(disabled),
+                );
+            if let Some(category) = draft.category.read(cx).selected_value() {
+                if let Some(plugin) = self
+                    .search_catalog
+                    .providers
+                    .plugins()
+                    .into_iter()
+                    .find(|p| p.name() == category)
+                {
+                    let filter = draft.filter.read(cx).value().to_string();
+                    let category = category.clone();
+                    let draft_id = draft.category.clone();
+                    panel = panel.child(
+                        div()
+                            .id("result-favorite-choices")
+                            .flex()
+                            .flex_col()
+                            .max_h(px(160.0))
+                            .overflow_y_scroll()
+                            .children(
+                                favorite_picker_choices(plugin, &filter)
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, choice)| {
+                                        let caption = format!("{} - {}", choice.label, choice.desc);
+                                        let category = category.clone();
+                                        let filter = filter.clone();
+                                        let draft_id = draft_id.clone();
+                                        Button::new(SharedString::from(format!(
+                                            "result-favorite-choice-{index}"
+                                        )))
+                                        .label(caption)
+                                        .tab_stop(true)
+                                        .disabled(disabled)
+                                        .on_click(
+                                            cx.listener(move |root, _, window, cx| {
+                                                root.pick_result_favorite(
+                                                    category.clone(),
+                                                    filter.clone(),
+                                                    choice.clone(),
+                                                    draft_id.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            }),
+                                        )
+                                    }),
+                            ),
+                    );
+                }
             }
         } else if state.rows.is_empty() && state.pending.is_none() {
             panel = panel.child(Label::new("No Favorites.").id("result-favorites-empty"));

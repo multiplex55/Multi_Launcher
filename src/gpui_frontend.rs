@@ -9842,7 +9842,7 @@ impl Render for RootWindow {
                 if quick_help_escape_capture_should_close(
                     &window.context_stack(),
                     root.result_favorites.owns_focus(window, cx),
-                ) {
+                ) && !context_stack_has_primary(&window.context_stack(), "List") {
                     root.dismiss_result_favorites(window, cx);
                     cx.stop_propagation();
                 } else if root.toast_log_viewer.open
@@ -9881,7 +9881,7 @@ impl Render for RootWindow {
                   if quick_help_escape_capture_should_close(
                       &window.context_stack(),
                       root.result_favorites.owns_focus(window, cx),
-                  ) {
+                  ) && !context_stack_has_primary(&window.context_stack(), "List") {
                       root.dismiss_result_favorites(window, cx);
                       cx.stop_propagation();
                   } else if root.quick_help.open
