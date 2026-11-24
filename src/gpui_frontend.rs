@@ -3776,6 +3776,19 @@ fn command_help_escape_capture_should_close(
         && !context_stack_has_primary(context_stack, "PopupMenu")
 }
 
+fn hash_escape_capture_should_close(
+    context_stack: &[KeyContext],
+    hash_owns_focus: bool,
+    file_picker_pending: bool,
+) -> bool {
+    hash_owns_focus
+        && !file_picker_pending
+        && !context_stack_has_primary(context_stack, "List")
+        && !context_stack_has_primary(context_stack, "PopupMenu")
+        && !context_stack_has_primary(context_stack, "AlertDialog")
+        && !context_stack_has_primary(context_stack, "Dialog")
+}
+
 fn quick_help_escape_capture_should_close(
     context_stack: &[KeyContext],
     quick_help_owns_focus: bool,
@@ -10716,6 +10729,20 @@ impl Render for HashGeneratorWindow {
             .p(px(metrics.window_padding))
             .track_focus(&self.focus_handle)
             .key_context("HashGeneratorWindow")
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == Modifiers::default()
+                    && hash_escape_capture_should_close(
+                        &window.context_stack(),
+                        this.focus_handle.contains_focused(window, cx),
+                        this.file_picker_pending.load(Ordering::Acquire),
+                    )
+                    && this.is_current_mount()
+                {
+                    this.request_close(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &CalculateHash, _, cx| {
                 this.calculate_hash(cx);
             }))
@@ -12663,7 +12690,8 @@ mod tests {
         docked_resize_commit_size, duplicate_instance_message, fresh_search_enter_marker,
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
         admit_quick_help_shortcut,
-        hash_file_picker_admissible, hash_mount_identity_matches, hash_picker_result_is_current,
+        hash_escape_capture_should_close, hash_file_picker_admissible, hash_mount_identity_matches,
+        hash_picker_result_is_current,
         bounds_are_contained_by, clipped_search_jump_geometry, is_fresh_plain_search_enter,
         keyboard_docked_resize_preview,
         launcher_result_activation_is_current, launcher_result_grid_row_id, launcher_result_row_id,
@@ -14756,6 +14784,24 @@ mod tests {
         assert!(search_completion_session_is_current(Some(8), 8));
         assert!(!search_completion_session_is_current(Some(8), 9));
         assert!(!search_completion_session_is_current(None, 8));
+    }
+
+    #[test]
+    fn hash_escape_defers_to_nested_owners_and_native_picker() {
+        let contexts = |nested: Option<&str>| {
+            let mut contexts = vec![KeyContext::parse("HashGeneratorWindow").unwrap()];
+            if let Some(nested) = nested {
+                contexts.push(KeyContext::parse(nested).unwrap());
+            }
+            contexts
+        };
+        assert!(hash_escape_capture_should_close(&contexts(Some("Input")), true, false));
+        assert!(hash_escape_capture_should_close(&contexts(Some("Select")), true, false));
+        for owner in ["List", "PopupMenu", "AlertDialog", "Dialog"] {
+            assert!(!hash_escape_capture_should_close(&contexts(Some(owner)), true, false));
+        }
+        assert!(!hash_escape_capture_should_close(&contexts(None), false, false));
+        assert!(!hash_escape_capture_should_close(&contexts(None), true, true));
     }
 
     #[test]
