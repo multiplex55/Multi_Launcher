@@ -4,8 +4,8 @@ use gpui_kit::base::Selectable;
 use multi_launcher::file_search::{
     coordinator::SearchCoordinator,
     model::{
-        FilenameResult, SearchDiagnostic, SearchEvent, SearchId, SearchKind, SearchResult,
-        SearchStatus,
+        FileKind, FilenameResult, SearchBackend, SearchDiagnostic, SearchEvent, SearchId,
+        SearchKind, SearchResult, SearchStatus,
     },
     request::{RequestInput, RootScope, build_request},
     settings::FileSearchSettings,
@@ -29,6 +29,19 @@ pub(super) fn current_row(
         && visible.contains(&index)
 }
 
+pub(super) fn eligible_file_row(row: &FilenameResult, expected: &std::path::Path) -> bool {
+    row.kind == FileKind::File && row.path == expected
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SelectionReceipt {
+    pub owner: EntityId,
+    pub search: SearchId,
+    pub generation: u64,
+    pub index: usize,
+    pub path: PathBuf,
+}
+
 pub(super) struct FileSearchView {
     pub open: bool,
     root: WeakEntity<RootWindow>,
@@ -38,10 +51,12 @@ pub(super) struct FileSearchView {
     term: Entity<InputState>,
     directory: Entity<InputState>,
     focus: FocusHandle,
+    calculate_focus: FocusHandle,
     generation: u64,
     active: Option<SearchId>,
     validating: bool,
     status: String,
+    backend: Option<SearchBackend>,
     results: Vec<FilenameResult>,
     selected: Option<usize>,
     page: usize,
@@ -88,10 +103,12 @@ impl FileSearchView {
             term,
             directory,
             focus: cx.focus_handle(),
+            calculate_focus: cx.focus_handle(),
             generation: 0,
             active: None,
             validating: false,
             status: "Enter a directory and filename, then search.".into(),
+            backend: None,
             results: Vec::new(),
             selected: None,
             page: 0,
@@ -112,10 +129,14 @@ impl FileSearchView {
         self.results.clear();
         self.set_page(0);
         self.truncated = false;
+        self.backend = None;
         self.status = message.to_owned();
     }
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open {
+            self.status = "Enter a directory and filename, then search.".to_owned();
+        }
         self.open = true;
         self.term.focus_handle(cx).focus(window, cx);
         cx.notify();
@@ -123,6 +144,10 @@ impl FileSearchView {
 
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool {
         self.open && self.focus.contains_focused(window, cx)
+    }
+
+    pub(super) fn hash_action_is_focused(&self, window: &Window) -> bool {
+        self.calculate_focus.is_focused(window)
     }
 
     pub fn shutdown(&mut self) {
@@ -139,6 +164,75 @@ impl FileSearchView {
             cx.notify();
         });
         cx.notify();
+    }
+
+    fn selected_receipt(&self, owner: EntityId) -> Option<SelectionReceipt> {
+        let index = self.selected?;
+        let search = self.active?;
+        if !current_row(
+            self.open,
+            self.generation,
+            self.active,
+            self.generation,
+            Some(search),
+            index,
+            self.visible_rows(),
+        ) {
+            return None;
+        }
+        let row = self.results.get(index)?;
+        eligible_file_row(row, &row.path).then(|| SelectionReceipt {
+            owner,
+            search,
+            generation: self.generation,
+            index,
+            path: row.path.clone(),
+        })
+    }
+
+    pub(super) fn receipt_is_current(&self, receipt: &SelectionReceipt, owner: EntityId) -> bool {
+        self.selected_receipt(owner).as_ref() == Some(receipt)
+    }
+
+    pub(super) fn restore_receipt_focus(
+        &self,
+        receipt: &SelectionReceipt,
+        owner: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.receipt_is_current(receipt, owner) {
+            return false;
+        }
+        self.calculate_focus.focus(window, cx);
+        true
+    }
+
+    pub(super) fn report_hash_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.status = format!("Could not open Hash Generator: {error}");
+        cx.notify();
+    }
+
+    fn calculate_selected(
+        &mut self,
+        receipt: SelectionReceipt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !window.is_window_active()
+            || self.admission.is_fenced()
+            || !self.receipt_is_current(&receipt, cx.entity_id())
+        {
+            return;
+        }
+        self.calculate_focus.focus(window, cx);
+        let root = self.root.clone();
+        let source = cx.entity().downgrade();
+        window.defer(cx, move |window, app| {
+            let _ = root.update(app, |root, cx| {
+                root.open_hash_from_file_search(source, receipt, window, cx)
+            });
+        });
     }
 
     fn running(&self) -> bool {
@@ -241,9 +335,11 @@ impl FileSearchView {
         for event in events {
             match event {
                 SearchEvent::Started { backend, .. } => {
+                    self.backend = Some(backend);
                     self.status = format!("Searching with {backend:?}…")
                 }
                 SearchEvent::BackendFallback { to, reason, .. } => {
+                    self.backend = Some(to);
                     self.status = format!("Using {to:?}: {reason}")
                 }
                 SearchEvent::Result {
@@ -265,11 +361,17 @@ impl FileSearchView {
                     self.status = format!("Search: {diagnostic:?}");
                 }
                 SearchEvent::Completed { .. } => {
-                    self.status = if self.truncated {
-                        format!("Completed · {} results (limit reached)", self.results.len())
+                    let backend = self
+                        .backend
+                        .map(|backend| format!(" · {backend:?}"))
+                        .unwrap_or_default();
+                    let limit = if self.truncated {
+                        " (limit reached)"
                     } else {
-                        format!("Completed · {} results", self.results.len())
-                    }
+                        ""
+                    };
+                    self.status =
+                        format!("Completed{backend} · {} results{limit}", self.results.len());
                 }
                 SearchEvent::Cancelled { .. } => {
                     self.invalidate("Search cancelled.");
@@ -302,6 +404,10 @@ impl Render for FileSearchView {
         let end = visible.end;
         let generation = self.generation;
         let active = self.active;
+        let selected_receipt = self.selected_receipt(cx.entity_id());
+        let selected_path = selected_receipt
+            .as_ref()
+            .map(|receipt| receipt.path.display().to_string());
         let rows = self
             .results
             .iter()
@@ -387,6 +493,18 @@ impl Render for FileSearchView {
                             })),
                     )
                     .child(
+                        Button::new("file-search-calculate-hash")
+                            .tab_stop(true)
+                            .track_focus(&self.calculate_focus)
+                            .label("Calculate hash")
+                            .disabled(selected_receipt.is_none())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(receipt) = selected_receipt.clone() {
+                                    this.calculate_selected(receipt, window, cx);
+                                }
+                            })),
+                    )
+                    .child(
                         Button::new("file-search-close")
                             .tab_stop(true)
                             .label("Close")
@@ -394,6 +512,10 @@ impl Render for FileSearchView {
                     ),
             )
             .child(Label::new(self.status.clone()).id("file-search-status"))
+            .when_some(selected_path, |pane, path| {
+                pane.child(Label::new("Selected file"))
+                    .child(Label::new(path).id("file-search-selected-path"))
+            })
             .when(self.results.len() > MOUNTED_ROWS, |pane| {
                 pane.child(
                     div()

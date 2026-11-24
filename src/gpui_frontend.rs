@@ -2371,6 +2371,7 @@ struct RootWindow {
     file_search: Option<Entity<file_search::FileSearchView>>,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     hash_window: HashWindowState,
+    hash_file_search_return: Option<file_search::SelectionReceipt>,
     hash_window_revision: Arc<AtomicU64>,
     hash_mount_generation: Arc<AtomicU64>,
     hash_mount_counter: u64,
@@ -3454,6 +3455,13 @@ struct RetiringHashWindow {
     native_window: Option<NativeWindow>,
 }
 
+/// Typed Hash open target shared by explicit launcher and file-producing tools.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HashOpenIntent {
+    Default,
+    File(PathBuf),
+}
+
 struct HashMountConfig {
     jump_controller: JumpModeController,
     session: Arc<Mutex<HashSession>>,
@@ -4349,10 +4357,15 @@ async fn remove_and_wait_for_hash_window(cx: &mut AsyncApp, retiring: RetiringHa
 
 async fn restore_root_search_focus_after_hash_close(
     root: WeakEntity<RootWindow>,
+    close_revision: u64,
+    file_search_return: Option<file_search::SelectionReceipt>,
+    retired_docked_focus: Option<FocusHandle>,
     cx: &mut AsyncApp,
 ) {
     let target = root.update(cx, |root, cx| {
         let may_restore_search = root.action_sheet.is_none()
+            && root.context_favorite_popup.is_none()
+            && root.hash_window_revision.load(Ordering::Acquire) == close_revision
             && root.root_visibility.visible.load(Ordering::Acquire)
             && root_search_focus_is_current(
                 root.hash_window.mode(),
@@ -4385,6 +4398,8 @@ async fn restore_root_search_focus_after_hash_close(
             .is_some_and(|handle| handle.window_id() == root_window.window_id());
         let still_current = root_handle_matches
             && root.action_sheet.is_none()
+            && root.context_favorite_popup.is_none()
+            && root.hash_window_revision.load(Ordering::Acquire) == close_revision
             && root.root_visibility.visible.load(Ordering::Acquire)
             && root_search_focus_is_current(
                 root.hash_window.mode(),
@@ -4396,10 +4411,31 @@ async fn restore_root_search_focus_after_hash_close(
             )
             && root.native_window == native_root
             && (!cfg!(windows) || native_root.is_some_and(native_window_is_valid));
-        if still_current {
-            // This updates the root window's logical focus without activating it.
-            root.query.focus_handle(cx).focus(window, cx);
+        if !still_current {
+            return;
         }
+        if let Some(receipt) = file_search_return {
+            let may_leave_focus = window.focused(cx).is_none_or(|focus| {
+                !root.focus_handle.contains(&focus, window)
+                    || retired_docked_focus.as_ref().is_some_and(|owner| owner.contains(&focus, window))
+            });
+            if let Some(view) = root.file_search.clone().filter(|view| view.entity_id() == receipt.owner) {
+                if may_leave_focus || view.read(cx).hash_action_is_focused(window) {
+                    let restored = view.update(cx, |view, cx| {
+                        view.restore_receipt_focus(&receipt, cx.entity_id(), window, cx)
+                    });
+                    if restored {
+                        root.root_scroll.scroll_to_top_of_item(root.file_search_scroll_item());
+                        return;
+                    }
+                }
+            }
+            if !may_leave_focus {
+                return;
+            }
+        }
+        // Restore logical focus while Windows independently chooses the next foreground window.
+        root.query.focus_handle(cx).focus(window, cx);
     });
 }
 
@@ -5689,7 +5725,7 @@ impl RootWindow {
             return;
         };
         let outcome = handle_hash_generator(&HashGeneratorCommand::Open, || {
-            self.open_hash_generator_window(operation, window, cx)
+            self.open_hash_generator_window(HashOpenIntent::Default, operation, window, cx)
         });
         self.hash_open_error = outcome
             .err()
@@ -7156,6 +7192,53 @@ impl RootWindow {
         true
     }
 
+    fn open_hash_from_file_search(
+        &mut self,
+        source: WeakEntity<file_search::FileSearchView>,
+        receipt: file_search::SelectionReceipt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = source.upgrade() else {
+            return;
+        };
+        let source = view.read(cx);
+        let current = self.file_search.as_ref().is_some_and(|mounted| mounted.entity_id() == receipt.owner)
+            && view.entity_id() == receipt.owner
+            && self.root_window.is_some_and(|root| root.window_id() == window.window_handle().window_id())
+            && self.root_visibility.active.load(Ordering::Acquire)
+            && self.root_visibility.visible.load(Ordering::Acquire)
+            && window.is_window_active()
+            && self.action_sheet.is_none()
+            && self.context_favorite_popup.is_none()
+            && source.hash_action_is_focused(window)
+            && source.receipt_is_current(&receipt, view.entity_id());
+        if !current {
+            return;
+        }
+        #[cfg(windows)]
+        if !self.native_window.is_some_and(|native| native_window_is_valid(native)
+            && current_foreground_identity() == Some(native.identity)) {
+            return;
+        }
+        let Some(operation) = self.restart_admission.admit() else {
+            return;
+        };
+        let outcome = self.open_hash_generator_window(
+            HashOpenIntent::File(receipt.path.clone()), operation, window, cx,
+        );
+        match outcome {
+            Ok(()) => {
+                self.hash_file_search_return = Some(receipt);
+                if self.hash_window.mode() == Some(HashPresentationMode::Docked) {
+                    self.root_scroll.scroll_to_top_of_item(self.docked_hash_scroll_item());
+                }
+            }
+            Err(error) => view.update(cx, |view, cx| view.report_hash_error(error, cx)),
+        }
+        cx.notify();
+    }
+
     fn open_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(_permit) = self.restart_admission.admit() else { return; };
         let view = if let Some(view) = &self.file_search {
@@ -7169,14 +7252,16 @@ impl RootWindow {
             view
         };
         view.update(cx, |view, cx| view.show(window, cx));
-        self.root_scroll.scroll_to_top_of_item(
-            self.quick_help_scroll_item()
-                + usize::from(self.quick_help.open)
-                + usize::from(self.result_favorites.is_open())
-                + usize::from(self.app_editor.open),
-        );
+        self.root_scroll.scroll_to_top_of_item(self.file_search_scroll_item());
         self.query_history.reset();
         cx.notify();
+    }
+
+    fn file_search_scroll_item(&self) -> usize {
+        self.quick_help_scroll_item()
+            + usize::from(self.quick_help.open)
+            + usize::from(self.result_favorites.is_open())
+            + usize::from(self.app_editor.open)
     }
 
     fn activate_launcher_result(
@@ -7275,7 +7360,7 @@ impl RootWindow {
         match route {
             InstalledSearchRoute::HashOpen => {
                 let outcome = dispatch_hash_open(invocation, || {
-                    self.open_hash_generator_window(operation, window, cx)
+                    self.open_hash_generator_window(HashOpenIntent::Default, operation, window, cx)
                 });
                 if outcome.is_ok() {
                     self.query_history.reset();
@@ -7412,7 +7497,10 @@ impl RootWindow {
                     panel_stack::retire(&mut root.panel_stack, Panel::HashGeneratorDialog);
                     root.hash_rehost_pending.store(false, Ordering::Release);
                     root.hash_rehost_revision.fetch_add(1, Ordering::AcqRel);
-                    hash_window_revision.fetch_add(1, Ordering::AcqRel);
+                    let close_revision = hash_window_revision
+                        .fetch_add(1, Ordering::AcqRel)
+                        .wrapping_add(1);
+                    let file_search_return = root.hash_file_search_return.take();
                     let root_for_retirement = root_for_retirement.clone();
                     cx.spawn(async move |_, cx| {
                         let _operation = operation;
@@ -7434,6 +7522,9 @@ impl RootWindow {
                         if retired {
                             restore_root_search_focus_after_hash_close(
                                 root_for_retirement.clone(),
+                                close_revision,
+                                file_search_return,
+                                None,
                                 cx,
                             )
                             .await;
@@ -7448,15 +7539,37 @@ impl RootWindow {
 
     fn open_hash_generator_window(
         &mut self,
+        intent: HashOpenIntent,
         operation: EffectPermit,
         root_window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let file = match intent {
+            HashOpenIntent::Default => {
+                self.hash_file_search_return = None;
+                None
+            }
+            HashOpenIntent::File(path) => {
+                if self.hash_rehost_pending.load(Ordering::Acquire)
+                    || self.hash_file_picker_pending.load(Ordering::Acquire)
+                    || self.hash_clipboard_pending.is_pending()
+                {
+                    return Err("Hash Generator is busy with another operation.".to_owned());
+                }
+                Some(path)
+            }
+        };
         match &self.hash_window {
             HashWindowState::Docked { view, .. } => {
-                panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
                 let view = view.clone();
-                view.update(cx, |tool, cx| tool.focus_editable(root_window, cx));
+                view.update(cx, |tool, cx| {
+                    if let Some(path) = file {
+                        tool.select_external_file(path, root_window, cx)?;
+                    }
+                    tool.focus_editable(root_window, cx);
+                    Ok::<(), String>(())
+                })?;
+                panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
                 return Ok(());
             }
             HashWindowState::Popout { window, view, .. } => {
@@ -7468,11 +7581,18 @@ impl RootWindow {
                     .fetch_add(1, Ordering::AcqRel)
                     .wrapping_add(1)
                     .max(1);
-                match update_kit_window_content(window, &view, cx, |tool, window, cx| {
+                let native_window = update_kit_window_content(window, &view, cx, |tool, window, cx| {
+                    if let Some(path) = file {
+                        if cfg!(windows) && !tool.native_window.is_some_and(native_window_is_valid) {
+                            return Err("The Hash Generator window has no current Windows handle.".to_owned());
+                        }
+                        tool.select_external_file(path, window, cx)?;
+                    }
                     tool.focus_editable(window, cx);
-                    tool.native_window
-                }) {
-                    Ok(Some(native_window)) => {
+                    Ok(tool.native_window)
+                }).map_err(|error| format!("Could not focus the existing Hash window: {error}"))??;
+                match native_window {
+                    Some(native_window) => {
                         panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
                         let revision_guard = Arc::clone(&self.hash_window_revision);
                         cx.spawn(async move |_, cx| {
@@ -7491,18 +7611,15 @@ impl RootWindow {
                         .detach();
                         return Ok(());
                     }
-                    Ok(None) if !cfg!(windows) => {
+                    None if !cfg!(windows) => {
                         panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
                         return Ok(());
                     }
-                    Ok(None) => {
+                    None => {
                         return Err(
                             "The Hash Generator window has no checked Windows handle to activate."
                                 .to_owned(),
                         );
-                    }
-                    Err(error) => {
-                        return Err(format!("Could not focus the existing Hash window: {error}"));
                     }
                 }
             }
@@ -7512,7 +7629,7 @@ impl RootWindow {
         self.hash_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .begin(None);
+            .begin(file);
         self.hash_native_geometry_error = None;
         let session_epoch = self
             .hash_session
@@ -8270,6 +8387,10 @@ impl RootWindow {
         }
         self.cancel_docked_hash_resize_for_mount(mount_generation, session_epoch);
         self.drain_hash_native_geometry(cx, true);
+        let retired_docked_focus = match &self.hash_window {
+            HashWindowState::Docked { view, .. } => Some(view.read(cx).focus_handle.clone()),
+            _ => None,
+        };
         let retiring = match &self.hash_window {
             HashWindowState::Popout { window, view, .. } => Some(RetiringHashWindow {
                 window: *window,
@@ -8288,7 +8409,10 @@ impl RootWindow {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .end();
-        self.hash_window_revision.fetch_add(1, Ordering::AcqRel);
+        let close_revision = self.hash_window_revision
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        let file_search_return = self.hash_file_search_return.take();
         self.hash_open_error = None;
         cx.notify();
 
@@ -8319,7 +8443,9 @@ impl RootWindow {
                 true
             };
             if retired {
-                restore_root_search_focus_after_hash_close(root.clone(), cx).await;
+                restore_root_search_focus_after_hash_close(
+                    root.clone(), close_revision, file_search_return, retired_docked_focus, cx,
+                ).await;
             }
         })
         .detach();
@@ -10043,6 +10169,21 @@ impl HashGeneratorWindow {
         }
     }
 
+    fn apply_file_selection(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_file_path(Some(path));
+        self.source.update(cx, |state, cx| state.set_selected_value(&HashSourceChoice::File, window, cx));
+        self.file_picker_feedback = None;
+        cx.notify();
+    }
+
+    fn select_external_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        if !self.is_current_mount() || self.file_picker_pending.load(Ordering::Acquire) || self.clipboard_pending.is_pending() {
+            return Err("Hash Generator is busy with another operation.".to_owned());
+        }
+        self.apply_file_selection(path, window, cx);
+        Ok(())
+    }
+
     fn picker_request_is_current(&self, request: HashPickerRequest) -> bool {
         if !self.is_current_mount()
             || request.mount_generation != self.mount_generation
@@ -10076,14 +10217,7 @@ impl HashGeneratorWindow {
         }
         match outcome {
             HashPickerOutcome::Selected(path) => {
-                self.session
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .set_file_path(Some(path));
-                self.source.update(cx, |state, cx| {
-                    state.set_selected_value(&HashSourceChoice::File, window, cx)
-                });
-                self.file_picker_feedback = None;
+                self.apply_file_selection(path, window, cx);
             }
             HashPickerOutcome::Cancelled => {
                 self.file_picker_feedback =
@@ -11871,6 +12005,7 @@ pub(crate) fn run_foundation_window(
                 file_search: None,
                 file_search_settings: file_search_settings.clone(),
                 hash_window: HashWindowState::Closed,
+                hash_file_search_return: None,
                 hash_window_revision: window_revision_for_root,
                 hash_mount_generation: hash_mount_generation_for_root,
                 hash_mount_counter: 0,
@@ -13716,6 +13851,44 @@ mod tests {
         assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs", Some(&HashSet::new()), Some(&search)).is_empty());
         let disabled_caps = HashMap::from([("file_search".to_owned(), Vec::new())]);
         assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs", Some(&enabled), Some(&disabled_caps)).is_empty());
+    }
+
+    #[test]
+    fn file_handoff_preserves_same_hash_file_and_invalidates_changed_file() {
+        let first = PathBuf::from(r"C:\first\same.txt");
+        let second = PathBuf::from(r"C:\second\same.txt");
+        let mut session = super::HashSession::new();
+        session.begin(Some(first.clone()));
+        assert_eq!(session.mode(), super::HashInputMode::File);
+        let generation = session.generation();
+        session.set_file_path(Some(first.clone()));
+        assert_eq!(session.generation(), generation);
+        assert_eq!(session.file_path(), Some(first.as_path()));
+        session.set_file_path(Some(second.clone()));
+        assert_ne!(session.generation(), generation);
+        assert_eq!(session.file_path(), Some(second.as_path()));
+        assert!(!session.has_job());
+    }
+
+    #[test]
+    fn file_search_hash_requires_exact_file_row_and_current_page() {
+        use super::file_search::{current_row, eligible_file_row};
+        use multi_launcher::file_search::model::{FileKind, FilenameRank, SearchId};
+        let path = PathBuf::from(r"C:\data\first\same.txt");
+        let mut row = multi_launcher::file_search::model::FilenameResult {
+            path: path.clone(), file_name: "same.txt".into(), parent_directory: None,
+            kind: FileKind::File, size: None, modified: None, rank: FilenameRank::ExactFilename,
+            match_quality: FilenameRank::ExactFilename, filename_match_ranges: Vec::new(),
+            path_match_ranges: Vec::new(), arrival_index: 0,
+        };
+        assert!(eligible_file_row(&row, &path));
+        assert!(!eligible_file_row(&row, &PathBuf::from(r"C:\data\second\same.txt")));
+        assert!(current_row(true, 3, Some(SearchId(7)), 3, Some(SearchId(7)), 1, 0..2));
+        assert!(!current_row(true, 4, Some(SearchId(7)), 3, Some(SearchId(7)), 1, 0..2));
+        assert!(!current_row(true, 3, Some(SearchId(8)), 3, Some(SearchId(7)), 1, 0..2));
+        assert!(!current_row(true, 3, Some(SearchId(7)), 3, Some(SearchId(7)), 1, 2..4));
+        row.kind = FileKind::Directory;
+        assert!(!eligible_file_row(&row, &path));
     }
 
     #[test]
