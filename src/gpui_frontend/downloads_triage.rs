@@ -279,7 +279,7 @@ impl DownloadsTriageView {
         let cancellation = ScanCancellation::new();
         let worker_cancel = cancellation.clone();
         self.cancellation = Some(cancellation);
-        self.status = "Scanning Downloadsâ€¦".into();
+        self.status = "Scanning Downloads…".into();
         let generation = self.generation;
         let profile = self.profile.clone();
         let task = cx.background_executor().spawn(async move {
@@ -303,7 +303,7 @@ impl DownloadsTriageView {
                             DownloadsScanCompletion::Io(error) => format!("I/O error: {error}"),
                         };
                         this.status = format!(
-                            "{completion} Â· {} entries Â· {} skipped",
+                            "{completion} · {} entries · {} skipped",
                             scan.rows().len(),
                             scan.skipped().len()
                         );
@@ -494,7 +494,7 @@ impl Render for DownloadsTriageView {
             )
             .when(self.inspect_cancel.is_some(), |pane| {
                 pane.child(
-                    Label::new("Checking selected fileâ€¦").id("downloads-triage-inspect-status"),
+                    Label::new("Checking selected file…").id("downloads-triage-inspect-status"),
                 )
             })
             .when_some(root, |pane, path| {
@@ -522,7 +522,7 @@ impl Render for DownloadsTriageView {
                                 })),
                         )
                         .child(Label::new(format!(
-                            "Entries {}â€“{} of {count}",
+                            "Entries {}–{} of {count}",
                             range.start + 1,
                             range.end
                         )))
@@ -574,7 +574,7 @@ impl Render for DownloadsTriageView {
                                 })),
                         )
                         .child(Label::new(format!(
-                            "Skipped {}â€“{} of {skipped_count}",
+                            "Skipped {}–{} of {skipped_count}",
                             skipped_start + 1,
                             skipped_end
                         )))

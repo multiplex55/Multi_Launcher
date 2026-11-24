@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G07 File Search now delivers the exact current file to G04 Hash in Docked and Pop Out. Focused tests and Windows replay verified both matched digests, same-file retention, changed-file invalidation, restart, Escape and closed-selector Calculate. G04 main and dropdown Jump, G01/G03 retirement, G05 external execution and G06 checked App Editor retain their scoped evidence. Runtime inventory closure, broader providers, mixed DPI, global invocation and active UI Automation focus remain open. [File Search handoff](VALIDATION_LOG.md#g07-and-g04-checked-file-search-to-hash-handoff) · [Hash dropdowns](VALIDATION_LOG.md#g04-hash-dropdown-item-jump-mode) · [Provider evidence](VALIDATION_LOG.md#g05-folder-and-bookmark-search-admission) · [App Editor evidence](VALIDATION_LOG.md#g06-saved-custom-app-editor-catalog-and-checked-editing)
+G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows verified exact digests, refusal of replaced files, focus return, and restart into the egui Downloads launcher. G07 File Search delivers the exact current file to G04 Hash in Docked and Pop Out. Focused tests and Windows replay verified both matched digests, same-file retention, changed-file invalidation, restart, Escape and closed-selector Calculate. G04 main and dropdown Jump, G01/G03 retirement, G05 external execution and G06 checked App Editor retain their scoped evidence. Runtime inventory closure, broader providers, mixed DPI, global invocation and active UI Automation focus remain open. [Downloads Inspect](VALIDATION_LOG.md#g11-and-g04-checked-downloads-triage-inspect-to-hash) · [File Search handoff](VALIDATION_LOG.md#g07-and-g04-checked-file-search-to-hash-handoff) · [Hash dropdowns](VALIDATION_LOG.md#g04-hash-dropdown-item-jump-mode) · [Provider evidence](VALIDATION_LOG.md#g05-folder-and-bookmark-search-admission) · [App Editor evidence](VALIDATION_LOG.md#g06-saved-custom-app-editor-catalog-and-checked-editing)
 
 ## Execution status
 
@@ -19,7 +19,7 @@ G07 File Search now delivers the exact current file to G04 Hash in Docked and Po
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Mount the real Downloads Triage scan and checked Inspect file handoff for the remaining Hash provider dependency. Stale accessibility focus, native egui Clipboard and mixed DPI remain open for Hash. The matched F2 probe left native delivery and foreground restoration open. |
+| Current next action | Trace the committed GPUI accessibility focus through Windows on the current Hash hosts. Native egui Clipboard and mixed DPI remain open for Hash. The matched F2 probe left native delivery and foreground restoration open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
