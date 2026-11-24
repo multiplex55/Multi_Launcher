@@ -343,10 +343,7 @@ pub use state::{
     VirtualDesktopGuiCompletion, WatchEvent,
 };
 
-const SUBCOMMANDS: &[&str] = &[
-    "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
-    "edit", "ma",
-];
+const SUBCOMMANDS: &[&str] = crate::actions::search::PROVIDER_SUBCOMMANDS;
 
 pub(super) fn radial_placement_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("radial-submenu-placement-recovery")

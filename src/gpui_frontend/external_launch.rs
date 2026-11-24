@@ -30,6 +30,10 @@ pub(super) fn ordinary_external(
 }
 
 fn ordinary_executable(target: &str) -> bool {
+    ordinary_path(target, true)
+}
+
+fn ordinary_path(target: &str, executable: bool) -> bool {
     if target.is_empty()
         || target.trim() != target
         || target.starts_with("\\\\?\\")
@@ -60,11 +64,14 @@ fn ordinary_executable(target: &str) -> bool {
         .split(['\\', '/'])
         .filter(|part| !part.is_empty())
         .collect();
-    if parts.is_empty()
-        || (unc && parts.len() < 3)
-        || !std::path::Path::new(parts[parts.len() - 1])
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+    let drive_root = drive && path.chars().all(|c| c == '\\' || c == '/');
+    let current_drive_root = !drive && (path == "\\" || path == "/");
+    if (parts.is_empty() && (executable || !(drive_root || current_drive_root)))
+        || (unc && parts.len() < if executable { 3 } else { 2 })
+        || (executable
+            && !std::path::Path::new(parts[parts.len() - 1])
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe")))
     {
         return false;
     }
@@ -169,6 +176,120 @@ impl Stamp {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AssociationKind {
+    Folder,
+    Bookmark,
+}
+
+pub(super) fn provider_association(
+    origin: &super::LauncherResultOrigin,
+    action: &Action,
+) -> Option<(AssociationKind, ExternalCommand)> {
+    match origin {
+        super::LauncherResultOrigin::Provider(name) => provider_association_by_name(name, action),
+        _ => None,
+    }
+}
+
+pub(super) fn provider_association_by_name(
+    name: &str,
+    action: &Action,
+) -> Option<(AssociationKind, ExternalCommand)> {
+    let kind = match name {
+        "folders" => AssociationKind::Folder,
+        "bookmarks" => AssociationKind::Bookmark,
+        _ => return None,
+    };
+    association_command(kind, action).map(|command| (kind, command))
+}
+
+fn association_command(kind: AssociationKind, action: &Action) -> Option<ExternalCommand> {
+    if action.args.is_some() {
+        return None;
+    }
+    let multi_launcher::commands::Command::External(command) =
+        multi_launcher::commands::parse_action(action).ok()?
+    else {
+        return None;
+    };
+    if command.namespace.is_some() || command.args.is_some() || command.target != action.action {
+        return None;
+    }
+    let valid = match kind {
+        AssociationKind::Folder => ordinary_path(&command.target, false),
+        AssociationKind::Bookmark => {
+            let raw = command.target.as_str();
+            let authority = raw
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+                .then(|| &raw[7..])
+                .or_else(|| {
+                    raw.get(..8)
+                        .filter(|prefix| prefix.eq_ignore_ascii_case("https://"))
+                        .map(|_| &raw[8..])
+                });
+            raw.trim() == raw
+                && !raw.chars().any(char::is_control)
+                && authority.is_some_and(|rest| {
+                    !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\')
+                })
+                && url::Url::parse(raw).is_ok_and(|url| {
+                    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+                })
+        }
+    };
+    valid.then_some(command)
+}
+
+fn checked_association(
+    kind: AssociationKind,
+    action: &Action,
+    command: &ExternalCommand,
+) -> anyhow::Result<()> {
+    checked_association_with(
+        kind,
+        action,
+        command,
+        multi_launcher::plugins::folders::FOLDERS_FILE,
+        multi_launcher::plugins::bookmarks::BOOKMARKS_FILE,
+        |target| multi_launcher::actions::exec::launch_association(target),
+    )
+}
+
+fn checked_association_with(
+    kind: AssociationKind,
+    action: &Action,
+    command: &ExternalCommand,
+    folder_path: &str,
+    bookmark_path: &str,
+    launch: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        association_command(kind, action).as_ref() == Some(command),
+        "Invalid provider target"
+    );
+    let current = match kind {
+        AssociationKind::Folder => {
+            multi_launcher::plugins::folders::folder_search_result_is_current(folder_path, action)?
+        }
+        AssociationKind::Bookmark => {
+            multi_launcher::plugins::bookmarks::bookmark_search_result_is_current(
+                bookmark_path,
+                action,
+            )?
+        }
+    };
+    anyhow::ensure!(current, "The Search result is stale; refresh and try again");
+    if kind == AssociationKind::Folder {
+        anyhow::ensure!(
+            std::path::Path::new(&command.target).is_dir(),
+            "The folder is unavailable"
+        );
+    }
+    launch(&command.target)
+}
+
 #[derive(Clone)]
 pub(super) struct Request {
     pub action: Action,
@@ -176,6 +297,7 @@ pub(super) struct Request {
     pub query: String,
     pub source: ActivationSource,
     pub settings: Settings,
+    pub association: Option<AssociationKind>,
 }
 
 pub(super) struct WorkerResult {
@@ -250,13 +372,17 @@ impl ExternalLaunch {
 
 struct Host {
     settings: Settings,
+    association: Option<AssociationKind>,
 }
 impl ExternalCommandHost for Host {
     fn execute_external_command(
         &mut self,
         command: &ExternalCommand,
-        _: &Action,
+        action: &Action,
     ) -> anyhow::Result<()> {
+        if let Some(kind) = self.association {
+            return checked_association(kind, action, command);
+        }
         multi_launcher::actions::exec::launch(&command.target, command.args.as_deref())
     }
     fn external_clear_query_after_run(&self) -> bool {
@@ -273,6 +399,7 @@ impl ExternalCommandHost for Host {
 pub(super) fn run(request: &Request) -> WorkerResult {
     let mut host = Host {
         settings: request.settings.clone(),
+        association: request.association,
     };
     let outcome = CommandBus.dispatch_external(
         &request.command,
@@ -342,6 +469,7 @@ impl RootWindow {
         command: ExternalCommand,
         query: String,
         source: ActivationSource,
+        association: Option<AssociationKind>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -364,6 +492,7 @@ impl RootWindow {
             query,
             source,
             settings: self.external_launch_preferences.clone(),
+            association,
         };
         let Some(ticket) = self
             .external_launch
@@ -656,6 +785,133 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_paths_allow_directory_roots_and_require_literal_url_authority() {
+        use super::{AssociationKind, association_command, ordinary_executable, ordinary_path};
+        assert!(ordinary_path(r"C:\", false));
+        assert!(ordinary_path(r"\", false));
+        assert!(ordinary_path("/", false));
+        assert!(!ordinary_path("C:", false));
+        assert!(!ordinary_path(r"\\server", false));
+        assert!(ordinary_path(r"\\server\share", false));
+        assert!(!ordinary_executable(r"C:\"));
+        assert!(!ordinary_executable(r"\\server\share"));
+        let mut action = Action {
+            label: "URL".into(),
+            desc: "Bookmark".into(),
+            action: "HTTPS://example.com/x".into(),
+            args: None,
+        };
+        assert!(association_command(AssociationKind::Bookmark, &action).is_some());
+        for invalid in [
+            "https:example.com",
+            "https:///example.com",
+            "https:////example.com",
+            "https://",
+        ] {
+            action.action = invalid.into();
+            assert!(
+                association_command(AssociationKind::Bookmark, &action).is_none(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_association_revalidates_before_forwarding_exact_targets() {
+        use super::{AssociationKind, checked_association_with, provider_association};
+        use crate::gpui_frontend::LauncherResultOrigin;
+        use std::cell::RefCell;
+        let dir = tempfile::tempdir().unwrap();
+        let bookmarks = dir.path().join("bookmarks.json");
+        let folders = dir.path().join("folders.json");
+        let bookmark_path = bookmarks.to_str().unwrap();
+        let folder_path = folders.to_str().unwrap();
+        let raw = "https://example.com/a.exe?token=Raw%2FValue";
+        std::fs::write(
+            &bookmarks,
+            serde_json::json!([{ "url": raw, "alias": "Alias" }]).to_string(),
+        )
+        .unwrap();
+        let action = Action {
+            label: "Alias".into(),
+            desc: "Bookmark".into(),
+            action: raw.into(),
+            args: None,
+        };
+        let origin = LauncherResultOrigin::Provider("bookmarks".into());
+        let (kind, command) = provider_association(&origin, &action).unwrap();
+        assert_eq!(kind, AssociationKind::Bookmark);
+        let calls = RefCell::new(Vec::new());
+        let run = || {
+            checked_association_with(
+                kind,
+                &action,
+                &command,
+                folder_path,
+                bookmark_path,
+                |target| {
+                    calls.borrow_mut().push(target.to_owned());
+                    Ok(())
+                },
+            )
+        };
+        run().unwrap();
+        assert_eq!(&*calls.borrow(), &[raw.to_owned()]);
+        std::fs::write(&bookmarks, "[]").unwrap();
+        assert!(run().is_err());
+        std::fs::write(&bookmarks, "{broken").unwrap();
+        assert!(run().is_err());
+        assert_eq!(calls.borrow().len(), 1);
+        assert!(provider_association(&LauncherResultOrigin::Saved, &action).is_none());
+        let mut changed = action.clone();
+        changed.args = Some(String::new());
+        assert!(provider_association(&origin, &changed).is_none());
+
+        let folder = dir.path().join("folder.exe");
+        std::fs::create_dir(&folder).unwrap();
+        let target = folder.to_str().unwrap();
+        std::fs::write(
+            &folders,
+            serde_json::json!([{ "label": "Folder", "path": target }]).to_string(),
+        )
+        .unwrap();
+        let action = Action {
+            label: "Folder".into(),
+            desc: target.into(),
+            action: target.into(),
+            args: None,
+        };
+        let (kind, command) =
+            provider_association(&LauncherResultOrigin::Provider("folders".into()), &action)
+                .unwrap();
+        checked_association_with(
+            kind,
+            &action,
+            &command,
+            folder_path,
+            bookmark_path,
+            |target| {
+                calls.borrow_mut().push(target.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.borrow().last().unwrap(), target);
+        std::fs::remove_dir(&folder).unwrap();
+        assert!(
+            checked_association_with(
+                kind,
+                &action,
+                &command,
+                folder_path,
+                bookmark_path,
+                |_| panic!("stale directory launched")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn ordinary_executable_admission_rejects_protocols_and_invalid_windows_paths() {
         for target in [
             r"C:\Apps\Tool.EXE",
@@ -740,6 +996,7 @@ mod tests {
                 args: None,
                 namespace: None,
             },
+            association: None,
             query: "tool".into(),
             source: ActivationSource::Enter,
             settings: Settings {
@@ -828,6 +1085,7 @@ mod tests {
                 args: Some("--arg".into()),
                 namespace: None,
             },
+            association: None,
             query: "tool".into(),
             source: ActivationSource::Click,
             settings: Settings {

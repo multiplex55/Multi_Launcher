@@ -536,20 +536,6 @@ impl LauncherApp {
         Ok((aliases, aliases_lc))
     }
 
-    fn alias_matches_lc(&self, action: &str, query_lc: &str) -> bool {
-        crate::actions::search::alias_matches_lc(
-            action,
-            query_lc,
-            &self.folder_aliases_lc,
-            &self.bookmark_aliases_lc,
-        )
-    }
-
-    fn is_exact_match_mode(&self) -> bool {
-        // `match_exact` is a strict override: if enabled, we always bypass fuzzy scoring.
-        self.match_exact || self.fuzzy_weight <= 0.0
-    }
-
     fn should_bypass_exact_post_filter(query: &str, action: &str) -> bool {
         // `query:*` actions are command suggestions that should still participate in
         // exact display-text filtering when users are browsing command names/options.
@@ -1046,37 +1032,18 @@ impl LauncherApp {
                         .saturating_add(cached.desc_lc.len() as u64)
                         .saturating_add(cached.action_lc.len() as u64);
                 }
-                if self.is_exact_match_mode() {
-                    if Self::should_bypass_exact_post_filter(trimmed, &a.action) {
-                        // Plugin commands like `note today`/`note search <term>` already
-                        // returned concrete results (e.g. `note:new:*`, `note:open:*`).
-                        // Re-filtering by label/desc text can hide valid plugin-resolved
-                        // outputs, so keep them as-is in exact mode.
-                        res.push((a, 0.0));
-                        continue;
-                    }
-                    if query_term.is_empty() {
-                        res.push((a, 0.0));
-                    } else {
-                        let alias_match = self.alias_matches_lc(&a.action, query_term);
-                        let label_match = cached.matches_exact_display_text(query_term);
-                        let desc_match = cached.desc_lc.contains(query_term);
-                        let action_match = cached.action_lc.contains(query_term);
-                        if label_match || desc_match || action_match || alias_match {
-                            let score = if alias_match { 1.0 } else { 0.0 };
-                            res.push((a, score));
-                        }
-                    }
-                } else {
-                    let score = if raw_query.is_empty() {
-                        0.0
-                    } else {
-                        self.matcher
-                            .fuzzy_match(&a.label, raw_query)
-                            .max(self.matcher.fuzzy_match(&a.desc, raw_query))
-                            .unwrap_or(0) as f32
-                            * self.fuzzy_weight
-                    };
+                if let Some(score) = crate::actions::search::score_provider_candidate(
+                    &a,
+                    &cached,
+                    raw_query,
+                    query_term,
+                    self.match_exact || self.fuzzy_weight <= 0.0,
+                    Self::should_bypass_exact_post_filter(trimmed, &a.action),
+                    &self.matcher,
+                    self.fuzzy_weight,
+                    &self.folder_aliases_lc,
+                    &self.bookmark_aliases_lc,
+                ) {
                     res.push((a, score));
                 }
             }
@@ -1133,17 +1100,7 @@ impl LauncherApp {
             }
             res = command_fallback.scored_actions;
         } else {
-            let tail = trimmed_lc.split_once(" ").map(|x| x.1).unwrap_or("");
-            let mut query_term = tail.split(" ").nth(1).unwrap_or("").to_string();
-            if query_term.is_empty() {
-                let parts: Vec<&str> = tail.split_whitespace().collect();
-                if parts.len() == 1 && !SUBCOMMANDS.contains(&parts[0]) {
-                    query_term = parts[0].to_string();
-                } else if parts.len() > 1 {
-                    query_term = parts[1..].join(" ");
-                }
-            }
-            let query_term_lc = query_term.to_lowercase();
+            let query_term_lc = crate::actions::search::provider_query_term(trimmed_lc);
             for a in plugin_results {
                 let cached = CachedSearchEntry::from_action(&a);
                 #[cfg(test)]
@@ -1155,36 +1112,18 @@ impl LauncherApp {
                         .saturating_add(cached.desc_lc.len() as u64)
                         .saturating_add(cached.action_lc.len() as u64);
                 }
-                if self.is_exact_match_mode() {
-                    if Self::should_bypass_exact_post_filter(trimmed, &a.action) {
-                        // Explicit plugin commands can resolve into result lists/artifacts.
-                        // Preserve those resolved actions in exact mode instead of applying
-                        // a second label/description exact filter in the launcher layer.
-                        res.push((a, 0.0));
-                        continue;
-                    }
-                    if query_term_lc.is_empty() {
-                        res.push((a, 0.0));
-                    } else {
-                        let alias_match = self.alias_matches_lc(&a.action, &query_term_lc);
-                        let label_match = cached.matches_exact_display_text(&query_term_lc);
-                        let desc_match = cached.desc_lc.contains(&query_term_lc);
-                        let action_match = cached.action_lc.contains(&query_term_lc);
-                        if label_match || desc_match || action_match || alias_match {
-                            let score = if alias_match { 1.0 } else { 0.0 };
-                            res.push((a, score));
-                        }
-                    }
-                } else {
-                    let score = if raw_query.is_empty() {
-                        0.0
-                    } else {
-                        self.matcher
-                            .fuzzy_match(&a.label, raw_query)
-                            .max(self.matcher.fuzzy_match(&a.desc, raw_query))
-                            .unwrap_or(0) as f32
-                            * self.fuzzy_weight
-                    };
+                if let Some(score) = crate::actions::search::score_provider_candidate(
+                    &a,
+                    &cached,
+                    raw_query,
+                    &query_term_lc,
+                    self.match_exact || self.fuzzy_weight <= 0.0,
+                    Self::should_bypass_exact_post_filter(trimmed, &a.action),
+                    &self.matcher,
+                    self.fuzzy_weight,
+                    &self.folder_aliases_lc,
+                    &self.bookmark_aliases_lc,
+                ) {
                     res.push((a, score));
                 }
             }

@@ -54,6 +54,80 @@ impl CachedSearchEntry {
     }
 }
 
+/// Words treated as provider subcommands by launcher post-filtering.
+pub const PROVIDER_SUBCOMMANDS: &[&str] = &[
+    "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
+    "edit", "ma",
+];
+
+/// The existing provider post-filter term, including its literal-space semantics.
+pub fn provider_query_term(trimmed_lc: &str) -> String {
+    if trimmed_lc.starts_with("g ") {
+        return trimmed_lc
+            .split_once(' ')
+            .map(|x| x.1)
+            .unwrap_or("")
+            .to_owned();
+    }
+    let tail = trimmed_lc.split_once(" ").map(|x| x.1).unwrap_or("");
+    let mut term = tail.split(" ").nth(1).unwrap_or("").to_owned();
+    if term.is_empty() {
+        let parts: Vec<_> = tail.split_whitespace().collect();
+        if parts.len() == 1 && !PROVIDER_SUBCOMMANDS.contains(&parts[0]) {
+            term = parts[0].to_owned();
+        } else if parts.len() > 1 {
+            term = parts[1..].join(" ");
+        }
+    }
+    term.to_lowercase()
+}
+
+/// Score a routed provider row without discarding its caller-owned provenance.
+pub fn score_provider_candidate<M: FuzzyMatcher>(
+    action: &Action,
+    cached: &CachedSearchEntry,
+    raw_query: &str,
+    query_term_lc: &str,
+    exact: bool,
+    bypass_exact: bool,
+    matcher: &M,
+    fuzzy_weight: f32,
+    folder_aliases_lc: &HashMap<String, Option<String>>,
+    bookmark_aliases_lc: &HashMap<String, Option<String>>,
+) -> Option<f32> {
+    if exact {
+        if bypass_exact || query_term_lc.is_empty() {
+            return Some(0.0);
+        }
+        let alias = alias_matches_lc(
+            &action.action,
+            query_term_lc,
+            folder_aliases_lc,
+            bookmark_aliases_lc,
+        );
+        cached.score_candidate(
+            action,
+            query_term_lc,
+            query_term_lc,
+            true,
+            alias,
+            matcher,
+            fuzzy_weight,
+        )
+    } else {
+        let score = if raw_query.is_empty() {
+            0.0
+        } else {
+            matcher
+                .fuzzy_match(&action.label, raw_query)
+                .max(matcher.fuzzy_match(&action.desc, raw_query))
+                .unwrap_or(0) as f32
+                * fuzzy_weight
+        };
+        Some(score)
+    }
+}
+
 /// Cached command data needed by the launcher's installed command fallback.
 pub struct CommandFallbackInput<'a, M> {
     pub actions: &'a [Action],
@@ -620,6 +694,63 @@ mod tests {
                 (duplicate.clone(), "first".to_owned()),
                 (duplicate, "second".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn provider_scoring_preserves_exact_alias_and_zero_score_fuzzy_results() {
+        use super::{provider_query_term, score_provider_candidate};
+        let row = action("Alias", "payload");
+        let cached = CachedSearchEntry::from_action(&row);
+        let matcher = SkimMatcherV2::default();
+        let aliases = HashMap::from([(row.action.clone(), Some("needle".to_owned()))]);
+        let empty = HashMap::new();
+        assert_eq!(provider_query_term("f list needle"), "needle");
+        assert_eq!(provider_query_term("bm list"), "");
+        assert_eq!(
+            score_provider_candidate(
+                &row,
+                &cached,
+                "f list needle",
+                "needle",
+                true,
+                false,
+                &matcher,
+                1.0,
+                &aliases,
+                &empty
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            score_provider_candidate(
+                &row,
+                &cached,
+                "f list other",
+                "other",
+                true,
+                false,
+                &matcher,
+                1.0,
+                &empty,
+                &empty
+            ),
+            None
+        );
+        assert_eq!(
+            score_provider_candidate(
+                &row,
+                &cached,
+                "f list other",
+                "other",
+                false,
+                false,
+                &matcher,
+                1.0,
+                &empty,
+                &empty
+            ),
+            Some(0.0)
         );
     }
 

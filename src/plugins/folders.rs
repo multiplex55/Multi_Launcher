@@ -321,6 +321,47 @@ pub struct FoldersPlugin {
 }
 
 impl FoldersPlugin {
+    /// Snapshot current aliases for the requested Search targets.
+    pub fn search_aliases_lc(
+        &self,
+        targets: &std::collections::HashSet<&str>,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        self.data
+            .lock()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| targets.contains(entry.path.as_str()))
+                    .map(|entry| {
+                        (
+                            entry.path.clone(),
+                            entry.alias.as_ref().map(|alias| alias.to_lowercase()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Snapshot aliased row identities for Search presentation.
+    pub fn aliased_search_rows(
+        &self,
+    ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+        let mut aliases =
+            std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
+        if let Ok(entries) = self.data.lock() {
+            for entry in entries.iter() {
+                if let Some(alias) = &entry.alias {
+                    aliases
+                        .entry(entry.path.clone())
+                        .or_default()
+                        .insert(alias.clone());
+                }
+            }
+        }
+        aliases
+    }
+
     /// Create a new folders plugin.
     pub fn new() -> Self {
         Self::new_for_path(FOLDERS_FILE)
@@ -562,6 +603,45 @@ mod tests {
             path: path.into(),
             alias: alias.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn search_alias_snapshot_tracks_current_live_folder_rows() {
+        let data = Arc::new(Mutex::new(vec![folder(
+            "Work Documents",
+            r"C:\other",
+            Some("Old"),
+        )]));
+        let plugin = FoldersPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::clone(&data),
+            watcher: None,
+        };
+        let targets = std::collections::HashSet::from([r"C:\other"]);
+        assert_eq!(
+            plugin.search_aliases_lc(&targets).get(r"C:\other"),
+            Some(&Some("old".into()))
+        );
+        data.lock().unwrap()[0].alias = Some("Work".into());
+        let aliases = plugin.search_aliases_lc(&targets);
+        assert_eq!(aliases.get(r"C:\other"), Some(&Some("work".into())));
+        let row = query_folder_entries("f list work", &data.lock().unwrap())[0].clone();
+        let cached = crate::actions::search::CachedSearchEntry::from_action(&row);
+        assert_eq!(
+            crate::actions::search::score_provider_candidate(
+                &row,
+                &cached,
+                "f list work",
+                "work",
+                true,
+                false,
+                &plugin.matcher,
+                1.0,
+                &aliases,
+                &std::collections::HashMap::new(),
+            ),
+            Some(1.0)
+        );
     }
 
     #[test]

@@ -40,6 +40,28 @@ pub struct BookmarksPlugin {
 }
 
 impl BookmarksPlugin {
+    /// Snapshot current aliases for the requested Search targets.
+    pub fn search_aliases_lc(
+        &self,
+        targets: &std::collections::HashSet<&str>,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        self.data
+            .lock()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| targets.contains(entry.url.as_str()))
+                    .map(|entry| {
+                        (
+                            entry.url.clone(),
+                            entry.alias.as_ref().map(|alias| alias.to_lowercase()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Construct a new `BookmarksPlugin` with a fuzzy matcher.
     pub fn new() -> Self {
         Self::new_for_path(BOOKMARKS_FILE)
@@ -494,6 +516,34 @@ mod tests {
             url: url.into(),
             alias: alias.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn search_alias_snapshot_tracks_current_live_bookmark_rows() {
+        let data = Arc::new(Mutex::new(vec![bookmark(
+            "https://example.com",
+            Some("Old"),
+        )]));
+        let plugin = BookmarksPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::clone(&data),
+            cache: Arc::new(Mutex::new(LruCache::new(4))),
+            watcher: None,
+        };
+        let targets = std::collections::HashSet::from(["https://example.com"]);
+        assert_eq!(
+            plugin
+                .search_aliases_lc(&targets)
+                .get("https://example.com"),
+            Some(&Some("old".into()))
+        );
+        data.lock().unwrap()[0].alias = Some("Work".into());
+        assert_eq!(
+            plugin
+                .search_aliases_lc(&targets)
+                .get("https://example.com"),
+            Some(&Some("work".into()))
+        );
     }
 
     #[test]

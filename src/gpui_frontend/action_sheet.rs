@@ -166,10 +166,15 @@ impl RootWindow {
         };
         let Some(action) = self
             .launcher_results
-            .resolve_action(generation, row, &query)
+            .resolve_result(generation, row, &query)
         else {
             return;
         };
+        if matches!(&action.origin, LauncherResultOrigin::Provider(name) if name == "folders" || name == "bookmarks")
+        {
+            return;
+        }
+        let action = action.action;
         let resolver = ActionTargetResolverContext::new(
             &self.search_catalog.folder_aliases_lc,
             &self.search_catalog.bookmark_aliases_lc,

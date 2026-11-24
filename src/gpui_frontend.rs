@@ -6,6 +6,7 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod favorites;
+mod search_providers;
 
 pub(crate) use external_launch::Settings as ExternalLaunchPreferences;
 
@@ -105,7 +106,6 @@ use multi_launcher::launcher::query_results_layout::{
     QueryLayoutPlugin, QuerySelectionMove, ResolvedQueryResultsLayout, move_query_selection,
     resolve_query_results_layout,
 };
-use multi_launcher::plugin::Plugin as _;
 use multi_launcher::settings::{
     AppliedWindowSize, HintAlphabet, JumpModeChord, NativeWindowGeometry, PreferredWindowSize,
     QueryResultsLayoutSettings, RememberedPresentation, UtilityDialogSizes,
@@ -151,6 +151,7 @@ enum LauncherResultOrigin {
 struct LauncherSearchResult {
     action: Action,
     origin: LauncherResultOrigin,
+    hide_description: bool,
 }
 
 impl LauncherSearchResult {
@@ -186,65 +187,7 @@ struct LauncherSearchCatalog {
     bookmark_aliases_lc: HashMap<String, Option<String>>,
 }
 
-/// The intentionally small, side-effect-free provider collection used by the
-/// initial GPUI launcher. Its contents are policy at this frontend boundary.
-struct InstalledLauncherProviders {
-    hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
-    settings: multi_launcher::plugins::settings::SettingsPlugin,
-    help: multi_launcher::plugins::help::HelpPlugin,
-    favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
-}
-
-impl Default for InstalledLauncherProviders {
-    fn default() -> Self {
-        Self {
-            hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
-            settings: multi_launcher::plugins::settings::SettingsPlugin,
-            help: multi_launcher::plugins::help::HelpPlugin,
-            favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
-        }
-    }
-}
-
-impl InstalledLauncherProviders {
-    fn plugins(&self) -> [&dyn multi_launcher::plugin::Plugin; 4] {
-        [
-            &self.hash_generator,
-            &self.settings,
-            &self.help,
-            &self.favorites,
-        ]
-    }
-
-    fn cached_commands(&self, enabled_plugins: Option<&HashSet<String>>) -> Vec<Action> {
-        self.plugins()
-            .into_iter()
-            .filter(|provider| {
-                enabled_plugins.is_none_or(|enabled| enabled.contains(provider.name()))
-            })
-            .flat_map(|provider| supported_launcher_search_actions(provider.commands()))
-            .collect()
-    }
-
-    fn command_help_providers(&self) -> Arc<[CommandHelpProvider]> {
-        let mut providers = self
-            .plugins()
-            .into_iter()
-            .map(|provider| CommandHelpProvider {
-                name: provider.name().to_owned(),
-                description: provider.description().to_owned(),
-                capabilities: provider
-                    .capabilities()
-                    .iter()
-                    .map(|capability| (*capability).to_owned())
-                    .collect(),
-                commands: supported_launcher_search_actions(provider.commands()),
-            })
-            .collect::<Vec<_>>();
-        providers.sort_by(|left, right| left.name.cmp(&right.name));
-        providers.into()
-    }
-}
+use search_providers::InstalledLauncherProviders;
 
 impl LauncherSearchCatalog {
     fn new(
@@ -255,7 +198,10 @@ impl LauncherSearchCatalog {
         // boundary can execute without changing their Search payload. Saved
         // typed actions retain the shared local-action admission semantics.
         let actions = supported_saved_search_actions(startup.actions);
-        let providers = InstalledLauncherProviders::default();
+        #[cfg(not(test))]
+        let providers = InstalledLauncherProviders::new(enabled_plugins);
+        #[cfg(test)]
+        let providers = InstalledLauncherProviders::test_without_persisted_providers();
         // Installed command labels and completion fallbacks follow plugin
         // enablement. Search capability gates provider rows at query time.
         let commands = providers.cached_commands(enabled_plugins);
@@ -326,7 +272,7 @@ impl LauncherSearchCatalog {
             query,
             &self.query_results_layout,
             enabled_plugins,
-            [&self.providers.hash_generator],
+            self.providers.plugins(),
             |plugin| plugin.name(),
             |plugin| QueryLayoutPlugin {
                 name: plugin.name(),
@@ -340,6 +286,7 @@ impl LauncherSearchCatalog {
         &self,
         raw_query: &str,
         provider_actions: Vec<(String, Action)>,
+        raw_provider_results_empty: bool,
     ) -> Vec<LauncherSearchResult> {
         // Clearing GPUI Search restores the blank result state.
         // Cached commands become searchable once there is a query.
@@ -348,24 +295,62 @@ impl LauncherSearchCatalog {
         }
         let trimmed = raw_query.trim();
         let trimmed_lc = trimmed.to_lowercase();
-        let command_fallback =
-            multi_launcher::actions::search::collect_command_fallback_candidates(
-                multi_launcher::actions::search::CommandFallbackInput {
-                    actions: &self.commands,
-                    cached_entries: &self.command_cached_entries,
-                    matcher: &self.matcher,
-                    match_exact: self.match_exact,
-                    fuzzy_weight: self.fuzzy_weight,
-                    folder_aliases_lc: &self.folder_aliases_lc,
-                    bookmark_aliases_lc: &self.bookmark_aliases_lc,
-                },
-                trimmed,
-                &trimmed_lc,
-                provider_actions.is_empty(),
-            );
+        let command_fallback = multi_launcher::actions::search::collect_command_fallback_candidates(
+            multi_launcher::actions::search::CommandFallbackInput {
+                actions: &self.commands,
+                cached_entries: &self.command_cached_entries,
+                matcher: &self.matcher,
+                match_exact: self.match_exact,
+                fuzzy_weight: self.fuzzy_weight,
+                folder_aliases_lc: &self.folder_aliases_lc,
+                bookmark_aliases_lc: &self.bookmark_aliases_lc,
+            },
+            trimmed,
+            &trimmed_lc,
+            raw_provider_results_empty,
+        );
+        let provider_term = multi_launcher::actions::search::provider_query_term(&trimmed_lc);
+        let targets: HashSet<&str> =
+            if (self.match_exact || self.fuzzy_weight <= 0.0) && !provider_term.is_empty() {
+                provider_actions
+                    .iter()
+                    .filter(|(provider, _)| provider == "folders" || provider == "bookmarks")
+                    .map(|(_, action)| action.action.as_str())
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+        let (folder_aliases, bookmark_aliases) = if targets.is_empty() {
+            (None, None)
+        } else {
+            self.providers.current_search_aliases(&targets)
+        };
+        let folder_aliases = folder_aliases.as_ref().unwrap_or(&self.folder_aliases_lc);
+        let bookmark_aliases = bookmark_aliases
+            .as_ref()
+            .unwrap_or(&self.bookmark_aliases_lc);
         let mut scored_provider_actions = provider_actions
             .into_iter()
-            .map(|(provider, action)| (action, 0.0, LauncherResultOrigin::Provider(provider)))
+            .filter_map(|(provider, action)| {
+                let score = if provider == "folders" || provider == "bookmarks" {
+                    let cached = CachedSearchEntry::from_action(&action);
+                    multi_launcher::actions::search::score_provider_candidate(
+                        &action,
+                        &cached,
+                        raw_query,
+                        &provider_term,
+                        self.match_exact || self.fuzzy_weight <= 0.0,
+                        false,
+                        &self.matcher,
+                        self.fuzzy_weight,
+                        folder_aliases,
+                        bookmark_aliases,
+                    )?
+                } else {
+                    0.0
+                };
+                Some((action, score, LauncherResultOrigin::Provider(provider)))
+            })
             .collect::<Vec<_>>();
         scored_provider_actions.extend(
             command_fallback
@@ -398,18 +383,24 @@ impl LauncherSearchCatalog {
         )
         .actions
         .into_iter()
-        .map(|(action, origin)| LauncherSearchResult { action, origin })
+        .map(|(action, origin)| LauncherSearchResult {
+            action,
+            origin,
+            hide_description: false,
+        })
         .collect()
     }
 
     #[cfg(test)]
     fn compose_actions(&self, query: &str, providers: Vec<Action>) -> Vec<Action> {
+        let raw_provider_results_empty = providers.is_empty();
         self.compose(
             query,
             providers
                 .into_iter()
                 .map(|action| ("test".to_owned(), action))
                 .collect(),
+            raw_provider_results_empty,
         )
         .into_iter()
         .map(|row| row.action)
@@ -2454,6 +2445,7 @@ impl LauncherSearchResults {
                 .map(|action| LauncherSearchResult {
                     action,
                     origin: LauncherResultOrigin::Saved,
+                    hide_description: false,
                 })
                 .collect(),
             layout,
@@ -3378,6 +3370,8 @@ fn launcher_result_grid_geometry(
 
 fn render_launcher_result_cell(
     action: &Action,
+    hide_description: bool,
+    compact_description: bool,
     horizontal_padding: f32,
     generation: u64,
     absolute_index: usize,
@@ -3389,6 +3383,16 @@ fn render_launcher_result_cell(
     metrics: multi_launcher::gui::theme::ThemeMetrics,
     cx: &mut Context<RootWindow>,
 ) -> AnyElement {
+    let description = if compact_description {
+        action
+            .desc
+            .split_whitespace()
+            .take(7)
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        action.desc.clone()
+    };
     let target_id = search_jump_result_target_id(generation, absolute_index);
     let hint = search_jump_hint_badge(
         hint,
@@ -3419,7 +3423,11 @@ fn render_launcher_result_cell(
         }))
         .text_color(appearance::to_hsla(palette.primary_text))
         .role(Role::Button)
-        .aria_label(format!("{}: {}", action.label, action.desc))
+        .aria_label(if hide_description {
+            action.label.clone()
+        } else {
+            format!("{}: {}", action.label, description)
+        })
         .tab_stop(false)
         .on_mouse_down(
             MouseButton::Right,
@@ -3454,15 +3462,15 @@ fn render_launcher_result_cell(
                 .text_size(px(metrics.body_text_size))
                 .line_height(px(metrics.line_height)),
         )
-        .child(
-            Label::new(action.desc.clone())
+        .children((!hide_description).then(|| {
+            Label::new(description)
                 .w_full()
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .id("launcher-search-result-description")
                 .text_size(px(metrics.small_text_size))
-                .line_height(px(metrics.line_height)),
-        )
+                .line_height(px(metrics.line_height))
+        }))
         .children(hint);
     if let Some(draft) = jump_geometry_draft {
         let metadata = TargetMetadata::new(
@@ -7228,19 +7236,43 @@ impl RootWindow {
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool) {
         self.retire_context_favorite();
         self.retire_search_jump_mode();
-        let provider_actions = multi_launcher::plugin::search_filtered_plugins_with_origin(
+        let raw_provider_actions = multi_launcher::plugin::search_filtered_plugins_with_origin(
             self.search_catalog.providers.plugins(),
             &query,
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
-        )
-        .into_iter()
-        .filter(|(_, action)| is_supported_launcher_search_action(action))
-        .collect();
-        let actions = self.search_catalog.compose(&query, provider_actions);
+        );
+        let raw_provider_results_empty = raw_provider_actions.is_empty();
+        let provider_actions = raw_provider_actions
+            .into_iter()
+            .filter(|(provider, action)| {
+                if provider == "folders" || provider == "bookmarks" {
+                    external_launch::provider_association_by_name(provider, action).is_some()
+                } else {
+                    is_supported_launcher_search_action(action)
+                }
+            })
+            .collect();
+        let mut actions =
+            self.search_catalog
+                .compose(&query, provider_actions, raw_provider_results_empty);
         let layout = self
             .search_catalog
             .resolve_result_layout(&query, self.enabled_plugins.as_ref());
+        let show_full_path = self
+            .enabled_capabilities
+            .as_ref()
+            .and_then(|caps| caps.get("folders"))
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "show_full_path"));
+        if !layout.grid && !show_full_path && actions.iter().any(|row| matches!(&row.origin, LauncherResultOrigin::Provider(name) if name == "folders")) {
+            let aliases = self.search_catalog.providers.aliased_folder_rows();
+            for row in &mut actions {
+                row.hide_description = matches!(&row.origin, LauncherResultOrigin::Provider(name) if name == "folders")
+                    && row.action.args.is_none()
+                    && row.action.desc == row.action.action
+                    && aliases.get(&row.action.action).is_some_and(|labels| labels.contains(&row.action.label));
+            }
+        }
         self.launcher_results
             .replace(query, actions, layout, self.search_catalog.page_jump);
         self.fresh_search_enter = None;
@@ -7629,9 +7661,17 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         let query = self.query.read(cx).value().to_string();
-        let Some(action) = self.launcher_results.resolve_action(generation, row, &query) else {
+        let Some(result) = self
+            .launcher_results
+            .resolve_result(generation, row, &query)
+        else {
             return;
         };
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders" || name == "bookmarks")
+        {
+            return;
+        }
+        let action = result.action;
         if &action != rendered_action {
             return;
         }
@@ -7799,7 +7839,21 @@ impl RootWindow {
             return;
         }
         if let Some(command) = result.saved_external() {
-            self.start_external_launch(result.action, command, query, source, window, cx);
+            self.start_external_launch(result.action, command, query, source, None, window, cx);
+            return;
+        }
+        if let Some((kind, command)) =
+            external_launch::provider_association(&result.origin, &result.action)
+        {
+            self.start_external_launch(
+                result.action,
+                command,
+                query,
+                source,
+                Some(kind),
+                window,
+                cx,
+            );
             return;
         }
         let installed_invocation = match parse_installed_search_invocation(result.action, source) {
@@ -9618,6 +9672,8 @@ impl Render for RootWindow {
                                 .min_w(px(0.0))
                                 .child(render_launcher_result_cell(
                                     action,
+                                    self.launcher_results.actions[absolute_index].hide_description,
+                                    matches!(&self.launcher_results.actions[absolute_index].origin, LauncherResultOrigin::Provider(name) if name == "folders"),
                                     grid_padding,
                                     result_generation,
                                     absolute_index,
@@ -9649,6 +9705,8 @@ impl Render for RootWindow {
                     let hint = self.search_jump_mode.hint_for(&target_id);
                     render_launcher_result_cell(
                         action,
+                        self.launcher_results.actions[first_index].hide_description,
+                        false,
                         list_padding,
                         result_generation,
                         first_index,
@@ -13335,9 +13393,14 @@ mod tests {
             let mut results = LauncherSearchResults {
                 generation: 19,
                 query: "hash".to_owned(),
-                actions: jump_test_actions(7).into_iter().map(|action| super::LauncherSearchResult {
-                    action, origin: super::LauncherResultOrigin::Saved,
-                }).collect(),
+                actions: jump_test_actions(7)
+                    .into_iter()
+                    .map(|action| super::LauncherSearchResult {
+                        action,
+                        origin: super::LauncherResultOrigin::Saved,
+                        hide_description: false,
+                    })
+                    .collect(),
                 selected: None,
                 layout,
                 page_jump: 3,
@@ -13738,22 +13801,90 @@ mod tests {
     }
 
     #[test]
+    fn folder_bookmark_post_filter_preserves_origin_and_raw_provider_precedence() {
+        use super::LauncherResultOrigin;
+        let catalog = completion_catalog(Vec::new(), true, None);
+        let folder = saved_action("Alpha", r"C:\alpha", None);
+        let missing = saved_action("Beta", r"C:\beta", None);
+        let rows = catalog.compose(
+            "f list alpha",
+            vec![
+                ("folders".into(), folder.clone()),
+                ("folders".into(), missing),
+            ],
+            false,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, folder);
+        assert_eq!(
+            rows[0].origin,
+            LauncherResultOrigin::Provider("folders".into())
+        );
+        let bookmark = saved_action("Alpha", "https://example.com", None);
+        let rows = catalog.compose(
+            "bm list alpha",
+            vec![("bookmarks".into(), bookmark.clone())],
+            false,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, bookmark);
+        assert_eq!(
+            rows[0].origin,
+            LauncherResultOrigin::Provider("bookmarks".into())
+        );
+        let with_commands = completion_catalog(Vec::new(), true, None);
+        assert!(!with_commands.compose("ha", Vec::new(), true).is_empty());
+        assert!(with_commands.compose("ha", Vec::new(), false).is_empty());
+    }
+
+    #[test]
     fn executable_authority_tracks_result_origin_and_rejects_stale_rows() {
         use super::{LauncherResultOrigin, LauncherSearchResult};
         let action = saved_action("Executable", r"C:\Tools\example.exe", None);
         let catalog = completion_catalog(vec![action.clone()], true, None);
-        let rows = catalog.compose("app Executable", vec![("provider".into(), action.clone())]);
+        let rows = catalog.compose(
+            "app Executable",
+            vec![("provider".into(), action.clone())],
+            false,
+        );
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], LauncherSearchResult { action: action.clone(), origin: LauncherResultOrigin::Saved });
-        assert_eq!(rows[1], LauncherSearchResult { action: action.clone(), origin: LauncherResultOrigin::Provider("provider".into()) });
+        assert_eq!(
+            rows[0],
+            LauncherSearchResult {
+                action: action.clone(),
+                origin: LauncherResultOrigin::Saved,
+                hide_description: false
+            }
+        );
+        assert_eq!(
+            rows[1],
+            LauncherSearchResult {
+                action: action.clone(),
+                origin: LauncherResultOrigin::Provider("provider".into()),
+                hide_description: false
+            }
+        );
         let mut results = LauncherSearchResults::default();
         results.replace("app Executable".into(), rows, ResolvedQueryResultsLayout::default(), 2);
         let generation = results.generation;
         assert!(results.resolve_result(generation, 0, "app Executable").unwrap().saved_external().is_some());
         assert!(results.resolve_result(generation, 1, "app Executable").unwrap().saved_external().is_none());
         assert!(results.resolve_result(generation, 0, "changed").is_none());
-        results.replace("app Executable".into(), vec![LauncherSearchResult { action, origin: LauncherResultOrigin::Provider("provider".into()) }], ResolvedQueryResultsLayout::default(), 2);
-        assert!(results.resolve_result(generation, 0, "app Executable").is_none());
+        results.replace(
+            "app Executable".into(),
+            vec![LauncherSearchResult {
+                action,
+                origin: LauncherResultOrigin::Provider("provider".into()),
+                hide_description: false,
+            }],
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
+        assert!(
+            results
+                .resolve_result(generation, 0, "app Executable")
+                .is_none()
+        );
     }
 
     #[test]
@@ -14120,7 +14251,7 @@ mod tests {
 
     #[test]
     fn gpui_favorites_browse_admission_and_provider_gates() {
-        let providers = super::InstalledLauncherProviders::default();
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
         let enabled = HashSet::from(["favorites".to_owned()]);
         let search = HashMap::from([("favorites".to_owned(), vec!["search".to_owned()])]);
         for query in ["fav", " FAV ADD "] {
@@ -14166,7 +14297,7 @@ mod tests {
 
     #[test]
     fn gpui_provider_collection_drives_search_cache_and_help_without_search_gates() {
-        let providers = super::InstalledLauncherProviders::default();
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
         let enabled = HashSet::from([
             "hash_generator".to_owned(),
             "settings".to_owned(),

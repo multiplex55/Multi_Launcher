@@ -5,6 +5,50 @@ pub fn launch(path: &str, args: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// Open the exact target through the operating system's registered association.
+#[cfg(windows)]
+pub fn launch_association(target: impl AsRef<OsStr>) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::{
+            Foundation::HWND,
+            System::Com::{
+                COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+            },
+            UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        },
+        core::{PCWSTR, w},
+    };
+
+    let mut wide: Vec<u16> = target.as_ref().encode_wide().collect();
+    anyhow::ensure!(
+        !wide.contains(&0),
+        "Association target contains a NUL character"
+    );
+    wide.push(0);
+    // Some association handlers use apartment-threaded Shell extensions. The
+    // synchronous call keeps the literal UTF-16 target alive and COM balanced.
+    let result = unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
+            .ok()
+            .context("Could not initialize COM for the Windows association")?;
+        let result = ShellExecuteW(
+            HWND::default(),
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        CoUninitialize();
+        result
+    };
+    let code = result.0 as isize;
+    anyhow::ensure!(code > 32, "Shell association failed with code {code}");
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn launch_association(target: impl AsRef<OsStr>) -> anyhow::Result<()> {
     open::that(target).map_err(Into::into)
 }
@@ -45,9 +89,19 @@ pub fn launch_with_identity(path: &str, args: Option<&str>) -> anyhow::Result<La
             })
             .map_err(|e| e.into())
     } else {
-        launch_association(path).map(|_| LaunchIdentity {
-            pid: None,
-            target: path.to_string_lossy().into_owned(),
-        })
+        open::that(path)
+            .map(|_| LaunchIdentity {
+                pid: None,
+                target: path.to_string_lossy().into_owned(),
+            })
+            .map_err(Into::into)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn association_rejects_embedded_nul_before_shell_handoff() {
+        assert!(super::launch_association(std::ffi::OsStr::new("target\0other")).is_err());
     }
 }
