@@ -6,6 +6,8 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod file_search;
+#[cfg(windows)]
+mod downloads_triage;
 mod favorites;
 mod hash_jump;
 mod hash_jump_select;
@@ -1725,6 +1727,10 @@ fn supported_launcher_search_actions(actions: Vec<Action>) -> Vec<Action> {
         .collect()
 }
 
+fn is_downloads_triage_opener(action: &Action) -> bool {
+    action.args.is_none() && matches!(parse_action(action), Ok(Command::Dialog(DialogCommand::DownloadsTriage)))
+}
+
 fn is_file_search_opener(query: &str, action: &Action) -> bool {
     query.trim().eq_ignore_ascii_case("fs")
         && action.args.is_none()
@@ -2370,6 +2376,10 @@ struct RootWindow {
     hash_clipboard_operation: Option<HashClipboardOperation>,
     hash_clipboard_operation_counter: u64,
     file_search: Option<Entity<file_search::FileSearchView>>,
+    #[cfg(windows)]
+    downloads_triage: Option<Entity<downloads_triage::DownloadsTriageView>>,
+    #[cfg(windows)]
+    app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     hash_window: HashWindowState,
     hash_file_search_return: Option<file_search::SelectionReceipt>,
@@ -3216,6 +3226,7 @@ fn root_tab_traversed_to_search(
         && !context_stack_has_primary(context_stack, "CommandHelp")
         && !context_stack_has_primary(context_stack, "ToastLogViewer")
         && !context_stack_has_primary(context_stack, "FileSearchPane")
+        && !context_stack_has_primary(context_stack, "DownloadsTriagePane")
         && !context_stack_has_primary(context_stack, "PopupMenu")
 }
 
@@ -4285,6 +4296,7 @@ struct RestartDrafts {
     settings: SettingsRestartDraft,
     show_examples: bool,
     file_search_open: bool,
+    downloads_triage_open: bool,
 }
 
 struct RestartSnapshot {
@@ -4476,6 +4488,9 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.file_search_open {
         names.push("File Search form and results");
     }
+    if drafts.downloads_triage_open {
+        names.push("Downloads Triage view and results");
+    }
     if names.is_empty() {
         return "Restart Multi Launcher in the egui fallback? The GPUI windows will close."
             .to_owned();
@@ -4609,7 +4624,7 @@ impl RootWindow {
         {
             return;
         }
-        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| view.read(cx).open) {
+        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| view.read(cx).open) || self.downloads_triage_open(cx) {
             self.root_scroll
                 .scroll_to_top_of_item(self.docked_hash_scroll_item());
         } else {
@@ -5404,6 +5419,7 @@ impl RootWindow {
                 settings: self.settings_editor.restart_draft(),
                 show_examples: self.command_help.show_examples,
                 file_search_open: self.file_search.as_ref().is_some_and(|view| view.read(cx).open),
+                downloads_triage_open: self.downloads_triage_open(cx),
             },
             hash_work,
             child_windows,
@@ -5571,6 +5587,8 @@ impl RootWindow {
         self.root_visibility.deactivate();
         self.retire_search_jump_mode();
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
+        #[cfg(windows)]
+        if let Some(view) = self.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.coordinate_hud_probe_closing
             .store(true, Ordering::Release);
         self.coordinate_hud_probe_status = "Closing GPUI services for the egui restart…".to_owned();
@@ -5904,6 +5922,7 @@ impl RootWindow {
             || self.context_favorite_popup.is_some()
             || self.result_favorites.owns_focus(window, cx)
             || self.file_search.as_ref().is_some_and(|view| view.read(cx).owns_focus(window, cx))
+            || self.downloads_triage_owns_focus(window, cx)
         {
             return false;
         }
@@ -6620,6 +6639,8 @@ impl RootWindow {
             .filter(|(provider, action)| {
                 if provider == "folders" || provider == "bookmarks" {
                     external_launch::provider_association_by_name(provider, action).is_some()
+                } else if cfg!(windows) && provider == "downloads_triage" {
+                    is_downloads_triage_opener(action)
                 } else if provider == "file_search" {
                     is_file_search_opener(&query, action)
                 } else {
@@ -7240,6 +7261,40 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn downloads_triage_open(&self, cx: &App) -> bool {
+        #[cfg(windows)]
+        { self.downloads_triage.as_ref().is_some_and(|view| view.read(cx).open) }
+        #[cfg(not(windows))]
+        { let _ = cx; false }
+    }
+
+    fn downloads_triage_owns_focus(&self, window: &Window, cx: &App) -> bool {
+        #[cfg(windows)]
+        { self.downloads_triage.as_ref().is_some_and(|view| view.read(cx).owns_focus(window, cx)) }
+        #[cfg(not(windows))]
+        { let _ = (window, cx); false }
+    }
+
+    #[cfg(windows)]
+    fn open_downloads_triage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(_permit) = self.restart_admission.admit() else { return; };
+        let view = if let Some(view) = &self.downloads_triage {
+            view.clone()
+        } else {
+            let root = cx.entity().downgrade();
+            let admission = Arc::clone(&self.restart_admission);
+            let profile = self.app_data_root.clone();
+            let view = cx.new(|cx| downloads_triage::DownloadsTriageView::new(cx, root, admission, profile));
+            self.downloads_triage = Some(view.clone());
+            view
+        };
+        view.update(cx, |view, cx| view.show(window, cx));
+        let index = self.file_search_scroll_item() + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open));
+        self.root_scroll.scroll_to_top_of_item(index);
+        self.query_history.reset();
+        cx.notify();
+    }
+
     fn open_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(_permit) = self.restart_admission.admit() else { return; };
         let view = if let Some(view) = &self.file_search {
@@ -7282,6 +7337,16 @@ impl RootWindow {
             return;
         };
         if !self.launcher_result_activation_is_live(origin, window, cx) {
+            return;
+        }
+        #[cfg(windows)]
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "downloads_triage") {
+            if is_downloads_triage_opener(&result.action)
+                && self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("downloads_triage"))
+                && self.enabled_capabilities.as_ref().is_none_or(|caps| caps.get("downloads_triage").is_none_or(|caps| caps.iter().any(|cap| cap == "search")))
+            {
+                self.open_downloads_triage(window, cx);
+            }
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "file_search") {
@@ -9606,7 +9671,8 @@ impl Render for RootWindow {
                     && quick_help_panel.is_none()
                     && docked_hash.is_none()
                     && app_editor_panel.is_none()
-                    && self.file_search.as_ref().is_none_or(|view| !view.read(cx).open),
+                    && self.file_search.as_ref().is_none_or(|view| !view.read(cx).open)
+                    && !self.downloads_triage_open(cx),
                 |this| {
                     // Center the ordinary root only when its content fits.
                     this.my_auto()
@@ -9816,6 +9882,10 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().child(panel));
         }
         if let Some(view) = self.file_search.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        #[cfg(windows)]
+        if let Some(view) = self.downloads_triage.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // The absolute Search observer still has a layout slot, so keep it after the pane anchors.
@@ -11554,6 +11624,7 @@ pub(crate) fn run_foundation_window(
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_startup: LauncherSearchStartup,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
+    #[cfg(windows)] app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     external_launch_preferences: ExternalLaunchPreferences,
     coordinate_tool_preferences: CoordinateToolPreferences,
     theme_settings: multi_launcher::settings::ThemeSettings,
@@ -11700,6 +11771,8 @@ pub(crate) fn run_foundation_window(
                     }
                     root.retire_search_jump_mode();
                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
+                    #[cfg(windows)]
+                    if let Some(view) = root.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.drain_hash_native_geometry(cx, true);
                 });
             }
@@ -11886,6 +11959,10 @@ pub(crate) fn run_foundation_window(
                 hash_clipboard_operation: None,
                 hash_clipboard_operation_counter: 0,
                 file_search: None,
+                #[cfg(windows)]
+                downloads_triage: None,
+                #[cfg(windows)]
+                app_data_root: app_data_root.clone(),
                 file_search_settings: file_search_settings.clone(),
                 hash_window: HashWindowState::Closed,
                 hash_file_search_return: None,
@@ -13725,6 +13802,26 @@ mod tests {
         assert!(!catalog.replace_saved_actions(vec![second, first]));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn downloads_provider_aliases_obey_search_gates() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        let enabled = HashSet::from(["downloads_triage".to_owned()]);
+        let search = HashMap::from([("downloads_triage".to_owned(), vec!["search".to_owned()])]);
+        for query in ["downloads", " DOWNLOADS TRIAGE ", "Downloads Triage Center"] {
+            let rows = multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), query, Some(&enabled), Some(&search));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, "downloads_triage");
+            assert!(super::is_downloads_triage_opener(&rows[0].1));
+        }
+        assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "downloads", Some(&HashSet::new()), Some(&search)).is_empty());
+        let no_search = HashMap::from([("downloads_triage".to_owned(), Vec::new())]);
+        assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "downloads", Some(&enabled), Some(&no_search)).is_empty());
+        let mut action = saved_action("Downloads", "downloads_triage:open", None);
+        action.args = Some("unexpected".to_owned());
+        assert!(!super::is_downloads_triage_opener(&action));
+    }
+
     #[test]
     fn file_search_provider_admits_only_enabled_bare_opener() {
         let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
@@ -14240,7 +14337,10 @@ mod tests {
             .iter()
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
+        #[cfg(not(windows))]
         assert_eq!(help_names, ["favorites", "file_search", "hash_generator", "help", "settings"]);
+        #[cfg(windows)]
+        assert_eq!(help_names, ["downloads_triage", "favorites", "file_search", "hash_generator", "help", "settings"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14269,7 +14369,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), 5);
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 6 } else { 5 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(
