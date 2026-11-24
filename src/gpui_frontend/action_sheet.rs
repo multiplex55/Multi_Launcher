@@ -482,7 +482,7 @@ mod tests {
         };
         let mut results = LauncherSearchResults::default();
         let layout = ResolvedQueryResultsLayout::new(false, 1);
-        results.replace("hash".into(), vec![action.clone()], layout, 1);
+        results.replace_test_actions("hash".into(), vec![action.clone()], layout, 1);
         let generation = results.generation;
         assert!(snapshot_matches(
             &results, generation, 0, "hash", &action, 4, 4
@@ -493,11 +493,11 @@ mod tests {
         assert!(!snapshot_matches(
             &results, generation, 0, "hash", &action, 4, 5
         ));
-        results.actions[0].args = Some("changed".into());
+        results.actions[0].action.args = Some("changed".into());
         assert!(!snapshot_matches(
             &results, generation, 0, "hash", &action, 4, 4
         ));
-        results.replace("hash".into(), vec![action.clone()], layout, 1);
+        results.replace_test_actions("hash".into(), vec![action.clone()], layout, 1);
         assert!(!snapshot_matches(
             &results, generation, 0, "hash", &action, 4, 4
         ));
