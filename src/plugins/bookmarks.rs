@@ -129,6 +129,25 @@ fn parse_bookmark_query(query: &str) -> BookmarkQuery<'_> {
     }
 }
 
+fn bookmark_search_row(entry: &BookmarkEntry) -> (&str, &str, &str) {
+    (
+        entry.alias.as_deref().unwrap_or(&entry.url),
+        "Bookmark",
+        &entry.url,
+    )
+}
+
+/// Check the full read-only Search row against the currently persisted data.
+pub fn bookmark_search_result_is_current(path: &str, action: &Action) -> anyhow::Result<bool> {
+    Ok(load_bookmarks(path)?.iter().any(|entry| {
+        let (label, desc, target) = bookmark_search_row(entry);
+        action.label == label
+            && action.desc == desc
+            && action.action == target
+            && action.args.is_none()
+    }))
+}
+
 fn project_bookmark_query(
     query: BookmarkQuery<'_>,
     entries: &[BookmarkEntry],
@@ -173,10 +192,11 @@ fn project_bookmark_query(
                     args: None,
                 }
             } else {
+                let (label, desc, target) = bookmark_search_row(entry);
                 Action {
-                    label: entry.alias.clone().unwrap_or_else(|| entry.url.clone()),
-                    desc: "Bookmark".into(),
-                    action: entry.url.clone(),
+                    label: label.to_owned(),
+                    desc: desc.to_owned(),
+                    action: target.to_owned(),
                     args: None,
                 }
             }
@@ -546,6 +566,51 @@ mod tests {
         );
         assert!(plugin.search_internal("other").is_empty());
         assert!(plugin.search_internal("bm list").is_empty());
+    }
+
+    #[test]
+    fn current_bookmark_search_row_uses_exact_persisted_and_legacy_projection() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bookmarks.json");
+        let path = path.to_str().unwrap();
+        let entry = bookmark("https://example.com/file.exe", Some("Alias"));
+        std::fs::write(path, serde_json::to_vec(&vec![entry.clone()]).unwrap()).unwrap();
+        let row = query_bookmark_entries("bm list", &[entry])[0].clone();
+        assert!(bookmark_search_result_is_current(path, &row).unwrap());
+        for changed in [
+            Action {
+                label: "changed".into(),
+                ..row.clone()
+            },
+            Action {
+                desc: "changed".into(),
+                ..row.clone()
+            },
+            Action {
+                action: "changed".into(),
+                ..row.clone()
+            },
+            Action {
+                args: Some(String::new()),
+                ..row.clone()
+            },
+        ] {
+            assert!(!bookmark_search_result_is_current(path, &changed).unwrap());
+        }
+        std::fs::write(path, br#"["https://legacy.example"]"#).unwrap();
+        assert!(!bookmark_search_result_is_current(path, &row).unwrap());
+        let legacy = query_bookmark_entries("bm list", &[bookmark("https://legacy.example", None)])
+            [0]
+        .clone();
+        assert!(bookmark_search_result_is_current(path, &legacy).unwrap());
+        std::fs::write(path, "[]").unwrap();
+        assert!(!bookmark_search_result_is_current(path, &legacy).unwrap());
+        std::fs::write(path, "{broken").unwrap();
+        assert!(bookmark_search_result_is_current(path, &legacy).is_err());
+        assert!(
+            bookmark_search_result_is_current(directory.path().to_str().unwrap(), &legacy).is_err()
+        );
     }
 
     #[test]

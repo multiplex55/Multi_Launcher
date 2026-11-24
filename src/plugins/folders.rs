@@ -395,6 +395,25 @@ fn add_folder_action(path: &str) -> Action {
     }
 }
 
+fn folder_search_row(entry: &FolderEntry) -> (&str, &str, &str) {
+    (
+        entry.alias.as_deref().unwrap_or(&entry.label),
+        &entry.path,
+        &entry.path,
+    )
+}
+
+/// Check the full read-only Search row against the currently persisted data.
+pub fn folder_search_result_is_current(path: &str, action: &Action) -> anyhow::Result<bool> {
+    Ok(load_folders(path)?.iter().any(|entry| {
+        let (label, desc, target) = folder_search_row(entry);
+        action.label == label
+            && action.desc == desc
+            && action.action == target
+            && action.args.is_none()
+    }))
+}
+
 fn project_folder_query(
     query: FolderQuery<'_>,
     entries: &[FolderEntry],
@@ -425,10 +444,11 @@ fn project_folder_query(
                     args: None,
                 }
             } else {
+                let (label, desc, target) = folder_search_row(f);
                 Action {
-                    label: f.alias.clone().unwrap_or_else(|| f.label.clone()),
-                    desc: f.path.clone(),
-                    action: f.path.clone(),
+                    label: label.to_owned(),
+                    desc: desc.to_owned(),
+                    action: target.to_owned(),
                     args: None,
                 }
             }
@@ -627,6 +647,48 @@ mod tests {
         assert!(
             bounded_picker_entries(&[folder("x", &"y".repeat(PICKER_MAX_BYTES), None)]).is_err()
         );
+    }
+
+    #[test]
+    fn current_folder_search_row_uses_exact_persisted_projection() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("folders.json");
+        let path = path.to_str().unwrap();
+        if let Some(default) = default_folders().first() {
+            let default_row =
+                query_folder_entries("f list", std::slice::from_ref(default))[0].clone();
+            assert!(folder_search_result_is_current(path, &default_row).unwrap());
+        }
+        let entry = folder("Folder", r"C:\folder.exe", Some("Alias"));
+        std::fs::write(path, serde_json::to_vec(&vec![entry.clone()]).unwrap()).unwrap();
+        let row = query_folder_entries("f list", &[entry])[0].clone();
+        assert!(folder_search_result_is_current(path, &row).unwrap());
+        for changed in [
+            Action {
+                label: "changed".into(),
+                ..row.clone()
+            },
+            Action {
+                desc: "changed".into(),
+                ..row.clone()
+            },
+            Action {
+                action: "changed".into(),
+                ..row.clone()
+            },
+            Action {
+                args: Some(String::new()),
+                ..row.clone()
+            },
+        ] {
+            assert!(!folder_search_result_is_current(path, &changed).unwrap());
+        }
+        std::fs::write(path, "[]").unwrap();
+        assert!(!folder_search_result_is_current(path, &row).unwrap());
+        std::fs::write(path, "{broken").unwrap();
+        assert!(folder_search_result_is_current(path, &row).is_err());
+        assert!(folder_search_result_is_current(directory.path().to_str().unwrap(), &row).is_err());
     }
 
     #[test]

@@ -1,7 +1,12 @@
-use std::path::Path;
+use std::{ffi::OsStr, path::Path};
 
 pub fn launch(path: &str, args: Option<&str>) -> anyhow::Result<()> {
     launch_with_identity(path, args).map(|_| ())
+}
+
+/// Open the exact target through the operating system's registered association.
+pub fn launch_association(target: impl AsRef<OsStr>) -> anyhow::Result<()> {
+    open::that(target).map_err(Into::into)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,11 +45,9 @@ pub fn launch_with_identity(path: &str, args: Option<&str>) -> anyhow::Result<La
             })
             .map_err(|e| e.into())
     } else {
-        open::that(path)
-            .map(|_| LaunchIdentity {
-                pid: None,
-                target: path.to_string_lossy().into_owned(),
-            })
-            .map_err(|e| e.into())
+        launch_association(path).map(|_| LaunchIdentity {
+            pid: None,
+            target: path.to_string_lossy().into_owned(),
+        })
     }
 }
