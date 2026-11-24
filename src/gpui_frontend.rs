@@ -2,9 +2,12 @@ use std::pin::Pin;
 #[cfg(windows)]
 use std::sync::mpsc::{Receiver, Sender, channel};
 mod appearance;
+mod favorites;
+
+use favorites::{FAVORITES_SAVE_PENDING, ResultFavorites};
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     future::Future,
@@ -30,7 +33,7 @@ use gpui_kit::component::{
     button::Button,
     input::{Input, InputState, Textarea, TextareaState},
     label::Label,
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     scroll::ScrollableElement as _,
     searchable_list::SearchableListItem,
     select::{Select, SelectEvent, SelectState},
@@ -50,6 +53,11 @@ use crate::gpui_restart::{
 };
 use multi_launcher::SettingsSaveWorkerRegistry;
 use multi_launcher::actions::Action;
+use multi_launcher::universal_actions::{
+    ActionResolutionContext, ActionSurface, ActionTargetResolver, ActionTargetResolverContext,
+    RootLauncherPolicy, UniversalActionInvocationContext, UniversalActionOperation,
+    UniversalActionRegistry, UniversalUiIntent, action_ids,
+};
 use multi_launcher::actions::search::{CachedSearchEntry, ReadOnlySearchInput, compose_read_only_results};
 use multi_launcher::common::query::ActionFilterMetadata;
 use multi_launcher::clipboard_modify::clipboard::{
@@ -2112,6 +2120,9 @@ struct RootWindow {
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_catalog: LauncherSearchCatalog,
     launcher_results: LauncherSearchResults,
+    context_favorite_popup: Option<ContextFavoritePopup>,
+    context_favorite_serial: u64,
+    result_favorites: ResultFavorites,
     launcher_results_scroll: ScrollHandle,
     query_history: QueryHistoryNavigator,
     fresh_search_enter: Option<FreshSearchEnter>,
@@ -2213,6 +2224,32 @@ struct RootWindow {
     restart_status: Option<String>,
     restart_exit: Rc<RefCell<Option<(RestartContext, Vec<NativeWindow>)>>>,
     restart_failure: Rc<RefCell<Option<String>>>,
+}
+
+#[derive(Clone)]
+struct ContextFavoriteReceipt {
+    serial: u64,
+    generation: u64,
+    row: usize,
+    invocation: UniversalActionInvocationContext,
+    action: Action,
+    visibility_revision: u64,
+    previous_focus: Option<FocusHandle>,
+}
+struct ContextFavoritePopup {
+    receipt: ContextFavoriteReceipt,
+    position: Point<Pixels>,
+    menu: Option<Entity<PopupMenu>>,
+    subscription: Option<Subscription>,
+}
+impl ContextFavoriteReceipt {
+    fn matches(&self, results: &LauncherSearchResults, query: &str, revision: u64) -> bool {
+        self.visibility_revision == revision
+            && self.invocation.surface == ActionSurface::ContextMenu
+            && self.invocation.source == ActivationSource::Click
+            && self.invocation.history_query == query
+            && results.resolve_action(self.generation, self.row, query).as_ref() == Some(&self.action)
+    }
 }
 
 #[derive(Default)]
@@ -3144,6 +3181,7 @@ fn render_launcher_result_cell(
         palette,
         metrics,
     );
+    let context_action = action.clone();
     let cell = div()
         .id(launcher_result_row_id(generation, absolute_index))
         .relative()
@@ -3164,6 +3202,20 @@ fn render_launcher_result_cell(
         .role(Role::Button)
         .aria_label(format!("{}: {}", action.label, action.desc))
         .tab_stop(false)
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |root, event: &MouseDownEvent, window, cx| {
+                root.open_context_favorite(
+                    generation,
+                    absolute_index,
+                    &context_action,
+                    event.position,
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            }),
+        )
         .on_click(cx.listener(move |root, event: &ClickEvent, window, cx| {
             root.activate_launcher_result(
                 generation,
@@ -3807,6 +3859,7 @@ enum RootCloseBlocker {
     HashClipboard(&'static str),
     HashFilePicker,
     ToastLogOpen,
+    FavoritesSave,
     BooleanPreferenceSave,
 }
 
@@ -4875,6 +4928,7 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if open { self.retire_context_favorite(); }
         let was_menu_open = self.file_menu_open || self.settings_menu_open || self.help_menu_open;
         match menu {
             RootMenuKind::File => self.file_menu_open = open,
@@ -4928,7 +4982,7 @@ impl RootWindow {
         {
             return;
         }
-        if self.quick_help.open {
+        if self.quick_help.open || self.result_favorites.is_open() {
             self.root_scroll
                 .scroll_to_top_of_item(self.docked_hash_scroll_item());
         } else {
@@ -5518,6 +5572,9 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if let Some(blocker) = self.result_favorites.restart_blocker() {
+            return Err(blocker.to_owned());
+        }
         if self.settings_editor.read_pending.is_some() {
             return Err(
                 "The current Settings value is still loading. Wait for it to finish before restarting in egui."
@@ -5724,6 +5781,7 @@ impl RootWindow {
     }
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.retire_context_favorite();
         let Some(context) = self.restart_context.clone() else {
             self.restart_status = Some(format!(
                 "Could not capture the executable path and working directory before restart. Close and relaunch manually with {}.",
@@ -6209,6 +6267,9 @@ impl RootWindow {
     }
 
     fn quick_help_focus_change_allowed(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.context_favorite_popup.is_some() || self.result_favorites.owns_focus(window, cx) {
+            return false;
+        }
         let contexts = window.context_stack();
         let docked_hash_owner_has_focus = matches!(
             &self.hash_window,
@@ -6898,6 +6959,7 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results(&mut self, query: String) {
+        self.retire_context_favorite();
         self.retire_search_jump_mode();
         let provider_actions = supported_launcher_search_actions(
             multi_launcher::plugin::search_filtered_plugins(
@@ -7233,6 +7295,181 @@ impl RootWindow {
         }
         cx.notify();
         true
+    }
+
+    fn retire_context_favorite(&mut self) {
+        self.context_favorite_popup = None;
+        self.context_favorite_serial = self.context_favorite_serial.wrapping_add(1);
+    }
+
+    fn context_favorite_is_live(
+        &self,
+        receipt: &ContextFavoriteReceipt,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> bool {
+        #[cfg(windows)]
+        if !self.native_window.is_some_and(|native| {
+            self.root_visibility.is_current_visible_revision(receipt.visibility_revision, native)
+        }) {
+            return false;
+        }
+        let contexts = window.context_stack();
+        let competing_popup = self.context_favorite_popup.as_ref()
+            .and_then(|popup| popup.menu.as_ref())
+            .is_some_and(|menu| {
+                context_stack_has_primary(&contexts, "PopupMenu")
+                    && !menu.focus_handle(cx).contains_focused(window, cx)
+            });
+        self.root_visibility.visible.load(Ordering::Acquire)
+            && self.root_visibility.active.load(Ordering::Acquire)
+            && window.is_window_active()
+            && !self.restart_admission.is_fenced()
+            && !self.file_menu_open
+            && !self.settings_menu_open
+            && !self.help_menu_open
+            && !competing_popup
+            && !context_stack_has_primary(&contexts, "AlertDialog")
+            && !context_stack_has_primary(&contexts, "Dialog")
+            && receipt.matches(
+                &self.launcher_results,
+                self.query.read(cx).value().as_str(),
+                self.root_visibility.request_revision.load(Ordering::Acquire),
+            )
+    }
+
+    fn open_context_favorite(
+        &mut self,
+        generation: u64,
+        row: usize,
+        rendered_action: &Action,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query = self.query.read(cx).value().to_string();
+        let Some(action) = self.launcher_results.resolve_action(generation, row, &query) else {
+            return;
+        };
+        if &action != rendered_action {
+            return;
+        }
+        let previous_focus = self
+            .context_favorite_popup
+            .as_ref()
+            .and_then(|popup| popup.receipt.previous_focus.clone())
+            .or_else(|| window.focused(cx).filter(|focus| self.focus_handle.contains(focus, window)));
+        self.retire_context_favorite();
+        cx.notify();
+        let receipt = ContextFavoriteReceipt {
+            serial: self.context_favorite_serial,
+            generation,
+            row,
+            invocation: UniversalActionInvocationContext {
+                history_query: query,
+                root_policy: RootLauncherPolicy::PreserveOrdinaryState,
+                ..UniversalActionInvocationContext::legacy(ActionSurface::ContextMenu, ActivationSource::Click)
+            },
+            action,
+            visibility_revision: self.root_visibility.request_revision.load(Ordering::Acquire),
+            previous_focus,
+        };
+        if !self.context_favorite_is_live(&receipt, window, cx) {
+            return;
+        }
+        let resolver = ActionTargetResolverContext::new(
+            &self.search_catalog.folder_aliases_lc,
+            &self.search_catalog.bookmark_aliases_lc,
+            &self.search_catalog.actions,
+        );
+        let target = ActionTargetResolver.resolve(&receipt.action, &resolver);
+        let surface = receipt.invocation.surface;
+        let mut context = ActionResolutionContext::new(surface, &receipt.invocation.history_query);
+        context.can_add_favorite = target.target.persistent_ref().is_some();
+        let Some(favorite) = UniversalActionRegistry.resolve(&target, &context).into_iter()
+            .find(|item| item.id == action_ids::RESULT_FAVORITE && item.is_available())
+        else {
+            return;
+        };
+        let presentation = favorite.effective_presentation(surface);
+        let UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite { action }) = favorite.operation else {
+            return;
+        };
+        if !presentation.visible || action != receipt.action {
+            return;
+        }
+        self.context_favorite_popup = Some(ContextFavoritePopup {
+            receipt: receipt.clone(),
+            position,
+            menu: None,
+            subscription: None,
+        });
+        self.fresh_search_enter = None;
+        self.retire_search_jump_mode();
+        let root = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let _ = root.update(cx, |this, cx| {
+                if this.context_favorite_serial != receipt.serial {
+                    return;
+                }
+                if !this.context_favorite_is_live(&receipt, window, cx) {
+                    this.retire_context_favorite();
+                    cx.notify();
+                    return;
+                }
+                let selected = Rc::new(Cell::new(false));
+                let clicked = selected.clone();
+                let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+                    menu.item(PopupMenuItem::new(presentation.label).on_click(move |_, _, _| {
+                        clicked.set(true);
+                    }))
+                });
+                let menu_focus = menu.focus_handle(cx);
+                let root = cx.entity().downgrade();
+                let serial = receipt.serial;
+                let subscription = window.subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
+                    let _ = root.update(cx, |this, cx| {
+                        if !this.context_favorite_popup.as_ref().is_some_and(|popup| popup.receipt.serial == serial) {
+                            return;
+                        }
+                        let Some(popup) = this.context_favorite_popup.take() else {
+                            return;
+                        };
+                        let choice = selected.replace(false);
+                        let restore_focus = !choice && menu_focus.contains_focused(window, cx);
+                        let menu_focus = menu_focus.clone();
+                        let root = cx.entity().downgrade();
+                        let action = action.clone();
+                        window.defer(cx, move |window, cx| {
+                            let _ = root.update(cx, |this, cx| {
+                                let receipt = popup.receipt;
+                                if this.context_favorite_serial != receipt.serial
+                                    || !this.context_favorite_is_live(&receipt, window, cx)
+                                {
+                                    return;
+                                }
+                                if choice {
+                                    this.open_result_favorites(action, receipt.previous_focus, window, cx);
+                                } else if restore_focus && window.focused(cx).is_none_or(|focus| {
+                                    menu_focus.contains(&focus, window)
+                                }) {
+                                    if let Some(focus) = receipt.previous_focus.filter(|focus| this.focus_handle.contains(focus, window)) {
+                                        focus.focus(window, cx);
+                                    }
+                                }
+                            });
+                        });
+                        cx.notify();
+                    });
+                });
+                menu.focus_handle(cx).focus(window, cx);
+                if let Some(popup) = this.context_favorite_popup.as_mut() {
+                    popup.menu = Some(menu);
+                    popup.subscription = Some(subscription);
+                }
+                cx.notify();
+            });
+        });
     }
 
     fn select_search_result_exact(
@@ -8891,12 +9128,10 @@ impl RootWindow {
     }
 
     fn request_quit(&mut self, cx: &mut Context<Self>) {
-        let blocker = root_close_blocker(
+        self.retire_context_favorite();
+        let blocker = self.current_root_close_blocker(
             hash_clipboard_close_message(self.hash_clipboard_pending.kind()),
             self.hash_file_picker_pending.load(Ordering::Acquire),
-            self.toast_log_external_open_pending,
-            self.settings_editor.pending.is_some(),
-            self.command_help.pending.is_some(),
         );
         match blocker {
             Some(RootCloseBlocker::HashClipboard(message)) => {
@@ -8910,6 +9145,9 @@ impl RootWindow {
             }
             Some(RootCloseBlocker::ToastLogOpen) => {
                 self.restart_status = Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
+            }
+            Some(RootCloseBlocker::FavoritesSave) => {
+                self.restart_status = Some(FAVORITES_SAVE_PENDING.to_owned());
             }
             Some(RootCloseBlocker::BooleanPreferenceSave) => {
                 if !self.prepare_boolean_preference_close(cx) {
@@ -8929,11 +9167,31 @@ impl RootWindow {
         self.drain_hash_native_geometry(cx, true);
         cx.quit();
     }
+
+    fn current_root_close_blocker(
+        &self,
+        clipboard_message: Option<&'static str>,
+        file_picker_pending: bool,
+    ) -> Option<RootCloseBlocker> {
+        self.result_favorites.save_pending().then_some(RootCloseBlocker::FavoritesSave)
+            .or_else(|| root_close_blocker(
+                clipboard_message,
+                file_picker_pending,
+                self.toast_log_external_open_pending,
+                self.settings_editor.pending.is_some(),
+                self.command_help.pending.is_some(),
+            ))
+    }
 }
 
 impl Render for RootWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_pending_help_filter_sync(window, cx);
+        if self.context_favorite_popup.as_ref().is_some_and(|popup| {
+            !self.context_favorite_is_live(&popup.receipt, window, cx)
+        }) {
+            self.retire_context_favorite();
+        }
         if !self.file_menu_open && !self.settings_menu_open && !self.help_menu_open {
             // Popovers may transiently report no focus. Keep the last focus
             // that was actually inside the live root focus tree.
@@ -9537,7 +9795,13 @@ impl Render for RootWindow {
                 {
                     return;
                 }
-                if root.toast_log_viewer.open
+                if quick_help_escape_capture_should_close(
+                    &window.context_stack(),
+                    root.result_favorites.owns_focus(window, cx),
+                ) {
+                    root.dismiss_result_favorites(window, cx);
+                    cx.stop_propagation();
+                } else if root.toast_log_viewer.open
                     && root
                         .toast_log_owner_focus_handle
                         .contains_focused(window, cx)
@@ -9570,7 +9834,13 @@ impl Render for RootWindow {
                 }
             }))
             .on_action(cx.listener(|root, _: &gpui_kit::base::input::Escape, window, cx| {
-                if root.quick_help.open
+                  if quick_help_escape_capture_should_close(
+                      &window.context_stack(),
+                      root.result_favorites.owns_focus(window, cx),
+                  ) {
+                      root.dismiss_result_favorites(window, cx);
+                      cx.stop_propagation();
+                  } else if root.quick_help.open
                     && quick_help_escape_capture_should_close(
                         &window.context_stack(),
                         root.quick_help_owner_focus_handle.contains_focused(window, cx),
@@ -9698,7 +9968,24 @@ impl Render for RootWindow {
                 metrics,
             ));
         }
-        root_scroll
+        root_scroll = root_scroll.children(
+            self.render_result_favorites(root_controls_width, metrics, palette, cx)
+                .map(|panel| div().flex_shrink_0().child(panel)),
+        );
+        let popup = self.context_favorite_popup.as_ref().and_then(|popup| {
+            let menu = popup.menu.as_ref()?;
+            self.context_favorite_is_live(&popup.receipt, window, cx).then(|| {
+                deferred(
+                    anchored()
+                        .position(popup.position)
+                        .snap_to_window_with_margin(px(8.0))
+                        .anchor(Anchor::TopLeft)
+                        .child(menu.clone()),
+                )
+                .with_priority(gpui_kit::base::POPUP_PRIORITY)
+            })
+        });
+        div().size_full().child(root_scroll).children(popup)
     }
 }
 
@@ -11345,6 +11632,9 @@ pub(crate) fn run_foundation_window(
                 enabled_capabilities: enabled_capabilities.clone(),
                 search_catalog: search_catalog_for_root,
                 launcher_results: initial_launcher_results,
+                context_favorite_popup: None,
+                context_favorite_serial: 0,
+                result_favorites: ResultFavorites::default(),
                 launcher_results_scroll: ScrollHandle::new(),
                 query_history:
                     QueryHistoryNavigator::default(),
@@ -11663,7 +11953,9 @@ pub(crate) fn run_foundation_window(
                         event.action.is_some(),
                         &event.context_stack,
                         root.search_input_is_live(window, cx),
-                        root.file_menu_open || root.settings_menu_open || root.help_menu_open,
+                          root.file_menu_open || root.settings_menu_open || root.help_menu_open
+                              || root.context_favorite_popup.is_some()
+                              || root.result_favorites.owns_focus(window, cx),
                     ) {
                         root.accept_search_completion(false, window, cx);
                     }
@@ -11675,6 +11967,7 @@ pub(crate) fn run_foundation_window(
             let activation_subscription = root.update(cx, |_, cx| {
                 cx.observe_window_activation(window, |root, window, cx| {
                     if !window.is_window_active() {
+                        root.retire_context_favorite();
                         root.retire_search_jump_mode();
                         root.revoke_search_completion_focus();
                         cx.notify();
@@ -11701,13 +11994,8 @@ pub(crate) fn run_foundation_window(
                     hash_clipboard_close_message(clipboard_pending_for_root_close.kind());
                 let picker_pending = picker_pending_for_root_close.load(Ordering::Acquire);
                 let Ok(blocker) = root_for_window_close.update(app, |root, _| {
-                    root_close_blocker(
-                        clipboard_message,
-                        picker_pending,
-                        root.toast_log_external_open_pending,
-                        root.settings_editor.pending.is_some(),
-                        root.command_help.pending.is_some(),
-                    )
+                    root.retire_context_favorite();
+                    root.current_root_close_blocker(clipboard_message, picker_pending)
                 }) else {
                     return false;
                 };
@@ -11742,6 +12030,13 @@ pub(crate) fn run_foundation_window(
                         let _ = root_for_window_close.update(app, |root, cx| {
                             root.restart_status =
                                 Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
+                            cx.notify();
+                        });
+                        false
+                    }
+                    Some(RootCloseBlocker::FavoritesSave) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status = Some(FAVORITES_SAVE_PENDING.to_owned());
                             cx.notify();
                         });
                         false
@@ -11991,6 +12286,7 @@ pub(crate) fn run_foundation_window(
                         |root, window, cx| {
                             root.revoke_search_completion_focus();
                             if !desired_visible {
+                                root.retire_context_favorite();
                                 root.retire_search_jump_mode();
                             }
                             let mut search_focus_selected = false;
@@ -13423,6 +13719,41 @@ mod tests {
     #[test]
     fn linking_guide_keeps_the_egui_filter_seed() {
         assert_eq!(super::LINKING_GUIDE_FILTER, "todo note cal @note: @todo:");
+    }
+
+    #[test]
+    fn context_favorite_receipt_follows_unselected_row_in_list_and_grid() {
+        use super::{ActionSurface, ContextFavoriteReceipt, UniversalActionInvocationContext};
+
+        for layout in [ResolvedQueryResultsLayout::new(false, 1), ResolvedQueryResultsLayout::new(true, 3)] {
+            let first = hash_action();
+            let mut clicked = first.clone();
+            clicked.label = "Right-clicked fixture".into();
+            clicked.args = Some("complete action".into());
+            let mut results = LauncherSearchResults::default();
+            results.replace("hash".into(), vec![first.clone(), clicked.clone()], layout, 2);
+            results.selected = Some(0);
+            let receipt = ContextFavoriteReceipt {
+                serial: 1,
+                generation: results.generation,
+                row: 1,
+                invocation: UniversalActionInvocationContext {
+                    history_query: "hash".into(),
+                    ..UniversalActionInvocationContext::legacy(ActionSurface::ContextMenu, ActivationSource::Click)
+                },
+                action: clicked.clone(),
+                visibility_revision: 4,
+                previous_focus: None,
+            };
+            assert!(receipt.matches(&results, "hash", 4));
+            assert_eq!(results.selected, Some(0));
+            assert!(!receipt.matches(&results, "other", 4));
+            assert!(!receipt.matches(&results, "hash", 5));
+            results.actions[1].args = Some("changed".into());
+            assert!(!receipt.matches(&results, "hash", 4));
+            results.replace("hash".into(), vec![first, clicked], layout, 2);
+            assert!(!receipt.matches(&results, "hash", 4));
+        }
     }
 
     #[test]
