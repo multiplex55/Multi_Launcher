@@ -4,7 +4,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 mod action_sheet;
 mod add_action;
 mod appearance;
+mod external_launch;
 mod favorites;
+
+pub(crate) use external_launch::Settings as ExternalLaunchPreferences;
 
 use favorites::{FAVORITES_WRITE_PENDING, ResultFavorites};
 use multi_launcher::gui::{Panel, panel_stack};
@@ -2206,6 +2209,8 @@ struct RootWindow {
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_catalog: LauncherSearchCatalog,
     launcher_results: LauncherSearchResults,
+    external_launch: external_launch::ExternalLaunch,
+    external_launch_preferences: ExternalLaunchPreferences,
     action_sheet: Option<action_sheet::Sheet>,
     action_sheet_serial: u64,
     context_favorite_popup: Option<ContextFavoritePopup>,
@@ -4005,6 +4010,7 @@ enum RootCloseBlocker {
     ToastLogOpen,
     FavoritesWrite,
     AppWrite,
+    ExternalLaunch,
     BooleanPreferenceSave,
 }
 
@@ -9355,6 +9361,9 @@ impl RootWindow {
             Some(RootCloseBlocker::AppWrite) => {
                 self.restart_status = Some(add_action::APP_WRITE_CLOSE_STATUS.to_owned());
             }
+            Some(RootCloseBlocker::ExternalLaunch) => {
+                self.restart_status = Some(external_launch::CLOSE_STATUS.to_owned());
+            }
             Some(RootCloseBlocker::BooleanPreferenceSave) => {
                 if !self.prepare_boolean_preference_close(cx) {
                     return;
@@ -9379,9 +9388,14 @@ impl RootWindow {
         clipboard_message: Option<&'static str>,
         file_picker_pending: bool,
     ) -> Option<RootCloseBlocker> {
-        self.app_editor
-            .write_pending()
-            .then_some(RootCloseBlocker::AppWrite)
+        self.external_launch
+            .is_pending()
+            .then_some(RootCloseBlocker::ExternalLaunch)
+            .or_else(|| {
+                self.app_editor
+                    .write_pending()
+                    .then_some(RootCloseBlocker::AppWrite)
+            })
             .or_else(|| {
                 self.result_favorites
                     .write_pending()
@@ -11734,6 +11748,7 @@ pub(crate) fn run_foundation_window(
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_startup: LauncherSearchStartup,
+    external_launch_preferences: ExternalLaunchPreferences,
     coordinate_tool_preferences: CoordinateToolPreferences,
     theme_settings: multi_launcher::settings::ThemeSettings,
     settings_path: String,
@@ -11758,6 +11773,7 @@ pub(crate) fn run_foundation_window(
         search_startup.jump_mode_activation_chord,
         search_startup.jump_mode_hint_alphabet.clone(),
     );
+    let external_launch_preferences_for_root = external_launch_preferences;
     let launcher_search_catalog =
         LauncherSearchCatalog::new(search_startup, enabled_plugins.as_ref());
     let search_jump_geometry_frame_for_root =
@@ -11977,6 +11993,8 @@ pub(crate) fn run_foundation_window(
                 enabled_capabilities: enabled_capabilities.clone(),
                 search_catalog: search_catalog_for_root,
                 launcher_results: initial_launcher_results,
+                external_launch: external_launch::ExternalLaunch::default(),
+                external_launch_preferences: external_launch_preferences_for_root.clone(),
                 action_sheet: None,
                 action_sheet_serial: 0,
                 context_favorite_popup: None,
@@ -12400,6 +12418,13 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::AppWrite) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
                             root.restart_status = Some(add_action::APP_WRITE_CLOSE_STATUS.to_owned());
+                            cx.notify();
+                        });
+                        false
+                    }
+                    Some(RootCloseBlocker::ExternalLaunch) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status = Some(external_launch::CLOSE_STATUS.to_owned());
                             cx.notify();
                         });
                         false
