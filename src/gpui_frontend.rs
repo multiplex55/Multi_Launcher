@@ -10623,6 +10623,20 @@ impl HashGeneratorWindow {
         .detach();
         cx.notify();
     }
+
+    fn handle_escape(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        if !self.is_current_mount()
+            || !hash_escape_capture_should_close(
+                &window.context_stack(),
+                self.focus_handle.contains_focused(window, cx),
+                self.file_picker_pending.load(Ordering::Acquire),
+            )
+        {
+            return false;
+        }
+        self.request_close(cx);
+        true
+    }
 }
 
 impl Render for HashGeneratorWindow {
@@ -10732,15 +10746,16 @@ impl Render for HashGeneratorWindow {
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape"
                     && event.keystroke.modifiers == Modifiers::default()
-                    && hash_escape_capture_should_close(
-                        &window.context_stack(),
-                        this.focus_handle.contains_focused(window, cx),
-                        this.file_picker_pending.load(Ordering::Acquire),
-                    )
-                    && this.is_current_mount()
+                    && this.handle_escape(window, cx)
                 {
-                    this.request_close(cx);
                     cx.stop_propagation();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| {
+                if this.handle_escape(window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
                 }
             }))
             .on_action(cx.listener(|this, _: &CalculateHash, _, cx| {
