@@ -1,7 +1,7 @@
 //! Single-flight ownership for ordinary external launcher actions.
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
-use gpui_kit::*;
+use gpui_kit::{Context, FocusHandle, Focusable as _, Window, WindowId};
 use multi_launcher::actions::Action;
 use multi_launcher::commands::{
     ActivationSource, CommandBus, CommandError, CommandOutcome, ExternalCommand,
@@ -9,7 +9,7 @@ use multi_launcher::commands::{
 };
 use multi_launcher::history::HistoryEntry;
 
-use super::{Context, FocusHandle, Ordering, RootWindow, Window};
+use super::RootWindow;
 use crate::gpui_restart::{EffectPermit, RestartAdmission};
 use gpui_kit::component::{
     WindowExt as _,
