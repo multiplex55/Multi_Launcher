@@ -1,4 +1,4 @@
-mod action_sheet;
+pub(crate) mod action_sheet;
 mod actions;
 mod activity_dialog;
 mod add_action_dialog;
@@ -12835,6 +12835,7 @@ mod tests {
         assert!(app.open_action_sheet_for_index(0));
         let list_ids = app
             .action_sheet
+            .choices
             .actions
             .iter()
             .map(|action| action.id.clone())
@@ -12845,6 +12846,7 @@ mod tests {
         assert!(app.open_action_sheet_for_index(0));
         let grid_ids = app
             .action_sheet
+            .choices
             .actions
             .iter()
             .map(|action| action.id.clone())

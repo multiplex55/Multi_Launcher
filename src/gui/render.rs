@@ -3450,11 +3450,12 @@ impl LauncherApp {
     ) -> Option<(crate::universal_actions::UniversalAction, ActivationSource)> {
         match key {
             Some(action_sheet::ActionSheetKey::Escape) => self.close_action_sheet(),
-            Some(action_sheet::ActionSheetKey::Up) => self.action_sheet.move_selection(-1),
-            Some(action_sheet::ActionSheetKey::Down) => self.action_sheet.move_selection(1),
+            Some(action_sheet::ActionSheetKey::Up) => self.action_sheet.choices.move_selection(-1),
+            Some(action_sheet::ActionSheetKey::Down) => self.action_sheet.choices.move_selection(1),
             Some(action_sheet::ActionSheetKey::Enter) => {
                 let selected = self
                     .action_sheet
+                    .choices
                     .selected_invocation(ActivationSource::Enter);
                 if selected.is_some() {
                     self.close_action_sheet();

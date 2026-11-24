@@ -21,15 +21,21 @@ pub(crate) enum ActionSheetKey {
 pub(crate) struct ActionSheetState {
     pub(crate) target: Option<ResolvedActionTarget>,
     pub(crate) legacy_action: Option<Action>,
-    pub(crate) actions: Vec<UniversalAction>,
-    pub(crate) filter: String,
-    pub(crate) filtered_indices: Vec<usize>,
-    pub(crate) selected_index: Option<usize>,
+    pub(crate) choices: ActionSheetChoices,
     pub(crate) request_filter_focus: bool,
     #[cfg(feature = "qa-framebuffer-capture")]
     qa_identity: u64,
     #[cfg(feature = "qa-framebuffer-capture")]
     qa_target_repair_paint: Option<TargetRepairActionSheetPaint>,
+}
+
+/// Renderer-neutral filter and selection state for a snapshot of sheet actions.
+#[derive(Default)]
+pub(crate) struct ActionSheetChoices {
+    pub(crate) actions: Vec<UniversalAction>,
+    pub(crate) filter: String,
+    pub(crate) filtered_indices: Vec<usize>,
+    pub(crate) selected_index: Option<usize>,
 }
 
 #[cfg(feature = "qa-framebuffer-capture")]
@@ -77,28 +83,85 @@ impl ActionSheetState {
     ) {
         self.target = Some(target);
         self.legacy_action = Some(legacy_action);
-        self.actions = actions;
-        self.filter.clear();
+        self.choices = ActionSheetChoices::new(actions, matcher);
         self.request_filter_focus = true;
         #[cfg(feature = "qa-framebuffer-capture")]
         {
             self.qa_identity = self.qa_identity.wrapping_add(1).max(1);
         }
-        self.rebuild_filter(matcher);
     }
 
     pub(crate) fn close(&mut self) {
         self.target = None;
         self.legacy_action = None;
-        self.actions.clear();
-        self.filter.clear();
-        self.filtered_indices.clear();
-        self.selected_index = None;
+        self.choices = ActionSheetChoices::default();
         self.request_filter_focus = false;
         #[cfg(feature = "qa-framebuffer-capture")]
         {
             self.qa_target_repair_paint = None;
         }
+    }
+
+    pub(crate) fn consume_open_shortcut(input: &mut egui::InputState) -> bool {
+        let Some(index) = input.events.iter().position(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd
+            )
+        }) else {
+            return false;
+        };
+        input.events.remove(index);
+        true
+    }
+
+    /// Consume sheet-owned navigation keys regardless of modifiers, while only
+    /// interpreting their unmodified forms. In particular Ctrl+Enter is eaten
+    /// without executing or reaching the launcher.
+    pub(crate) fn consume_key(input: &mut egui::InputState) -> Option<ActionSheetKey> {
+        let mut routed = None;
+        input.events.retain(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                return true;
+            };
+            let key = match key {
+                egui::Key::Escape => Some(ActionSheetKey::Escape),
+                egui::Key::ArrowUp => Some(ActionSheetKey::Up),
+                egui::Key::ArrowDown => Some(ActionSheetKey::Down),
+                egui::Key::Enter => Some(ActionSheetKey::Enter),
+                _ => None,
+            };
+            let Some(key) = key else {
+                return true;
+            };
+            if routed.is_none() && *modifiers == egui::Modifiers::NONE {
+                routed = Some(key);
+            }
+            false
+        });
+        routed
+    }
+}
+
+impl ActionSheetChoices {
+    pub(crate) fn new(actions: Vec<UniversalAction>, matcher: &SkimMatcherV2) -> Self {
+        let mut choices = Self {
+            actions,
+            ..Self::default()
+        };
+        choices.rebuild_filter(matcher);
+        choices
     }
 
     pub(crate) fn set_filter(&mut self, filter: String, matcher: &SkimMatcherV2) {
@@ -186,7 +249,7 @@ impl ActionSheetState {
         self.selected_action().map(|action| (action, source))
     }
 
-    fn invocation_at_filtered_position(
+    pub(crate) fn invocation_at_filtered_position(
         &self,
         position: usize,
         source: ActivationSource,
@@ -208,57 +271,6 @@ impl ActionSheetState {
         {
             self.selected_index = Some(position);
         }
-    }
-
-    pub(crate) fn consume_open_shortcut(input: &mut egui::InputState) -> bool {
-        let Some(index) = input.events.iter().position(|event| {
-            matches!(
-                event,
-                egui::Event::Key {
-                    key: egui::Key::Enter,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd
-            )
-        }) else {
-            return false;
-        };
-        input.events.remove(index);
-        true
-    }
-
-    /// Consume sheet-owned navigation keys regardless of modifiers, while only
-    /// interpreting their unmodified forms. In particular Ctrl+Enter is eaten
-    /// without executing or reaching the launcher.
-    pub(crate) fn consume_key(input: &mut egui::InputState) -> Option<ActionSheetKey> {
-        let mut routed = None;
-        input.events.retain(|event| {
-            let egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } = event
-            else {
-                return true;
-            };
-            let key = match key {
-                egui::Key::Escape => Some(ActionSheetKey::Escape),
-                egui::Key::ArrowUp => Some(ActionSheetKey::Up),
-                egui::Key::ArrowDown => Some(ActionSheetKey::Down),
-                egui::Key::Enter => Some(ActionSheetKey::Enter),
-                _ => None,
-            };
-            let Some(key) = key else {
-                return true;
-            };
-            if routed.is_none() && *modifiers == egui::Modifiers::NONE {
-                routed = Some(key);
-            }
-            false
-        });
-        routed
     }
 }
 
@@ -308,7 +320,7 @@ pub(crate) fn render(
             ),
             |ui| {
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut state.filter)
+                    egui::TextEdit::singleline(&mut state.choices.filter)
                         .id(egui::Id::new("universal_action_sheet_filter"))
                         .desired_width(f32::INFINITY)
                         .hint_text("Filter actions"),
@@ -333,8 +345,8 @@ pub(crate) fn render(
                     state.request_filter_focus = false;
                 }
                 if response.changed() {
-                    let filter = state.filter.clone();
-                    state.set_filter(filter, matcher);
+                    let filter = state.choices.filter.clone();
+                    state.choices.set_filter(filter, matcher);
                 }
 
                 ui.separator();
@@ -342,9 +354,9 @@ pub(crate) fn render(
                     .max_height(360.0)
                     .show(ui, |ui| {
                         let mut previous_group: Option<ActionGroup> = None;
-                        let visible = state.filtered_indices.clone();
+                        let visible = state.choices.filtered_indices.clone();
                         for (position, action_index) in visible.into_iter().enumerate() {
-                            let action = state.actions[action_index].clone();
+                            let action = state.choices.actions[action_index].clone();
                             let presentation =
                                 action.effective_presentation(ActionSurface::ActionSheet);
                             if previous_group.is_some()
@@ -361,7 +373,7 @@ pub(crate) fn render(
                             let response = ui.add_enabled(
                                 action.is_available(),
                                 egui::Button::selectable(
-                                    state.selected_index == Some(position),
+                                    state.choices.selected_index == Some(position),
                                     label,
                                 ),
                             );
@@ -398,16 +410,16 @@ pub(crate) fn render(
                                 }
                             }
                             if response.hovered() && action.is_available() {
-                                state.select_filtered_position(position);
+                                state.choices.select_filtered_position(position);
                             }
                             if response.clicked() {
-                                selected = state.invocation_at_filtered_position(
+                                selected = state.choices.invocation_at_filtered_position(
                                     position,
                                     ActivationSource::Click,
                                 );
                             }
                         }
-                        if state.filtered_indices.is_empty() {
+                        if state.choices.filtered_indices.is_empty() {
                             ui.weak("No matching actions");
                         }
                     });
@@ -417,9 +429,10 @@ pub(crate) fn render(
     #[cfg(feature = "qa-framebuffer-capture")]
     {
         let qa_selected_action_id = state
+            .choices
             .selected_index
-            .and_then(|position| state.filtered_indices.get(position))
-            .and_then(|index| state.actions.get(*index))
+            .and_then(|position| state.choices.filtered_indices.get(position))
+            .and_then(|index| state.choices.actions.get(*index))
             .map(|action| action.id.to_string());
         state.qa_target_repair_paint = if observe_target_repair {
             qa_filter.map(
@@ -433,7 +446,7 @@ pub(crate) fn render(
                 )| {
                     TargetRepairActionSheetPaint {
                         sheet_identity: state.qa_identity,
-                        filter: state.filter.clone(),
+                        filter: state.choices.filter.clone(),
                         layer_id,
                         filter_response_id: format!("{filter_id:?}"),
                         filter_rect,
@@ -480,13 +493,14 @@ impl ActionSheetState {
         egui_pass_index: usize,
     ) -> bool {
         let selected_now = self
+            .choices
             .selected_index
-            .and_then(|position| self.filtered_indices.get(position))
-            .and_then(|index| self.actions.get(*index))
+            .and_then(|position| self.choices.filtered_indices.get(position))
+            .and_then(|index| self.choices.actions.get(*index))
             .map(|action| action.id.as_str());
         self.is_open()
             && self.qa_identity == sheet_identity
-            && self.filter == filter
+            && self.choices.filter == filter
             && self
                 .qa_target_repair_paint
                 .as_ref()
@@ -563,34 +577,70 @@ mod tests {
     fn open_filter_and_close_own_independent_state() {
         let mut state = state();
         assert!(state.is_open());
-        assert_eq!(state.filtered_indices, vec![0, 1, 2, 3]);
+        assert_eq!(state.choices.filtered_indices, vec![0, 1, 2, 3]);
 
-        state.set_filter("NEO".into(), &SkimMatcherV2::default());
-        assert_eq!(state.filtered_indices, vec![0]);
-        assert_eq!(state.selected_action().unwrap().id.as_str(), "open.nvim");
+        state
+            .choices
+            .set_filter("NEO".into(), &SkimMatcherV2::default());
+        assert_eq!(state.choices.filtered_indices, vec![0]);
+        assert_eq!(
+            state.choices.selected_action().unwrap().id.as_str(),
+            "open.nvim"
+        );
 
-        state.set_filter(String::new(), &SkimMatcherV2::default());
-        assert_eq!(state.filtered_indices, vec![0, 1, 2, 3]);
-        state.set_filter("no such action".into(), &SkimMatcherV2::default());
-        assert!(state.filtered_indices.is_empty());
-        assert_eq!(state.selected_index, None);
+        state
+            .choices
+            .set_filter(String::new(), &SkimMatcherV2::default());
+        assert_eq!(state.choices.filtered_indices, vec![0, 1, 2, 3]);
+        state
+            .choices
+            .set_filter("no such action".into(), &SkimMatcherV2::default());
+        assert!(state.choices.filtered_indices.is_empty());
+        assert_eq!(state.choices.selected_index, None);
         state.close();
         assert!(!state.is_open());
-        assert!(state.actions.is_empty());
+        assert!(state.choices.actions.is_empty());
+    }
+
+    #[test]
+    fn choices_filter_effective_fields_and_hide_invisible_actions() {
+        use crate::universal_actions::ActionPresentationOverride;
+
+        let mut shown = action("unique.identifier", "Original", true);
+        shown.presentation.surface_overrides.insert(
+            ActionSurface::ActionSheet,
+            ActionPresentationOverride {
+                label: Some("Renamed".into()),
+                short_label: Some("Brief".into()),
+                description: Some("Detailed explanation".into()),
+                ..Default::default()
+            },
+        );
+        let mut hidden = action("hidden", "Renamed", true);
+        hidden.presentation.visible = false;
+        let matcher = SkimMatcherV2::default();
+        let mut choices = ActionSheetChoices::new(vec![shown, hidden], &matcher);
+        assert_eq!(choices.filtered_indices, vec![0]);
+        for filter in ["renamed", "brief", "explanation", "identifier"] {
+            choices.set_filter(filter.into(), &matcher);
+            assert_eq!(choices.filtered_indices, vec![0], "{filter}");
+        }
+        choices.set_filter("original".into(), &matcher);
+        assert!(choices.filtered_indices.is_empty());
     }
 
     #[test]
     fn navigation_wraps_and_skips_disabled_actions() {
         let mut state = state();
-        assert_eq!(state.selected_index, Some(0));
-        state.move_selection(1);
-        assert_eq!(state.selected_index, Some(2));
-        state.move_selection(1);
-        assert_eq!(state.selected_index, Some(3));
-        state.move_selection(1);
-        assert_eq!(state.selected_index, Some(0));
-        state.move_selection(-1);
-        assert_eq!(state.selected_index, Some(3));
+        assert_eq!(state.choices.selected_index, Some(0));
+        state.choices.move_selection(1);
+        assert_eq!(state.choices.selected_index, Some(2));
+        state.choices.move_selection(1);
+        assert_eq!(state.choices.selected_index, Some(3));
+        state.choices.move_selection(1);
+        assert_eq!(state.choices.selected_index, Some(0));
+        state.choices.move_selection(-1);
+        assert_eq!(state.choices.selected_index, Some(3));
     }
 
     #[test]
@@ -602,10 +652,10 @@ mod tests {
             vec![action("disabled", "Disabled", false)],
             &SkimMatcherV2::default(),
         );
-        assert_eq!(state.selected_index, Some(0));
-        assert!(state.selected_action().is_none());
-        state.move_selection(1);
-        assert_eq!(state.selected_index, Some(0));
+        assert_eq!(state.choices.selected_index, Some(0));
+        assert!(state.choices.selected_action().is_none());
+        state.choices.move_selection(1);
+        assert_eq!(state.choices.selected_index, Some(0));
     }
 
     fn key_press(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
@@ -656,9 +706,12 @@ mod tests {
     #[test]
     fn sheet_selection_preserves_keyboard_and_mouse_activation_sources() {
         let state = state();
-        let (keyboard_action, keyboard_source) =
-            state.selected_invocation(ActivationSource::Enter).unwrap();
+        let (keyboard_action, keyboard_source) = state
+            .choices
+            .selected_invocation(ActivationSource::Enter)
+            .unwrap();
         let (mouse_action, mouse_source) = state
+            .choices
             .invocation_at_filtered_position(0, ActivationSource::Click)
             .unwrap();
 
