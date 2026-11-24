@@ -32,15 +32,7 @@ impl AddAction {
         show_args: bool,
         args: &str,
     ) -> Result<Self, &'static str> {
-        if path.is_empty() || !Path::new(path).exists() {
-            return Err("Path does not exist");
-        }
-        Ok(Self(Action {
-            label: label.to_owned(),
-            desc: desc.to_owned(),
-            action: path.to_owned(),
-            args: (show_args && !args.trim().is_empty()).then(|| args.to_owned()),
-        }))
+        validated_action(label, desc, path, show_args, args).map(Self)
     }
 
     /// Apply this request to the current custom catalog without deduplication.
@@ -52,6 +44,163 @@ impl AddAction {
     /// Commit this request through the canonical actions transaction.
     pub fn commit(self, path: &str) -> anyhow::Result<Vec<Action>> {
         update_actions(path, |actions| self.append_to(actions))
+    }
+}
+
+fn validated_action(
+    label: &str,
+    desc: &str,
+    path: &str,
+    show_args: bool,
+    args: &str,
+) -> Result<Action, &'static str> {
+    if path.is_empty() || !Path::new(path).exists() {
+        return Err("Path does not exist");
+    }
+    Ok(Action {
+        label: label.to_owned(),
+        desc: desc.to_owned(),
+        action: path.to_owned(),
+        args: (show_args && !args.trim().is_empty()).then(|| args.to_owned()),
+    })
+}
+
+/// Identity of a presented custom row, including the positions of equal rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomActionRowTarget {
+    index: usize,
+    original: Action,
+    matching_positions: Vec<usize>,
+}
+
+pub fn custom_action_row_target(actions: &[Action], index: usize) -> Option<CustomActionRowTarget> {
+    let original = actions.get(index)?.clone();
+    let matching_positions = actions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, action)| (action == &original).then_some(i))
+        .collect();
+    Some(CustomActionRowTarget {
+        index,
+        original,
+        matching_positions,
+    })
+}
+
+impl CustomActionRowTarget {
+    fn is_current(&self, actions: &[Action]) -> bool {
+        actions.get(self.index) == Some(&self.original)
+            && actions
+                .iter()
+                .enumerate()
+                .filter_map(|(i, action)| (action == &self.original).then_some(i))
+                .eq(self.matching_positions.iter().copied())
+    }
+}
+
+/// The selected row no longer has the identity captured by the frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleCustomAction;
+
+impl std::fmt::Display for StaleCustomAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("custom action selection is stale")
+    }
+}
+
+impl std::error::Error for StaleCustomAction {}
+
+#[derive(Debug)]
+pub enum CheckedActionError {
+    StaleTarget,
+    Store(anyhow::Error),
+}
+
+impl std::fmt::Display for CheckedActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleTarget => write!(f, "{StaleCustomAction}"),
+            Self::Store(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for CheckedActionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::StaleTarget => None,
+            Self::Store(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+fn checked_commit(
+    path: &str,
+    apply: impl FnOnce(&mut Vec<Action>) -> Result<(), StaleCustomAction>,
+) -> Result<Vec<Action>, CheckedActionError> {
+    update_actions(path, |actions| apply(actions).map_err(anyhow::Error::new)).map_err(|error| {
+        if error.is::<StaleCustomAction>() {
+            CheckedActionError::StaleTarget
+        } else {
+            CheckedActionError::Store(error)
+        }
+    })
+}
+
+/// A validated replacement of one captured custom row.
+#[derive(Debug, Clone)]
+pub struct EditAction {
+    target: CustomActionRowTarget,
+    replacement: Action,
+}
+
+impl EditAction {
+    pub fn new(
+        target: CustomActionRowTarget,
+        label: &str,
+        desc: &str,
+        path: &str,
+        show_args: bool,
+        args: &str,
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
+            target,
+            replacement: validated_action(label, desc, path, show_args, args)?,
+        })
+    }
+
+    pub fn apply_to(self, actions: &mut [Action]) -> Result<(), StaleCustomAction> {
+        if !self.target.is_current(actions) {
+            return Err(StaleCustomAction);
+        }
+        actions[self.target.index] = self.replacement;
+        Ok(())
+    }
+
+    pub fn commit(self, path: &str) -> Result<Vec<Action>, CheckedActionError> {
+        checked_commit(path, |actions| self.apply_to(actions))
+    }
+}
+
+/// A checked immediate removal of one captured custom row.
+#[derive(Debug, Clone)]
+pub struct RemoveAction(CustomActionRowTarget);
+
+impl RemoveAction {
+    pub fn new(target: CustomActionRowTarget) -> Self {
+        Self(target)
+    }
+
+    pub fn apply_to(self, actions: &mut Vec<Action>) -> Result<(), StaleCustomAction> {
+        if !self.0.is_current(actions) {
+            return Err(StaleCustomAction);
+        }
+        actions.remove(self.0.index);
+        Ok(())
+    }
+
+    pub fn commit(self, path: &str) -> Result<Vec<Action>, CheckedActionError> {
+        checked_commit(path, |actions| self.apply_to(actions))
     }
 }
 
@@ -276,6 +425,102 @@ mod tests {
                 .unwrap();
             assert_eq!(actions[0].args, None);
         }
+    }
+
+    #[test]
+    fn checked_custom_mutations_preserve_order_duplicates_and_exact_fields() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let target_path = directory.path().join("target.exe");
+        std::fs::write(&target_path, "").unwrap();
+        let target_path = target_path.to_str().unwrap();
+        let storage = directory.path().join("actions.json");
+        let storage = storage.to_str().unwrap();
+        let duplicate = action("duplicate");
+        let mut different_args = duplicate.clone();
+        different_args.args = None;
+        let seed = vec![duplicate.clone(), different_args.clone(), duplicate.clone()];
+        save_actions(storage, &seed).unwrap();
+
+        assert!(custom_action_row_target(&seed, seed.len()).is_none());
+        let selected = custom_action_row_target(&seed, 2).unwrap();
+        assert!(EditAction::new(selected.clone(), "", "", "", false, "").is_err());
+        let edit = EditAction::new(
+            selected,
+            " label ",
+            " description ",
+            target_path,
+            true,
+            " --arg ",
+        )
+        .unwrap();
+        let committed = edit.commit(storage).unwrap();
+        let replacement = Action {
+            label: " label ".into(),
+            desc: " description ".into(),
+            action: target_path.into(),
+            args: Some(" --arg ".into()),
+        };
+        assert_eq!(
+            committed,
+            vec![
+                duplicate.clone(),
+                different_args.clone(),
+                replacement.clone()
+            ]
+        );
+        let target = custom_action_row_target(&committed, 1).unwrap();
+        let removed = RemoveAction::new(target).commit(storage).unwrap();
+        assert_eq!(removed, vec![duplicate, replacement]);
+        assert_eq!(load_actions(storage).unwrap(), removed);
+        assert_eq!(
+            std::fs::read_to_string(storage).unwrap(),
+            serde_json::to_string_pretty(&removed).unwrap()
+        );
+    }
+
+    #[test]
+    fn checked_custom_mutations_refuse_stale_targets_and_store_failures() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let target_path = directory.path().join("target.exe");
+        std::fs::write(&target_path, "").unwrap();
+        let target_path = target_path.to_str().unwrap();
+        let storage = directory.path().join("actions.json");
+        let storage = storage.to_str().unwrap();
+        let duplicate = action("duplicate");
+        let seed = vec![duplicate.clone(), action("other"), duplicate.clone()];
+        let target = custom_action_row_target(&seed, 0).unwrap();
+        let changed = vec![duplicate.clone(), action("other")];
+        save_actions(storage, &changed).unwrap();
+        let bytes = std::fs::read(storage).unwrap();
+        let version = actions_version();
+        let edit = EditAction::new(target.clone(), "new", "desc", target_path, false, "").unwrap();
+        assert!(matches!(
+            edit.commit(storage),
+            Err(CheckedActionError::StaleTarget)
+        ));
+        assert!(matches!(
+            RemoveAction::new(target.clone()).commit(storage),
+            Err(CheckedActionError::StaleTarget)
+        ));
+        assert_eq!(std::fs::read(storage).unwrap(), bytes);
+        assert_eq!(actions_version(), version);
+        let mut in_memory = changed.clone();
+        assert_eq!(
+            RemoveAction::new(target).apply_to(&mut in_memory),
+            Err(StaleCustomAction)
+        );
+        assert_eq!(in_memory, changed);
+
+        let current = custom_action_row_target(&changed, 0).unwrap();
+        std::fs::write(storage, b"invalid").unwrap();
+        assert!(matches!(
+            RemoveAction::new(current).commit(storage),
+            Err(CheckedActionError::Store(_))
+        ));
+        assert_eq!(std::fs::read(storage).unwrap(), b"invalid");
+        assert_eq!(actions_version(), version);
     }
 
     #[cfg(windows)]
