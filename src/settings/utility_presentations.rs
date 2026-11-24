@@ -1,4 +1,5 @@
 //! Independently owned presentation preferences for stable utility kinds.
+use super::store::{raw_object, raw_value};
 use super::{Settings, UtilityToolKey};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -86,15 +87,168 @@ pub(crate) fn persist_presentation(
     key: UtilityToolKey,
     value: RememberedPresentation,
 ) -> anyhow::Result<()> {
-    Settings::update_if_changed(path, |settings| {
-        settings.utility_presentations.set(key, value)
-    })?;
-    Ok(())
+    Settings::update_utility_envelope(
+        path,
+        "utility_presentations",
+        |settings| Ok((settings.utility_presentations.set(key, value)?, ())),
+        |existing, settings| {
+            let Some(existing) = existing else {
+                return raw_value(&settings.utility_presentations);
+            };
+            let mut envelope = raw_object(existing)?;
+            let mut entries = raw_object(
+                envelope
+                    .get("entries")
+                    .ok_or_else(|| anyhow::anyhow!("utility presentation entries are missing"))?,
+            )?;
+            entries.insert(key.as_str().to_owned(), raw_value(&value)?);
+            envelope.insert("entries".to_owned(), raw_value(&entries)?);
+            raw_value(&envelope)
+        },
+        |intended, candidate| intended.utility_presentations == candidate.utility_presentations,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_write_preserves_raw_siblings_and_noop_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let path_str = path.to_str().unwrap();
+        let source = r#"{ "opaque": { "large": 1234567890123456789012345 }, "plugin_settings": { "future": { "x": 1e+10 } }, "utility_dialog_sizes": { "version": 99, "entries": { "future": [ 1, 2 ] } }, "utility_presentations": { "version": 1, "entries": { "hash-generator": "docked", "batch-rename": "p\u006fpout" } } }"#;
+        std::fs::write(&path, source).unwrap();
+        let key = UtilityToolKey::parse("hash-generator").unwrap();
+        persist_presentation(path_str, key, RememberedPresentation::Docked).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+        persist_presentation(path_str, key, RememberedPresentation::Popout).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let root: super::super::store::RawSettingsObject = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            root["opaque"].get(),
+            r#"{ "large": 1234567890123456789012345 }"#
+        );
+        assert_eq!(
+            root["plugin_settings"].get(),
+            r#"{ "future": { "x": 1e+10 } }"#
+        );
+        assert_eq!(
+            root["utility_dialog_sizes"].get(),
+            r#"{ "version": 99, "entries": { "future": [ 1, 2 ] } }"#
+        );
+        let envelope = raw_object(&root["utility_presentations"]).unwrap();
+        let entries = raw_object(&envelope["entries"]).unwrap();
+        assert_eq!(entries["batch-rename"].get(), r#""p\u006fpout""#);
+        assert_eq!(
+            Settings::load(path_str)
+                .unwrap()
+                .utility_presentations
+                .get(key),
+            Some(RememberedPresentation::Popout)
+        );
+    }
+
+    #[test]
+    fn presentation_write_handles_sparse_missing_and_rejected_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let path_str = path.to_str().unwrap();
+        let key = UtilityToolKey::parse("hash-generator").unwrap();
+        std::fs::write(&path, br#"{ "opaque": [ 1, 2 ] }"#).unwrap();
+        persist_presentation(path_str, key, RememberedPresentation::Docked).unwrap();
+        let root: super::super::store::RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root.len(), 2);
+        assert_eq!(root["opaque"].get(), "[ 1, 2 ]");
+        for source in [
+            r#"{"utility_presentations":{"version":99,"entries":{}}}"#,
+            "{ invalid",
+        ] {
+            std::fs::write(&path, source).unwrap();
+            assert!(persist_presentation(path_str, key, RememberedPresentation::Popout).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+        }
+        std::fs::remove_file(&path).unwrap();
+        persist_presentation(path_str, key, RememberedPresentation::Popout).unwrap();
+        let root: super::super::store::RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(root.len() > 2);
+        assert_eq!(
+            Settings::load(path_str)
+                .unwrap()
+                .utility_presentations
+                .get(key),
+            Some(RememberedPresentation::Popout)
+        );
+    }
+
+    #[test]
+    fn presentation_write_accepts_positional_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let source = super::super::store::legacy_positional_settings(&Settings::default());
+        std::fs::write(&path, source).unwrap();
+        let key = UtilityToolKey::parse("hash-generator").unwrap();
+        persist_presentation(path.to_str().unwrap(), key, RememberedPresentation::Popout).unwrap();
+        assert_eq!(
+            Settings::load(path.to_str().unwrap())
+                .unwrap()
+                .utility_presentations
+                .get(key),
+            Some(RememberedPresentation::Popout)
+        );
+    }
+
+    #[test]
+    fn utility_transaction_rejects_a_candidate_with_the_wrong_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let source = br#"{"opaque":[ 1, 2 ]}"#;
+        std::fs::write(&path, source).unwrap();
+        let key = UtilityToolKey::parse("hash-generator").unwrap();
+        assert!(
+            Settings::update_utility_envelope(
+                &path,
+                "utility_presentations",
+                |settings| Ok((
+                    settings
+                        .utility_presentations
+                        .set(key, RememberedPresentation::Popout)?,
+                    ()
+                )),
+                |_, _| raw_value(&UtilityPresentations::default()),
+                |intended, candidate| intended.utility_presentations
+                    == candidate.utility_presentations,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), source);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn presentation_write_reports_atomic_refusal() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let source = br#"{"opaque":[1,2]}"#;
+        std::fs::write(&path, source).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(&path)
+            .unwrap();
+        let key = UtilityToolKey::parse("hash-generator").unwrap();
+        assert!(
+            persist_presentation(path.to_str().unwrap(), key, RememberedPresentation::Popout)
+                .is_err()
+        );
+        drop(lock);
+        assert_eq!(std::fs::read(path).unwrap(), source);
+    }
 
     #[test]
     fn presentation_preferences_default_roundtrip_and_preserve_opaque_data() {

@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU8, Ordering};
 
-type RawSettingsObject = BTreeMap<String, Box<serde_json::value::RawValue>>;
+pub(super) type RawSettingsObject = BTreeMap<String, Box<serde_json::value::RawValue>>;
 
 /// Root and optional feature preferences owned by the ordinary launcher close.
 #[derive(Clone, Debug, PartialEq)]
@@ -252,6 +252,45 @@ impl std::error::Error for SettingsBooleanSaveError {}
 static SETTINGS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 impl Settings {
+    /// Mutate one utility envelope while retaining the raw values owned by
+    /// other Settings writers. The candidate is validated before committing.
+    pub(super) fn update_utility_envelope<T>(
+        path: impl AsRef<Path>,
+        field: &str,
+        mutate: impl FnOnce(&mut Self) -> anyhow::Result<(bool, T)>,
+        patch: impl FnOnce(
+            Option<&serde_json::value::RawValue>,
+            &Self,
+        ) -> anyhow::Result<Box<serde_json::value::RawValue>>,
+        matches: impl FnOnce(&Self, &Self) -> bool,
+    ) -> anyhow::Result<T> {
+        let _transaction = transaction_guard();
+        let path = path.as_ref();
+        let bytes = read_exact_bytes(path)?;
+        let mut settings = parse_effective_settings(path, &bytes)?;
+        let (changed, result) = mutate(&mut settings)?;
+        if !changed {
+            return Ok(result);
+        }
+        let mut root = match serde_json::from_slice::<RawSettingsObject>(&bytes) {
+            Ok(root) => root,
+            // Valid positional roots and empty files have no raw object members.
+            Err(_) => raw_object(raw_value(&settings)?.as_ref())
+                .context("failed to canonicalize utility Settings")?,
+        };
+        let envelope = patch(root.get(field).map(Box::as_ref), &settings)?;
+        root.insert(field.to_owned(), envelope);
+        let candidate = serde_json::to_vec(&root)
+            .context("failed to serialize utility Settings transaction")?;
+        let validated = parse_effective_settings(path, &candidate)?;
+        anyhow::ensure!(
+            matches(&settings, &validated),
+            "utility Settings candidate did not preserve the intended value"
+        );
+        save_json_atomic(path, &root).context("failed to atomically persist utility Settings")?;
+        Ok(result)
+    }
+
     /// Load settings while preserving the generic missing/empty distinction.
     pub fn load_typed(path: impl AsRef<Path>) -> Result<LoadState<Self>, PersistenceError> {
         load_json(path)
@@ -574,13 +613,15 @@ fn parse_effective_settings(
     })
 }
 
-fn raw_value<T: serde::Serialize + ?Sized>(value: &T) -> anyhow::Result<Box<serde_json::value::RawValue>> {
+pub(super) fn raw_value<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> anyhow::Result<Box<serde_json::value::RawValue>> {
     let value = serde_json::to_string(value).context("failed to serialize owned Settings value")?;
     serde_json::value::RawValue::from_string(value)
         .context("failed to retain serialized Settings value as raw JSON")
 }
 
-fn raw_object(raw: &serde_json::value::RawValue) -> anyhow::Result<RawSettingsObject> {
+pub(super) fn raw_object(raw: &serde_json::value::RawValue) -> anyhow::Result<RawSettingsObject> {
     serde_json::from_str(raw.get()).context("expected a JSON object")
 }
 
@@ -745,6 +786,43 @@ fn load_effective(path: impl AsRef<Path>) -> anyhow::Result<Settings> {
         LoadState::Missing | LoadState::Empty => Ok(Settings::default()),
         LoadState::Loaded(settings) => Ok(settings),
     }
+}
+
+#[cfg(test)]
+pub(super) fn legacy_positional_settings(settings: &Settings) -> Vec<u8> {
+    use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
+
+    struct Positional(Vec<Box<serde_json::value::RawValue>>);
+    impl<'de> Deserialize<'de> for Positional {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Fields;
+            impl<'de> Visitor<'de> for Fields {
+                type Value = Positional;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("a serialized Settings object")
+                }
+
+                fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                    let mut values = Vec::new();
+                    // Model an older positional file ending at the pins.
+                    let mut finished = false;
+                    while let Some((key, value)) = map.next_entry::<String, _>()? {
+                        if !finished {
+                            values.push(value);
+                            finished = key == "pinned_panels";
+                        }
+                    }
+                    Ok(Positional(values))
+                }
+            }
+            deserializer.deserialize_map(Fields)
+        }
+    }
+
+    let object = serde_json::to_vec(settings).unwrap();
+    let Positional(values) = serde_json::from_slice(&object).unwrap();
+    serde_json::to_vec(&values).unwrap()
 }
 
 #[cfg(test)]
@@ -1279,44 +1357,11 @@ mod tests {
 
     #[test]
     fn unpin_panel_checked_accepts_positional_settings() {
-        use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
-        struct Positional(Vec<Box<serde_json::value::RawValue>>);
-        impl<'de> Deserialize<'de> for Positional {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                struct Fields;
-                impl<'de> Visitor<'de> for Fields {
-                    type Value = Positional;
-                    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                        formatter.write_str("a serialized Settings object")
-                    }
-                    fn visit_map<M: MapAccess<'de>>(
-                        self,
-                        mut map: M,
-                    ) -> Result<Self::Value, M::Error> {
-                        let mut values = Vec::new();
-                        // Model an older positional file ending at the pins.
-                        let mut finished = false;
-                        while let Some((key, value)) =
-                            map.next_entry::<String, Box<serde_json::value::RawValue>>()?
-                        {
-                            if !finished {
-                                values.push(value);
-                                finished = key == "pinned_panels";
-                            }
-                        }
-                        Ok(Positional(values))
-                    }
-                }
-                deserializer.deserialize_map(Fields)
-            }
-        }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
         let mut settings = Settings::default();
         settings.pinned_panels = vec![crate::gui::Panel::FavDialog, crate::gui::Panel::HelpWindow];
-        let object = serde_json::to_vec(&settings).unwrap();
-        let Positional(values) = serde_json::from_slice(&object).unwrap();
-        std::fs::write(&path, serde_json::to_vec(&values).unwrap()).unwrap();
+        std::fs::write(&path, super::legacy_positional_settings(&settings)).unwrap();
         Settings::unpin_panel_checked(&path, crate::gui::Panel::FavDialog).unwrap();
         assert_eq!(
             Settings::read_current(&path).unwrap().pinned_panels,
