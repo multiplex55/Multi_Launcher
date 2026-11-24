@@ -140,3 +140,7 @@ After a hint resolves, move Kit's transient List cursor through its own focus ha
 Verify Source → File in Docked and Algorithm → SHA-512 in Pop Out. Observe real cursor movement with the prior committed value, confirm only on fresh Enter, then check Escape, dismiss/reopen and rehost retirement. Keep standalone provider handoffs, mixed DPI, native egui Clipboard and stale accessibility focus in the existing pilot criteria.
 
 The focused batch and Windows replay covered both stock lists, cursor-only hint activation, separate confirmation, Escape and reopen. A corrective replay verified intact option labels and the same behavior in both hosts. The accessibility focused-element report remained stale during some real focus changes. [Exact dropdown evidence](../VALIDATION_LOG.md#g04-hash-dropdown-item-jump-mode)
+
+### Selected-file handoffs
+
+The first G07 File Search packet verified real current-row delivery of different same-named files in Docked and Pop Out. The same file retained its existing digest and closing the popout returned to the still-current File Search action. Changed files cleared the result until an explicit Calculate. Windows Ctrl+Enter now calculates from the closed Source selector while separate Space and Escape retain their stock menu behavior. Downloads Triage retains its separate Inspect requirement. [File Search evidence](../VALIDATION_LOG.md#g07-and-g04-checked-file-search-to-hash-handoff)
