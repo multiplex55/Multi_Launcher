@@ -10,6 +10,8 @@ pub use io::{set_settings_path, settings_path};
 pub use model::*;
 pub(crate) use store::LauncherClosePreferences;
 pub use store::{
+    SearchCapabilityError, SearchCapabilitySaveAcknowledgement, SearchCapabilitySaveRequest,
+    SearchCapabilitySnapshot, provider_search_capability_enabled,
     SettingsBooleanPreference, SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError,
     SettingsBooleanSaveRequest, SettingsBooleanSaveToken,
 };

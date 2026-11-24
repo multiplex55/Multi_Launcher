@@ -1501,10 +1501,7 @@ fn plugin_matches_search(
     if enabled_plugins.is_some_and(|list| !list.contains(name)) {
         return false;
     }
-    if enabled_caps
-        .and_then(|map| map.get(name))
-        .is_some_and(|caps| !caps.iter().any(|capability| capability == "search"))
-    {
+    if !crate::settings::provider_search_capability_enabled(enabled_caps, name) {
         return false;
     }
     if plugin.always_search() {

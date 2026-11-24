@@ -2,7 +2,7 @@ use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use anyhow::Context;
 use once_cell::sync::Lazy;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -249,6 +249,83 @@ impl std::fmt::Display for SettingsBooleanSaveError {
 
 impl std::error::Error for SettingsBooleanSaveError {}
 
+/// Canonical runtime capability map and the effective Search state for one provider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchCapabilitySnapshot {
+    pub capabilities: Option<HashMap<String, Vec<String>>>,
+    pub search_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchCapabilitySaveRequest {
+    pub provider: String,
+    /// Effective enabled non-Search capabilities used only when no row exists.
+    pub inherited_enabled_siblings: Vec<String>,
+    pub expected_baseline: bool,
+    pub desired: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchCapabilitySaveAcknowledgement {
+    pub snapshot: SearchCapabilitySnapshot,
+    pub changed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchCapabilityError {
+    Conflict {
+        provider: String,
+        expected: bool,
+        actual: bool,
+    },
+    Store(String),
+}
+
+impl std::fmt::Display for SearchCapabilityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict {
+                provider,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "Search capability for {provider} changed from {expected} to {actual}. Reload Settings and retry."
+            ),
+            Self::Store(message) => formatter.write_str(message),
+        }
+    }
+}
+impl std::error::Error for SearchCapabilityError {}
+
+/// Missing capability maps and missing provider entries both enable Search.
+pub fn provider_search_capability_enabled(
+    capabilities: Option<&HashMap<String, Vec<String>>>,
+    provider: &str,
+) -> bool {
+    capabilities
+        .and_then(|map| map.get(provider))
+        .is_none_or(|caps| caps.iter().any(|capability| capability == "search"))
+}
+
+fn search_capability_snapshot(settings: &Settings, provider: &str) -> SearchCapabilitySnapshot {
+    let capabilities = settings.enabled_capabilities.clone();
+    let search_enabled = provider_search_capability_enabled(capabilities.as_ref(), provider);
+    SearchCapabilitySnapshot {
+        capabilities,
+        search_enabled,
+    }
+}
+
+fn validate_search_provider(provider: &str) -> Result<(), SearchCapabilityError> {
+    if provider.is_empty() || provider.trim() != provider {
+        return Err(SearchCapabilityError::Store(
+            "Search capability requires a valid provider name".into(),
+        ));
+    }
+    Ok(())
+}
+
 static SETTINGS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 impl Settings {
@@ -449,6 +526,112 @@ impl Settings {
             .context("failed to serialize unpin Settings transaction")?;
         parse_effective_settings(path, &candidate)?;
         save_json_atomic(path, &raw_settings).context("failed to atomically persist unpin")
+    }
+
+    /// Read the current effective Search preference and canonical map under the Settings lock.
+    pub fn read_search_capability(
+        path: impl AsRef<Path>,
+        provider: &str,
+    ) -> Result<SearchCapabilitySnapshot, SearchCapabilityError> {
+        validate_search_provider(provider)?;
+        let _transaction = transaction_guard();
+        let path = path.as_ref();
+        let bytes = read_exact_bytes(path)
+            .map_err(|error| SearchCapabilityError::Store(error.to_string()))?;
+        let settings = parse_effective_settings(path, &bytes)
+            .map_err(|error| SearchCapabilityError::Store(error.to_string()))?;
+        Ok(search_capability_snapshot(&settings, provider))
+    }
+
+    /// Compare only this provider's effective Search state, preserving raw siblings.
+    pub fn save_search_capability_checked(
+        path: impl AsRef<Path>,
+        request: SearchCapabilitySaveRequest,
+    ) -> Result<SearchCapabilitySaveAcknowledgement, SearchCapabilityError> {
+        validate_search_provider(&request.provider)?;
+        let _transaction = transaction_guard();
+        let path = path.as_ref();
+        let bytes = read_exact_bytes(path)
+            .map_err(|error| SearchCapabilityError::Store(error.to_string()))?;
+        let settings = parse_effective_settings(path, &bytes)
+            .map_err(|error| SearchCapabilityError::Store(error.to_string()))?;
+        let snapshot = search_capability_snapshot(&settings, &request.provider);
+        if snapshot.search_enabled != request.expected_baseline {
+            return Err(SearchCapabilityError::Conflict {
+                provider: request.provider,
+                expected: request.expected_baseline,
+                actual: snapshot.search_enabled,
+            });
+        }
+        if snapshot.search_enabled == request.desired {
+            return Ok(SearchCapabilitySaveAcknowledgement {
+                snapshot,
+                changed: false,
+            });
+        }
+        let raw_source = if bytes.iter().all(u8::is_ascii_whitespace) {
+            serde_json::to_vec(&settings).map_err(|error| {
+                SearchCapabilityError::Store(format!(
+                    "failed to serialize default Settings: {error}"
+                ))
+            })?
+        } else {
+            bytes
+        };
+        let mut root: RawSettingsObject = serde_json::from_slice(&raw_source).map_err(|error| {
+            SearchCapabilityError::Store(format!(
+                "failed to preserve Settings at {}: {error}",
+                path.display()
+            ))
+        })?;
+        let mut raw_caps: RawSettingsObject = match root.get("enabled_capabilities") {
+            None => RawSettingsObject::new(),
+            Some(raw) if raw.get() == "null" => RawSettingsObject::new(),
+            Some(raw) => raw_object(raw).map_err(|error| {
+                SearchCapabilityError::Store(format!(
+                    "invalid enabled_capabilities at {}: {error}",
+                    path.display()
+                ))
+            })?,
+        };
+        let mut provider_caps = snapshot
+            .capabilities
+            .as_ref()
+            .and_then(|map| map.get(&request.provider))
+            .cloned()
+            .unwrap_or_else(|| request.inherited_enabled_siblings.clone());
+        provider_caps.retain(|cap| cap != "search");
+        if request.desired {
+            provider_caps.push("search".to_owned());
+        }
+        raw_caps.insert(
+            request.provider.clone(),
+            raw_value(&provider_caps)
+                .map_err(|error| SearchCapabilityError::Store(error.to_string()))?,
+        );
+        root.insert(
+            "enabled_capabilities".into(),
+            raw_value(&raw_caps)
+                .map_err(|error| SearchCapabilityError::Store(error.to_string()))?,
+        );
+        let candidate = serde_json::to_vec(&root).map_err(|error| {
+            SearchCapabilityError::Store(format!("failed to serialize Search capability: {error}"))
+        })?;
+        let candidate_settings = parse_effective_settings(path, &candidate)
+            .map_err(|error| SearchCapabilityError::Store(error.to_string()))?;
+        let snapshot = search_capability_snapshot(&candidate_settings, &request.provider);
+        if snapshot.search_enabled != request.desired {
+            return Err(SearchCapabilityError::Store(
+                "Search capability did not match the requested value before saving".into(),
+            ));
+        }
+        save_json_atomic(path, &root).map_err(|error| {
+            SearchCapabilityError::Store(format!("failed to save Search capability: {error}"))
+        })?;
+        Ok(SearchCapabilitySaveAcknowledgement {
+            snapshot,
+            changed: true,
+        })
     }
 
     /// Acknowledge one GPUI-owned Boolean preference without
@@ -1386,6 +1569,164 @@ mod tests {
         assert!(Settings::unpin_panel_checked(&path, crate::gui::Panel::FavDialog).is_err());
         drop(lock);
         assert_eq!(std::fs::read(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn search_capability_sparse_defaults_and_noop_preserve_bytes() {
+        use super::SearchCapabilitySaveRequest;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let initial = Settings::read_search_capability(&path, "folders").unwrap();
+        assert!(initial.search_enabled);
+        assert!(initial.capabilities.is_none());
+        let source = br#"{ "enabled_plugins": [], "opaque": 1234567890123456789012345 }"#;
+        std::fs::write(&path, source).unwrap();
+        let no_op = Settings::save_search_capability_checked(
+            &path,
+            SearchCapabilitySaveRequest {
+                provider: "folders".into(),
+                inherited_enabled_siblings: Vec::new(),
+                expected_baseline: true,
+                desired: true,
+            },
+        )
+        .unwrap();
+        assert!(!no_op.changed);
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+        let saved = Settings::save_search_capability_checked(
+            &path,
+            SearchCapabilitySaveRequest {
+                provider: "folders".into(),
+                inherited_enabled_siblings: Vec::new(),
+                expected_baseline: true,
+                desired: false,
+            },
+        )
+        .unwrap();
+        assert!(saved.changed);
+        assert_eq!(
+            saved.snapshot.capabilities.unwrap()["folders"],
+            Vec::<String>::new()
+        );
+        assert!(!saved.snapshot.search_enabled);
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["enabled_plugins"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn search_capability_preserves_latest_siblings_and_other_raw_values() {
+        use super::{RawSettingsObject, SearchCapabilitySaveRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let source = r#"{"enabled_plugins":["other"],"enabled_capabilities":{"folders":["show_full_path","search","future","search"],"other" : [ "opaque", "search" ]},"opaque":{"huge":1234567890123456789012345}}"#;
+        std::fs::write(&path, source).unwrap();
+        let saved = Settings::save_search_capability_checked(
+            &path,
+            SearchCapabilitySaveRequest {
+                provider: "folders".into(),
+                inherited_enabled_siblings: Vec::new(),
+                expected_baseline: true,
+                desired: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            saved.snapshot.capabilities.as_ref().unwrap()["folders"],
+            ["show_full_path", "future"]
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        let root: RawSettingsObject = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(root["enabled_plugins"].get(), "[\"other\"]");
+        assert_eq!(
+            root["opaque"].get(),
+            r#"{"huge":1234567890123456789012345}"#
+        );
+        let caps: RawSettingsObject =
+            serde_json::from_str(root["enabled_capabilities"].get()).unwrap();
+        assert_eq!(caps["other"].get(), r#"[ "opaque", "search" ]"#);
+        let saved = Settings::save_search_capability_checked(
+            &path,
+            SearchCapabilitySaveRequest {
+                provider: "folders".into(),
+                inherited_enabled_siblings: Vec::new(),
+                expected_baseline: false,
+                desired: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            saved.snapshot.capabilities.unwrap()["folders"],
+            ["show_full_path", "future", "search"]
+        );
+    }
+
+    #[test]
+    fn search_capability_materializes_only_inherited_enabled_siblings() {
+        use super::SearchCapabilitySaveRequest;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, br#"{"enabled_capabilities":{}}"#).unwrap();
+        let saved = Settings::save_search_capability_checked(
+            &path,
+            SearchCapabilitySaveRequest {
+                provider: "timer".into(),
+                inherited_enabled_siblings: vec!["completion_dialog".into(), "search".into()],
+                expected_baseline: true,
+                desired: false,
+            },
+        ).unwrap();
+        assert_eq!(saved.snapshot.capabilities.unwrap()["timer"], ["completion_dialog"]);
+        let saved = Settings::save_search_capability_checked(
+            &path,
+            SearchCapabilitySaveRequest {
+                provider: "timer".into(),
+                inherited_enabled_siblings: vec!["unrelated".into()],
+                expected_baseline: false,
+                desired: true,
+            },
+        ).unwrap();
+        assert_eq!(saved.snapshot.capabilities.unwrap()["timer"], ["completion_dialog", "search"]);
+    }
+
+    #[test]
+    fn search_capability_rejects_stale_and_malformed_store_without_writes() {
+        use super::{SearchCapabilityError, SearchCapabilitySaveRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let source = br#"{"enabled_capabilities":{"web_search":[]}}"#;
+        std::fs::write(&path, source).unwrap();
+        let result = Settings::save_search_capability_checked(
+            &path,
+            SearchCapabilitySaveRequest {
+                provider: "web_search".into(),
+                inherited_enabled_siblings: Vec::new(),
+                expected_baseline: true,
+                desired: false,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(SearchCapabilityError::Conflict { actual: false, .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+        for malformed in [r#"{"enabled_capabilities":{"web_search":[4]}}"#, "{broken"] {
+            std::fs::write(&path, malformed).unwrap();
+            assert!(Settings::read_search_capability(&path, "web_search").is_err());
+            assert!(
+                Settings::save_search_capability_checked(
+                    &path,
+                    SearchCapabilitySaveRequest {
+                        provider: "web_search".into(),
+                        inherited_enabled_siblings: Vec::new(),
+                        expected_baseline: true,
+                        desired: false,
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), malformed.as_bytes());
+        }
     }
 
     #[test]
