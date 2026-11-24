@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G02/G05 ordinary saved application execution passed 25 focused tests and matching Windows GPUI and egui launches. The replay verified missing-executable refusal, clear-after-run with inline Usage failure, and configured hide with independent Hash calculation and Dock restoration. G06 saved custom App Editor catalog and checked Edit/Remove retain their scoped evidence. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Saved application evidence](VALIDATION_LOG.md#g02-and-g05-ordinary-saved-application-execution) · [App Editor evidence](VALIDATION_LOG.md#g06-saved-custom-app-editor-catalog-and-checked-editing)
+G05 Folder and Bookmark Search passed 29 focused tests and native activation on the same Windows artifact in GPUI and egui. The replay verified exact targets and accounting, guarded stale and missing rows, and Search capability gating. G02/G05 saved application execution and G06 checked App Editor Edit/Remove retain their scoped evidence. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Provider evidence](VALIDATION_LOG.md#g05-folder-and-bookmark-search-admission) · [Saved application evidence](VALIDATION_LOG.md#g02-and-g05-ordinary-saved-application-execution) · [App Editor evidence](VALIDATION_LOG.md#g06-saved-custom-app-editor-catalog-and-checked-editing)
 
 ## Execution status
 
@@ -19,7 +19,7 @@ G02/G05 ordinary saved application execution passed 25 focused tests and matchin
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Admit live Folder and Bookmark Search through the existing provider and launch owners. Then prioritize global invocation and foreground restoration and complete the Hash Generator pilot. |
+| Current next action | Replay configured global invocation and foreground restoration on the verified Windows artifact and retire the GPUI visibility wake owner on shutdown. Continue the Hash Generator pilot and its provider dependencies. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
