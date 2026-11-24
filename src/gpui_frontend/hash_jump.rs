@@ -5,7 +5,9 @@ use super::{
         jump_hint_badge,
     },
 };
-use gpui_kit::{AnyElement, Context, FocusHandle, IntoElement, ParentElement, Styled, div};
+use gpui_kit::{
+    AnyElement, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Styled, div,
+};
 use multi_launcher::{
     gui::theme::{SemanticPalette, ThemeMetrics},
     launcher::jump_mode::{
@@ -210,8 +212,19 @@ impl HashJump {
         palette: SemanticPalette,
         metrics: ThemeMetrics,
     ) -> AnyElement {
-        let Some(draft) = draft else {
+        if !self.controller.enabled {
             return element.into_any_element();
+        }
+        // Scope each control and its hint to the same stable element path,
+        // including frames where the control is temporarily disabled.
+        let wrapped = div()
+            .id(format!("hash-jump-control-{generation}-{}", role.name()))
+            .relative()
+            .w_full()
+            .min_w(gpui_kit::px(0.0))
+            .child(element);
+        let Some(draft) = draft else {
+            return wrapped.into_any_element();
         };
         let id = Self::id(generation, role);
         let (label, order, kind) = role.metadata();
@@ -223,14 +236,12 @@ impl HashJump {
             palette,
             metrics,
         );
-        let wrapped = div()
-            .relative()
-            .w_full()
-            .min_w(gpui_kit::px(0.0))
-            .child(element)
-            .children(badge);
-        JumpGeometryElement::new(wrapped, TargetMetadata::new(id, label, kind, order), draft)
-            .into_any_element()
+        JumpGeometryElement::new(
+            wrapped.children(badge),
+            TargetMetadata::new(id, label, kind, order),
+            draft,
+        )
+        .into_any_element()
     }
     pub fn key(
         &mut self,
