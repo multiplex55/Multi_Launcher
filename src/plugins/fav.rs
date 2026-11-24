@@ -641,6 +641,12 @@ impl Plugin for FavBrowsePlugin {
             vec![favorite_browse_action()]
         } else if query.eq_ignore_ascii_case("fav add") {
             vec![favorite_dialog_action("")]
+        } else if let Some(rest) = crate::common::strip_prefix_ci(query, "fav add") {
+            if rest.starts_with(char::is_whitespace) && !rest.trim().is_empty() {
+                vec![favorite_dialog_action(rest.trim())]
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
         }
@@ -764,7 +770,11 @@ mod tests {
         for query in ["fav add", " FAV ADD  "] {
             assert_eq!(provider.search(query), vec![favorite_dialog_action("")]);
         }
-        for query in ["fav add name", "fav addx", "fav list", "favorite"] {
+        assert_eq!(
+            provider.search(" FAV ADD Mixed Case "),
+            vec![favorite_dialog_action("Mixed Case")]
+        );
+        for query in ["fav addx", "fav list", "favorite"] {
             assert!(provider.search(query).is_empty());
         }
     }

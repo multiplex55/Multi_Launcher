@@ -11,8 +11,9 @@ use gpui_kit::*;
 use multi_launcher::actions::Action;
 use multi_launcher::gui::theme::{SemanticPalette, ThemeMetrics};
 use multi_launcher::plugins::fav::{
-    FAV_FILE, FavEntry, PrefilledFavoriteDraft, load_favs, prefilled_favorite_draft,
-    save_prefilled_favorite,
+    FAV_FILE, FavEntry, ManualFavoriteOrigin, PrefilledFavoriteDraft, PrefilledFavoriteSaveError,
+    favorite_row_target, load_favs, named_favorite_origin, prefilled_favorite_draft,
+    save_manual_favorite, save_prefilled_favorite,
 };
 
 use super::{RootWindow, appearance};
@@ -35,7 +36,8 @@ pub(super) struct ResultFavorites {
     draft: Option<FavoriteFields>,
     status: Option<String>,
     pending: Option<Request>,
-    pending_prefill: Option<Action>,
+    pending_draft: Option<OpenDraft>,
+    loaded: bool,
     sequence: u64,
 }
 
@@ -57,7 +59,7 @@ impl ResultFavorites {
     pub(super) fn restart_blocker(&self) -> Option<&'static str> {
         if self.save_pending() {
             Some("Wait for the Favorites save to finish before switching to egui.")
-        } else if self.draft.is_some() || self.pending_prefill.is_some() {
+        } else if self.draft.is_some() || self.pending_draft.is_some() {
             Some("Save or cancel the current Favorites draft before switching to egui.")
         } else {
             None
@@ -85,8 +87,8 @@ impl ResultFavorites {
 
     fn cancel_draft(&mut self) -> bool {
         let had_draft = self.draft.take().is_some();
-        let was_prefilling = self.pending_prefill.take().is_some();
-        if had_draft {
+        let was_prefilling = self.pending_draft.take().is_some();
+        if had_draft && self.loaded {
             self.status = None;
         }
         had_draft || was_prefilling
@@ -94,8 +96,21 @@ impl ResultFavorites {
 }
 
 #[derive(Clone)]
+enum OpenDraft {
+    Prefilled(Action),
+    Named(String),
+}
+
+#[derive(Clone)]
+enum DraftOrigin {
+    Prefilled(PrefilledFavoriteDraft),
+    Manual(ManualFavoriteOrigin),
+}
+
+#[derive(Clone)]
 struct FavoriteFields {
-    draft: PrefilledFavoriteDraft,
+    origin: DraftOrigin,
+    original: FavEntry,
     label: FavoriteField,
     command: FavoriteField,
     args: FavoriteField,
@@ -105,6 +120,23 @@ struct FavoriteFields {
 struct FavoriteField {
     input: Entity<TextareaState>,
     initial: String,
+}
+
+impl FavoriteFields {
+    fn new(
+        origin: DraftOrigin,
+        original: FavEntry,
+        window: &mut Window,
+        cx: &mut Context<RootWindow>,
+    ) -> Self {
+        Self {
+            label: FavoriteField::new(&original.label, window, cx),
+            command: FavoriteField::new(&original.action, window, cx),
+            args: FavoriteField::new(original.args.as_deref().unwrap_or_default(), window, cx),
+            origin,
+            original,
+        }
+    }
 }
 
 impl FavoriteField {
@@ -137,7 +169,12 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_favorites(Some(action), previous_focus, window, cx);
+        self.open_favorites(
+            Some(OpenDraft::Prefilled(action)),
+            previous_focus,
+            window,
+            cx,
+        );
     }
 
     pub(super) fn open_favorites_browse(
@@ -149,9 +186,19 @@ impl RootWindow {
         self.open_favorites(None, previous_focus, window, cx);
     }
 
+    pub(super) fn open_favorites_named(
+        &mut self,
+        label: String,
+        previous_focus: Option<FocusHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_favorites(Some(OpenDraft::Named(label)), previous_focus, window, cx);
+    }
+
     fn open_favorites(
         &mut self,
-        action: Option<Action>,
+        action: Option<OpenDraft>,
         previous_focus: Option<FocusHandle>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -172,7 +219,7 @@ impl RootWindow {
             return;
         }
         if state.restart_blocker().is_some() {
-            if state.pending.is_none() {
+            if state.loaded && state.pending.is_none() {
                 state.status = Some("Finish the current Favorites draft first.".to_owned());
             }
             self.root_scroll.scroll_to_top_of_item(scroll_item);
@@ -183,7 +230,7 @@ impl RootWindow {
             return;
         }
         if state.is_open() && matches!(state.pending, Some(Request::Load(_))) {
-            state.pending_prefill = action;
+            state.pending_draft = action;
             state.return_focus = previous_focus;
             state.return_offset = Some(self.root_scroll.offset());
             self.root_scroll.scroll_to_top_of_item(scroll_item);
@@ -198,7 +245,8 @@ impl RootWindow {
         state.return_focus = previous_focus;
         state.return_offset = Some(self.root_scroll.offset());
         state.status = Some("Loading Favorites…".to_owned());
-        state.pending_prefill = action;
+        state.loaded = false;
+        state.pending_draft = action;
         let request = Request::Load(state.next());
         state.pending = Some(request);
         self.fresh_search_enter = None;
@@ -216,21 +264,37 @@ impl RootWindow {
                 if !state.consume(request) {
                     return;
                 }
-                let prefill = state.pending_prefill.take();
+                let prefill = state.pending_draft.take();
                 match rows {
                     Ok(rows) => {
-                        if let Some(action) = prefill {
-                            state.draft = Some(FavoriteFields {
-                                draft: prefilled_favorite_draft(&rows, &action),
-                                label: FavoriteField::new(&action.label, window, cx),
-                                command: FavoriteField::new(&action.action, window, cx),
-                                args: FavoriteField::new(
-                                    action.args.as_deref().unwrap_or_default(),
-                                    window,
-                                    cx,
-                                ),
-                            });
+                        if let Some(draft) = prefill {
+                            let (origin, original) = match draft {
+                                OpenDraft::Prefilled(action) => {
+                                    let draft = prefilled_favorite_draft(&rows, &action);
+                                    let original = FavEntry {
+                                        label: action.label,
+                                        action: action.action,
+                                        args: action.args,
+                                    };
+                                    (DraftOrigin::Prefilled(draft), original)
+                                }
+                                OpenDraft::Named(label) => {
+                                    let origin = named_favorite_origin(&rows, &label);
+                                    let original = rows
+                                        .iter()
+                                        .find(|row| row.label == label)
+                                        .cloned()
+                                        .unwrap_or(FavEntry {
+                                            label,
+                                            action: String::new(),
+                                            args: None,
+                                        });
+                                    (DraftOrigin::Manual(origin), original)
+                                }
+                            };
+                            state.draft = Some(FavoriteFields::new(origin, original, window, cx));
                         }
+                        state.loaded = true;
                         state.rows = rows.into();
                         state.status = None;
                     }
@@ -243,19 +307,69 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn edit_result_favorite(
+        &mut self,
+        row: Option<(usize, FavEntry, u64)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = &mut self.result_favorites;
+        if !state.is_open() || !state.loaded || state.pending.is_some() || state.draft.is_some() {
+            return;
+        }
+        let (origin, entry) = if let Some((index, displayed, sequence)) = row {
+            if state.sequence != sequence || state.rows.get(index) != Some(&displayed) {
+                return;
+            }
+            let Some(target) = favorite_row_target(&state.rows, index) else {
+                return;
+            };
+            (
+                ManualFavoriteOrigin::Existing(target),
+                state.rows[index].clone(),
+            )
+        } else {
+            (
+                ManualFavoriteOrigin::Append,
+                FavEntry {
+                    label: String::new(),
+                    action: String::new(),
+                    args: None,
+                },
+            )
+        };
+        state.draft = Some(FavoriteFields::new(
+            DraftOrigin::Manual(origin),
+            entry,
+            window,
+            cx,
+        ));
+        state.status = None;
+        if let Some(owner) = &state.owner {
+            owner.focus(window, cx);
+        }
+        cx.notify();
+    }
+
     fn save_result_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = &mut self.result_favorites;
-        let Some(fields) = state.draft.as_ref().filter(|_| state.pending.is_none()) else {
+        let Some(fields) = state
+            .draft
+            .as_ref()
+            .filter(|_| state.pending.is_none() && state.loaded)
+        else {
             return;
         };
-        let mut draft = fields.draft.clone();
-        draft.label = fields.label.exact_value(&draft.label, cx);
-        draft.action = fields.command.exact_value(&draft.action, cx);
-        draft.args = Some(
-            fields
-                .args
-                .exact_value(draft.args.as_deref().unwrap_or_default(), cx),
-        );
+        let args = fields
+            .args
+            .exact_value(fields.original.args.as_deref().unwrap_or_default(), cx);
+        let entry = FavEntry {
+            label: fields.label.exact_value(&fields.original.label, cx),
+            action: fields.command.exact_value(&fields.original.action, cx),
+            args: Some(args),
+        };
+        let origin = fields.origin.clone();
+        let prefilled = matches!(&origin, DraftOrigin::Prefilled(_));
         let Some(permit) = self.restart_admission.admit() else {
             return;
         };
@@ -266,9 +380,27 @@ impl RootWindow {
             owner.focus(window, cx);
         }
 
-        let task = cx
-            .background_executor()
-            .spawn(async move { save_prefilled_favorite(FAV_FILE, draft) });
+        let task = cx.background_executor().spawn(async move {
+            match origin {
+                DraftOrigin::Prefilled(mut draft) => {
+                    draft.label = entry.label;
+                    draft.action = entry.action;
+                    draft.args = Some(entry.args.unwrap_or_default());
+                    save_prefilled_favorite(FAV_FILE, draft)
+                }
+                DraftOrigin::Manual(origin) => {
+                    let mut entry = entry;
+                    if entry
+                        .args
+                        .as_ref()
+                        .is_some_and(|args| args.trim().is_empty())
+                    {
+                        entry.args = None;
+                    }
+                    save_manual_favorite(FAV_FILE, origin, entry)
+                }
+            }
+        });
         let root = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             let result = task.await;
@@ -286,7 +418,21 @@ impl RootWindow {
                         state.draft = None;
                         state.status = Some("Favorite saved.".to_owned());
                     }
-                    Err(error) => state.status = Some(format!("Could not save Favorite: {error}")),
+                    Err(error) => {
+                        if matches!(error, PrefilledFavoriteSaveError::Store(_)) {
+                            state.loaded = false;
+                            state.status = Some(format!("Could not save Favorite: {error}. Close and reopen Favorites to reload."));
+                        } else if !prefilled
+                            && matches!(error, PrefilledFavoriteSaveError::StaleTarget)
+                        {
+                            state.status = Some(
+                                "Favorites changed while this draft was open. Reopen it before saving."
+                                    .to_owned(),
+                            );
+                        } else {
+                            state.status = Some(format!("Could not save Favorite: {error}"));
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -336,7 +482,7 @@ impl RootWindow {
         let owner = state.owner.as_ref()?;
         let editing = state.draft.is_some();
         let waiting = state.save_pending();
-        let dismiss_label = if editing || state.pending_prefill.is_some() {
+        let dismiss_label = if editing || state.pending_draft.is_some() {
             "Cancel"
         } else {
             "Close"
@@ -350,9 +496,20 @@ impl RootWindow {
                         Button::new("result-favorites-save")
                             .label("Save")
                             .tab_stop(true)
-                            .disabled(waiting)
+                            .disabled(waiting || !state.loaded)
                             .on_click(cx.listener(|root, _, window, cx| {
                                 root.save_result_favorite(window, cx)
+                            })),
+                    )
+                })
+                .when(!editing, |this| {
+                    this.child(
+                        Button::new("result-favorites-add")
+                            .label("Add Fav")
+                            .tab_stop(true)
+                            .disabled(!state.loaded || state.pending.is_some())
+                            .on_click(cx.listener(|root, _, window, cx| {
+                                root.edit_result_favorite(None, window, cx)
                             })),
                     )
                 })
@@ -415,7 +572,28 @@ impl RootWindow {
                             Some(args) => format!("{} · {} {}", row.label, row.action, args),
                             None => format!("{} · {}", row.label, row.action),
                         };
-                        Label::new(caption).id(format!("result-favorite-row-{index}"))
+                        let displayed = row.clone();
+                        let sequence = state.sequence;
+                        div()
+                            .flex()
+                            .child(Label::new(caption).id(format!("result-favorite-row-{index}")))
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "result-favorite-edit-{index}"
+                                )))
+                                .label("Edit")
+                                .tab_stop(true)
+                                .disabled(!state.loaded || state.pending.is_some())
+                                .on_click(cx.listener(
+                                    move |root, _, window, cx| {
+                                        root.edit_result_favorite(
+                                            Some((index, displayed.clone(), sequence)),
+                                            window,
+                                            cx,
+                                        )
+                                    },
+                                )),
+                            )
                     })),
             );
         }
@@ -458,18 +636,31 @@ mod tests {
     fn result_favorites_cancels_prefill_without_discarding_browse_load() {
         let mut state = ResultFavorites::default();
         state.pending = Some(Request::Load(1));
-        state.pending_prefill = Some(multi_launcher::actions::Action {
-            label: "test".into(),
-            desc: String::new(),
-            action: "test".into(),
-            args: None,
-        });
+        state.pending_draft = Some(super::OpenDraft::Prefilled(
+            multi_launcher::actions::Action {
+                label: "test".into(),
+                desc: String::new(),
+                action: "test".into(),
+                args: None,
+            },
+        ));
         assert!(state.restart_blocker().is_some());
         assert!(state.cancel_draft());
-        assert!(state.pending_prefill.is_none());
+        assert!(state.pending_draft.is_none());
         assert!(state.restart_blocker().is_none());
         assert_eq!(state.pending, Some(Request::Load(1)));
         assert!(state.consume(Request::Load(1)));
+    }
+
+    #[test]
+    fn named_draft_cancellation_keeps_the_load_receipt() {
+        let mut state = ResultFavorites::default();
+        state.pending = Some(Request::Load(9));
+        state.pending_draft = Some(super::OpenDraft::Named("Case".into()));
+        assert!(state.restart_blocker().is_some());
+        assert!(state.cancel_draft());
+        assert_eq!(state.pending, Some(Request::Load(9)));
+        assert!(state.consume(Request::Load(9)));
     }
 
     #[test]

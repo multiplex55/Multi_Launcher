@@ -1607,6 +1607,7 @@ enum InstalledSearchRoute {
     Settings,
     Help,
     FavoritesBrowse,
+    FavoritesNamed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1653,8 +1654,12 @@ fn classify_installed_search_command(
         }
         Command::Dialog(DialogCommand::Settings) => Ok(InstalledSearchRoute::Settings),
         Command::Dialog(DialogCommand::Help) => Ok(InstalledSearchRoute::Help),
-        Command::Storage(StorageCommand::FavoriteDialog(label)) if label.is_empty() => {
-            Ok(InstalledSearchRoute::FavoritesBrowse)
+        Command::Storage(StorageCommand::FavoriteDialog(label)) => {
+            if label.is_empty() {
+                Ok(InstalledSearchRoute::FavoritesBrowse)
+            } else {
+                Ok(InstalledSearchRoute::FavoritesNamed(label.clone()))
+            }
         }
         _ => Err(InstalledSearchActionError::Unsupported(
             "The selected launcher action is not an installed Search route.".to_owned(),
@@ -7553,7 +7558,7 @@ impl RootWindow {
         let help_open = matches!(&installed_invocation.route, InstalledSearchRoute::Help);
         let favorites_open = matches!(
             &installed_invocation.route,
-            InstalledSearchRoute::FavoritesBrowse
+            InstalledSearchRoute::FavoritesBrowse | InstalledSearchRoute::FavoritesNamed(_)
         );
         let Some(operation) = self.restart_admission.admit() else {
             if query_set {
@@ -7606,6 +7611,11 @@ impl RootWindow {
                 drop(operation);
                 let focus = Some(self.query.focus_handle(cx));
                 self.open_favorites_browse(focus, window, cx);
+            }
+            InstalledSearchRoute::FavoritesNamed(label) => {
+                drop(operation);
+                let focus = Some(self.query.focus_handle(cx));
+                self.open_favorites_named(label, focus, window, cx);
             }
         }
         // Hash Open and Settings preserve the launcher query and results.
@@ -13544,6 +13554,17 @@ mod tests {
                 InstalledSearchRoute::FavoritesBrowse
             ));
         }
+        let named = multi_launcher::plugin::search_filtered_plugins(
+            providers.plugins(), "FAV ADD Mixed Case", Some(&enabled), Some(&search),
+        );
+        assert_eq!(named.len(), 1);
+        assert!(matches!(
+            parse_installed_search_invocation(named[0].clone(), ActivationSource::Enter).unwrap().route,
+            InstalledSearchRoute::FavoritesNamed(ref label) if label == "Mixed Case"
+        ));
+        assert!(multi_launcher::plugin::search_filtered_plugins(
+            providers.plugins(), "fav addx", Some(&enabled), Some(&search),
+        ).is_empty());
         assert!(multi_launcher::plugin::search_filtered_plugins(
             providers.plugins(), "fav", Some(&HashSet::new()), Some(&search),
         ).is_empty());
@@ -13554,7 +13575,7 @@ mod tests {
         let commands = providers.cached_commands(Some(&enabled));
         assert_eq!(commands.len(), 2);
         assert!(providers.cached_commands(Some(&HashSet::new())).is_empty());
-        for (command, admitted) in [("fav:dialog:", true), ("fav:dialog:name", false)] {
+        for (command, admitted) in [("fav:dialog:", true), ("fav:dialog:name", true)] {
             let action = saved_action("saved favorite", command, None);
             assert_eq!(
                 parse_installed_search_invocation(action, ActivationSource::Enter).is_ok(),
