@@ -9,6 +9,7 @@ mod file_search;
 mod favorites;
 mod hash_jump;
 mod hash_jump_select;
+mod launcher_controls;
 mod jump_mode;
 mod search_providers;
 
@@ -9588,146 +9589,13 @@ impl Render for RootWindow {
                     .track_scroll(&self.launcher_results_scroll)
                     .children(result_rows)
             }))
-            .child(
-                Label::new("Use the button to open or dismiss the retained window")
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height)),
-            )
-            .child(
-                Button::new("retained-window")
-                    .w_full()
-                    .min_w(px(0.0))
-                    .label("Open or dismiss retained window")
-                    .tab_stop(true)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_or_toggle_secondary(cx);
-                    })),
-            )
-            .child(
-                Button::new("coordinate-hud-probe")
-                    .w_full()
-                    .min_w(px(0.0))
-                    .label("Toggle passive Coordinate HUD (F6)")
-                    .tab_stop(true)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_coordinate_hud_probe(cx);
-                    })),
-            )
-            .child(
-                Button::new("open-hash-generator")
-                    .w_full()
-                    .min_w(px(0.0))
-                    .label("Open Hash Generator (Ctrl+G)")
-                    .tab_stop(true)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.run_hash_generator_open(window, cx);
-                    })),
-            )
-            .children(docked_hash.is_some().then(|| {
-                Label::new(
-                    "Ctrl+Shift+R: focus docked resize grip · arrows preview · Enter saves · Escape discards",
-                )
-                .w_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .text_size(px(metrics.small_text_size))
-                .line_height(px(metrics.line_height))
-            }))
-            .child(
-                Button::new("restart-egui")
-                    .w_full()
-                    .min_w(px(0.0))
-                    .label("Restart in egui (Ctrl+Shift+E)")
-                    .tab_stop(true)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_restart_confirmation(window, cx);
-                    })),
-            )
-            .child(
-                Label::new(self.coordinate_hud_probe_status.clone())
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height)),
-            )
-            .children(self.restart_status.as_ref().map(|status| {
-                Label::new(status.clone())
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_color(appearance::to_hsla(palette.warning))
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height))
-            }))
-            .children(self.toast_log_external_open_error.as_ref().map(|error| {
-                Label::new(error.clone())
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .id("toast-log-open-error")
-                    .text_color(appearance::to_hsla(palette.error))
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height))
-            }))
-            .child(
-                Button::new("quit-gpui")
-                    .w_full()
-                    .min_w(px(0.0))
-                    .label("Quit Multi Launcher")
-                    .tab_stop(true)
-                    .on_click(cx.listener(|this, _, _, cx| this.request_quit(cx))),
-            )
-            .children(self.secondary_error.as_ref().map(|error| {
-                Label::new(error.clone())
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_color(appearance::to_hsla(palette.error))
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height))
-            }))
-            .children(self.hash_open_error.as_ref().map(|error| {
-                Label::new(error.clone())
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_color(appearance::to_hsla(palette.error))
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height))
-            }))
-            .children(self.hash_presentation_error.as_ref().map(|error| {
-                Label::new(error.clone())
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_color(appearance::to_hsla(palette.error))
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height))
-            }))
-            .children(self.hash_native_geometry_error.as_ref().map(|error| {
-                Label::new(error.clone())
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .id("hash-native-geometry-error")
-                    .text_color(appearance::to_hsla(palette.warning))
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height))
-            }))
-            .children(self.hash_size_write_error.as_ref().map(|error| {
-                Label::new(error.clone())
-                    .w_full()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .id("hash-size-write-error")
-                    .text_color(appearance::to_hsla(palette.error))
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height))
-            }));
+            .child(launcher_controls::LauncherUtilityControls::new(
+                self,
+                cx.entity().downgrade(),
+                metrics,
+                palette,
+                docked_hash.is_some(),
+            ));
         let root_controls = root_controls
             .flex_shrink_0()
             .when(
@@ -9737,7 +9605,8 @@ impl Render for RootWindow {
                     && command_help_panel.is_none()
                     && quick_help_panel.is_none()
                     && docked_hash.is_none()
-                    && app_editor_panel.is_none(),
+                    && app_editor_panel.is_none()
+                    && self.file_search.as_ref().is_none_or(|view| !view.read(cx).open),
                 |this| {
                     // Center the ordinary root only when its content fits.
                     this.my_auto()
