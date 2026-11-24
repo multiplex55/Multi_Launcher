@@ -386,6 +386,32 @@ impl Settings {
             .context("failed to atomically persist launcher close preferences")
     }
 
+    /// Remove one panel from the latest persisted pins, preserving unrelated raw values.
+    pub fn unpin_panel_checked(path: impl AsRef<Path>, panel: crate::gui::Panel) -> anyhow::Result<()> {
+        let _transaction = transaction_guard();
+        let path = path.as_ref();
+        let source_bytes = read_exact_bytes(path)?;
+        let mut settings = parse_effective_settings(path, &source_bytes)?;
+        if !settings.pinned_panels.contains(&panel) {
+            return Ok(());
+        }
+        settings.pinned_panels.retain(|pinned| *pinned != panel);
+
+        let mut raw_settings = match serde_json::from_slice::<RawSettingsObject>(&source_bytes) {
+            Ok(raw_settings) => raw_settings,
+            Err(_) => raw_object(raw_value(&settings)?.as_ref())
+                .context("failed to canonicalize typed Settings for unpin")?,
+        };
+        raw_settings.insert(
+            "pinned_panels".to_owned(),
+            raw_value(&settings.pinned_panels)?,
+        );
+        let candidate = serde_json::to_vec(&raw_settings)
+            .context("failed to serialize unpin Settings transaction")?;
+        parse_effective_settings(path, &candidate)?;
+        save_json_atomic(path, &raw_settings).context("failed to atomically persist unpin")
+    }
+
     /// Acknowledge one GPUI-owned Boolean preference without
     /// reserializing any of the other Settings values. Both the typed
     /// baseline check and raw JSON patch share the canonical Settings lock.
@@ -1204,6 +1230,117 @@ mod tests {
 
         assert!(Settings::save_launcher_close_preferences(&path, &preferences).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn unpin_panel_checked_preserves_latest_order_and_raw_siblings() {
+        use crate::gui::Panel;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let opaque = r#"{ "large": 90071992547409931234567890123456789, "nested": [1, 2] }"#;
+        let latest = format!(
+            r#"{{"pinned_panels":["HelpWindow","FavDialog","FileSearchDialog","FavDialog"],"future":{opaque}}}"#
+        );
+        std::fs::write(&path, latest).unwrap();
+
+        Settings::unpin_panel_checked(&path, Panel::FavDialog).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let raw: super::RawSettingsObject = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(raw["future"].get(), opaque);
+        assert_eq!(
+            Settings::read_current(&path).unwrap().pinned_panels,
+            vec![Panel::HelpWindow, Panel::FileSearchDialog]
+        );
+    }
+
+    #[test]
+    fn unpin_panel_checked_acknowledges_absence_and_rejects_bad_source() {
+        use crate::gui::Panel;
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        Settings::unpin_panel_checked(&missing, Panel::FavDialog).unwrap();
+        assert!(!missing.exists());
+        let path = directory.path().join("settings.json");
+        for source in [
+            b" \r\n".as_slice(),
+            br#"{ "pinned_panels": ["HelpWindow"] }"#.as_slice(),
+        ] {
+            std::fs::write(&path, source).unwrap();
+            Settings::unpin_panel_checked(&path, Panel::FavDialog).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), source);
+        }
+        let malformed = br#"{ "pinned_panels": [42] }"#;
+        std::fs::write(&path, malformed).unwrap();
+        assert!(Settings::unpin_panel_checked(&path, Panel::FavDialog).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), malformed);
+        assert!(Settings::unpin_panel_checked(directory.path(), Panel::FavDialog).is_err());
+    }
+
+    #[test]
+    fn unpin_panel_checked_accepts_positional_settings() {
+        use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
+        struct Positional(Vec<Box<serde_json::value::RawValue>>);
+        impl<'de> Deserialize<'de> for Positional {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct Fields;
+                impl<'de> Visitor<'de> for Fields {
+                    type Value = Positional;
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        formatter.write_str("a serialized Settings object")
+                    }
+                    fn visit_map<M: MapAccess<'de>>(
+                        self,
+                        mut map: M,
+                    ) -> Result<Self::Value, M::Error> {
+                        let mut values = Vec::new();
+                        // Model an older positional file ending at the pins.
+                        let mut finished = false;
+                        while let Some((key, value)) =
+                            map.next_entry::<String, Box<serde_json::value::RawValue>>()?
+                        {
+                            if !finished {
+                                values.push(value);
+                                finished = key == "pinned_panels";
+                            }
+                        }
+                        Ok(Positional(values))
+                    }
+                }
+                deserializer.deserialize_map(Fields)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut settings = Settings::default();
+        settings.pinned_panels = vec![crate::gui::Panel::FavDialog, crate::gui::Panel::HelpWindow];
+        let object = serde_json::to_vec(&settings).unwrap();
+        let Positional(values) = serde_json::from_slice(&object).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&values).unwrap()).unwrap();
+        Settings::unpin_panel_checked(&path, crate::gui::Panel::FavDialog).unwrap();
+        assert_eq!(
+            Settings::read_current(&path).unwrap().pinned_panels,
+            vec![crate::gui::Panel::HelpWindow]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unpin_panel_checked_reports_atomic_write_failure() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let source = br#"{"pinned_panels":["FavDialog"]}"#;
+        std::fs::write(&path, source).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(&path)
+            .unwrap();
+        assert!(Settings::unpin_panel_checked(&path, crate::gui::Panel::FavDialog).is_err());
+        drop(lock);
+        assert_eq!(std::fs::read(&path).unwrap(), source);
     }
 
     #[test]
