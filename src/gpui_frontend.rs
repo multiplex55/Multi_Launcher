@@ -3436,6 +3436,12 @@ impl DockedHashResizePayload {
     }
 }
 
+fn launcher_column_width(viewport_width: f32, window_padding: f32) -> f32 {
+    (viewport_width - 2.0 * window_padding)
+        .max(1.0)
+        .min(HASH_ROOT_CONTROLS_WIDTH)
+}
+
 fn docked_hash_available_size(
     viewport_width: f32,
     viewport_height: f32,
@@ -9303,17 +9309,10 @@ impl Render for RootWindow {
             } => Some((view.clone(), *mount_generation)),
             _ => None,
         };
-        let root_controls_width = if docked_hash.is_some() {
-            docked_hash_available_size(
-                window.bounds().size.width.as_f32(),
-                window.bounds().size.height.as_f32(),
-                metrics.window_padding,
-            )
-            .width
-            .min(HASH_ROOT_CONTROLS_WIDTH)
-        } else {
-            HASH_ROOT_CONTROLS_WIDTH
-        };
+        let root_controls_width = launcher_column_width(
+            window.viewport_size().width.as_f32(),
+            metrics.window_padding,
+        );
         let completion_preview = self
             .search_completion
             .suggestions
@@ -12709,7 +12708,8 @@ mod tests {
         hash_picker_result_is_current,
         bounds_are_contained_by, clipped_search_jump_geometry, is_fresh_plain_search_enter,
         keyboard_docked_resize_preview,
-        launcher_result_activation_is_current, launcher_result_grid_row_id, launcher_result_row_id,
+        launcher_column_width, launcher_result_activation_is_current, launcher_result_grid_row_id,
+        launcher_result_row_id,
         launcher_results_viewport_max_height, parse_installed_search_invocation,
         physical_keypad_selection_move, pointer_docked_resize_preview, query_set_outcome_text,
         result_click_source, root_menu_close_should_restore_focus,
@@ -15592,6 +15592,14 @@ mod tests {
             HashPresentationMode::from_saved(Some(RememberedPresentation::Docked)),
             HashPresentationMode::Docked
         );
+    }
+
+    #[test]
+    fn launcher_column_width_fits_viewport_padding_and_preserves_preferred_width() {
+        assert_eq!(launcher_column_width(800.0, 12.0), 520.0);
+        assert_eq!(launcher_column_width(544.0, 12.0), 520.0);
+        assert_eq!(launcher_column_width(400.0, 12.0), 376.0);
+        assert_eq!(launcher_column_width(20.0, 12.0), 1.0);
     }
 
     #[test]
