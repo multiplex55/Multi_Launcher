@@ -2,12 +2,43 @@ use super::{CommandHelpProvider, supported_launcher_search_actions};
 use multi_launcher::actions::Action;
 use std::{collections::HashSet, sync::Arc};
 
+struct FileSearchBarePlugin(multi_launcher::plugins::file_search::FileSearchPlugin);
+
+impl multi_launcher::plugin::Plugin for FileSearchBarePlugin {
+    fn name(&self) -> &str {
+        "file_search"
+    }
+    fn description(&self) -> &str {
+        "Open local File Search"
+    }
+    fn capabilities(&self) -> &[&str] {
+        &["search"]
+    }
+    fn query_prefixes(&self) -> &[&str] {
+        &["fs"]
+    }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if query.trim().eq_ignore_ascii_case("fs") {
+            multi_launcher::plugin::Plugin::search(&self.0, query)
+        } else {
+            Vec::new()
+        }
+    }
+    fn commands(&self) -> Vec<Action> {
+        multi_launcher::plugin::Plugin::commands(&self.0)
+            .into_iter()
+            .filter(|action| action.label == "fs")
+            .collect()
+    }
+}
+
 /// Providers admitted by GPUI Search, including the owners of watched stores.
 pub(super) struct InstalledLauncherProviders {
     pub(super) hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
     settings: multi_launcher::plugins::settings::SettingsPlugin,
     help: multi_launcher::plugins::help::HelpPlugin,
     favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
+    file_search: FileSearchBarePlugin,
     folders: Option<multi_launcher::plugins::folders::FoldersPlugin>,
     bookmarks: Option<multi_launcher::plugins::bookmarks::BookmarksPlugin>,
 }
@@ -34,6 +65,9 @@ impl InstalledLauncherProviders {
             settings: multi_launcher::plugins::settings::SettingsPlugin,
             help: multi_launcher::plugins::help::HelpPlugin,
             favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
+            file_search: FileSearchBarePlugin(
+                multi_launcher::plugins::file_search::FileSearchPlugin::default(),
+            ),
             folders,
             bookmarks,
         }
@@ -50,6 +84,7 @@ impl InstalledLauncherProviders {
             Some(&self.settings as &dyn multi_launcher::plugin::Plugin),
             Some(&self.help as &dyn multi_launcher::plugin::Plugin),
             Some(&self.favorites as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             self.folders
                 .as_ref()
                 .map(|p| p as &dyn multi_launcher::plugin::Plugin),

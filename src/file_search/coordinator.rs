@@ -227,6 +227,16 @@ impl SearchCoordinator {
     }
 
     pub fn start_search(&mut self, request: SearchRequest) -> SearchId {
+        self.start_search_with_retirement_guard(request, ())
+    }
+
+    /// Retain a caller-owned guard until the executor actually returns, including
+    /// after cancellation, terminal publication, or panic.
+    pub fn start_search_with_retirement_guard<G: Send + 'static>(
+        &mut self,
+        request: SearchRequest,
+        guard: G,
+    ) -> SearchId {
         self.cancel_active_token();
 
         let id = SearchId(self.next_id);
@@ -257,6 +267,7 @@ impl SearchCoordinator {
         let worker_token = token;
         let worker_activity = activity.clone();
         thread::spawn(move || {
+            let _retirement_guard = guard;
             if let Some(activity) = worker_activity.as_ref() {
                 activity.mark_running();
             }
@@ -312,6 +323,11 @@ impl SearchCoordinator {
 
     pub fn drain_current_events(&mut self) -> Vec<SearchEvent> {
         self.drain_events(false)
+    }
+
+    /// Apply at most `limit` queued events, including stale events, per call.
+    pub fn drain_current_events_bounded(&mut self, limit: usize) -> Vec<SearchEvent> {
+        self.drain_events_bounded(false, limit)
     }
 
     pub fn drain_events_including_stale(&mut self) -> Vec<SearchEvent> {
@@ -380,8 +396,15 @@ impl SearchCoordinator {
     }
 
     fn drain_events(&mut self, include_stale: bool) -> Vec<SearchEvent> {
+        self.drain_events_bounded(include_stale, usize::MAX)
+    }
+
+    fn drain_events_bounded(&mut self, include_stale: bool, limit: usize) -> Vec<SearchEvent> {
         let mut events = Vec::new();
-        while let Ok(event) = self.event_receiver.try_recv() {
+        for _ in 0..limit {
+            let Ok(event) = self.event_receiver.try_recv() else {
+                break;
+            };
             let is_current = Some(event_id(&event)) == self.active_search_id;
             if include_stale || is_current {
                 self.apply_event(&event);
@@ -980,6 +1003,54 @@ mod tests {
             coordinator.diagnostics().last_error.as_deref(),
             Some("fake failure")
         );
+    }
+
+    #[test]
+    fn retirement_guard_outlives_terminal_and_logical_retirement() {
+        struct Guard(mpsc::Sender<()>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        struct HeldExecutor {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl SearchExecutor for HeldExecutor {
+            fn execute(
+                &self,
+                id: SearchId,
+                _: SearchRequest,
+                _: CancellationToken,
+                events: SearchEventSender,
+            ) {
+                events.send(SearchEvent::Completed { id }).unwrap();
+                self.entered.send(()).unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(FAKE_WORKER_TIMEOUT)
+                    .unwrap();
+            }
+        }
+        let (entered, observed) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let (dropped, observed_drop) = mpsc::channel();
+        let mut coordinator = SearchCoordinator::with_executor(Arc::new(HeldExecutor {
+            entered,
+            release: Mutex::new(wait),
+        }));
+        coordinator.start_search_with_retirement_guard(
+            request(SearchKind::Filename, SearchScope::Roots { roots: Vec::new() }, 10),
+            Guard(dropped),
+        );
+        observed.recv_timeout(FAKE_WORKER_TIMEOUT).unwrap();
+        assert_eq!(coordinator.drain_current_events_bounded(1).len(), 1);
+        coordinator.cancel_and_retire();
+        assert!(observed_drop.try_recv().is_err());
+        release.send(()).unwrap();
+        observed_drop.recv_timeout(FAKE_WORKER_TIMEOUT).unwrap();
     }
 
     #[test]

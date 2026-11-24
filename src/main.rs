@@ -4865,6 +4865,9 @@ fn main() -> anyhow::Result<()> {
             settings.enabled_plugins.clone(),
             settings.enabled_capabilities.clone(),
             search_startup,
+            settings.plugin_settings.get("file_search")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
             gpui_frontend::ExternalLaunchPreferences {
                 clear_query_after_run: settings.clear_query_after_run,
                 hide_after_run: settings.hide_after_run,

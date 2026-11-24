@@ -5,6 +5,7 @@ mod action_sheet;
 mod add_action;
 mod appearance;
 mod external_launch;
+mod file_search;
 mod favorites;
 mod hash_jump;
 mod hash_jump_select;
@@ -1723,6 +1724,15 @@ fn supported_launcher_search_actions(actions: Vec<Action>) -> Vec<Action> {
         .collect()
 }
 
+fn is_file_search_opener(query: &str, action: &Action) -> bool {
+    query.trim().eq_ignore_ascii_case("fs")
+        && action.args.is_none()
+        && matches!(
+            parse_action(action),
+            Ok(Command::FileSearch(multi_launcher::commands::FileSearchCommand::Open))
+        )
+}
+
 fn is_supported_launcher_search_action(action: &Action) -> bool {
     match parse_action(action) {
         Ok(command) => {
@@ -2358,6 +2368,8 @@ struct RootWindow {
     hash_clipboard_pending: Arc<HashClipboardPendingState>,
     hash_clipboard_operation: Option<HashClipboardOperation>,
     hash_clipboard_operation_counter: u64,
+    file_search: Option<Entity<file_search::FileSearchView>>,
+    file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     hash_window: HashWindowState,
     hash_window_revision: Arc<AtomicU64>,
     hash_mount_generation: Arc<AtomicU64>,
@@ -3201,6 +3213,7 @@ fn root_tab_traversed_to_search(
         && !context_stack_has_primary(context_stack, "SettingsEditor")
         && !context_stack_has_primary(context_stack, "CommandHelp")
         && !context_stack_has_primary(context_stack, "ToastLogViewer")
+        && !context_stack_has_primary(context_stack, "FileSearchPane")
         && !context_stack_has_primary(context_stack, "PopupMenu")
 }
 
@@ -4262,6 +4275,7 @@ struct RestartDrafts {
     hash_window_open: bool,
     settings: SettingsRestartDraft,
     show_examples: bool,
+    file_search_open: bool,
 }
 
 struct RestartSnapshot {
@@ -4422,6 +4436,9 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     } else if drafts.settings.open && drafts.settings.draft != drafts.settings.baseline {
         names.push("unsaved Settings preference");
     }
+    if drafts.file_search_open {
+        names.push("File Search form and results");
+    }
     if names.is_empty() {
         return "Restart Multi Launcher in the egui fallback? The GPUI windows will close."
             .to_owned();
@@ -4555,7 +4572,7 @@ impl RootWindow {
         {
             return;
         }
-        if self.quick_help.open || self.result_favorites.is_open() {
+        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| view.read(cx).open) {
             self.root_scroll
                 .scroll_to_top_of_item(self.docked_hash_scroll_item());
         } else {
@@ -5349,6 +5366,7 @@ impl RootWindow {
                 hash_window_open,
                 settings: self.settings_editor.restart_draft(),
                 show_examples: self.command_help.show_examples,
+                file_search_open: self.file_search.as_ref().is_some_and(|view| view.read(cx).open),
             },
             hash_work,
             child_windows,
@@ -5515,6 +5533,7 @@ impl RootWindow {
         }
         self.root_visibility.deactivate();
         self.retire_search_jump_mode();
+        if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.coordinate_hud_probe_closing
             .store(true, Ordering::Release);
         self.coordinate_hud_probe_status = "Closing GPUI services for the egui restart…".to_owned();
@@ -5844,7 +5863,11 @@ impl RootWindow {
     }
 
     fn quick_help_focus_change_allowed(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.action_sheet.is_some() || self.context_favorite_popup.is_some() || self.result_favorites.owns_focus(window, cx) {
+        if self.action_sheet.is_some()
+            || self.context_favorite_popup.is_some()
+            || self.result_favorites.owns_focus(window, cx)
+            || self.file_search.as_ref().is_some_and(|view| view.read(cx).owns_focus(window, cx))
+        {
             return false;
         }
         let contexts = window.context_stack();
@@ -6560,6 +6583,8 @@ impl RootWindow {
             .filter(|(provider, action)| {
                 if provider == "folders" || provider == "bookmarks" {
                     external_launch::provider_association_by_name(provider, action).is_some()
+                } else if provider == "file_search" {
+                    is_file_search_opener(&query, action)
                 } else {
                     is_supported_launcher_search_action(action)
                 }
@@ -7131,6 +7156,29 @@ impl RootWindow {
         true
     }
 
+    fn open_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(_permit) = self.restart_admission.admit() else { return; };
+        let view = if let Some(view) = &self.file_search {
+            view.clone()
+        } else {
+            let root = cx.entity().downgrade();
+            let admission = Arc::clone(&self.restart_admission);
+            let settings = self.file_search_settings.clone();
+            let view = cx.new(|cx| file_search::FileSearchView::new(window, cx, root, admission, settings));
+            self.file_search = Some(view.clone());
+            view
+        };
+        view.update(cx, |view, cx| view.show(window, cx));
+        self.root_scroll.scroll_to_top_of_item(
+            self.quick_help_scroll_item()
+                + usize::from(self.quick_help.open)
+                + usize::from(self.result_favorites.is_open())
+                + usize::from(self.app_editor.open),
+        );
+        self.query_history.reset();
+        cx.notify();
+    }
+
     fn activate_launcher_result(
         &mut self,
         generation: u64,
@@ -7148,6 +7196,15 @@ impl RootWindow {
             return;
         };
         if !self.launcher_result_activation_is_live(origin, window, cx) {
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "file_search") {
+            if is_file_search_opener(&query, &result.action)
+                && self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("file_search"))
+                && self.enabled_capabilities.as_ref().is_none_or(|caps| caps.get("file_search").is_none_or(|caps| caps.iter().any(|cap| cap == "search")))
+            {
+                self.open_file_search(window, cx);
+            }
             return;
         }
         if let Some(command) = result.saved_external() {
@@ -9763,6 +9820,9 @@ impl Render for RootWindow {
         if let Some(panel) = app_editor_panel {
             root_scroll = root_scroll.child(div().flex_shrink_0().child(panel));
         }
+        if let Some(view) = self.file_search.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().child(view.clone()));
+        }
         // The absolute Search observer still has a layout slot, so keep it after the pane anchors.
         if let (Some(draft), Some(target_ids)) = (jump_geometry_draft, jump_target_ids) {
             root_scroll = root_scroll.child(jump_geometry_publisher(
@@ -11476,6 +11536,7 @@ pub(crate) fn run_foundation_window(
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_startup: LauncherSearchStartup,
+    file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     external_launch_preferences: ExternalLaunchPreferences,
     coordinate_tool_preferences: CoordinateToolPreferences,
     theme_settings: multi_launcher::settings::ThemeSettings,
@@ -11621,6 +11682,7 @@ pub(crate) fn run_foundation_window(
                         token.request_cancel();
                     }
                     root.retire_search_jump_mode();
+                    if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.drain_hash_native_geometry(cx, true);
                 });
             }
@@ -11806,6 +11868,8 @@ pub(crate) fn run_foundation_window(
                 hash_clipboard_pending: hash_clipboard_pending_for_root,
                 hash_clipboard_operation: None,
                 hash_clipboard_operation_counter: 0,
+                file_search: None,
+                file_search_settings: file_search_settings.clone(),
                 hash_window: HashWindowState::Closed,
                 hash_window_revision: window_revision_for_root,
                 hash_mount_generation: hash_mount_generation_for_root,
@@ -13640,6 +13704,37 @@ mod tests {
     }
 
     #[test]
+    fn file_search_provider_admits_only_enabled_bare_opener() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        let enabled = HashSet::from(["file_search".to_owned()]);
+        let search = HashMap::from([("file_search".to_owned(), vec!["search".to_owned()])]);
+        let rows = multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "FS", Some(&enabled), Some(&search));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "file_search");
+        assert!(super::is_file_search_opener("FS", &rows[0].1));
+        assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs file", Some(&enabled), Some(&search)).is_empty());
+        assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs", Some(&HashSet::new()), Some(&search)).is_empty());
+        let disabled_caps = HashMap::from([("file_search".to_owned(), Vec::new())]);
+        assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs", Some(&enabled), Some(&disabled_caps)).is_empty());
+    }
+
+    #[test]
+    fn file_search_opener_is_exact_and_current_rows_are_generation_bound() {
+        use super::{file_search::current_row, is_file_search_opener};
+        use multi_launcher::file_search::model::SearchId;
+        let action = saved_action("Open file search", "file_search:open", None);
+        assert!(is_file_search_opener(" FS ", &action));
+        assert!(!is_file_search_opener("fs file", &action));
+        let mut with_args = action.clone(); with_args.args = Some(String::new());
+        assert!(!is_file_search_opener("fs", &with_args));
+        assert!(current_row(true, 4, Some(SearchId(7)), 4, Some(SearchId(7)), 1, 0..2));
+        assert!(!current_row(true, 5, Some(SearchId(7)), 4, Some(SearchId(7)), 1, 0..2));
+        assert!(!current_row(true, 4, Some(SearchId(8)), 4, Some(SearchId(7)), 1, 0..2));
+        assert!(!current_row(false, 4, Some(SearchId(7)), 4, Some(SearchId(7)), 1, 0..2));
+        assert!(!current_row(true, 4, Some(SearchId(7)), 4, Some(SearchId(7)), 1, 100..102));
+    }
+
+    #[test]
     fn saved_executables_are_admitted_without_opening_the_provider_gate() {
         let action = multi_launcher::actions::Action {
             label: "Saved Tool".into(),
@@ -14085,7 +14180,7 @@ mod tests {
             .iter()
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(help_names, ["favorites", "hash_generator", "help", "settings"]);
+        assert_eq!(help_names, ["favorites", "file_search", "hash_generator", "help", "settings"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14114,7 +14209,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), 4);
+        assert_eq!(disabled_catalog.command_help_providers.len(), 5);
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(
