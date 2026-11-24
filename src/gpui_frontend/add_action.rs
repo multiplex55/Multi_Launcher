@@ -148,6 +148,12 @@ impl AppEditorState {
 }
 
 impl RootWindow {
+    fn app_editor_scroll_item(&self) -> usize {
+        self.quick_help_scroll_item()
+            + usize::from(self.quick_help.open)
+            + usize::from(self.result_favorites.is_open())
+    }
+
     /// The menu route supplies its live origin before dismissing the menu.
     pub(super) fn open_app_editor(
         &mut self,
@@ -164,10 +170,7 @@ impl RootWindow {
             self.app_editor.return_scroll = Some(self.root_scroll.offset());
             self.app_editor.open = true;
         }
-        let item = self.quick_help_scroll_item()
-            + usize::from(self.quick_help.open)
-            + usize::from(self.result_favorites.is_open());
-        self.root_scroll.scroll_to_top_of_item(item);
+        self.root_scroll.scroll_to_top_of_item(self.app_editor_scroll_item());
         if let Some(draft) = &self.app_editor.draft {
             draft.label.focus_handle(cx).focus(window, cx);
         } else {
@@ -196,12 +199,13 @@ impl RootWindow {
             self.app_editor.arguments_focus.clone(),
             args.focus_handle(cx),
         ];
-        let subscriptions = handles
+        let mut subscriptions: Vec<Subscription> = handles
             .iter()
             .enumerate()
             .map(|(index, handle)| {
                 cx.on_focus(handle, window, move |root, window, cx| {
                     if window.is_window_active() && root.app_editor.is_current_draft(draft_id) {
+                        root.root_scroll.scroll_to_top_of_item(root.app_editor_scroll_item());
                         if let Some(draft) = &root.app_editor.draft {
                             draft.scroll.scroll_to_item(index);
                             cx.notify();
@@ -210,6 +214,27 @@ impl RootWindow {
                 })
             })
             .collect();
+        let mut last_viewport = window.viewport_size();
+        subscriptions.push(cx.observe_window_bounds(window, move |root, window, cx| {
+            let viewport = window.viewport_size();
+            if viewport == last_viewport {
+                return;
+            }
+            last_viewport = viewport;
+            if !window.is_window_active()
+                || !root.app_editor.is_current_draft(draft_id)
+                || !root.app_editor.owner_focus.contains_focused(window, cx)
+            {
+                return;
+            }
+            root.root_scroll.scroll_to_top_of_item(root.app_editor_scroll_item());
+            if let Some(index) = handles.iter().position(|handle| handle.is_focused(window)) {
+                if let Some(draft) = &root.app_editor.draft {
+                    draft.scroll.scroll_to_item(index);
+                }
+            }
+            cx.notify();
+        }));
         self.app_editor.draft = Some(AddAppDraft {
             label,
             description,
@@ -470,6 +495,20 @@ impl RenderOnce for AppEditorPanel {
                 );
             let cancel_root = self.root.clone();
             let submit_root = self.root.clone();
+            let tab_root = self.root.clone();
+            panel = panel.capture_key_down(move |event: &KeyDownEvent, window, app| {
+                if event.keystroke.key != "tab" || !window.is_window_active() {
+                    return;
+                }
+                let _ = tab_root.update(app, |root, cx| {
+                    if root.app_editor.is_current_draft(draft_id)
+                        && root.app_editor.owner_focus.contains_focused(window, cx)
+                    {
+                        root.root_scroll.scroll_to_top_of_item(root.app_editor_scroll_item());
+                        cx.notify();
+                    }
+                });
+            });
             let reserved_height = 2.0 * metrics.window_padding
                 + 2.0 * metrics.panel_padding
                 + metrics.heading_text_size.max(metrics.line_height)
