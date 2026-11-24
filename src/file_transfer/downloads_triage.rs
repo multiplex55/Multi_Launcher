@@ -48,8 +48,8 @@ pub(crate) fn downloads_review_key(entry: &EntrySnapshot) -> [u8; 32] {
     hash.finalize().into()
 }
 
-#[derive(Debug)]
-pub(crate) enum DownloadsScanCompletion {
+#[derive(Debug, PartialEq, Eq)]
+pub enum DownloadsScanCompletion {
     Complete,
     Limited,
     Cancelled,

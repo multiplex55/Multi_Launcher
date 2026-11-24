@@ -6,6 +6,7 @@ use crate::file_transfer::{
     AdmissionError, DownloadsScan, DownloadsScanCompletion, EntryKind, EntrySnapshot,
     downloads_review_key, scan_downloads_directory,
 };
+use crate::platform::app_data::AppDataRoot;
 use std::{
     collections::HashMap,
     path::Path,
@@ -30,27 +31,77 @@ pub(crate) enum Origin {
     WebHost(String),
 }
 #[derive(Debug)]
-pub(crate) struct Row {
-    pub entry: EntrySnapshot,
-    pub review_proof: [u8; 32],
-    pub category: Category,
-    pub incomplete: bool,
-    pub large: bool,
-    pub older_installer: bool,
-    pub suspected_same_size: bool,
-    pub origin: Origin,
+pub struct Row {
+    pub(crate) entry: EntrySnapshot,
+    pub(crate) review_proof: [u8; 32],
+    pub(crate) category: Category,
+    pub(crate) incomplete: bool,
+    pub(crate) large: bool,
+    pub(crate) older_installer: bool,
+    pub(crate) suspected_same_size: bool,
+    pub(crate) origin: Origin,
 }
 #[derive(Debug)]
-pub(crate) struct Skipped {
-    pub name: std::ffi::OsString,
-    pub reason: AdmissionError,
+pub struct Skipped {
+    pub(crate) name: std::ffi::OsString,
+    pub(crate) reason: AdmissionError,
 }
 #[derive(Debug)]
-pub(crate) struct Scan {
-    pub root: crate::file_transfer::ParentSnapshot,
-    pub rows: Vec<Row>,
-    pub skipped: Vec<Skipped>,
-    pub completion: DownloadsScanCompletion,
+pub struct Scan {
+    pub(crate) root: crate::file_transfer::ParentSnapshot,
+    pub(crate) rows: Vec<Row>,
+    pub(crate) skipped: Vec<Skipped>,
+    pub(crate) completion: DownloadsScanCompletion,
+}
+
+impl Row {
+    /// The exact observed entry, including its held-parent lineage.
+    pub fn entry(&self) -> &EntrySnapshot {
+        &self.entry
+    }
+}
+
+impl Skipped {
+    pub fn name(&self) -> &std::ffi::OsStr {
+        &self.name
+    }
+
+    pub fn reason(&self) -> &AdmissionError {
+        &self.reason
+    }
+}
+
+impl Scan {
+    /// The scanner's held-directory identity and resolved root path.
+    pub fn root(&self) -> &crate::file_transfer::ParentSnapshot {
+        &self.root
+    }
+
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    pub fn skipped(&self) -> &[Skipped] {
+        &self.skipped
+    }
+
+    pub fn completion(&self) -> &DownloadsScanCompletion {
+        &self.completion
+    }
+}
+
+/// Read the canonical profile and scan on the calling thread. Call this from
+/// an owned worker: preferences, Windows root lookup and scanning perform I/O.
+/// An explicitly configured missing root is not replaced by the default.
+pub fn scan_profile(
+    profile: &AppDataRoot,
+    cancellation: &ScanCancellation,
+    now: SystemTime,
+) -> anyhow::Result<Scan> {
+    let store = DownloadsStore::open(profile)?;
+    let preferences = store.preferences();
+    let root = proposed_root(preferences.root.as_deref())?;
+    Ok(scan(&root, cancellation, now)?)
 }
 
 /// Use the explicit preference even when that location is unavailable.
@@ -221,6 +272,59 @@ fn parse_zone(bytes: &[u8]) -> Origin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn downloads_read_only_profile_scan_preserves_root_snapshot_and_store() {
+        let profile_dir = tempfile::tempdir().unwrap();
+        let root_dir = tempfile::tempdir().unwrap();
+        let profile = AppDataRoot::from_path(profile_dir.path());
+        let path = root_dir.path().join("fixture.zip");
+        std::fs::write(&path, b"owned fixture").unwrap();
+        let cancel = ScanCancellation::new();
+        let mut store = DownloadsStore::open(&profile).unwrap();
+        store
+            .set_preferences(&DownloadsPreferences {
+                root: Some(root_dir.path().to_path_buf()),
+                destination: Some(profile_dir.path().to_path_buf()),
+            })
+            .unwrap();
+        let preferences_path = profile_dir.path().join("downloads_triage.json");
+        let before = std::fs::read(&preferences_path).unwrap();
+        let receipt = scan_profile(&profile, &cancel, SystemTime::now()).unwrap();
+        assert_eq!(receipt.completion(), &DownloadsScanCompletion::Complete);
+        assert_eq!(
+            std::fs::canonicalize(receipt.root().path()).unwrap(),
+            std::fs::canonicalize(root_dir.path()).unwrap(),
+        );
+        assert_eq!(receipt.rows().len(), 1);
+        let row = &receipt.rows()[0];
+        assert_eq!(
+            row.entry().leaf().as_os_str(),
+            std::ffi::OsStr::new("fixture.zip"),
+        );
+        assert_eq!(row.entry().parent(), receipt.root());
+        assert_eq!(row.entry().path(), receipt.root().path().join("fixture.zip"));
+        assert_eq!(std::fs::read(preferences_path).unwrap(), before);
+    }
+
+    #[test]
+    fn downloads_read_only_scan_fails_for_explicit_missing_or_malformed_profile() {
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = AppDataRoot::from_path(profile_dir.path());
+        let missing = profile_dir.path().join("missing");
+        let mut store = DownloadsStore::open(&profile).unwrap();
+        store
+            .set_preferences(&DownloadsPreferences {
+                root: Some(missing),
+                destination: None,
+            })
+            .unwrap();
+        assert!(scan_profile(&profile, &ScanCancellation::new(), SystemTime::now()).is_err());
+        let preferences_path = profile_dir.path().join("downloads_triage.json");
+        std::fs::write(&preferences_path, b"{broken").unwrap();
+        assert!(scan_profile(&profile, &ScanCancellation::new(), SystemTime::now()).is_err());
+        assert_eq!(std::fs::read(preferences_path).unwrap(), b"{broken");
+    }
+
     #[test]
     fn downloads_triage_explicit_missing_root_does_not_fall_back() {
         let temp = tempfile::tempdir().unwrap();

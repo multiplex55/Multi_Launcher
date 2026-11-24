@@ -12,3 +12,13 @@ G11 owns `downloads-triage`. The built-in `downloads_triage` plugin accepts `dow
 | DOWNLOADS-06 | Preserve live dock/popout presentation and accepted-origin child delivery. Root-hidden operation remains observable. Close retires accepted selection, confirmation and active work. Replaced scans and windows reject late results. |
 
 `G10-EGUI-ZIP-HANDOFF-PREVIEW` records the actual `downloads` route, isolated scan, exact item checkbox selection and ZIP handoff. Filters, files, Recycle Bin and most host criteria remain pending. Use `downloads_triage_dialog_session_retires_selection`, `downloads_triage_runtime_marks_exact_rows_and_rejects_a_stale_transfer_ticket`, `downloads_triage_review_is_durable_and_bound_to_the_exact_revision` and the affected scan/rename/compare tests. The actual native Recycle Bin fixture is ignored by default and belongs only in disposable acceptance. GPUI remains pending.
+
+## First GPUI Inspect checkpoint
+
+Start with the canonical read-only Downloads scan and the regular-file Inspect dependency for G04. Load the versioned Downloads preferences from the current app profile. Use the explicit root when present, including its failure path, and the existing Windows Downloads resolver when unset. Preserve scan limits, completion, skipped reasons and each accepted entry's original snapshot. Keep preference reads and scanning in the worker.
+
+Mount a retained docked Triage pane from the stock Downloads aliases with the current plugin and Search capability gates. Show the resolved root, bounded pages, status, Refresh and one exact selected entry. Refresh and close retire older selection authority and cancel the active scan. Check the mounted view and scan generation before accepting any receipt.
+
+Inspect a current regular file by rechecking its original metadata off the UI thread. Apply the result only to the same live scan, selected entry and focused origin. Deliver the exact path through the shared Hash File opener, retaining current Hash work for the same file and clearing old results on a different file. The user calculates explicitly. Directory Inspect, background transfers, persistent review and the other G11 criteria stay in their existing packets.
+
+Use scoped locked fast-dev checks, one focused Nextest batch and an owned Windows replay. The disposable corpus has two files with known different digests, a directory, and an independently replaceable stale file. Check exact first and repeated Inspect, changed-file clearing, directory refusal, stale metadata refusal, and the unchanged canonical Downloads store.

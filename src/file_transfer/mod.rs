@@ -5,7 +5,10 @@
 
 mod downloads_triage;
 pub(crate) use downloads_triage::{MAX_RECYCLE_SELECTION, recycle_downloads};
-pub(crate) use downloads_triage::{scan_downloads_directory, downloads_review_key, DownloadsScan, DownloadsScanCompletion, DownloadsScanRow};
+pub(crate) use downloads_triage::{
+    DownloadsScan, DownloadsScanRow, downloads_review_key, scan_downloads_directory,
+};
+pub use downloads_triage::DownloadsScanCompletion;
 pub use downloads_triage::{with_downloads_entry_path, rename_downloads_entry, compare_downloads_pair};
 mod control;
 mod copy;

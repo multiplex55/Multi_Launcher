@@ -1,6 +1,6 @@
 # G11 — File Operations Center, Downloads Triage, and Explorer Tabs
 
-**Status:** Pending. **Owner:** G11 implementer with shared file-transfer and Explorer integration owners. No test or live operation was performed during drafting. Use the single migration branch.
+**Status:** In implementation. **Owner:** G11 implementer with shared file-transfer and Explorer integration owners. The first Downloads Triage increment supports the G04 Hash dependency. [Current checkpoint](../gui/downloads-triage.md#first-gpui-inspect-checkpoint)
 
 ## Objective and dependencies
 
