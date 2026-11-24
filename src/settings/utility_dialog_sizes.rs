@@ -6,9 +6,11 @@
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 use std::collections::BTreeMap;
 use std::fmt;
+
+use super::store::{RawSettingsObject, raw_object, raw_value};
 
 pub const CURRENT_VERSION: u16 = 2;
 pub const MAX_ACTIVE_TOOLS: usize = 96;
@@ -635,49 +637,142 @@ impl UtilityDialogSizes {
     }
 }
 
+fn raw_size_entry(raw: &RawValue, typed: &Entry) -> anyhow::Result<RawSettingsObject> {
+    if let Ok(object) = raw_object(raw) {
+        return Ok(object);
+    }
+    let values: Vec<Box<RawValue>> = serde_json::from_str(raw.get())?;
+    let fields: &[&str] = match typed {
+        Entry::Preferred { .. } => &["state", "size", "native"],
+        Entry::Reset { .. } | Entry::Geometry { .. } => &["state", "native"],
+    };
+    Ok(fields
+        .iter()
+        .map(|field| (*field).to_owned())
+        .zip(values)
+        .collect())
+}
+
+fn patch_size_envelope(
+    existing: Option<&RawValue>,
+    sizes: &UtilityDialogSizes,
+    key: UtilityToolKey,
+) -> anyhow::Result<Box<RawValue>> {
+    let Some(existing) = existing else {
+        return raw_value(sizes);
+    };
+    let original: UtilityDialogSizes = serde_json::from_str(existing.get())?;
+    let (Representation::Supported(original_envelope), Representation::Supported(final_envelope)) =
+        (&original.0, &sizes.0)
+    else {
+        bail!(
+            "saved utility window sizes use an unsupported or invalid format; preferences were left unchanged"
+        );
+    };
+    let mut envelope = raw_object(existing)?;
+    let legacy = envelope
+        .get("version")
+        .is_some_and(|version| version.get() == "1");
+    let mut entries = raw_object(
+        envelope
+            .get("entries")
+            .ok_or_else(|| anyhow::anyhow!("utility size entries are missing"))?,
+    )?;
+    let final_entry = final_envelope
+        .entries
+        .get(&key)
+        .ok_or_else(|| anyhow::anyhow!("utility size entry is missing"))?;
+    let mut entry = raw_object(raw_value(final_entry)?.as_ref())?;
+    if let Some(old_raw) = entries.get(key.as_str())
+        && let Some(old_typed) = original_envelope.entries.get(&key)
+    {
+        let old_entry = raw_size_entry(old_raw, old_typed)?;
+        if std::mem::discriminant(old_typed) == std::mem::discriminant(final_entry)
+            && let Some(state) = old_entry.get("state")
+        {
+            entry.insert("state".to_owned(), state.clone());
+        }
+        if matches!(old_typed, Entry::Preferred { .. })
+            && original.preference(key) == sizes.preference(key)
+            && let Some(size) = old_entry.get("size")
+        {
+            entry.insert("size".to_owned(), size.clone());
+        }
+        if !legacy
+            && original.native_geometry(key) == sizes.native_geometry(key)
+            && let Some(native) = old_entry.get("native")
+        {
+            entry.insert("native".to_owned(), native.clone());
+        }
+    }
+    if legacy {
+        // Legacy Reset ignored extra members. Canonicalize a sibling only
+        // when keeping its token would reject it or change its meaning in v2.
+        for (sibling, typed) in &final_envelope.entries {
+            if *sibling != key
+                && let Some(raw) = entries.get_mut(sibling.as_str())
+                && serde_json::from_str::<Value>(raw.get())
+                    .and_then(serde_json::from_value::<Entry>)
+                    .ok()
+                    .as_ref()
+                    != Some(typed)
+            {
+                *raw = raw_value(typed)?;
+            }
+        }
+    }
+    entries.insert(key.as_str().to_owned(), raw_value(&entry)?);
+    envelope.insert("version".to_owned(), raw_value(&CURRENT_VERSION)?);
+    envelope.insert("entries".to_owned(), raw_value(&entries)?);
+    raw_value(&envelope)
+}
+
 pub(crate) fn persist_mutation(
     settings_path: &str,
     key: UtilityToolKey,
     mutation: UtilitySizeMutation,
 ) -> anyhow::Result<(UtilitySizePreference, Option<NativeWindowGeometry>)> {
-    let (_, committed) = crate::settings::Settings::update_if_changed(settings_path, |settings| {
-        match mutation {
-            UtilitySizeMutation::Set(size) => {
-                settings.utility_dialog_sizes.set(key, size)?;
-            }
-            UtilitySizeMutation::SetNative(geometry) => {
-                settings
-                    .utility_dialog_sizes
-                    .set_native_geometry(key, geometry)?;
-            }
-            UtilitySizeMutation::Reset => {
-                settings.utility_dialog_sizes.reset(key)?;
-            }
-            UtilitySizeMutation::Components {
-                reset,
-                size,
-                native,
-            } => {
-                if reset {
-                    settings.utility_dialog_sizes.reset(key)?;
+    crate::settings::Settings::update_utility_envelope(
+        settings_path,
+        "utility_dialog_sizes",
+        |settings| {
+            let sizes = &mut settings.utility_dialog_sizes;
+            let before = sizes.clone();
+            match mutation {
+                UtilitySizeMutation::Set(size) => {
+                    sizes.set(key, size)?;
                 }
-                if let Some(size) = size {
-                    settings.utility_dialog_sizes.set(key, size)?;
+                UtilitySizeMutation::SetNative(geometry) => {
+                    sizes.set_native_geometry(key, geometry)?;
                 }
-                if let Some(geometry) = native {
-                    settings
-                        .utility_dialog_sizes
-                        .set_native_geometry(key, geometry)?;
+                UtilitySizeMutation::Reset => {
+                    sizes.reset(key)?;
+                }
+                UtilitySizeMutation::Components {
+                    reset,
+                    size,
+                    native,
+                } => {
+                    if reset {
+                        sizes.reset(key)?;
+                    }
+                    if let Some(size) = size {
+                        sizes.set(key, size)?;
+                    }
+                    if let Some(geometry) = native {
+                        sizes.set_native_geometry(key, geometry)?;
+                    }
                 }
             }
-        }
-        Ok((
-            settings.utility_dialog_sizes.preference(key),
-            settings.utility_dialog_sizes.native_geometry(key),
-        ))
-    })
-    .context("failed to persist utility window geometry")?;
-    Ok(committed)
+            Ok((
+                *sizes != before,
+                (sizes.preference(key), sizes.native_geometry(key)),
+            ))
+        },
+        |existing, settings| patch_size_envelope(existing, &settings.utility_dialog_sizes, key),
+        |intended, candidate| intended.utility_dialog_sizes == candidate.utility_dialog_sizes,
+    )
+    .context("failed to persist utility window geometry")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1027,13 +1122,15 @@ mod tests {
             UtilitySizeMutation::Set(size),
         )
         .unwrap();
-        let committed_bytes = std::fs::read(&path).unwrap();
-        let (changed, ()) = Settings::update_if_changed(path.to_str().unwrap(), |settings| {
-            settings.utility_dialog_sizes.set(key("diff"), size)?;
-            Ok(())
-        })
+        let mut committed_bytes = std::fs::read(&path).unwrap();
+        committed_bytes.extend_from_slice(b"\n\n");
+        std::fs::write(&path, &committed_bytes).unwrap();
+        persist_mutation(
+            path.to_str().unwrap(),
+            key("diff"),
+            UtilitySizeMutation::Set(size),
+        )
         .unwrap();
-        assert!(!changed, "equal settings should bypass the disk writer");
         assert_eq!(std::fs::read(&path).unwrap(), committed_bytes);
         let restored = Settings::load(path.to_str().unwrap()).unwrap();
         assert_eq!(
@@ -1067,6 +1164,223 @@ mod tests {
         );
         let encoded = serde_json::to_value(&reset.utility_dialog_sizes).unwrap();
         assert_eq!(encoded["entries"]["diff"]["state"], "reset");
+    }
+
+    #[test]
+    fn persistence_preserves_raw_components_siblings_and_v1_noops() {
+        use super::super::store::{RawSettingsObject, raw_object};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let path_str = path.to_str().unwrap();
+        let source = r#"{ "opaque": [ 12345678901234567890123 ], "utility_dialog_sizes": { "version": 2, "entries": { "diff": { "state": "preferred", "size": { "width": 700e0, "height": 500.00 }, "native": { "position": { "x": -12e0, "y": 3.0 }, "size": { "width": 800.00, "height": 600e0 }, "scale_factor": 1.0 } }, "file-preview": { "state": "reset", "native": null } } } }"#;
+        std::fs::write(&path, source).unwrap();
+        let diff = key("diff");
+        let original_sizes = Settings::load(path_str).unwrap().utility_dialog_sizes;
+        persist_mutation(
+            path_str,
+            diff,
+            UtilitySizeMutation::Components {
+                reset: true,
+                size: original_sizes.preferred(diff),
+                native: original_sizes.native_geometry(diff),
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+
+        let size = PreferredWindowSize::new(720.0, 520.0).unwrap();
+        let result = persist_mutation(path_str, diff, UtilitySizeMutation::Set(size)).unwrap();
+        assert_eq!(result.0, UtilitySizePreference::Preferred(size));
+        let root: RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["opaque"].get(), "[ 12345678901234567890123 ]");
+        let envelope = raw_object(&root["utility_dialog_sizes"]).unwrap();
+        let entries = raw_object(&envelope["entries"]).unwrap();
+        assert_eq!(
+            entries["file-preview"].get(),
+            r#"{ "state": "reset", "native": null }"#
+        );
+        let entry = raw_object(&entries["diff"]).unwrap();
+        assert_eq!(
+            entry["native"].get(),
+            r#"{ "position": { "x": -12e0, "y": 3.0 }, "size": { "width": 800.00, "height": 600e0 }, "scale_factor": 1.0 }"#
+        );
+        std::fs::write(&path, source).unwrap();
+        let native =
+            NativeWindowGeometry::new(SavedWindowPosition::new(10.0, 20.0).unwrap(), size, 1.0)
+                .unwrap();
+        persist_mutation(path_str, diff, UtilitySizeMutation::SetNative(native)).unwrap();
+        let root: RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let envelope = raw_object(&root["utility_dialog_sizes"]).unwrap();
+        let entries = raw_object(&envelope["entries"]).unwrap();
+        assert_eq!(
+            raw_object(&entries["diff"]).unwrap()["size"].get(),
+            r#"{ "width": 700e0, "height": 500.00 }"#
+        );
+        persist_mutation(path_str, diff, UtilitySizeMutation::Reset).unwrap();
+        let saved = Settings::load(path_str).unwrap();
+        assert_eq!(
+            saved.utility_dialog_sizes.preference(diff),
+            UtilitySizePreference::Reset
+        );
+        assert_eq!(saved.utility_dialog_sizes.native_geometry(diff), None);
+
+        let legacy = r#"{ "utility_dialog_sizes": { "version": 1, "entries": { "diff": { "state": "preferred", "size": { "width": 700e0, "height": 500.0 } }, "file-preview": [ "reset" ] } } }"#;
+        std::fs::write(&path, legacy).unwrap();
+        persist_mutation(
+            path_str,
+            diff,
+            UtilitySizeMutation::Set(PreferredWindowSize::new(700.0, 500.0).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), legacy.as_bytes());
+        persist_mutation(path_str, diff, UtilitySizeMutation::Set(size)).unwrap();
+        let root: RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let envelope = raw_object(&root["utility_dialog_sizes"]).unwrap();
+        assert_eq!(envelope["version"].get(), "2");
+        let entries = raw_object(&envelope["entries"]).unwrap();
+        assert_eq!(entries["file-preview"].get(), r#"[ "reset" ]"#);
+    }
+
+    #[test]
+    fn size_edit_preserves_explicit_null_native_token() {
+        use super::super::store::{RawSettingsObject, raw_object};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"utility_dialog_sizes":{"version":2,"entries":{"diff":{"state":"preferred","size":{"width":700,"height":500},"native":null}}}}"#).unwrap();
+        persist_mutation(
+            path.to_str().unwrap(),
+            key("diff"),
+            UtilitySizeMutation::Set(PreferredWindowSize::new(800.0, 600.0).unwrap()),
+        )
+        .unwrap();
+        let root: RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let envelope = raw_object(&root["utility_dialog_sizes"]).unwrap();
+        let entries = raw_object(&envelope["entries"]).unwrap();
+        assert_eq!(
+            raw_object(&entries["diff"]).unwrap()["native"].get(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn native_edit_preserves_docked_reset_token() {
+        use super::super::store::{RawSettingsObject, raw_object};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let source =
+            r#"{"utility_dialog_sizes":{"version":2,"entries":{"diff":{"state":"r\u0065set"}}}}"#;
+        std::fs::write(&path, source).unwrap();
+        let native = NativeWindowGeometry::new(
+            SavedWindowPosition::new(10.0, 20.0).unwrap(),
+            PreferredWindowSize::new(800.0, 600.0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(
+            persist_mutation(
+                path.to_str().unwrap(),
+                key("diff"),
+                UtilitySizeMutation::SetNative(native),
+            )
+            .unwrap(),
+            (UtilitySizePreference::Reset, Some(native))
+        );
+        let root: RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let envelope = raw_object(&root["utility_dialog_sizes"]).unwrap();
+        let entries = raw_object(&envelope["entries"]).unwrap();
+        assert_eq!(
+            raw_object(&entries["diff"]).unwrap()["state"].get(),
+            r#""r\u0065set""#
+        );
+    }
+
+    #[test]
+    fn native_edit_preserves_positional_size_and_tag_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let path_str = path.to_str().unwrap();
+        let source = r#"{"utility_dialog_sizes":{"version":2,"entries":{"diff":["pr\u0065ferred",{ "width": 700e0, "height": 500.00 },null]}}}"#;
+        std::fs::write(&path, source).unwrap();
+        let key = key("diff");
+        let size = PreferredWindowSize::new(700.0, 500.0).unwrap();
+        assert_eq!(
+            Settings::load(path_str)
+                .unwrap()
+                .utility_dialog_sizes
+                .preferred(key),
+            Some(size)
+        );
+        let native =
+            NativeWindowGeometry::new(SavedWindowPosition::new(10.0, 20.0).unwrap(), size, 1.0)
+                .unwrap();
+        assert_eq!(
+            persist_mutation(path_str, key, UtilitySizeMutation::SetNative(native)).unwrap(),
+            (UtilitySizePreference::Preferred(size), Some(native))
+        );
+        let root: RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let envelope = raw_object(&root["utility_dialog_sizes"]).unwrap();
+        let entries = raw_object(&envelope["entries"]).unwrap();
+        let entry = raw_object(&entries["diff"]).unwrap();
+        assert_eq!(entry["state"].get(), r#""pr\u0065ferred""#);
+        assert_eq!(
+            entry["size"].get(),
+            r#"{ "width": 700e0, "height": 500.00 }"#
+        );
+    }
+
+    #[test]
+    fn legacy_upgrade_normalizes_only_reset_entries_with_ignored_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let path_str = path.to_str().unwrap();
+        let source = r#"{"utility_dialog_sizes":{"version":1,"entries":{
+            "diff":{"state":"reset","size":{"width":700,"height":500},"native":{"position":{"x":10,"y":20},"size":{"width":800,"height":600},"scale_factor":1}},
+            "file-preview":{"state":"reset","future":true},
+            "settings":{"state":"reset","native":{"position":{"x":10,"y":20},"size":{"width":800,"height":600},"scale_factor":1}},
+            "hash-generator": { "state":"preferred", "size": { "width": 5e2, "width": 7e2, "height": 5e2 } }
+        }}}"#;
+        let diff = key("diff");
+        let size = PreferredWindowSize::new(700.0, 500.0).unwrap();
+        let native =
+            NativeWindowGeometry::new(SavedWindowPosition::new(30.0, 40.0).unwrap(), size, 1.0)
+                .unwrap();
+        for (mutation, expected) in [
+            (
+                UtilitySizeMutation::Set(size),
+                (UtilitySizePreference::Preferred(size), None),
+            ),
+            (
+                UtilitySizeMutation::SetNative(native),
+                (UtilitySizePreference::Reset, Some(native)),
+            ),
+        ] {
+            std::fs::write(&path, source).unwrap();
+            let before = Settings::load(path_str).unwrap().utility_dialog_sizes;
+            assert_eq!(before.preference(diff), UtilitySizePreference::Reset);
+            assert_eq!(before.native_geometry(diff), None);
+            assert_eq!(
+                persist_mutation(path_str, diff, mutation).unwrap(),
+                expected
+            );
+            let root: RawSettingsObject =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let envelope = raw_object(&root["utility_dialog_sizes"]).unwrap();
+            let entries = raw_object(&envelope["entries"]).unwrap();
+            assert_eq!(envelope["version"].get(), "2");
+            assert_eq!(entries["file-preview"].get(), r#"{"state":"reset"}"#);
+            assert_eq!(entries["settings"].get(), r#"{"state":"reset"}"#);
+            assert_eq!(
+                entries["hash-generator"].get(),
+                r#"{ "state":"preferred", "size": { "width": 5e2, "width": 7e2, "height": 5e2 } }"#
+            );
+        }
     }
 
     #[test]

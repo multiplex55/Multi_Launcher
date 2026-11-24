@@ -95,7 +95,18 @@ pub(crate) fn persist_presentation(
             let Some(existing) = existing else {
                 return raw_value(&settings.utility_presentations);
             };
-            let mut envelope = raw_object(existing)?;
+            let mut envelope = match raw_object(existing) {
+                Ok(envelope) => envelope,
+                Err(_) => {
+                    // The typed reader accepts positional utility envelopes too.
+                    let [version, entries]: [Box<serde_json::value::RawValue>; 2] =
+                        serde_json::from_str(existing.get())?;
+                    BTreeMap::from([
+                        ("version".to_owned(), version),
+                        ("entries".to_owned(), entries),
+                    ])
+                }
+            };
             let mut entries = raw_object(
                 envelope
                     .get("entries")
@@ -199,6 +210,32 @@ mod tests {
                 .get(key),
             Some(RememberedPresentation::Popout)
         );
+    }
+
+    #[test]
+    fn presentation_write_preserves_supported_positional_envelope_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let path_str = path.to_str().unwrap();
+        let source = r#"{ "opaque": [ 1, 2 ], "utility_presentations": [1, {"hash-generator":"docked","batch-rename":"p\u006fpout"}] }"#;
+        std::fs::write(&path, source).unwrap();
+        assert!(
+            Settings::load(path_str)
+                .unwrap()
+                .utility_presentations
+                .is_supported()
+        );
+
+        let key = UtilityToolKey::parse("hash-generator").unwrap();
+        persist_presentation(path_str, key, RememberedPresentation::Popout).unwrap();
+
+        let root: super::super::store::RawSettingsObject =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["opaque"].get(), "[ 1, 2 ]");
+        let envelope = raw_object(&root["utility_presentations"]).unwrap();
+        let entries = raw_object(&envelope["entries"]).unwrap();
+        assert_eq!(entries["batch-rename"].get(), r#""p\u006fpout""#);
+        assert_eq!(entries["hash-generator"].get(), r#""popout""#);
     }
 
     #[test]
