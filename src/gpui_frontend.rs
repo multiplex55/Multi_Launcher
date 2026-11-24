@@ -10010,7 +10010,7 @@ impl Render for RootWindow {
             ));
         }
         root_scroll = root_scroll.children(
-            self.render_result_favorites(root_controls_width, metrics, palette, cx)
+            self.favorites_panel(root_controls_width, metrics, palette, cx)
                 .map(|panel| div().flex_shrink_0().child(panel)),
         );
         let popup = self.context_favorite_popup.as_ref().and_then(|popup| {

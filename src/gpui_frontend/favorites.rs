@@ -691,57 +691,149 @@ impl RootWindow {
         cx.notify();
     }
 
-    pub(super) fn render_result_favorites(
+    pub(super) fn favorites_panel(
         &self,
         width: f32,
         metrics: ThemeMetrics,
         palette: SemanticPalette,
         cx: &Context<Self>,
-    ) -> Option<impl IntoElement> {
+    ) -> Option<FavoritesPanel> {
         let state = &self.result_favorites;
-        let owner = state.owner.as_ref()?;
+        let owner = state.owner.clone()?;
+        let draft = state.draft.as_ref().map(|draft| {
+            let choices = draft
+                .category
+                .read(cx)
+                .selected_value()
+                .and_then(|category| {
+                    self.search_catalog
+                        .providers
+                        .plugins()
+                        .into_iter()
+                        .find(|p| p.name() == category)
+                        .map(|plugin| {
+                            let filter = draft.filter.read(cx).value().to_string();
+                            (
+                                category.clone(),
+                                filter.clone(),
+                                favorite_picker_choices(plugin, &filter),
+                            )
+                        })
+                });
+            FavoritesPanelDraft {
+                label: draft.label.input.clone(),
+                command: draft.command.input.clone(),
+                args: draft.args.input.clone(),
+                category: draft.category.clone(),
+                filter: draft.filter.clone(),
+                choices,
+            }
+        });
+        Some(FavoritesPanel {
+            root: cx.entity().downgrade(),
+            owner,
+            draft,
+            rows: state.rows.clone(),
+            status: state.status.clone(),
+            pending: state.pending.is_some(),
+            pending_draft: state.pending_draft.is_some(),
+            waiting: state.write_pending(),
+            loaded: state.loaded,
+            sequence: state.sequence,
+            width,
+            metrics,
+            palette,
+        })
+    }
+}
+
+struct FavoritesPanelDraft {
+    label: Entity<TextareaState>,
+    command: Entity<TextareaState>,
+    args: Entity<TextareaState>,
+    category: Entity<SelectState<Vec<String>>>,
+    filter: Entity<InputState>,
+    choices: Option<(String, String, Vec<Action>)>,
+}
+
+#[derive(IntoElement)]
+pub(super) struct FavoritesPanel {
+    root: WeakEntity<RootWindow>,
+    owner: FocusHandle,
+    draft: Option<FavoritesPanelDraft>,
+    rows: Arc<[FavEntry]>,
+    status: Option<String>,
+    pending: bool,
+    pending_draft: bool,
+    waiting: bool,
+    loaded: bool,
+    sequence: u64,
+    width: f32,
+    metrics: ThemeMetrics,
+    palette: SemanticPalette,
+}
+
+impl RenderOnce for FavoritesPanel {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let state = &self;
+        let owner = &state.owner;
+        let width = state.width;
+        let metrics = state.metrics;
+        let palette = state.palette;
         let editing = state.draft.is_some();
-        let waiting = state.write_pending();
-        let dismiss_label = if editing || state.pending_draft.is_some() {
+        let waiting = state.waiting;
+        let dismiss_label = if editing || state.pending_draft {
             "Cancel"
         } else {
             "Close"
         };
-        let controls =
-            div()
-                .flex()
-                .gap_x(px(metrics.item_spacing_y))
-                .when(editing, |this| {
-                    this.child(
-                        Button::new("result-favorites-save")
-                            .label("Save")
-                            .tab_stop(true)
-                            .disabled(waiting || !state.loaded)
-                            .on_click(cx.listener(|root, _, window, cx| {
-                                root.save_result_favorite(window, cx)
-                            })),
-                    )
-                })
-                .when(!editing, |this| {
-                    this.child(
-                        Button::new("result-favorites-add")
-                            .label("Add Fav")
-                            .tab_stop(true)
-                            .disabled(!state.loaded || state.pending.is_some())
-                            .on_click(cx.listener(|root, _, window, cx| {
-                                root.edit_result_favorite(None, window, cx)
-                            })),
-                    )
-                })
-                .child(
-                    Button::new("result-favorites-close")
-                        .label(dismiss_label)
+        let controls = div()
+            .flex()
+            .gap_x(px(metrics.item_spacing_y))
+            .when(editing, |this| {
+                this.child(
+                    Button::new("result-favorites-save")
+                        .label("Save")
                         .tab_stop(true)
-                        .disabled(waiting)
-                        .on_click(cx.listener(|root, _, window, cx| {
-                            root.dismiss_result_favorites(window, cx)
-                        })),
-                );
+                        .disabled(waiting || !state.loaded)
+                        .on_click({
+                            let root = state.root.clone();
+                            move |_, window, app| {
+                                let _ = root
+                                    .update(app, |root, cx| root.save_result_favorite(window, cx));
+                            }
+                        }),
+                )
+            })
+            .when(!editing, |this| {
+                this.child(
+                    Button::new("result-favorites-add")
+                        .label("Add Fav")
+                        .tab_stop(true)
+                        .disabled(!state.loaded || state.pending)
+                        .on_click({
+                            let root = state.root.clone();
+                            move |_, window, app| {
+                                let _ = root.update(app, |root, cx| {
+                                    root.edit_result_favorite(None, window, cx)
+                                });
+                            }
+                        }),
+                )
+            })
+            .child(
+                Button::new("result-favorites-close")
+                    .label(dismiss_label)
+                    .tab_stop(true)
+                    .disabled(waiting)
+                    .on_click({
+                        let root = state.root.clone();
+                        move |_, window, app| {
+                            let _ = root
+                                .update(app, |root, cx| root.dismiss_result_favorites(window, cx));
+                        }
+                    }),
+            );
         let mut panel = div()
             .id("result-favorites-panel")
             .track_focus(owner)
@@ -770,7 +862,7 @@ impl RootWindow {
                         .flex_col()
                         .child(Label::new(label).id("result-favorite-field-label"))
                         .child(
-                            Textarea::new(&field.input)
+                            Textarea::new(field)
                                 .aria_label(label)
                                 .tab_index(0)
                                 .readonly(waiting),
@@ -793,125 +885,118 @@ impl RootWindow {
                         .tab_index(0)
                         .readonly(disabled),
                 );
-            if let Some(category) = draft.category.read(cx).selected_value() {
-                if let Some(plugin) = self
-                    .search_catalog
-                    .providers
-                    .plugins()
-                    .into_iter()
-                    .find(|p| p.name() == category)
-                {
-                    let filter = draft.filter.read(cx).value().to_string();
-                    let category = category.clone();
-                    let draft_id = draft.category.clone();
-                    panel = panel.child(
-                        div()
-                            .id("result-favorite-choices")
-                            .flex()
-                            .flex_col()
-                            .max_h(px(160.0))
-                            .overflow_y_scroll()
-                            .children(
-                                favorite_picker_choices(plugin, &filter)
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(index, choice)| {
-                                        let caption = format!("{} - {}", choice.label, choice.desc);
-                                        let category = category.clone();
-                                        let filter = filter.clone();
-                                        let draft_id = draft_id.clone();
-                                        Button::new(SharedString::from(format!(
-                                            "result-favorite-choice-{index}"
-                                        )))
-                                        .label(caption)
-                                        .tab_stop(true)
-                                        .disabled(disabled)
-                                        .on_click(
-                                            cx.listener(move |root, _, window, cx| {
-                                                root.pick_result_favorite(
-                                                    category.clone(),
-                                                    filter.clone(),
-                                                    choice.clone(),
-                                                    draft_id.clone(),
-                                                    window,
-                                                    cx,
-                                                )
-                                            }),
-                                        )
-                                    }),
-                            ),
-                    );
-                }
-            }
-        } else if state.rows.is_empty() && state.pending.is_none() {
-            panel = panel.child(Label::new("No Favorites.").id("result-favorites-empty"));
-        } else if !state.rows.is_empty() {
-            panel =
-                panel.child(
+            if let Some((category, filter, choices)) = &draft.choices {
+                let category = category.clone();
+                let filter = filter.clone();
+                let draft_id = draft.category.clone();
+                panel = panel.child(
                     div()
-                        .id("result-favorites-rows")
+                        .id("result-favorite-choices")
                         .flex()
                         .flex_col()
                         .max_h(px(160.0))
                         .overflow_y_scroll()
-                        .children(state.rows.iter().enumerate().map(|(index, row)| {
-                            let caption = match &row.args {
-                                Some(args) => format!("{} · {} {}", row.label, row.action, args),
-                                None => format!("{} · {}", row.label, row.action),
-                            };
-                            let displayed = row.clone();
-                            let remove_displayed = displayed.clone();
-                            let sequence = state.sequence;
-                            div()
-                                .flex()
-                                .child(
-                                    Label::new(caption).id(format!("result-favorite-row-{index}")),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "result-favorite-edit-{index}"
-                                    )))
-                                    .label("Edit")
-                                    .tab_stop(true)
-                                    .disabled(!state.loaded || state.pending.is_some())
-                                    .on_click(cx.listener(move |root, _, window, cx| {
-                                        root.edit_result_favorite(
-                                            Some((index, displayed.clone(), sequence)),
-                                            window,
-                                            cx,
-                                        )
-                                    })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "result-favorite-remove-{index}"
-                                    )))
-                                    .label("Remove")
-                                    .tab_stop(true)
-                                    .disabled(!state.loaded || state.pending.is_some())
-                                    .on_click(cx.listener(move |root, _, window, cx| {
-                                        root.remove_result_favorite(
-                                            index,
-                                            remove_displayed.clone(),
-                                            sequence,
-                                            window,
-                                            cx,
-                                        )
-                                    })),
-                                )
+                        .children(choices.iter().cloned().enumerate().map(|(index, choice)| {
+                            let caption = format!("{} - {}", choice.label, choice.desc);
+                            let category = category.clone();
+                            let filter = filter.clone();
+                            let draft_id = draft_id.clone();
+                            let root = state.root.clone();
+                            Button::new(SharedString::from(format!(
+                                "result-favorite-choice-{index}"
+                            )))
+                            .label(caption)
+                            .tab_stop(true)
+                            .disabled(disabled)
+                            .on_click(move |_, window, app| {
+                                let _ = root.update(app, |root, cx| {
+                                    root.pick_result_favorite(
+                                        category.clone(),
+                                        filter.clone(),
+                                        choice.clone(),
+                                        draft_id.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            })
                         })),
                 );
+            }
+        } else if state.rows.is_empty() && !state.pending {
+            panel = panel.child(Label::new("No Favorites.").id("result-favorites-empty"));
+        } else if !state.rows.is_empty() {
+            panel = panel.child(
+                div()
+                    .id("result-favorites-rows")
+                    .flex()
+                    .flex_col()
+                    .max_h(px(160.0))
+                    .overflow_y_scroll()
+                    .children(state.rows.iter().enumerate().map(|(index, row)| {
+                        let caption = match &row.args {
+                            Some(args) => format!("{} · {} {}", row.label, row.action, args),
+                            None => format!("{} · {}", row.label, row.action),
+                        };
+                        let displayed = row.clone();
+                        let remove_displayed = displayed.clone();
+                        let sequence = state.sequence;
+                        let edit_root = state.root.clone();
+                        let remove_root = state.root.clone();
+                        div()
+                            .flex()
+                            .child(Label::new(caption).id(format!("result-favorite-row-{index}")))
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "result-favorite-edit-{index}"
+                                )))
+                                .label("Edit")
+                                .tab_stop(true)
+                                .disabled(!state.loaded || state.pending)
+                                .on_click(
+                                    move |_, window, app| {
+                                        let _ = edit_root.update(app, |root, cx| {
+                                            root.edit_result_favorite(
+                                                Some((index, displayed.clone(), sequence)),
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    },
+                                ),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "result-favorite-remove-{index}"
+                                )))
+                                .label("Remove")
+                                .tab_stop(true)
+                                .disabled(!state.loaded || state.pending)
+                                .on_click(
+                                    move |_, window, app| {
+                                        let _ = remove_root.update(app, |root, cx| {
+                                            root.remove_result_favorite(
+                                                index,
+                                                remove_displayed.clone(),
+                                                sequence,
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    },
+                                ),
+                            )
+                    })),
+            );
         }
-        Some(
-            panel
-                .children(
-                    state
-                        .status
-                        .as_ref()
-                        .map(|status| Label::new(status.clone()).id("result-favorites-status")),
-                )
-                .child(controls),
-        )
+        panel
+            .children(
+                state
+                    .status
+                    .as_ref()
+                    .map(|status| Label::new(status.clone()).id("result-favorites-status")),
+            )
+            .child(controls)
     }
 }
 
