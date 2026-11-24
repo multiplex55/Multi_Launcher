@@ -278,6 +278,46 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn add_action_atomic_replace_failure_preserves_seed_and_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.exe");
+        std::fs::write(&target, b"owned target").unwrap();
+        let path = directory.path().join("actions.json");
+        let seed = vec![action("seed")];
+        let bytes = serde_json::to_vec_pretty(&seed).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let target = target.to_str().unwrap();
+        let path_str = path.to_str().unwrap();
+        let request = AddAction::new(" label ", " description ", target, true, " --arg ").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let version = actions_version();
+
+        let error = request.clone().commit(path_str).unwrap_err();
+        assert!(matches!(error.downcast_ref::<PersistenceError>(), Some(PersistenceError::AtomicWrite { .. })));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(actions_version(), version);
+
+        drop(held);
+        let expected = vec![seed[0].clone(), Action {
+            label: " label ".into(),
+            desc: " description ".into(),
+            action: target.into(),
+            args: Some(" --arg ".into()),
+        }];
+        assert_eq!(request.commit(path_str).unwrap(), expected);
+        assert_eq!(load_actions(path_str).unwrap(), expected);
+        assert_eq!(std::fs::read(&path).unwrap(), serde_json::to_vec_pretty(&expected).unwrap());
+    }
+
     #[test]
     fn action_id_lookup_is_catalog_bound_and_preserves_exact_args() {
         let mut duplicate_none = action("duplicate none");

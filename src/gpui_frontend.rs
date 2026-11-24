@@ -752,9 +752,20 @@ impl RenderOnce for LauncherMenuBar {
             .max_w_full()
             .min_w(px(0.0))
             .label("File")
-            .dropdown_menu(move |menu, _, _| {
+            .dropdown_menu(move |menu, window, cx| {
                 let action_context = file_action_context.clone();
-                menu.item(
+                let editor_context = file_action_context.clone();
+                menu.submenu("Apps", window, cx, move |menu, _, _| {
+                    let editor_context = editor_context.clone();
+                    menu.item(
+                        PopupMenuItem::new("Edit Apps")
+                            .action(Box::new(OpenAppEditor))
+                            .on_click(move |_, window, app| {
+                                editor_context.dispatch_action(&OpenAppEditor, window, app);
+                            }),
+                    )
+                })
+                .item(
                     PopupMenuItem::new("Close Application")
                         .action(Box::new(CloseApplication))
                         .on_click(move |_, window, app| {
@@ -2013,6 +2024,7 @@ gpui_kit::actions!([
     OpenActionSheet,
     ToggleCoordinateHudProbe,
     ToggleSettings,
+    OpenAppEditor,
     CloseApplication,
     CommandList,
     QuickHelp,
@@ -3977,6 +3989,7 @@ enum RootCloseBlocker {
     HashFilePicker,
     ToastLogOpen,
     FavoritesWrite,
+    AppWrite,
     BooleanPreferenceSave,
 }
 
@@ -5691,6 +5704,9 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if let Some(blocker) = self.app_editor.restart_blocker(cx) {
+            return Err(blocker.to_owned());
+        }
         if let Some(blocker) = self.result_favorites.restart_blocker() {
             return Err(blocker.to_owned());
         }
@@ -9304,6 +9320,9 @@ impl RootWindow {
             Some(RootCloseBlocker::FavoritesWrite) => {
                 self.restart_status = Some(FAVORITES_WRITE_PENDING.to_owned());
             }
+            Some(RootCloseBlocker::AppWrite) => {
+                self.restart_status = Some(add_action::APP_WRITE_CLOSE_STATUS.to_owned());
+            }
             Some(RootCloseBlocker::BooleanPreferenceSave) => {
                 if !self.prepare_boolean_preference_close(cx) {
                     return;
@@ -9328,9 +9347,14 @@ impl RootWindow {
         clipboard_message: Option<&'static str>,
         file_picker_pending: bool,
     ) -> Option<RootCloseBlocker> {
-        self.result_favorites
+        self.app_editor
             .write_pending()
-            .then_some(RootCloseBlocker::FavoritesWrite)
+            .then_some(RootCloseBlocker::AppWrite)
+            .or_else(|| {
+                self.result_favorites
+                    .write_pending()
+                    .then_some(RootCloseBlocker::FavoritesWrite)
+            })
             .or_else(|| {
                 root_close_blocker(
                     clipboard_message,
@@ -10134,6 +10158,17 @@ impl Render for RootWindow {
             }))
             .on_action(cx.listener(|this, _: &ToggleSettings, window, cx| {
                 this.toggle_settings_editor(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenAppEditor, window, cx| {
+                if !this.restart_admission.is_fenced() {
+                    let origin = this.root_menu_previous_focus.clone()
+                        .filter(|focus| this.focus_handle.contains(focus, window))
+                        .unwrap_or_else(|| this.query.focus_handle(cx));
+                    if this.file_menu_open {
+                        this.root_menu_action_routed_focus = true;
+                    }
+                    this.open_app_editor(Some(origin), window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &CommandList, window, cx| {
                 this.open_command_help(window, cx, CommandHelpOpenOrigin::Menu, None);
@@ -12326,6 +12361,13 @@ pub(crate) fn run_foundation_window(
                         let _ = root_for_window_close.update(app, |root, cx| {
                             root.restart_status =
                                 Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
+                            cx.notify();
+                        });
+                        false
+                    }
+                    Some(RootCloseBlocker::AppWrite) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status = Some(add_action::APP_WRITE_CLOSE_STATUS.to_owned());
                             cx.notify();
                         });
                         false
