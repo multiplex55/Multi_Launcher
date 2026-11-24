@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-The first G05/G06 Favorites toolbar and G04 Hash Escape passed 22 focused tests and the scoped Windows replay. The corrected Hash editor closes in both presentations and returns to the exact Search. The same replay exposed loss of opaque Settings values during utility writes. The preceding artifact reproduced the loss independently for presentation and native geometry. The shared utility Settings correction is next, followed by compact launcher width and folder and bookmark authoring. There are 219 source-backed GUI records, with zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers and active UI Automation focus remain open. [Toolbar and Hash evidence](VALIDATION_LOG.md#g05-and-g06-favorites-toolbar-and-g04-hash-escape-batch) · [Settings baseline](VALIDATION_LOG.md#g04-and-g06-utility-settings-preservation-baseline)
+The shared G04/G06 utility Settings correction passed 22 focused tests and the Windows replay. Pop Out and native resize independently preserved the unowned Settings values. The first Favorites toolbar and docked and popout Hash Escape have their scoped evidence. Compact launcher width is next, followed by folder and bookmark authoring. There are 219 source-backed GUI records and zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers and active UI Automation focus remain open. [Toolbar and Hash evidence](VALIDATION_LOG.md#g05-and-g06-favorites-toolbar-and-g04-hash-escape-batch) · [Settings evidence](VALIDATION_LOG.md#g04-and-g06-utility-settings-preservation)
 
 ## Execution kickoff
 
