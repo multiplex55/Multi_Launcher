@@ -12404,10 +12404,9 @@ impl LauncherApp {
                 });
                 for panel in self.pinned_panels.clone() {
                     if ui.button(panel.display_label()).clicked() && first_ui_pass {
-                        if self.panel_stack.last() == Some(&panel) {
-                            self.toggle_pin(panel);
-                        } else {
-                            self.focus_panel(panel);
+                        match super::panel_stack::saved_toolbar_action(&self.panel_stack, panel) {
+                            super::panel_stack::SavedToolbarAction::Unpin => self.toggle_pin(panel),
+                            super::panel_stack::SavedToolbarAction::Focus => self.focus_panel(panel),
                         }
                     }
                 }

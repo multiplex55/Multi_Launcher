@@ -42,6 +42,7 @@ mod file_search_window_host;
 mod folder_size_dialog;
 mod font_revision;
 mod hash_generator_dialog;
+pub mod panel_stack;
 mod password_generator_dialog;
 #[cfg(windows)]
 mod file_operations_center_dialog;
@@ -6621,11 +6622,11 @@ impl LauncherApp {
             _ => {}
         }
         if panel == Panel::DiagramStudioDialog && !self.diagram_studio_dialog.open {
-            self.panel_stack.retain(|open_panel| *open_panel != panel);
+            panel_stack::retire(&mut self.panel_stack, panel);
         } else if panel == Panel::MarkdownStudioDialog && !self.markdown_studio_dialog.open {
-            self.panel_stack.retain(|open_panel| *open_panel != panel);
-        } else if !self.panel_stack.contains(&panel) {
-            self.panel_stack.push(panel);
+            panel_stack::retire(&mut self.panel_stack, panel);
+        } else {
+            panel_stack::ensure(&mut self.panel_stack, panel);
         }
     }
 
@@ -6657,8 +6658,7 @@ impl LauncherApp {
             );
             return;
         }
-        self.panel_stack.retain(|p| *p != panel);
-        self.panel_stack.push(panel);
+        panel_stack::promote(&mut self.panel_stack, panel);
         if panel == Panel::ThemeSettingsDialog {
             let was_open = self.theme_settings_dialog.host_open;
             self.open_theme_settings_dialog();
@@ -7075,11 +7075,10 @@ impl LauncherApp {
             ($field:ident, $kind:expr) => {{
                 let is_open = self.is_panel_open($kind);
                 if is_open && !self.panel_states.$field {
-                    self.panel_stack.retain(|p| *p != $kind);
-                    self.panel_stack.push($kind);
+                    panel_stack::promote(&mut self.panel_stack, $kind);
                     self.panel_states.$field = true;
                 } else if !is_open && self.panel_states.$field {
-                    self.panel_stack.retain(|p| *p != $kind);
+                    panel_stack::retire(&mut self.panel_stack, $kind);
                     self.panel_states.$field = false;
                 }
             }};
