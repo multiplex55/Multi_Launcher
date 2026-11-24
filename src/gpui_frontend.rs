@@ -748,6 +748,8 @@ impl RenderOnce for LauncherMenuBar {
         let file_action_context = self.action_context.clone();
         let file_root = self.root.clone();
         let file_menu = Button::new("launcher-file-menu")
+            .max_w_full()
+            .min_w(px(0.0))
             .label("File")
             .dropdown_menu(move |menu, _, _| {
                 let action_context = file_action_context.clone();
@@ -766,6 +768,8 @@ impl RenderOnce for LauncherMenuBar {
         let settings_action_context = self.action_context.clone();
         let settings_root = self.root.clone();
         let settings_menu = Button::new("launcher-settings-menu")
+            .max_w_full()
+            .min_w(px(0.0))
             .label("Settings")
             .track_focus(&self.settings_menu_focus_handle)
             .dropdown_menu(move |menu, _, _| {
@@ -787,6 +791,8 @@ impl RenderOnce for LauncherMenuBar {
         let help_root = self.root;
         let toast_log_open_pending = self.toast_log_open_pending;
         let help_menu = Button::new("launcher-help-menu")
+            .max_w_full()
+            .min_w(px(0.0))
             .label("Help")
             .dropdown_menu(move |menu, _, _| {
                 let command_list_context = help_action_context.clone();
@@ -838,13 +844,19 @@ impl RenderOnce for LauncherMenuBar {
         let menus = div()
             .flex()
             .flex_row()
+            .flex_wrap()
+            .w_full()
+            .min_w(px(0.0))
             .items_center()
             .gap_x(px(6.0))
+            .gap_y(px(6.0))
             .child(file_menu)
             .child(settings_menu)
             .child(help_menu)
             .children(self.favorites_pinned.then(|| {
                 Button::new("pinned-favorites-toolbar")
+                    .max_w_full()
+                    .min_w(px(0.0))
                     .label(Panel::FavDialog.display_label())
                     .track_focus(&self.favorites_pin_focus_handle)
                     .tab_stop(true)
@@ -858,9 +870,15 @@ impl RenderOnce for LauncherMenuBar {
         div()
             .flex()
             .flex_col()
+            .w_full()
+            .min_w(px(0.0))
             .child(menus)
             .children(self.favorites_unpin_status.map(|status| {
-                Label::new(status).id("pinned-favorites-toolbar-status")
+                Label::new(status)
+                    .id("pinned-favorites-toolbar-status")
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
             }))
     }
 }
@@ -3387,7 +3405,7 @@ const HASH_DOCK_MIN_HEIGHT: f32 = 320.0;
 const HASH_DOCK_MAX_DIMENSION: f32 = 8192.0;
 const HASH_DOCK_RESIZE_HANDLE_SIZE: f32 = 26.0;
 const HASH_DOCK_KEYBOARD_RESIZE_STEP: f32 = 16.0;
-const HASH_ROOT_CONTROLS_WIDTH: f32 = 520.0;
+const LAUNCHER_PREFERRED_COLUMN_WIDTH: f32 = 520.0;
 
 #[derive(Clone, Copy, Debug)]
 enum DockedHashResizeOrigin {
@@ -3439,7 +3457,7 @@ impl DockedHashResizePayload {
 fn launcher_column_width(viewport_width: f32, window_padding: f32) -> f32 {
     (viewport_width - 2.0 * window_padding)
         .max(1.0)
-        .min(HASH_ROOT_CONTROLS_WIDTH)
+        .min(LAUNCHER_PREFERRED_COLUMN_WIDTH)
 }
 
 fn docked_hash_available_size(
@@ -9571,6 +9589,8 @@ impl Render for RootWindow {
         let search_field = div()
                 .id("launcher-search-input")
                 .relative()
+                .w_full()
+                .min_w(px(0.0))
                 .key_context("LauncherSearch")
                 .capture_action(cx.listener(|root, _: &OpenActionSheet, window, cx| {
                     root.open_action_sheet(window, cx);
@@ -9632,6 +9652,8 @@ impl Render for RootWindow {
                 }))
                 .child(
                     Input::new(&self.query)
+                        .w_full()
+                        .min_w(px(0.0))
                         .aria_label("Search")
                         .readonly(self.restart_admission.is_fenced()),
                 )
@@ -9733,12 +9755,18 @@ impl Render for RootWindow {
             .child(root_menu_bar)
             .child(
                 Label::new("Search")
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .text_size(px(metrics.heading_text_size))
                     .line_height(px(metrics.line_height)),
             )
             .child(search_field)
             .children(self.launcher_search_error.as_ref().map(|error| {
                 Label::new(error.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .id("launcher-search-error")
                     .text_color(appearance::to_hsla(palette.error))
                     .text_size(px(metrics.small_text_size))
@@ -9746,6 +9774,9 @@ impl Render for RootWindow {
             }))
             .children(completion_preview.into_iter().enumerate().map(|(index, preview)| {
                 Label::new(preview)
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .id(format!("launcher-search-completion-{index}"))
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
@@ -9764,11 +9795,16 @@ impl Render for RootWindow {
             }))
             .child(
                 Label::new("Use the button to open or dismiss the retained window")
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height)),
             )
             .child(
                 Button::new("retained-window")
+                    .w_full()
+                    .min_w(px(0.0))
                     .label("Open or dismiss retained window")
                     .tab_stop(true)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -9777,6 +9813,8 @@ impl Render for RootWindow {
             )
             .child(
                 Button::new("coordinate-hud-probe")
+                    .w_full()
+                    .min_w(px(0.0))
                     .label("Toggle passive Coordinate HUD (F6)")
                     .tab_stop(true)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -9785,6 +9823,8 @@ impl Render for RootWindow {
             )
             .child(
                 Button::new("open-hash-generator")
+                    .w_full()
+                    .min_w(px(0.0))
                     .label("Open Hash Generator (Ctrl+G)")
                     .tab_stop(true)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -9795,11 +9835,16 @@ impl Render for RootWindow {
                 Label::new(
                     "Ctrl+Shift+R: focus docked resize grip · arrows preview · Enter saves · Escape discards",
                 )
+                .w_full()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .text_size(px(metrics.small_text_size))
                 .line_height(px(metrics.line_height))
             }))
             .child(
                 Button::new("restart-egui")
+                    .w_full()
+                    .min_w(px(0.0))
                     .label("Restart in egui (Ctrl+Shift+E)")
                     .tab_stop(true)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -9808,17 +9853,26 @@ impl Render for RootWindow {
             )
             .child(
                 Label::new(self.coordinate_hud_probe_status.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height)),
             )
             .children(self.restart_status.as_ref().map(|status| {
                 Label::new(status.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .text_color(appearance::to_hsla(palette.warning))
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
             }))
             .children(self.toast_log_external_open_error.as_ref().map(|error| {
                 Label::new(error.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .id("toast-log-open-error")
                     .text_color(appearance::to_hsla(palette.error))
                     .text_size(px(metrics.small_text_size))
@@ -9826,30 +9880,44 @@ impl Render for RootWindow {
             }))
             .child(
                 Button::new("quit-gpui")
+                    .w_full()
+                    .min_w(px(0.0))
                     .label("Quit Multi Launcher")
                     .tab_stop(true)
                     .on_click(cx.listener(|this, _, _, cx| this.request_quit(cx))),
             )
             .children(self.secondary_error.as_ref().map(|error| {
                 Label::new(error.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .text_color(appearance::to_hsla(palette.error))
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
             }))
             .children(self.hash_open_error.as_ref().map(|error| {
                 Label::new(error.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .text_color(appearance::to_hsla(palette.error))
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
             }))
             .children(self.hash_presentation_error.as_ref().map(|error| {
                 Label::new(error.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .text_color(appearance::to_hsla(palette.error))
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
             }))
             .children(self.hash_native_geometry_error.as_ref().map(|error| {
                 Label::new(error.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .id("hash-native-geometry-error")
                     .text_color(appearance::to_hsla(palette.warning))
                     .text_size(px(metrics.small_text_size))
@@ -9857,6 +9925,9 @@ impl Render for RootWindow {
             }))
             .children(self.hash_size_write_error.as_ref().map(|error| {
                 Label::new(error.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
                     .id("hash-size-write-error")
                     .text_color(appearance::to_hsla(palette.error))
                     .text_size(px(metrics.small_text_size))
