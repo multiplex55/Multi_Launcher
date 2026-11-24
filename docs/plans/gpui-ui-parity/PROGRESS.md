@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G06 compact Favorites and saved pin passed its 10 focused tests and matched Windows replay from source `40c408bda`. Windows verified two compact sizes, retained draft and picker state through minimize and restore, and checked recovery from stale and malformed stores. Both owned processes exited 0 with exact Settings, Actions and restored Favorites. The next bounded packet is the first pinned toolbar control and the independent Hash Escape correction. There are 219 source-backed GUI records, with zero fully accepted GPUI product GUIs. Runtime inventory closure, wider Favorites providers, launcher width and active UI Automation focus remain open. [Compact Favorites checkpoint](CHECKPOINTS.md#g06-compact-favorites-and-saved-pin) · [Windows and Rust evidence](VALIDATION_LOG.md#g06-compact-favorites-and-saved-pin-batch)
+The first G05/G06 Favorites toolbar and G04 Hash Escape passed 22 focused tests and the scoped Windows replay. The corrected Hash editor closes in both presentations and returns to the exact Search. The same replay exposed loss of opaque Settings values during utility writes. The preceding artifact reproduced the loss independently for presentation and native geometry. The shared utility Settings correction is next, followed by compact launcher width and folder and bookmark authoring. There are 219 source-backed GUI records, with zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers and active UI Automation focus remain open. [Toolbar and Hash evidence](VALIDATION_LOG.md#g05-and-g06-favorites-toolbar-and-g04-hash-escape-batch) · [Settings baseline](VALIDATION_LOG.md#g04-and-g06-utility-settings-preservation-baseline)
 
 ## Execution kickoff
 

@@ -17,3 +17,7 @@ During execution classify issues as confirmed baseline defect, introduced migrat
 ## Observed validation limitation
 
 The Windows capture tool timed out when requesting imagery of the G01-A and G01-B GPUI windows. The same owned windows exposed UI Automation content. G01-B handled native keyboard input and retained focus and text. Preserve those receipts and keep visual evidence pending. Retry visual capture from the release candidate or another working display session. See [validation log](VALIDATION_LOG.md).
+
+## Confirmed utility Settings data loss
+
+G04 and G06 share ownership for the persistence correction. Before native close, both `persist_presentation` and the utility geometry writer drop opaque root Settings values through their whole typed rewrite. The previous linked build reproduced each write independently on an owned fixture. This blocks the affected HASH-08 Settings round trip. The next packet patches the canonical utility fields under the existing Settings lock and retains the unowned raw values. [Windows reproduction](VALIDATION_LOG.md#g04-and-g06-utility-settings-preservation-baseline)
