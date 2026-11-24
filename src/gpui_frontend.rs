@@ -9816,7 +9816,7 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().child(panel));
         }
         if let Some(view) = self.file_search.as_ref().filter(|view| view.read(cx).open) {
-            root_scroll = root_scroll.child(div().flex_shrink_0().child(view.clone()));
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // The absolute Search observer still has a layout slot, so keep it after the pane anchors.
         if let (Some(draft), Some(target_ids)) = (jump_geometry_draft, jump_target_ids) {
@@ -10673,6 +10673,20 @@ impl Render for HashGeneratorWindow {
                     cx.stop_propagation();
                 } else {
                     cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, confirm: &gpui_kit::base::actions::Confirm, window, cx| {
+                // The stock closed Select maps Ctrl+Enter to secondary Confirm
+                // before the containing Hash action can receive its shortcut.
+                let contexts = window.context_stack();
+                if confirm.secondary
+                    && context_stack_has_primary(&contexts, "Select")
+                    && !context_stack_has_primary(&contexts, "List")
+                    && this.focus_handle.contains_focused(window, cx)
+                    && this.is_current_mount()
+                {
+                    this.calculate_hash(cx);
+                    cx.stop_propagation();
                 }
             }))
             .on_action(cx.listener(|this, _: &CalculateHash, _, cx| {
@@ -11925,6 +11939,10 @@ pub(crate) fn run_foundation_window(
                         let Some(receipt) = receipt else {
                             return;
                         };
+                        if file_search::intercept_escape(&root, receipt, event, window, cx) {
+                            cx.stop_propagation();
+                            return;
+                        }
                         let is_hash = context_stack_has_primary(&event.context_stack, "HashGeneratorWindow");
                         if is_hash || context_stack_has_primary(&event.context_stack, "List") {
                             let owned = root.update(cx, |root, cx| {

@@ -1,6 +1,6 @@
 //! Retained docked filename-search pane.
 use super::*;
-use gpui_kit::base::Selectable;
+use gpui_kit::{KeyUpEvent, base::Selectable};
 use multi_launcher::file_search::{
     coordinator::SearchCoordinator,
     model::{
@@ -13,6 +13,46 @@ use multi_launcher::file_search::{
 
 const EVENT_BATCH: usize = 128;
 const MOUNTED_ROWS: usize = 100;
+
+#[cfg(windows)]
+pub(super) fn intercept_escape(
+    root: &WeakEntity<RootWindow>,
+    receipt: PhysicalKeydown,
+    event: &gpui_kit::KeystrokeEvent,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if event.keystroke.key != "escape"
+        || receipt.virtual_key != 0x1b
+        || receipt.modifiers.modified()
+        || !context_stack_has_primary(&event.context_stack, "FileSearchPane")
+    {
+        return false;
+    }
+    let Some(root) = root.upgrade() else {
+        return false;
+    };
+    let root = root.read(cx);
+    if !root.root_visibility.active.load(Ordering::Acquire)
+        || !root.root_visibility.visible.load(Ordering::Acquire)
+        || !root
+            .root_window
+            .is_some_and(|handle| handle.window_id() == window.window_handle().window_id())
+        || !root.native_window.is_some_and(|native| {
+            receipt.hwnd == native.identity.hwnd
+                && native_window_is_valid(native)
+                && current_foreground_identity() == Some(native.identity)
+        })
+    {
+        return false;
+    }
+    let view = root.file_search.clone();
+    view.is_some_and(|view| {
+        view.update(cx, |view, cx| {
+            view.handle_escape(window, cx, Some(receipt.held))
+        })
+    })
+}
 
 pub(super) fn current_row(
     open: bool,
@@ -52,6 +92,7 @@ pub(super) struct FileSearchView {
     directory: Entity<InputState>,
     focus: FocusHandle,
     calculate_focus: FocusHandle,
+    escape_waiting_for_release: bool,
     generation: u64,
     active: Option<SearchId>,
     validating: bool,
@@ -75,7 +116,17 @@ impl FileSearchView {
     ) -> Self {
         let term = cx.new(|cx| InputState::new(window, cx).placeholder("Filename to find"));
         let directory = cx.new(|cx| InputState::new(window, cx).placeholder("Directory to search"));
-        let mut subscriptions = Vec::new();
+        let focus = cx.focus_handle();
+        let mut subscriptions = vec![
+            cx.on_focus_out(&focus, window, |this, _, _, _| {
+                this.escape_waiting_for_release = false;
+            }),
+            cx.observe_window_activation(window, |this, window, _| {
+                if !window.is_window_active() {
+                    this.escape_waiting_for_release = false;
+                }
+            }),
+        ];
         for input in [term.clone(), directory.clone()] {
             subscriptions.push(cx.subscribe(
                 &input,
@@ -102,8 +153,9 @@ impl FileSearchView {
             settings,
             term,
             directory,
-            focus: cx.focus_handle(),
+            focus,
             calculate_focus: cx.focus_handle(),
+            escape_waiting_for_release: false,
             generation: 0,
             active: None,
             validating: false,
@@ -152,6 +204,7 @@ impl FileSearchView {
 
     pub fn shutdown(&mut self) {
         self.invalidate("Search closed.");
+        self.escape_waiting_for_release = false;
         self.open = false;
     }
 
@@ -238,6 +291,27 @@ impl FileSearchView {
     fn running(&self) -> bool {
         self.validating
             || (self.active.is_some() && self.coordinator.active_status() == SearchStatus::Running)
+    }
+
+    fn handle_escape(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        held: Option<bool>,
+    ) -> bool {
+        if !self.owns_focus(window, cx) || self.admission.is_fenced() {
+            return false;
+        }
+        if !held.unwrap_or(self.escape_waiting_for_release) {
+            if self.running() {
+                self.escape_waiting_for_release = true;
+                self.invalidate("Search cancelled.");
+                cx.notify();
+            } else {
+                self.close(window, cx);
+            }
+        }
+        true
     }
 
     fn visible_rows(&self) -> std::ops::Range<usize> {
@@ -444,6 +518,13 @@ impl Render for FileSearchView {
             .id("file-search-pane")
             .key_context("FileSearchPane")
             .track_focus(&self.focus)
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| {
+                    if this.handle_escape(window, cx, None) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key != "escape"
                     || event.keystroke.modifiers != Modifiers::default()
@@ -451,14 +532,13 @@ impl Render for FileSearchView {
                 {
                     return;
                 }
-                cx.stop_propagation();
-                if !event.is_held {
-                    if this.running() {
-                        this.invalidate("Search cancelled.");
-                        cx.notify();
-                    } else {
-                        this.close(window, cx);
-                    }
+                if this.handle_escape(window, cx, event.is_held.then_some(true)) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_key_up(cx.listener(|this, event: &KeyUpEvent, _, _| {
+                if event.keystroke.key == "escape" {
+                    this.escape_waiting_for_release = false;
                 }
             }))
             .flex()
@@ -474,6 +554,7 @@ impl Render for FileSearchView {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(
                         Button::new("file-search-start")
