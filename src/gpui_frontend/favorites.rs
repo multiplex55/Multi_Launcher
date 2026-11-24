@@ -1,4 +1,6 @@
 use std::sync::Arc;
+#[cfg(not(windows))]
+use std::sync::atomic::Ordering;
 
 use gpui_kit::base::Disableable;
 use gpui_kit::component::{
@@ -10,6 +12,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use multi_launcher::actions::Action;
+use multi_launcher::gui::Panel;
+use multi_launcher::gui::panel_stack::{self, SavedToolbarAction};
 use multi_launcher::gui::theme::{SemanticPalette, ThemeMetrics};
 use multi_launcher::plugins::fav::{
     FAV_FILE, FavEntry, FavoriteRowTarget, ManualFavoriteOrigin, PrefilledFavoriteDraft,
@@ -46,6 +50,8 @@ pub(super) struct ResultFavorites {
     pending_draft: Option<OpenDraft>,
     loaded: bool,
     pinned: bool,
+    unpin_pending: Option<u64>,
+    unpin_error: Option<String>,
     sequence: u64,
 }
 
@@ -55,6 +61,29 @@ impl ResultFavorites {
             pinned,
             ..Self::default()
         }
+    }
+
+    pub(super) fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    fn unpin_pending(&self) -> bool {
+        self.unpin_pending.is_some()
+    }
+
+    pub(super) fn unpin_status(&self) -> Option<&str> {
+        if self.unpin_pending() {
+            Some("Unpinning Favorites…")
+        } else {
+            self.unpin_error.as_deref()
+        }
+    }
+
+    pub(super) fn toolbar_disabled(&self, stack: &[Panel]) -> bool {
+        self.unpin_pending()
+            || (self.write_pending()
+                && panel_stack::saved_toolbar_action(stack, Panel::FavDialog)
+                    == SavedToolbarAction::Unpin)
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -68,7 +97,7 @@ impl ResultFavorites {
     }
 
     pub(super) fn write_pending(&self) -> bool {
-        matches!(self.pending, Some(Request::Write(_)))
+        self.unpin_pending() || matches!(self.pending, Some(Request::Write(_)))
     }
 
     pub(super) fn restart_blocker(&self) -> Option<&'static str> {
@@ -79,6 +108,28 @@ impl ResultFavorites {
         } else {
             None
         }
+    }
+
+    fn finish_unpin(&mut self, request: u64, result: Result<(), String>) -> bool {
+        if self.unpin_pending != Some(request) {
+            return false;
+        }
+        self.unpin_pending = None;
+        match result {
+            Ok(()) => {
+                self.pinned = false;
+                self.owner = None;
+                self.return_focus = None;
+                self.return_offset = None;
+                self.draft = None;
+                self.pending_draft = None;
+                self.retire_load();
+                self.status = None;
+                self.unpin_error = None;
+            }
+            Err(error) => self.unpin_error = Some(format!("Could not unpin Favorites: {error}")),
+        }
+        true
     }
 
     fn should_mount_pinned(&self) -> bool {
@@ -173,14 +224,10 @@ impl ResultFavorites {
                     WriteKind::Save { .. } => "save",
                     WriteKind::Remove => "remove",
                 };
-                let cancel = match operation {
-                    WriteKind::Save { .. } => "Cancel the draft. ",
-                    WriteKind::Remove => "",
-                };
                 self.status = Some(match error {
                     PrefilledFavoriteSaveError::Store(_) if self.pinned => {
                         self.loaded = false;
-                        format!("Could not {verb} Favorite: {error}. {cancel}{PINNED_FAVORITES_RELOAD}")
+                        format!("Could not {verb} Favorite: {error}. {PINNED_FAVORITES_RELOAD}")
                     }
                     PrefilledFavoriteSaveError::Store(_) => {
                         self.loaded = false;
@@ -192,7 +239,7 @@ impl ResultFavorites {
                             WriteKind::Save { .. } => "Favorites changed while this draft was open.",
                             WriteKind::Remove => "Favorites changed before this row could be removed.",
                         };
-                        format!("{reason} {cancel}{PINNED_FAVORITES_RELOAD}")
+                        format!("{reason} {PINNED_FAVORITES_RELOAD}")
                     }
                     PrefilledFavoriteSaveError::StaleTarget => match operation {
                         WriteKind::Remove => "Favorites changed before this row could be removed. Close and reopen Favorites to reload.".to_owned(),
@@ -419,8 +466,13 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.restart_admission.is_fenced() {
+        if self.restart_admission.is_fenced() || self.result_favorites.unpin_pending() {
             return;
+        }
+        if passive {
+            panel_stack::ensure(&mut self.panel_stack, Panel::FavDialog);
+        } else if !self.result_favorites.is_open() {
+            panel_stack::promote(&mut self.panel_stack, Panel::FavDialog);
         }
         let scroll_item = self.favorites_scroll_item();
         let state = &mut self.result_favorites;
@@ -549,7 +601,12 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         let state = &mut self.result_favorites;
-        if !state.is_open() || !state.loaded || state.pending.is_some() || state.draft.is_some() {
+        if !state.is_open()
+            || !state.loaded
+            || state.pending.is_some()
+            || state.unpin_pending()
+            || state.draft.is_some()
+        {
             return;
         }
         let (origin, entry) = if let Some((index, displayed, sequence)) = row {
@@ -598,7 +655,7 @@ impl RootWindow {
         let Some(fields) = state
             .draft
             .as_ref()
-            .filter(|_| state.pending.is_none() && state.loaded)
+            .filter(|_| state.pending.is_none() && !state.unpin_pending() && state.loaded)
         else {
             return;
         };
@@ -644,7 +701,7 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         let state = &mut self.result_favorites;
-        if !state.is_open() || !state.loaded || state.pending.is_some() {
+        if !state.is_open() || !state.loaded || state.pending.is_some() || state.unpin_pending() {
             return;
         }
         let Some(draft) = state.draft.as_mut() else {
@@ -700,6 +757,9 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.result_favorites.unpin_pending() {
+            return;
+        }
         let kind = match &write {
             FavoriteWrite::Save { origin, .. } => WriteKind::Save {
                 prefilled: matches!(origin, DraftOrigin::Prefilled(_)),
@@ -762,6 +822,109 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn favorites_toolbar_visibility_revision(&self, window: &Window) -> Option<u64> {
+        if !window.is_window_active()
+            || !self
+                .root_window
+                .is_some_and(|root| root.window_id() == window.window_handle().window_id())
+        {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            let native = self.native_window?;
+            self.root_visibility
+                .current_visible_revision(native)
+                .filter(|_| super::current_foreground_identity() == Some(native.identity))
+        }
+        #[cfg(not(windows))]
+        {
+            (self.root_visibility.visible.load(Ordering::Acquire)
+                && self.root_visibility.active.load(Ordering::Acquire))
+            .then(|| self.root_visibility.request_revision.load(Ordering::Acquire))
+        }
+    }
+
+    pub(super) fn pinned_favorites_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.result_favorites.pinned
+            || self.result_favorites.toolbar_disabled(&self.panel_stack)
+            || self.restart_admission.is_fenced()
+        {
+            return;
+        }
+        let Some(visibility_revision) = self.favorites_toolbar_visibility_revision(window) else {
+            return;
+        };
+        match panel_stack::saved_toolbar_action(&self.panel_stack, Panel::FavDialog) {
+            SavedToolbarAction::Focus => {
+                panel_stack::promote(&mut self.panel_stack, Panel::FavDialog);
+                self.root_scroll
+                    .scroll_to_top_of_item(self.favorites_scroll_item());
+                if let Some(owner) = &self.result_favorites.owner {
+                    owner.focus(window, cx);
+                }
+                cx.notify();
+            }
+            SavedToolbarAction::Unpin => {
+                let Some(permit) = self.restart_admission.admit() else {
+                    return;
+                };
+                let request = self.result_favorites.next();
+                self.result_favorites.unpin_pending = Some(request);
+                self.result_favorites.unpin_error = None;
+                let path = self.settings_path.clone();
+                let task = cx.background_executor().spawn(async move {
+                    multi_launcher::settings::Settings::unpin_panel_checked(path, Panel::FavDialog)
+                        .map_err(|error| format!("{error:#}"))
+                });
+                cx.spawn_in(window, async move |root, cx| {
+                    let result = task.await;
+                    let _ = root.update_in(cx, |root, window, cx| {
+                        let same_visible_root = root.favorites_toolbar_visibility_revision(window)
+                            == Some(visibility_revision);
+                        let toolbar_focused = root.favorites_pin_focus_handle.is_focused(window);
+                        let state = &mut root.result_favorites;
+                        let pane_focused = state.owns_focus(window, cx);
+                        let focus = state.return_focus.clone().filter(|focus| {
+                            focus != &root.favorites_pin_focus_handle
+                                && !state.owner.as_ref().is_some_and(|owner| {
+                                    owner == focus || owner.contains(focus, window)
+                                })
+                                && root.focus_handle.contains(focus, window)
+                        });
+                        let offset = state.return_offset;
+                        if !state.finish_unpin(request, result) {
+                            return;
+                        }
+                        if !state.pinned {
+                            panel_stack::retire(&mut root.panel_stack, Panel::FavDialog);
+                            if same_visible_root && pane_focused {
+                                if let Some(offset) = offset {
+                                    root.root_scroll.set_offset(offset);
+                                }
+                                focus
+                                    .unwrap_or_else(|| root.query.focus_handle(cx))
+                                    .focus(window, cx);
+                            } else if same_visible_root && toolbar_focused {
+                                root.query.focus_handle(cx).focus(window, cx);
+                            }
+                        }
+                        if matches!(
+                            root.restart_status.as_deref(),
+                            Some(FAVORITES_WRITE_PENDING | FAVORITES_RESTART_WRITE_PENDING)
+                        ) {
+                            root.restart_status = None;
+                        }
+                        cx.notify();
+                    });
+                    drop(permit);
+                })
+                .detach();
+                cx.notify();
+            }
+        }
+    }
+
     pub(super) fn dismiss_result_favorites(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = &mut self.result_favorites;
         let dismissal = state.dismiss();
@@ -779,6 +942,7 @@ impl RootWindow {
             state.retire_load();
             state.owner = None;
             state.status = None;
+            panel_stack::retire(&mut self.panel_stack, Panel::FavDialog);
             if restore {
                 if let Some(offset) = offset {
                     self.root_scroll.set_offset(offset);
@@ -837,8 +1001,14 @@ impl RootWindow {
             draft,
             rows: state.rows.clone(),
             browse_scroll: state.browse_scroll.clone(),
-            status: state.status.clone(),
-            pending: state.pending.is_some(),
+            status: state.status.as_ref().map(|status| {
+                if state.pinned && !state.loaded && state.draft.is_some() {
+                    format!("Cancel the draft before reloading. {status}")
+                } else {
+                    status.clone()
+                }
+            }),
+            pending: state.pending.is_some() || state.unpin_pending(),
             pending_draft: state.pending_draft.is_some(),
             waiting: state.write_pending(),
             loaded: state.loaded,
@@ -1179,6 +1349,45 @@ mod tests {
     use multi_launcher::gui::theme::ThemeMetrics;
 
     #[test]
+    fn canonical_write_blocks_unpin_and_allows_toolbar_reveal() {
+        use multi_launcher::gui::Panel;
+
+        let mut state = ResultFavorites::new(true);
+        state.pending = Some(Request::Write(1));
+        assert!(state.toolbar_disabled(&[Panel::FavDialog]));
+        assert!(!state.toolbar_disabled(&[Panel::FavDialog, Panel::HelpWindow]));
+        state.pending = None;
+        state.unpin_pending = Some(2);
+        assert!(state.toolbar_disabled(&[Panel::FavDialog, Panel::HelpWindow]));
+    }
+
+    #[test]
+    fn unpin_acknowledgement_preserves_load_and_pin_on_failure_and_retires_on_success() {
+        let mut state = ResultFavorites::new(true);
+        let load = state.begin_load(None);
+        state.unpin_pending = Some(42);
+        assert!(state.write_pending());
+        assert!(!state.finish_unpin(41, Ok(())));
+        assert_eq!(state.pending, Some(load));
+        assert!(state.finish_unpin(42, Err("settings unavailable".to_owned())));
+        assert!(!state.finish_unpin(42, Ok(())));
+        assert_eq!(state.pending, Some(load));
+        assert!(!state.write_pending());
+        assert!(state.pinned);
+        state.status = None;
+        assert_eq!(
+            state.unpin_status(),
+            Some("Could not unpin Favorites: settings unavailable")
+        );
+
+        state.unpin_pending = Some(43);
+        assert!(state.finish_unpin(43, Ok(())));
+        assert!(!state.pinned);
+        assert!(!state.consume(load));
+        assert_eq!(state.unpin_status(), None);
+    }
+
+    #[test]
     fn favorites_viewport_budget_fits_logical_viewport() {
         let metrics = ThemeMetrics {
             body_text_size: 14.0,
@@ -1339,7 +1548,13 @@ mod tests {
             Err(PrefilledFavoriteSaveError::StaleTarget),
         ));
         assert!(state.should_reload_browse());
-        assert!(state.status.as_deref().unwrap().contains("Run fav in Search"));
+        assert!(
+            state
+                .status
+                .as_deref()
+                .unwrap()
+                .contains("Run fav in Search")
+        );
         let reload = state.begin_load(None);
         assert!(!state.should_reload_browse());
         assert!(!state.consume(first));

@@ -6,6 +6,7 @@ mod appearance;
 mod favorites;
 
 use favorites::{FAVORITES_WRITE_PENDING, ResultFavorites};
+use multi_launcher::gui::{Panel, panel_stack};
 
 use std::{
     cell::{Cell, RefCell},
@@ -736,6 +737,10 @@ struct LauncherMenuBar {
     action_context: FocusHandle,
     settings_menu_focus_handle: FocusHandle,
     toast_log_open_pending: bool,
+    favorites_pin_focus_handle: FocusHandle,
+    favorites_pinned: bool,
+    favorites_toolbar_disabled: bool,
+    favorites_unpin_status: Option<String>,
 }
 
 impl RenderOnce for LauncherMenuBar {
@@ -777,6 +782,7 @@ impl RenderOnce for LauncherMenuBar {
                 root_menu_open_change(&settings_root, RootMenuKind::Settings, *open, window, app);
             });
 
+        let favorites_root = self.root.clone();
         let help_action_context = self.action_context;
         let help_root = self.root;
         let toast_log_open_pending = self.toast_log_open_pending;
@@ -829,7 +835,7 @@ impl RenderOnce for LauncherMenuBar {
                 root_menu_open_change(&help_root, RootMenuKind::Help, *open, window, app);
             });
 
-        div()
+        let menus = div()
             .flex()
             .flex_row()
             .items_center()
@@ -837,6 +843,25 @@ impl RenderOnce for LauncherMenuBar {
             .child(file_menu)
             .child(settings_menu)
             .child(help_menu)
+            .children(self.favorites_pinned.then(|| {
+                Button::new("pinned-favorites-toolbar")
+                    .label(Panel::FavDialog.display_label())
+                    .track_focus(&self.favorites_pin_focus_handle)
+                    .tab_stop(true)
+                    .disabled(self.favorites_toolbar_disabled)
+                    .on_click(move |_, window, app| {
+                        let _ = favorites_root.update(app, |root, cx| {
+                            root.pinned_favorites_click(window, cx);
+                        });
+                    })
+            }));
+        div()
+            .flex()
+            .flex_col()
+            .child(menus)
+            .children(self.favorites_unpin_status.map(|status| {
+                Label::new(status).id("pinned-favorites-toolbar-status")
+            }))
     }
 }
 
@@ -2136,6 +2161,7 @@ struct RootWindow {
     context_favorite_popup: Option<ContextFavoritePopup>,
     context_favorite_serial: u64,
     result_favorites: ResultFavorites,
+    panel_stack: Vec<Panel>,
     launcher_results_scroll: ScrollHandle,
     query_history: QueryHistoryNavigator,
     fresh_search_enter: Option<FreshSearchEnter>,
@@ -2184,6 +2210,7 @@ struct RootWindow {
     settings_focus_handle: FocusHandle,
     settings_owner_focus_handle: FocusHandle,
     settings_menu_focus_handle: FocusHandle,
+    favorites_pin_focus_handle: FocusHandle,
     command_help_owner_focus_handle: FocusHandle,
     command_help_close_focus_handle: FocusHandle,
     command_help_scroll: ScrollHandle,
@@ -6182,6 +6209,7 @@ impl RootWindow {
         let Some(receipt) = self.toast_log_viewer.open() else {
             return;
         };
+        panel_stack::promote(&mut self.panel_stack, Panel::ToastLogDialog);
         if self.help_menu_open {
             self.root_menu_action_routed_focus = true;
         }
@@ -6237,6 +6265,7 @@ impl RootWindow {
         if !self.toast_log_viewer.close() {
             return;
         }
+        panel_stack::retire(&mut self.panel_stack, Panel::ToastLogDialog);
         let restore_origin = restore_origin
             && self
                 .toast_log_owner_focus_handle
@@ -6361,6 +6390,7 @@ impl RootWindow {
                 .filter(|focus| self.focus_handle.contains(focus, window)),
         };
         self.quick_help.open = true;
+        panel_stack::promote(&mut self.panel_stack, Panel::HelpOverlay);
         self.fresh_search_enter = None;
         self.quick_help_return_focus = return_focus;
         self.quick_help_return_scroll_offset = Some(self.root_scroll.offset());
@@ -6408,6 +6438,7 @@ impl RootWindow {
                 .contains_focused(window, cx)
             && self.quick_help_focus_change_allowed(window, cx);
         self.quick_help.open = false;
+        panel_stack::retire(&mut self.panel_stack, Panel::HelpOverlay);
         let return_focus = self.quick_help_return_focus.take();
         let return_scroll_offset = self.quick_help_return_scroll_offset.take();
         if restore_origin {
@@ -6479,6 +6510,7 @@ impl RootWindow {
                 .unwrap_or_else(|| self.query.focus_handle(cx)),
         };
         self.command_help.open = true;
+        panel_stack::promote(&mut self.panel_stack, Panel::HelpWindow);
         self.command_help.status = None;
         self.command_help_return_focus = Some(return_focus);
         self.command_help_return_scroll_offset = Some(self.root_scroll.offset());
@@ -6522,6 +6554,7 @@ impl RootWindow {
         if !self.command_help.cancel_idle() {
             return;
         }
+        panel_stack::retire(&mut self.panel_stack, Panel::HelpWindow);
         let return_focus = self.command_help_return_focus.take();
         let return_scroll_offset = self.command_help_return_scroll_offset.take();
         if restore_origin {
@@ -6720,6 +6753,7 @@ impl RootWindow {
             drop(operation);
             return;
         };
+        panel_stack::promote(&mut self.panel_stack, Panel::Settings);
         if origin == SettingsOpenOrigin::Menu && self.settings_menu_open {
             self.root_menu_action_routed_focus = true;
         }
@@ -6849,6 +6883,7 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        panel_stack::retire(&mut self.panel_stack, Panel::Settings);
         clear_stale_settings_restart_status(&mut self.restart_status, true);
         let return_focus = self.settings_return_focus.take();
         let return_scroll_offset = self.settings_return_scroll_offset.take();
@@ -7718,6 +7753,7 @@ impl RootWindow {
                     session.end();
                     active_mount_generation.store(0, Ordering::Release);
                     root.hash_window = HashWindowState::Closed;
+                    panel_stack::retire(&mut root.panel_stack, Panel::HashGeneratorDialog);
                     root.hash_rehost_pending.store(false, Ordering::Release);
                     root.hash_rehost_revision.fetch_add(1, Ordering::AcqRel);
                     hash_window_revision.fetch_add(1, Ordering::AcqRel);
@@ -7762,6 +7798,7 @@ impl RootWindow {
     ) -> Result<(), String> {
         match &self.hash_window {
             HashWindowState::Docked { view, .. } => {
+                panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
                 let view = view.clone();
                 view.update(cx, |tool, cx| tool.focus_editable(root_window, cx));
                 return Ok(());
@@ -7780,6 +7817,7 @@ impl RootWindow {
                     tool.native_window
                 }) {
                     Ok(Some(native_window)) => {
+                        panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
                         let revision_guard = Arc::clone(&self.hash_window_revision);
                         cx.spawn(async move |_, cx| {
                             let _operation = operation;
@@ -7797,7 +7835,10 @@ impl RootWindow {
                         .detach();
                         return Ok(());
                     }
-                    Ok(None) if !cfg!(windows) => return Ok(()),
+                    Ok(None) if !cfg!(windows) => {
+                        panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
+                        return Ok(());
+                    }
                     Ok(None) => {
                         return Err(
                             "The Hash Generator window has no checked Windows handle to activate."
@@ -7925,6 +7966,7 @@ impl RootWindow {
                 popout_setup = native_window.map(|native_window| (native_window, view_for_setup));
             }
         }
+        panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
         self.hash_wake_signal.notify();
         self.hash_open_error = None;
         if let Some((native_window, view)) = popout_setup {
@@ -8582,6 +8624,7 @@ impl RootWindow {
         self.hash_mount_generation.store(0, Ordering::Release);
         self.hash_rehost_pending.store(false, Ordering::Release);
         self.hash_window = HashWindowState::Closed;
+        panel_stack::retire(&mut self.panel_stack, Panel::HashGeneratorDialog);
         self.hash_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -9602,6 +9645,10 @@ impl Render for RootWindow {
             action_context: self.focus_handle.clone(),
             settings_menu_focus_handle: self.settings_menu_focus_handle.clone(),
             toast_log_open_pending: self.toast_log_external_open_pending,
+            favorites_pin_focus_handle: self.favorites_pin_focus_handle.clone(),
+            favorites_pinned: self.result_favorites.is_pinned(),
+            favorites_toolbar_disabled: self.result_favorites.toolbar_disabled(&self.panel_stack),
+            favorites_unpin_status: self.result_favorites.unpin_status().map(str::to_owned),
         };
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
             root: cx.entity().downgrade(),
@@ -9998,6 +10045,11 @@ impl Render for RootWindow {
                 }
             }));
         }
+        root_scroll = root_scroll.children(
+            self.favorites_panel(root_controls_width, metrics, palette, cx)
+                .map(|panel| div().flex_shrink_0().child(panel)),
+        );
+        // The absolute Search observer still has a layout slot, so keep it after the pane anchors.
         if let (Some(draft), Some(target_ids)) = (jump_geometry_draft, jump_target_ids) {
             root_scroll = root_scroll.child(search_jump_geometry_publisher(
                 draft,
@@ -10009,10 +10061,6 @@ impl Render for RootWindow {
                 metrics,
             ));
         }
-        root_scroll = root_scroll.children(
-            self.favorites_panel(root_controls_width, metrics, palette, cx)
-                .map(|panel| div().flex_shrink_0().child(panel)),
-        );
         let popup = self.context_favorite_popup.as_ref().and_then(|popup| {
             let menu = popup.menu.as_ref()?;
             self.context_favorite_is_live(&popup.receipt, window, cx).then(|| {
@@ -11654,6 +11702,7 @@ pub(crate) fn run_foundation_window(
             let settings_focus_handle = cx.focus_handle();
             let settings_owner_focus_handle = cx.focus_handle();
             let settings_menu_focus_handle = cx.focus_handle();
+            let favorites_pin_focus_handle = cx.focus_handle();
             let command_help_owner_focus_handle = cx.focus_handle();
             let command_help_close_focus_handle = cx.focus_handle();
             let quick_help_owner_focus_handle = cx.focus_handle();
@@ -11679,6 +11728,7 @@ pub(crate) fn run_foundation_window(
                 context_favorite_popup: None,
                 context_favorite_serial: 0,
                 result_favorites: ResultFavorites::new(favorites_pinned),
+                panel_stack: Vec::new(),
                 launcher_results_scroll: ScrollHandle::new(),
                 query_history:
                     QueryHistoryNavigator::default(),
@@ -11729,6 +11779,7 @@ pub(crate) fn run_foundation_window(
                 settings_focus_handle,
                 settings_owner_focus_handle,
                 settings_menu_focus_handle,
+                favorites_pin_focus_handle,
                 command_help_owner_focus_handle,
                 command_help_close_focus_handle,
                 command_help_scroll: ScrollHandle::new(),
