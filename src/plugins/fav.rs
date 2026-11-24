@@ -421,6 +421,55 @@ fn bump_for_external_favs(path: &str, favs: &[FavEntry]) {
     bump_fav_version();
 }
 
+/// Sorted names of all installed providers available to the Favorites picker.
+pub fn favorite_picker_categories<I, S>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut names: Vec<_> = names.into_iter().map(Into::into).collect();
+    names.sort_unstable();
+    names
+}
+
+/// List a provider's authorable choices using the Favorites picker's literal filter.
+pub fn favorite_picker_choices(plugin: &dyn Plugin, filter: &str) -> Vec<Action> {
+    let actions = match plugin.name() {
+        "folders" => plugin.search(&format!("f {filter}")),
+        "bookmarks" => plugin.search(&format!("bm {filter}")),
+        _ => plugin.commands(),
+    };
+    let filter = filter.trim().to_lowercase();
+    actions
+        .into_iter()
+        .filter(|action| {
+            filter.is_empty()
+                || action.label.to_lowercase().contains(&filter)
+                || action.desc.to_lowercase().contains(&filter)
+                || action.action.to_lowercase().contains(&filter)
+        })
+        .collect()
+}
+
+/// Fill command and arguments from a picker choice without executing it.
+pub fn favorite_picker_pick(
+    plugin: &dyn Plugin,
+    choice: &Action,
+    existing_args: &str,
+) -> (String, Option<String>) {
+    let args = (!existing_args.trim().is_empty()).then(|| existing_args.to_owned());
+    if let Some(query) = choice.action.strip_prefix("query:") {
+        let query = join_command_args(query, args.as_deref());
+        if let Some(result) = plugin.search(&query).into_iter().next() {
+            (result.action, result.args)
+        } else {
+            (query, None)
+        }
+    } else {
+        (choice.action.clone(), args)
+    }
+}
+
 /// Resolve a command and optional arguments against a plugin's search results.
 ///
 /// The `command` and `args` are concatenated and passed to `plugin.search`.
@@ -747,6 +796,115 @@ mod tests {
         fn commands(&self) -> Vec<Action> {
             Vec::new()
         }
+    }
+
+    struct PickerPlugin {
+        name: &'static str,
+        commands: Vec<Action>,
+        results: Vec<Action>,
+        queries: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Plugin for PickerPlugin {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "picker test"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+        fn commands(&self) -> Vec<Action> {
+            self.commands.clone()
+        }
+        fn search(&self, query: &str) -> Vec<Action> {
+            self.queries.lock().unwrap().push(query.to_owned());
+            self.results.clone()
+        }
+    }
+
+    fn picker_action(label: &str, desc: &str, action: &str, args: Option<&str>) -> Action {
+        Action {
+            label: label.into(),
+            desc: desc.into(),
+            action: action.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn favorite_picker_categories_and_choices_preserve_provider_rules() {
+        use super::{favorite_picker_categories, favorite_picker_choices};
+        assert_eq!(
+            favorite_picker_categories(["zeta", "folders", "alpha"]),
+            ["alpha", "folders", "zeta"]
+        );
+        let items = vec![
+            picker_action("Label Match", "", "one", None),
+            picker_action("Other", "MATCH description", "two", None),
+            picker_action("Third", "", "command-Match", None),
+            picker_action("Excluded", "", "four", None),
+        ];
+        for (name, expected_query) in [
+            ("folders", Some("f  mAtCh ")),
+            ("bookmarks", Some("bm  mAtCh ")),
+            ("disabled", None),
+        ] {
+            let plugin = PickerPlugin {
+                name,
+                commands: items.clone(),
+                results: items.clone(),
+                queries: Default::default(),
+            };
+            assert_eq!(favorite_picker_choices(&plugin, " mAtCh "), items[..3]);
+            assert_eq!(
+                *plugin.queries.lock().unwrap(),
+                expected_query
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn favorite_picker_pick_resolves_queries_and_preserves_existing_args() {
+        use super::favorite_picker_pick;
+        let plugin = PickerPlugin {
+            name: "test",
+            commands: vec![],
+            results: vec![picker_action("resolved", "", "target", Some("result args"))],
+            queries: Default::default(),
+        };
+        let query = picker_action("unchanged label", "", "query:find  ", Some("ignored"));
+        assert_eq!(
+            favorite_picker_pick(&plugin, &query, "  existing"),
+            ("target".into(), Some("result args".into()))
+        );
+        assert_eq!(*plugin.queries.lock().unwrap(), vec!["find existing"]);
+        assert_eq!(query.label, "unchanged label");
+        let miss = PickerPlugin {
+            results: vec![],
+            ..plugin
+        };
+        assert_eq!(
+            favorite_picker_pick(&miss, &query, "  existing"),
+            ("find existing".into(), None)
+        );
+        let direct = picker_action("label", "", "direct", Some("ignored"));
+        assert_eq!(
+            favorite_picker_pick(&miss, &direct, "  args  "),
+            ("direct".into(), Some("  args  ".into()))
+        );
+        assert_eq!(
+            favorite_picker_pick(&miss, &direct, "  "),
+            ("direct".into(), None)
+        );
+        assert_eq!(
+            *miss.queries.lock().unwrap(),
+            vec!["find existing", "find existing"]
+        );
     }
 
     #[test]

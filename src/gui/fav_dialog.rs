@@ -7,9 +7,10 @@ use crate::gui::theme::widgets::{
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::fav::{
     FAV_FILE, FavEntry, FavoriteRowTarget, ManualFavoriteOrigin, PrefilledFavoriteDraft,
-    PrefilledFavoriteOrigin, PrefilledFavoriteSaveError, favorite_row_target, join_command_args,
-    load_favs, named_favorite_origin, prefilled_favorite_draft, remove_favorite_row,
-    resolve_with_plugin, save_manual_favorite, save_prefilled_favorite,
+    PrefilledFavoriteOrigin, PrefilledFavoriteSaveError, favorite_picker_categories,
+    favorite_picker_choices, favorite_picker_pick, favorite_row_target, load_favs,
+    named_favorite_origin, prefilled_favorite_draft, remove_favorite_row, resolve_with_plugin,
+    save_manual_favorite, save_prefilled_favorite,
 };
 use eframe::egui;
 
@@ -385,9 +386,9 @@ impl FavDialog {
                                 );
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Category");
-                                    let mut plugin_names: Vec<_> =
-                                        app.plugins.iter().map(|p| p.name().to_string()).collect();
-                                    plugin_names.sort_unstable();
+                                    let plugin_names = favorite_picker_categories(
+                                        app.plugins.iter().map(|p| p.name().to_owned()),
+                                    );
                                     egui::ComboBox::from_id_salt("fav_cat")
                                         .selected_text(if self.add_plugin.is_empty() {
                                             "Select".to_string()
@@ -413,14 +414,8 @@ impl FavDialog {
                                 if let Some(plugin) =
                                     app.plugins.iter().find(|p| p.name() == self.add_plugin)
                                 {
-                                    let filter = self.add_filter.trim().to_lowercase();
-                                    let mut actions = if plugin.name() == "folders" {
-                                        plugin.search(&format!("f {}", self.add_filter))
-                                    } else if plugin.name() == "bookmarks" {
-                                        plugin.search(&format!("bm {}", self.add_filter))
-                                    } else {
-                                        plugin.commands()
-                                    };
+                                    let actions =
+                                        favorite_picker_choices(plugin.as_ref(), &self.add_filter);
                                     let picker_height = ui.available_height().min(160.0).max(0.0);
                                     egui::ScrollArea::vertical()
                                         .id_salt("fav_plugin_actions")
@@ -428,14 +423,7 @@ impl FavDialog {
                                         .min_scrolled_height(0.0)
                                         .max_height(picker_height)
                                         .show(ui, |ui| {
-                                            for act in actions.drain(..) {
-                                                if !filter.is_empty()
-                                                    && !act.label.to_lowercase().contains(&filter)
-                                                    && !act.desc.to_lowercase().contains(&filter)
-                                                    && !act.action.to_lowercase().contains(&filter)
-                                                {
-                                                    continue;
-                                                }
+                                            for act in actions {
                                                 let action = ui.add(
                                                     egui::Button::new(format!(
                                                         "{} - {}",
@@ -444,25 +432,11 @@ impl FavDialog {
                                                     .wrap(),
                                                 );
                                                 if action.clicked() {
-                                                    let mut cmd = act.action.clone();
-                                                    let mut args = if self.args.trim().is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(self.args.clone())
-                                                    };
-                                                    if let Some(q) = cmd.strip_prefix("query:") {
-                                                        let q =
-                                                            join_command_args(q, args.as_deref());
-                                                        if let Some(res) =
-                                                            plugin.search(&q).into_iter().next()
-                                                        {
-                                                            cmd = res.action;
-                                                            args = res.args;
-                                                        } else {
-                                                            cmd = q;
-                                                            args = None;
-                                                        }
-                                                    }
+                                                    let (cmd, args) = favorite_picker_pick(
+                                                        plugin.as_ref(),
+                                                        &act,
+                                                        &self.args,
+                                                    );
                                                     self.command = cmd;
                                                     self.args = args.unwrap_or_default();
                                                 }
