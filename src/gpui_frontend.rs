@@ -943,6 +943,7 @@ impl RenderOnce for ToastLogViewerPanel {
             .flex_col()
             .gap_y(px(self.metrics.item_spacing_y))
             .w(px(self.width))
+            .max_w_full()
             .p(px(self.metrics.panel_padding))
             .bg(appearance::to_hsla(self.palette.panel_surface))
             .rounded(px(self.metrics.corner_radius))
@@ -1192,6 +1193,7 @@ impl RenderOnce for CommandHelpPanel {
             .flex_col()
             .gap_y(px(metrics.item_spacing_y))
             .w(px(self.width))
+            .max_w_full()
             .p(px(metrics.panel_padding))
             .bg(appearance::to_hsla(self.palette.panel_surface))
             .rounded(px(metrics.corner_radius))
@@ -1402,6 +1404,7 @@ impl RenderOnce for QuickHelpPanel {
             .flex_col()
             .gap_y(px(metrics.item_spacing_y))
             .w(px(self.width))
+            .max_w_full()
             .p(px(metrics.panel_padding))
             .bg(appearance::to_hsla(self.palette.panel_surface))
             .rounded(px(metrics.corner_radius))
@@ -1528,6 +1531,7 @@ impl RenderOnce for SettingsEditorPanel {
             .flex_col()
             .gap_y(px(self.metrics.item_spacing_y))
             .w(px(self.width))
+            .max_w_full()
             .p(px(self.metrics.panel_padding))
             .bg(appearance::to_hsla(self.palette.panel_surface))
             .rounded(px(self.metrics.corner_radius))
@@ -3218,8 +3222,32 @@ fn launcher_results_viewport_max_height(window_height: f32) -> f32 {
     (window_height * 0.45).clamp(72.0, 360.0)
 }
 
+// GPUI snaps style lengths to device pixels with half ties toward zero.
+fn launcher_snapped_length(value: f32, scale: f32) -> f32 {
+    ((value.max(0.0) * scale - 0.5).ceil().max(0.0)) / scale
+}
+
+fn launcher_result_grid_geometry(
+    width: f32,
+    columns: usize,
+    spacing: f32,
+    scale: f32,
+) -> (f32, f32) {
+    let width_pixels = (width.max(0.0) * scale).floor();
+    let columns = columns.max(1);
+    let gaps = columns.saturating_sub(1) as f32;
+    let gap_pixels = if gaps > 0.0 {
+        (launcher_snapped_length(spacing, scale) * scale).min((width_pixels / gaps).floor())
+    } else {
+        0.0
+    };
+    let cell_pixels = ((width_pixels - gaps * gap_pixels) / columns as f32).floor();
+    (gap_pixels / scale, cell_pixels / scale)
+}
+
 fn render_launcher_result_cell(
     action: &Action,
+    horizontal_padding: f32,
     generation: u64,
     absolute_index: usize,
     selected: bool,
@@ -3248,8 +3276,10 @@ fn render_launcher_result_cell(
         .flex_shrink_0()
         .w_full()
         .min_w(px(0.0))
+        .overflow_hidden()
         .gap_y(px(metrics.item_spacing_y))
-        .p(px(metrics.panel_padding))
+        .px(px(horizontal_padding))
+        .py(px(metrics.panel_padding))
         .rounded(px(metrics.corner_radius))
         .bg(appearance::to_hsla(if selected {
             palette.selection_fill
@@ -3286,12 +3316,18 @@ fn render_launcher_result_cell(
         }))
         .child(
             Label::new(action.label.clone())
+                .w_full()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .id("launcher-search-result-label")
                 .text_size(px(metrics.body_text_size))
                 .line_height(px(metrics.line_height)),
         )
         .child(
             Label::new(action.desc.clone())
+                .w_full()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .id("launcher-search-result-description")
                 .text_size(px(metrics.small_text_size))
                 .line_height(px(metrics.line_height)),
@@ -9359,6 +9395,24 @@ impl Render for RootWindow {
         let jump_session_generation = self.search_jump_mode.session_generation();
         let result_row_count = result_layout.row_count(result_count);
         let result_columns = result_layout.columns.max(1);
+        let scale = window.scale_factor();
+        let snapped_root_width = launcher_snapped_length(root_controls_width, scale).min(
+            (window.viewport_size().width.as_f32()
+                - 2.0 * launcher_snapped_length(metrics.window_padding, scale))
+                .max(0.0),
+        );
+        let result_width = (snapped_root_width
+            - 2.0 * launcher_snapped_length(metrics.panel_padding, scale))
+            .max(0.0);
+        let (result_gap, grid_cell_width) = launcher_result_grid_geometry(
+            result_width, result_columns, metrics.item_spacing_x, scale,
+        );
+        let grid_padding = metrics
+            .panel_padding
+            .min((grid_cell_width * scale / 2.0).floor() / scale);
+        let list_padding = metrics
+            .panel_padding
+            .min((result_width * scale / 2.0).floor() / scale);
         let result_rows = (0..result_row_count)
             .map(|row_index| {
                 let first_index = if result_layout.grid {
@@ -9378,8 +9432,9 @@ impl Render for RootWindow {
                         .flex()
                         .flex_row()
                         .flex_shrink_0()
-                        .gap_x(px(metrics.item_spacing_x))
-                        .w_full();
+                        .gap_x(px(result_gap))
+                        .w_full()
+                        .min_w(px(0.0));
                     for absolute_index in first_index..end_index {
                         let action = &self.launcher_results.actions[absolute_index];
                         let target_id =
@@ -9391,6 +9446,7 @@ impl Render for RootWindow {
                                 .min_w(px(0.0))
                                 .child(render_launcher_result_cell(
                                     action,
+                                    grid_padding,
                                     result_generation,
                                     absolute_index,
                                     self.launcher_results.selected == Some(absolute_index),
@@ -9410,7 +9466,7 @@ impl Render for RootWindow {
                             div()
                                 .flex_1()
                                 .flex_grow(missing_columns as f32)
-                                .flex_basis(px(metrics.item_spacing_x * omitted_gaps as f32))
+                                .flex_basis(px(result_gap * omitted_gaps as f32))
                                 .min_w(px(0.0)),
                         );
                     }
@@ -9421,6 +9477,7 @@ impl Render for RootWindow {
                     let hint = self.search_jump_mode.hint_for(&target_id);
                     render_launcher_result_cell(
                         action,
+                        list_padding,
                         result_generation,
                         first_index,
                         self.launcher_results.selected == Some(first_index),
@@ -9746,6 +9803,7 @@ impl Render for RootWindow {
             .flex_col()
             .gap_y(px(metrics.item_spacing_y))
             .w(px(root_controls_width))
+            .max_w_full()
             .p(px(metrics.panel_padding))
             .bg(appearance::to_hsla(palette.panel_surface))
             .rounded(px(metrics.corner_radius))
@@ -12779,8 +12837,8 @@ mod tests {
         hash_picker_result_is_current,
         bounds_are_contained_by, clipped_search_jump_geometry, is_fresh_plain_search_enter,
         keyboard_docked_resize_preview,
-        launcher_column_width, launcher_result_activation_is_current, launcher_result_grid_row_id,
-        launcher_result_row_id,
+        launcher_column_width, launcher_result_activation_is_current, launcher_result_grid_geometry,
+        launcher_result_grid_row_id, launcher_result_row_id,
         launcher_results_viewport_max_height, parse_installed_search_invocation,
         physical_keypad_selection_move, pointer_docked_resize_preview, query_set_outcome_text,
         result_click_source, root_menu_close_should_restore_focus,
@@ -15663,6 +15721,16 @@ mod tests {
             HashPresentationMode::from_saved(Some(RememberedPresentation::Docked)),
             HashPresentationMode::Docked
         );
+    }
+
+    #[test]
+    fn launcher_result_grid_geometry_bounds_gaps_and_equal_cells() {
+        assert_eq!(launcher_result_grid_geometry(359.0, 3, 6.0, 1.0), (6.0, 115.0));
+        assert_eq!(launcher_result_grid_geometry(10.0, 3, 8.0, 1.0), (5.0, 0.0));
+        assert_eq!(launcher_result_grid_geometry(0.0, 3, 8.0, 1.0), (0.0, 0.0));
+        assert_eq!(launcher_result_grid_geometry(10.0, 1, 8.0, 1.0), (0.0, 10.0));
+        assert_eq!(launcher_result_grid_geometry(3.0, 3, 8.0, 1.5), (2.0 / 1.5, 0.0));
+        assert_eq!(super::launcher_snapped_length(7.5, 1.0), 7.0);
     }
 
     #[test]
