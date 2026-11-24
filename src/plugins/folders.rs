@@ -344,33 +344,94 @@ impl FoldersPlugin {
             watcher,
         }
     }
+}
 
-    fn list_entries(&self, filter: &str) -> Vec<Action> {
-        let guard = match self.data.lock() {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard
-            .iter()
-            .filter(|f| {
-                self.matcher.fuzzy_match(&f.label, filter).is_some()
-                    || self.matcher.fuzzy_match(&f.path, filter).is_some()
-                    || f.alias
-                        .as_ref()
-                        .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
-                        .unwrap_or(false)
-            })
-            .map(|f| {
-                let label = f.alias.clone().unwrap_or_else(|| f.label.clone());
+// Parsing is separate so the live provider does not acquire its data lock for
+// Add or an unrelated prefix, as those queries do not need a snapshot.
+#[derive(Clone, Copy)]
+enum FolderQuery<'a> {
+    Add(&'a str),
+    Remove(&'a str),
+    List(&'a str),
+    Rejected,
+}
+
+fn parse_folder_query(query: &str) -> FolderQuery<'_> {
+    if let Some(rest) = crate::common::strip_prefix_ci(query, "f add ") {
+        let path = rest.trim();
+        if !path.is_empty() {
+            return FolderQuery::Add(path);
+        }
+    }
+    if let Some(rest) = crate::common::strip_prefix_ci(query, "f rm ") {
+        return FolderQuery::Remove(rest.trim());
+    }
+    if let Some(rest) = crate::common::strip_prefix_ci(query, "f list") {
+        return FolderQuery::List(rest.trim());
+    }
+    match crate::common::strip_prefix_ci(query, "f") {
+        Some(rest) => FolderQuery::List(rest.trim()),
+        None => FolderQuery::Rejected,
+    }
+}
+
+fn add_folder_action(path: &str) -> Action {
+    Action {
+        label: format!("Add folder {path}"),
+        desc: "Folder".into(),
+        action: format!("folder:add:{path}"),
+        args: None,
+    }
+}
+
+fn project_folder_query(
+    query: FolderQuery<'_>,
+    entries: &[FolderEntry],
+    matcher: &SkimMatcherV2,
+) -> Vec<Action> {
+    let (filter, remove) = match query {
+        FolderQuery::Add(path) => return vec![add_folder_action(path)],
+        FolderQuery::Rejected => return Vec::new(),
+        FolderQuery::Remove(filter) => (filter, true),
+        FolderQuery::List(filter) => (filter, false),
+    };
+    entries
+        .iter()
+        .filter(|f| {
+            matcher.fuzzy_match(&f.label, filter).is_some()
+                || matcher.fuzzy_match(&f.path, filter).is_some()
+                || f.alias
+                    .as_ref()
+                    .map(|a| matcher.fuzzy_match(a, filter).is_some())
+                    .unwrap_or(false)
+        })
+        .map(|f| {
+            if remove {
                 Action {
-                    label,
+                    label: format!("Remove folder {} ({})", f.label, f.path),
+                    desc: f.path.clone(),
+                    action: format!("folder:remove:{}", f.path),
+                    args: None,
+                }
+            } else {
+                Action {
+                    label: f.alias.clone().unwrap_or_else(|| f.label.clone()),
                     desc: f.path.clone(),
                     action: f.path.clone(),
                     args: None,
                 }
-            })
-            .collect()
-    }
+            }
+        })
+        .collect()
+}
+
+/// Project a folder query against borrowed entries in provider order.
+pub(crate) fn query_folder_entries(query: &str, entries: &[FolderEntry]) -> Vec<Action> {
+    project_folder_query(
+        parse_folder_query(query),
+        entries,
+        &SkimMatcherV2::default(),
+    )
 }
 
 fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> anyhow::Result<()> {
@@ -397,57 +458,18 @@ impl Default for FoldersPlugin {
 
 impl Plugin for FoldersPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        const ADD_PREFIX: &str = "f add ";
-        if let Some(rest) = crate::common::strip_prefix_ci(query, ADD_PREFIX) {
-            let path = rest.trim();
-            if !path.is_empty() {
-                return vec![Action {
-                    label: format!("Add folder {path}"),
-                    desc: "Folder".into(),
-                    action: format!("folder:add:{path}"),
-                    args: None,
-                }];
+        let query = parse_folder_query(query);
+        match query {
+            FolderQuery::Add(path) => vec![add_folder_action(path)],
+            FolderQuery::Rejected => Vec::new(),
+            FolderQuery::List(_) | FolderQuery::Remove(_) => {
+                let guard = match self.data.lock() {
+                    Ok(g) => g,
+                    Err(_) => return Vec::new(),
+                };
+                project_folder_query(query, &guard, &self.matcher)
             }
         }
-
-        const RM_PREFIX: &str = "f rm ";
-        if let Some(rest) = crate::common::strip_prefix_ci(query, RM_PREFIX) {
-            let filter = rest.trim();
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
-            return guard
-                .iter()
-                .filter(|f| {
-                    self.matcher.fuzzy_match(&f.label, filter).is_some()
-                        || self.matcher.fuzzy_match(&f.path, filter).is_some()
-                        || f.alias
-                            .as_ref()
-                            .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
-                            .unwrap_or(false)
-                })
-                .map(|f| Action {
-                    label: format!("Remove folder {} ({})", f.label.clone(), f.path.clone()),
-                    desc: f.path.clone(),
-                    action: format!("folder:remove:{}", f.path.clone()),
-                    args: None,
-                })
-                .collect();
-        }
-
-        const LIST_PREFIX: &str = "f list";
-        if let Some(rest) = crate::common::strip_prefix_ci(query, LIST_PREFIX) {
-            return self.list_entries(rest.trim());
-        }
-
-        const PREFIX: &str = "f";
-        let rest = match crate::common::strip_prefix_ci(query, PREFIX) {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
-        let filter = rest.trim();
-        self.list_entries(filter)
     }
 
     fn name(&self) -> &str {
@@ -509,6 +531,57 @@ mod tests {
             path: path.into(),
             alias: alias.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn folder_query_projection_preserves_order_alias_paths_and_commands() {
+        let entries = vec![
+            folder("Atlas", r"C:\shared\atlas", Some("First alias")),
+            folder("Birch", r"C:\shared\birch", Some("Second alias")),
+        ];
+        let plugin = FoldersPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(entries.clone())),
+            watcher: None,
+        };
+        for query in [
+            "f list shared",
+            "F first alias",
+            "f rm shared",
+            r"f add  C:\new  ",
+            "other",
+            "f add ",
+        ] {
+            let borrowed = query_folder_entries(query, &entries);
+            let live = plugin.search(query);
+            let fields = |actions: Vec<Action>| {
+                actions
+                    .into_iter()
+                    .map(|a| (a.label, a.desc, a.action, a.args))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(fields(borrowed), fields(live), "{query}");
+        }
+        let listed = query_folder_entries("f list shared", &entries);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|a| (&*a.label, &*a.action))
+                .collect::<Vec<_>>(),
+            vec![
+                ("First alias", r"C:\shared\atlas"),
+                ("Second alias", r"C:\shared\birch")
+            ]
+        );
+        let alias = query_folder_entries("f first alias", &entries);
+        assert_eq!(alias[0].action, r"C:\shared\atlas");
+        let removed = query_folder_entries("f rm shared", &entries);
+        assert_eq!(removed[0].label, r"Remove folder Atlas (C:\shared\atlas)");
+        assert_eq!(removed[0].action, r"folder:remove:C:\shared\atlas");
+        assert_eq!(
+            query_folder_entries(r"f add  C:\new  ", &entries)[0].action,
+            r"folder:add:C:\new"
+        );
     }
 
     #[test]
