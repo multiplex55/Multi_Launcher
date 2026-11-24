@@ -274,6 +274,21 @@ impl LauncherSearchCatalog {
         }
     }
 
+    fn replace_saved_actions(&mut self, rows: Vec<Action>) -> bool {
+        let actions = supported_launcher_search_actions(rows);
+        if self.actions == actions {
+            return false;
+        }
+        self.cached_entries = actions.iter().map(CachedSearchEntry::from_action).collect();
+        self.filter_metadata = actions
+            .iter()
+            .map(ActionFilterMetadata::from_action)
+            .collect();
+        self.completion_index = multi_launcher::completion::build_index(&self.commands, &actions);
+        self.actions = actions;
+        true
+    }
+
     fn resolve_result_layout(
         &self,
         query: &str,
@@ -7104,6 +7119,10 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results(&mut self, query: String) {
+        self.refresh_launcher_results_with_viewport(query, true);
+    }
+
+    fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool) {
         self.retire_context_favorite();
         self.retire_search_jump_mode();
         let provider_actions = supported_launcher_search_actions(
@@ -7125,8 +7144,21 @@ impl RootWindow {
         // Query replacement can change the list height while the root is
         // scrolled near the end. Keep the Search field at the leading edge
         // whenever a tall result set overflows the shared root scroller.
-        self.root_scroll
-            .scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
+        if scroll_to_search {
+            self.root_scroll
+                .scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
+        }
+    }
+
+    fn publish_saved_search_actions(&mut self, rows: Vec<Action>, cx: &mut Context<Self>) -> bool {
+        if self.search_catalog.replace_saved_actions(rows) {
+            let query = self.query.read(cx).value().to_string();
+            self.search_completion.reset_for_query(&self.search_catalog, &query);
+            self.refresh_launcher_results_with_viewport(query, false);
+            true
+        } else {
+            false
+        }
     }
 
     fn record_search_key_down(
@@ -13515,6 +13547,43 @@ mod tests {
             },
             enabled_plugins,
         )
+    }
+
+    #[test]
+    fn saved_action_projection_changes_only_for_supported_ordered_records() {
+        let action = |label: &str, command: &str| multi_launcher::actions::Action {
+            label: label.into(),
+            desc: String::new(),
+            action: command.into(),
+            args: None,
+        };
+        let first = action("Saved Alpha", "hash:open");
+        let second = action("Saved Beta", "hash:open");
+        let unsupported = action("Ordinary App", "C:\\app.exe");
+        let mut catalog = completion_catalog(vec![first.clone()], true, None);
+        let query = "app saved";
+        let mut completion = SearchCompletion::default();
+        completion.reset_for_query(&catalog, query);
+        assert!(!catalog.replace_saved_actions(vec![unsupported.clone(), first.clone()]));
+        assert!(catalog.replace_saved_actions(vec![second.clone(), unsupported, first.clone()]));
+        assert_eq!(catalog.actions, vec![second.clone(), first.clone()]);
+        let mut results = LauncherSearchResults::default();
+        results.replace(
+            query.into(),
+            catalog.compose(query, Vec::new()),
+            ResolvedQueryResultsLayout::default(),
+            catalog.page_jump,
+        );
+        assert_eq!(results.actions.len(), 2);
+        assert_eq!(results.query, query);
+        completion.reset_for_query(&catalog, query);
+        assert!(
+            completion
+                .suggestions
+                .iter()
+                .any(|value| value.contains("saved beta"))
+        );
+        assert!(!catalog.replace_saved_actions(vec![second, first]));
     }
 
     #[test]

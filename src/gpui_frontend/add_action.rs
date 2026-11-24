@@ -147,13 +147,69 @@ enum DraftMode {
     Edit(multi_launcher::actions::CustomActionRowTarget),
 }
 
+#[derive(Clone)]
+enum AppDraftField {
+    Single(Entity<InputState>),
+    Multiline(Entity<TextareaState>),
+}
+
+impl AppDraftField {
+    fn new(value: &str, window: &mut Window, cx: &mut Context<RootWindow>) -> Self {
+        if value.contains(['\r', '\n']) {
+            Self::Multiline(cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .default_value(value.to_owned())
+                    .auto_grow(1, 3)
+                    .submit_on_enter(true)
+            }))
+        } else {
+            Self::Single(cx.new(|cx| InputState::new(window, cx).default_value(value.to_owned())))
+        }
+    }
+
+    fn entity_id(&self) -> EntityId {
+        match self {
+            Self::Single(input) => input.entity_id(),
+            Self::Multiline(input) => input.entity_id(),
+        }
+    }
+
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match self {
+            Self::Single(input) => input.focus_handle(cx),
+            Self::Multiline(input) => input.focus_handle(cx),
+        }
+    }
+
+    fn value(&self, cx: &App) -> String {
+        match self {
+            Self::Single(input) => input.read(cx).value().to_string(),
+            Self::Multiline(input) => input.read(cx).value().to_string(),
+        }
+    }
+
+    fn render(&self, label: &'static str, pending: bool) -> AnyElement {
+        match self {
+            Self::Single(input) => Input::new(input)
+                .disabled(pending)
+                .aria_label(label)
+                .into_any_element(),
+            Self::Multiline(input) => Textarea::new(input)
+                .aria_label(label)
+                .tab_index(0)
+                .readonly(pending)
+                .into_any_element(),
+        }
+    }
+}
+
 struct AddAppDraft {
     mode: DraftMode,
     baseline: AddAppSnapshot,
-    label: Entity<InputState>,
-    description: Entity<InputState>,
-    path: Entity<InputState>,
-    args: Entity<InputState>,
+    label: AppDraftField,
+    description: AppDraftField,
+    path: AppDraftField,
+    args: AppDraftField,
     show_args: bool,
     scroll: ScrollHandle,
     _focus_subscriptions: Vec<Subscription>,
@@ -264,11 +320,11 @@ impl AppEditorState {
     pub(super) fn snapshot(&self, cx: &App) -> Option<AddAppSnapshot> {
         let draft = self.draft.as_ref()?;
         Some(AddAppSnapshot {
-            label: draft.label.read(cx).value().to_string(),
-            description: draft.description.read(cx).value().to_string(),
-            path: draft.path.read(cx).value().to_string(),
+            label: draft.label.value(cx),
+            description: draft.description.value(cx),
+            path: draft.path.value(cx),
             show_args: draft.show_args,
-            args: draft.args.read(cx).value().to_string(),
+            args: draft.args.value(cx),
         })
     }
 }
@@ -323,6 +379,16 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn publish_app_editor_search_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let owns_focus = self.app_editor.open
+            && window.is_window_active()
+            && self.app_editor.owner_focus.contains_focused(window, cx);
+        if self.publish_saved_search_actions(self.app_editor.catalog.to_vec(), cx) && owns_focus {
+            self.root_scroll
+                .scroll_to_top_of_item(self.app_editor_scroll_item());
+        }
+    }
+
     fn refresh_app_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.app_editor.open || self.app_editor.write_pending() {
             return;
@@ -336,12 +402,13 @@ impl RootWindow {
         let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
             let result = task.await;
-            let _ = window_handle.update(cx, |_, _, app| {
+            let _ = window_handle.update(cx, |_, window, app| {
                 let _ = root.update(app, |root, cx| {
                     if root.app_editor.open && root.app_editor.reads.finish(receipt) {
                         match result {
                             Ok(rows) => {
                                 root.app_editor.publish_catalog(rows);
+                                root.publish_app_editor_search_actions(window, cx);
                             }
                             Err(error) => root.app_editor.catalog_error = Some(error),
                         }
@@ -412,11 +479,10 @@ impl RootWindow {
                 show_args: false,
                 args: String::new(),
             });
-        let label = cx.new(|cx| InputState::new(window, cx).default_value(baseline.label.clone()));
-        let description =
-            cx.new(|cx| InputState::new(window, cx).default_value(baseline.description.clone()));
-        let path = cx.new(|cx| InputState::new(window, cx).default_value(baseline.path.clone()));
-        let args = cx.new(|cx| InputState::new(window, cx).default_value(baseline.args.clone()));
+        let label = AppDraftField::new(&baseline.label, window, cx);
+        let description = AppDraftField::new(&baseline.description, window, cx);
+        let path = AppDraftField::new(&baseline.path, window, cx);
+        let args = AppDraftField::new(&baseline.args, window, cx);
         let scroll = ScrollHandle::new();
         let draft_id = label.entity_id();
         let handles = [
@@ -594,6 +660,9 @@ impl RootWindow {
                         && !root.restart_admission.is_fenced();
                     let failed = result.is_err();
                     if root.app_editor.finish_write(receipt, result) {
+                        if !failed {
+                            root.publish_app_editor_search_actions(window, cx);
+                        }
                         if failed && root.app_editor.open {
                             if let Some(draft) = &root.app_editor.draft {
                                 draft.scroll.scroll_to_item(5);
@@ -713,10 +782,10 @@ pub(super) struct AppEditorPanel {
 }
 
 struct AddAppPanelDraft {
-    label: Entity<InputState>,
-    description: Entity<InputState>,
-    path: Entity<InputState>,
-    args: Entity<InputState>,
+    label: AppDraftField,
+    description: AppDraftField,
+    path: AppDraftField,
+    args: AppDraftField,
     show_args: bool,
     editing: bool,
     scroll: ScrollHandle,
@@ -866,11 +935,7 @@ impl RenderOnce for AppEditorPanel {
                         .flex_col()
                         .flex_shrink_0()
                         .child(Label::new("Label"))
-                        .child(
-                            Input::new(&draft.label)
-                                .disabled(self.pending)
-                                .aria_label("Label"),
-                        ),
+                        .child(draft.label.render("Label", self.pending)),
                 )
                 .child(
                     div()
@@ -878,11 +943,7 @@ impl RenderOnce for AppEditorPanel {
                         .flex_col()
                         .flex_shrink_0()
                         .child(Label::new("Description"))
-                        .child(
-                            Input::new(&draft.description)
-                                .disabled(self.pending)
-                                .aria_label("Description"),
-                        ),
+                        .child(draft.description.render("Description", self.pending)),
                 )
                 .child(
                     div()
@@ -890,11 +951,7 @@ impl RenderOnce for AppEditorPanel {
                         .flex_col()
                         .flex_shrink_0()
                         .child(Label::new("Path"))
-                        .child(
-                            Input::new(&draft.path)
-                                .disabled(self.pending)
-                                .aria_label("Path"),
-                        ),
+                        .child(draft.path.render("Path", self.pending)),
                 )
                 .child(div().flex_shrink_0().child(checkbox))
                 .child(
@@ -903,11 +960,8 @@ impl RenderOnce for AppEditorPanel {
                         .flex_col()
                         .flex_shrink_0()
                         .when(draft.show_args, |row| {
-                            row.child(Label::new("Args")).child(
-                                Input::new(&draft.args)
-                                    .disabled(self.pending)
-                                    .aria_label("Args"),
-                            )
+                            row.child(Label::new("Args"))
+                                .child(draft.args.render("Args", self.pending))
                         }),
                 )
                 .child(div().flex_shrink_0().children(self.status.map(Label::new)));
