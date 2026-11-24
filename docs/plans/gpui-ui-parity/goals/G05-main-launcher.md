@@ -4,7 +4,7 @@
 
 The first [Settings menu and bare typed entry](../gui/settings-main.md#first-native-settings-save) also passed the scoped checkpoint. File Close and both Toast Log actions have native and focused Rust evidence, with G23 ownership for the remaining viewer geometry. [File and Toast Log evidence](../VALIDATION_LOG.md#g05g23-gpui-file-close-and-toast-log)
 
-The first [Command Help checkpoint](../gui/command-help.md#first-native-command-help-checkpoint) passed native and focused Rust verification for Command List, Linking Guide and typed Help, shared filter and acknowledged Show examples for currently installed GPUI providers. [Quick Help](../gui/quick-help.md#first-native-quick-help-checkpoint) is implemented and type-checked. Its scoped tests and native replay await the combined batch. The broader catalog and utility geometry remain pending.
+The first [Command Help checkpoint](../gui/command-help.md#first-native-command-help-checkpoint) passed native and focused Rust verification for Command List, Linking Guide and typed Help, shared filter and acknowledged Show examples for currently installed GPUI providers. [Quick Help](../gui/quick-help.md#first-native-quick-help-checkpoint) passed the menu, filters, Guide, compact scroll and scoped Escape replay. The first [result context and Favorites route](../gui/launcher-result-context-menu.md#first-native-result-context-menu-checkpoint) passed List Save, exact egui reopen and offscreen Grid with Cancel. The held shortcut, broader catalog and other action groups and geometry remain pending.
 
 ## Objective and dependencies
 

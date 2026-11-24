@@ -4,6 +4,8 @@
 
 The ordinary egui close prerequisite passed native and focused Rust verification. EgUI close saved root geometry while preserving unowned Settings values. GPUI reopened the same profile and the checked reverse restart continued to refuse a failed close write. [G06-D ordinary close evidence](../VALIDATION_LOG.md#g06-d-ordinary-egui-close-preservation)
 
+The first Favorites prefilled draft companion passed focused tests and Windows replay from GPUI List and Grid result menus. A List save was visible after reopening the same owned profile in egui. Broader Favorites browse, editing, recovery, and complete control parity are open. [Favorites checkpoint](../gui/favorites-editor.md)
+
 **Owner:** G06 settings/authoring implementer, with G02 for persistence and plugin contracts. Use the existing migration branch.
 
 ## Objective and dependencies

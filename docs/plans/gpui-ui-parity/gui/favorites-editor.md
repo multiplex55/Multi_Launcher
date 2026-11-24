@@ -8,7 +8,7 @@ G06 owns `favorites-editor`. Bare `fav`, exact Add and Add to Favorites open the
 
 Select `favorites_pinned_open_loads_once_and_preserves_draft_until_close`, `invalid_reload_and_commit_keep_dialog_last_good_and_read_only` and `prefilled_add_preserves_legacy_favorite_fields`. `G06-EGUI-FAVORITES-SHELL-DRAFTS` verifies prefill and Cancel.
 
-Save and GPUI remain pending.
+The initial egui baseline verified prefill and Cancel. The first checked Save and GPUI draft route are recorded below.
 
 ### Shared prefilled draft and checked save
 
@@ -16,4 +16,4 @@ Extract the renderer-neutral prefill and checked save used by Add to Favorites, 
 
 Review and type-check the adopted path and the cases for exact arguments, a latest unrelated entry, stale refusal and missing or malformed data. Run their targeted combination before the Windows Add to Favorites Save. Reuse the canonical result through the separate [GPUI List/Grid popup checkpoint](launcher-result-context-menu.md#first-native-result-context-menu-checkpoint). If implementation changes repair or publication ordering, verify that boundary before dependent source proceeds.
 
-The shared draft and egui Save route passed the `fast-dev` library check and scoped source review. The draft exposes label, command and arguments to both frontends and retains the captured origin inside the library. The exact-argument, latest-entry, stale and malformed-store tests and egui Save replay remain queued for the batch. [Checkpoint ledger](../CHECKPOINTS.md#resume-after-agent-configuration-update)
+The shared draft and egui Save route passed scoped source review and the combined tests. The draft exposes label, command and arguments to both frontends and retains the captured origin inside the library. Windows verified the GPUI context-result draft, Cancel, Save, and egui reopening the exact canonical row. The remaining Favorites routes and authoring controls are still in scope for G06. [Batch evidence](../VALIDATION_LOG.md#g05-c-and-g06-quick-help-and-favorites-batch)
