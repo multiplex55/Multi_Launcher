@@ -1,7 +1,8 @@
 use super::super::{
     BrowserTabCommand, ClipboardCommand, Command, CommandError, CommandInvocation, CommandOutcome,
-    ExternalCommand, ExternalNamespace, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy,
-    QueryPolicy, StorageCommand, TimerCommand, ToastPolicy, VisibilityPolicy,
+    ExternalCommand, ExternalCommandHost, ExternalNamespace, FavoriteLogPolicy,
+    HeadlessCommandHost, HistoryPolicy, QueryPolicy, StorageCommand, TimerCommand, ToastPolicy,
+    VisibilityPolicy,
 };
 
 pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
@@ -78,9 +79,27 @@ pub(crate) fn handle_headless_gui_with_history_query<H: HeadlessCommandHost + ?S
         });
     }
 
-    if let Err(error) =
-        host.execute_headless_command(&invocation.command, &invocation.original_action)
-    {
+    let result = host.execute_headless_command(&invocation.command, &invocation.original_action);
+    finish_execution(invocation, result, || success_outcome(host, invocation))
+}
+
+pub(crate) fn handle_external<H: ExternalCommandHost + ?Sized>(
+    host: &mut H,
+    command: &ExternalCommand,
+    invocation: &CommandInvocation,
+) -> Result<CommandOutcome, CommandError> {
+    let result = host.execute_external_command(command, &invocation.original_action);
+    finish_execution(invocation, result, || {
+        finish_success_outcome(host, invocation, initial_success_outcome(invocation), false)
+    })
+}
+
+fn finish_execution(
+    invocation: &CommandInvocation,
+    result: anyhow::Result<()>,
+    success: impl FnOnce() -> CommandOutcome,
+) -> Result<CommandOutcome, CommandError> {
+    if let Err(error) = result {
         let mut error =
             CommandError::new("launcher", format!("Failed: {error}")).with_gui_failure_policy();
         if is_external_favorite(invocation) {
@@ -89,7 +108,7 @@ pub(crate) fn handle_headless_gui_with_history_query<H: HeadlessCommandHost + ?S
         return Err(error);
     }
 
-    Ok(success_outcome(host, invocation))
+    Ok(success())
 }
 
 fn handle_history_snippet_replay<H: HeadlessCommandHost + ?Sized>(
@@ -152,12 +171,7 @@ pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
     host: &H,
     invocation: &CommandInvocation,
 ) -> CommandOutcome {
-    let mut outcome = CommandOutcome {
-        history: HistoryPolicy::Record,
-        toasts: success_toasts(invocation),
-        favorite_log: favorite_log(invocation),
-        ..CommandOutcome::default()
-    };
+    let mut outcome = initial_success_outcome(invocation);
     let mut command_changed_query = false;
 
     match &invocation.command {
@@ -241,20 +255,38 @@ pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
         _ => {}
     }
 
-    if host.clear_query_after_run() && !command_changed_query {
+    finish_success_outcome(host, invocation, outcome, command_changed_query)
+}
+
+fn initial_success_outcome(invocation: &CommandInvocation) -> CommandOutcome {
+    CommandOutcome {
+        history: HistoryPolicy::Record,
+        toasts: success_toasts(invocation),
+        favorite_log: favorite_log(invocation),
+        ..CommandOutcome::default()
+    }
+}
+
+fn finish_success_outcome<H: ExternalCommandHost + ?Sized>(
+    host: &H,
+    invocation: &CommandInvocation,
+    mut outcome: CommandOutcome,
+    command_changed_query: bool,
+) -> CommandOutcome {
+    if host.external_clear_query_after_run() && !command_changed_query {
         outcome.query = QueryPolicy::Set(String::new());
         outcome.search = true;
         outcome.invalidate_results = true;
         outcome.focus = true;
     }
 
-    if host.hide_after_run() && !is_hide_exempt(&invocation.command) {
+    if host.external_hide_after_run() && !is_hide_exempt(&invocation.command) {
         outcome.visibility = VisibilityPolicy::Hide;
     }
 
     if !outcome.focus
         && outcome.visibility != VisibilityPolicy::Hide
-        && host.launcher_should_refocus()
+        && host.external_launcher_should_refocus()
     {
         outcome.focus = true;
     }
@@ -328,6 +360,81 @@ pub(super) fn favorite_log(invocation: &CommandInvocation) -> FavoriteLogPolicy 
 mod tests {
     use super::*;
     use crate::{actions::Action, commands::ActivationSource};
+
+    #[test]
+    fn typed_external_entry_uses_shared_policy_and_preserves_launch_arguments() {
+        #[derive(Default)]
+        struct ExternalHost {
+            seen: Option<(ExternalCommand, Action)>,
+            fail: bool,
+        }
+        impl ExternalCommandHost for ExternalHost {
+            fn execute_external_command(
+                &mut self,
+                command: &ExternalCommand,
+                action: &Action,
+            ) -> anyhow::Result<()> {
+                self.seen = Some((command.clone(), action.clone()));
+                if self.fail {
+                    anyhow::bail!("injected failure")
+                }
+                Ok(())
+            }
+            fn external_clear_query_after_run(&self) -> bool {
+                true
+            }
+            fn external_hide_after_run(&self) -> bool {
+                true
+            }
+            fn external_launcher_should_refocus(&self) -> bool {
+                true
+            }
+        }
+        let command = ExternalCommand {
+            target: "tool.exe".into(),
+            args: Some("--example".into()),
+            namespace: None,
+        };
+        let mut invocation = invocation(Command::External(command.clone()), "original wire value");
+        invocation.original_action.desc = "Fav".into();
+        invocation.original_action.args = Some("original arguments".into());
+        invocation.source = ActivationSource::Click;
+        let mut narrow = ExternalHost::default();
+        let outcome = crate::commands::CommandBus
+            .dispatch_external(
+                &command,
+                &invocation.original_action,
+                invocation.source,
+                Some("query"),
+                &mut narrow,
+            )
+            .unwrap();
+        let mut legacy = host();
+        legacy.clear = true;
+        legacy.hide = true;
+        assert_eq!(
+            outcome,
+            handle_headless_gui(&mut legacy, &invocation).unwrap()
+        );
+        assert_eq!(
+            narrow.seen,
+            Some((command.clone(), invocation.original_action.clone()))
+        );
+
+        narrow.fail = true;
+        legacy.fail = true;
+        let error = crate::commands::CommandBus
+            .dispatch_external(
+                &command,
+                &invocation.original_action,
+                invocation.source,
+                None,
+                &mut narrow,
+            )
+            .unwrap_err();
+        let legacy_error = handle_headless_gui(&mut legacy, &invocation).unwrap_err();
+        assert_eq!(format!("{error:?}"), format!("{legacy_error:?}"));
+    }
 
     struct FakeHost {
         query: String,

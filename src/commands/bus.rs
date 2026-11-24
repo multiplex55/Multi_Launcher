@@ -1,19 +1,42 @@
-use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
+use super::{
+    ActivationSource, Command, CommandError, CommandHost, CommandInvocation, CommandOutcome,
+    ExternalCommand, ExternalCommandHost,
+};
+use crate::actions::Action;
 use crate::commands::handlers::{
     handle_batch_rename, handle_calendar, handle_clipboard_modify_with_history_query,
     handle_color_pick, handle_coordinate_tool, handle_crop, handle_data, handle_diff,
-    handle_file_search, handle_hash_generator, handle_headless_gui_with_history_query,
-    handle_hotfolder, handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture,
-    handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence, handle_pinboard,
-    handle_query, handle_radial, handle_recording, handle_screen_draw, handle_screenshot,
-    handle_search_replace, handle_simple_dialog, handle_snippet_run, handle_table_utility,
-    handle_todo, handle_xml_toolkit, handle_zip_extractor,
+    handle_external, handle_file_search, handle_hash_generator,
+    handle_headless_gui_with_history_query, handle_hotfolder, handle_json_utility, handle_launcher,
+    handle_link, handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr,
+    handle_paste_sequence, handle_pinboard, handle_query, handle_radial, handle_recording,
+    handle_screen_draw, handle_screenshot, handle_search_replace, handle_simple_dialog,
+    handle_snippet_run, handle_table_utility, handle_todo, handle_xml_toolkit,
+    handle_zip_extractor,
 };
 
 #[derive(Debug, Default)]
 pub struct CommandBus;
 
 impl CommandBus {
+    /// Execute an external command through the shared launcher outcome policy.
+    pub fn dispatch_external<H: ExternalCommandHost + ?Sized>(
+        &self,
+        command: &ExternalCommand,
+        original_action: &Action,
+        source: ActivationSource,
+        query_override: Option<&str>,
+        host: &mut H,
+    ) -> Result<CommandOutcome, CommandError> {
+        let invocation = CommandInvocation {
+            command: Command::External(command.clone()),
+            original_action: original_action.clone(),
+            query_override: query_override.map(str::to_owned),
+            source,
+        };
+        handle_external(host, command, &invocation)
+    }
+
     pub fn dispatch(
         &self,
         invocation: &CommandInvocation,
@@ -93,6 +116,7 @@ impl CommandBus {
                 host.open_settings_dialog();
                 Ok(CommandOutcome::default())
             }
+            Command::External(command) => handle_external(host, command, invocation),
             Command::Shell(_)
             | Command::Clipboard(_)
             | Command::Calculator(_)
@@ -103,8 +127,7 @@ impl CommandBus {
             | Command::Media(_)
             | Command::Layout(_)
             | Command::Macro(_)
-            | Command::VirtualDesktop(_)
-            | Command::External(_) => {
+            | Command::VirtualDesktop(_) => {
                 handle_headless_gui_with_history_query(host, invocation, captured_history_query)
             }
             Command::Dialog(_) => unreachable!("dialog commands are handled before dispatch"),

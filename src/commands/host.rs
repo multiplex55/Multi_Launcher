@@ -308,6 +308,37 @@ pub trait DataCommandHost {
     fn data_launcher_should_refocus(&self) -> bool;
 }
 
+/// Effects and launcher settings needed to execute an external command.
+pub trait ExternalCommandHost {
+    fn execute_external_command(
+        &mut self,
+        command: &super::ExternalCommand,
+        original_action: &Action,
+    ) -> anyhow::Result<()>;
+    fn external_clear_query_after_run(&self) -> bool;
+    fn external_hide_after_run(&self) -> bool;
+    fn external_launcher_should_refocus(&self) -> bool;
+}
+
+impl<T: HeadlessCommandHost + ?Sized> ExternalCommandHost for T {
+    fn execute_external_command(
+        &mut self,
+        command: &super::ExternalCommand,
+        action: &Action,
+    ) -> anyhow::Result<()> {
+        self.execute_headless_command(&super::Command::External(command.clone()), action)
+    }
+    fn external_clear_query_after_run(&self) -> bool {
+        self.clear_query_after_run()
+    }
+    fn external_hide_after_run(&self) -> bool {
+        self.hide_after_run()
+    }
+    fn external_launcher_should_refocus(&self) -> bool {
+        self.launcher_should_refocus()
+    }
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
