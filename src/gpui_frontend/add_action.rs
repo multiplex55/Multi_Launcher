@@ -59,6 +59,8 @@ struct AddAppDraft {
     path: Entity<InputState>,
     args: Entity<InputState>,
     show_args: bool,
+    scroll: ScrollHandle,
+    _focus_subscriptions: Vec<Subscription>,
 }
 
 pub(super) struct AddAppSnapshot {
@@ -94,12 +96,16 @@ impl AppEditorState {
             || !draft.description.read(cx).value().is_empty()
             || !draft.path.read(cx).value().is_empty()
             || !draft.args.read(cx).value().is_empty())
-            .then_some(APP_DRAFT_RESTART_STATUS)
+        .then_some(APP_DRAFT_RESTART_STATUS)
     }
 
     fn is_current_draft(&self, id: EntityId) -> bool {
-        self.open && !self.write_pending()
-            && self.draft.as_ref().is_some_and(|draft| draft.label.entity_id() == id)
+        self.open
+            && !self.write_pending()
+            && self
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.label.entity_id() == id)
     }
 
     pub(super) fn write_pending(&self) -> bool {
@@ -171,21 +177,51 @@ impl RootWindow {
     }
 
     fn new_app_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.app_editor.open || self.restart_admission.is_fenced() || self.app_editor.draft.is_some() {
+        if !self.app_editor.open
+            || self.restart_admission.is_fenced()
+            || self.app_editor.draft.is_some()
+        {
             return;
         }
         let label = cx.new(|cx| InputState::new(window, cx));
         let description = cx.new(|cx| InputState::new(window, cx));
         let path = cx.new(|cx| InputState::new(window, cx));
         let args = cx.new(|cx| InputState::new(window, cx));
-        label.focus_handle(cx).focus(window, cx);
+        let scroll = ScrollHandle::new();
+        let draft_id = label.entity_id();
+        let handles = [
+            label.focus_handle(cx),
+            description.focus_handle(cx),
+            path.focus_handle(cx),
+            self.app_editor.arguments_focus.clone(),
+            args.focus_handle(cx),
+        ];
+        let subscriptions = handles
+            .iter()
+            .enumerate()
+            .map(|(index, handle)| {
+                cx.on_focus(handle, window, move |root, window, cx| {
+                    if window.is_window_active() && root.app_editor.is_current_draft(draft_id) {
+                        if let Some(draft) = &root.app_editor.draft {
+                            draft.scroll.scroll_to_item(index);
+                            cx.notify();
+                        }
+                    }
+                })
+            })
+            .collect();
         self.app_editor.draft = Some(AddAppDraft {
             label,
             description,
             path,
             args,
             show_args: false,
+            scroll,
+            _focus_subscriptions: subscriptions,
         });
+        if let Some(draft) = &self.app_editor.draft {
+            draft.label.focus_handle(cx).focus(window, cx);
+        }
         self.app_editor.status = None;
         cx.notify();
     }
@@ -232,7 +268,13 @@ impl RootWindow {
                         && window.is_window_active()
                         && root.app_editor.owner_focus.contains_focused(window, cx)
                         && !root.restart_admission.is_fenced();
+                    let failed = result.is_err();
                     if root.app_editor.finish_write(receipt, result) {
+                        if failed && root.app_editor.open {
+                            if let Some(draft) = &root.app_editor.draft {
+                                draft.scroll.scroll_to_item(5);
+                            }
+                        }
                         clear_app_diagnostic(&mut root.restart_status);
                         if restore {
                             root.app_editor.new_focus.focus(window, cx);
@@ -261,7 +303,10 @@ impl RootWindow {
     }
 
     fn close_app_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.app_editor.open || self.app_editor.write_pending() {
+        if !self.app_editor.open
+            || self.app_editor.write_pending()
+            || self.app_editor.draft.is_some()
+        {
             return;
         }
         let restore = self.app_editor.owner_focus.contains_focused(window, cx)
@@ -324,6 +369,7 @@ struct AddAppPanelDraft {
     path: Entity<InputState>,
     args: Entity<InputState>,
     show_args: bool,
+    scroll: ScrollHandle,
 }
 
 impl AppEditorPanel {
@@ -350,13 +396,14 @@ impl AppEditorPanel {
                 path: draft.path.clone(),
                 args: draft.args.clone(),
                 show_args: draft.show_args,
+                scroll: draft.scroll.clone(),
             }),
         }
     }
 }
 
 impl RenderOnce for AppEditorPanel {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
         let metrics = self.metrics;
         let mut panel = div()
             .id("app-editor")
@@ -423,67 +470,104 @@ impl RenderOnce for AppEditorPanel {
                 );
             let cancel_root = self.root.clone();
             let submit_root = self.root.clone();
-            panel = panel
-                .child(Label::new("Add App"))
-                .child(Label::new("Label"))
-                .child(
-                    Input::new(&draft.label)
-                        .disabled(self.pending)
-                        .aria_label("Label"),
-                )
-                .child(Label::new("Description"))
-                .child(
-                    Input::new(&draft.description)
-                        .disabled(self.pending)
-                        .aria_label("Description"),
-                )
-                .child(Label::new("Path"))
-                .child(
-                    Input::new(&draft.path)
-                        .disabled(self.pending)
-                        .aria_label("Path"),
-                )
-                .child(checkbox)
-                .when(draft.show_args, |panel| {
-                    panel.child(Label::new("Args")).child(
-                        Input::new(&draft.args)
-                            .disabled(self.pending)
-                            .aria_label("Args"),
-                    )
-                })
-                .children(self.status.map(Label::new))
+            let reserved_height = 2.0 * metrics.window_padding
+                + 2.0 * metrics.panel_padding
+                + metrics.heading_text_size.max(metrics.line_height)
+                + metrics.line_height
+                + metrics.row_min_height
+                + 2.0 * metrics.button_padding_y
+                + 4.0 * metrics.item_spacing_y;
+            let body_height = (window.viewport_size().height.as_f32() - reserved_height).max(40.0);
+            let body = div()
+                .id("add-app-body")
+                .flex()
+                .flex_col()
+                .gap_y(px(metrics.item_spacing_y))
+                .max_h(px(body_height))
+                .flex_shrink_0()
+                .overflow_y_scroll()
+                .track_scroll(&draft.scroll)
                 .child(
                     div()
                         .flex()
-                        .flex_row()
-                        .gap_x(px(metrics.item_spacing_x))
+                        .flex_col()
+                        .flex_shrink_0()
+                        .child(Label::new("Label"))
                         .child(
-                            Button::new("add-app-submit")
-                                .label("Add")
+                            Input::new(&draft.label)
                                 .disabled(self.pending)
-                                .on_click(move |_, window, app| {
-                                    let _ = submit_root
-                                        .update(app, |root, cx| {
-                                            if root.app_editor.is_current_draft(draft_id) {
-                                                root.submit_add_app(window, cx);
-                                            }
-                                        });
-                                }),
-                        )
-                        .child(
-                            Button::new("add-app-cancel")
-                                .label("Cancel")
-                                .disabled(self.pending)
-                                .on_click(move |_, window, app| {
-                                    let _ = cancel_root
-                                        .update(app, |root, cx| {
-                                            if root.app_editor.is_current_draft(draft_id) {
-                                                root.cancel_add_app(window, cx);
-                                            }
-                                        });
-                                }),
+                                .aria_label("Label"),
                         ),
-                );
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .child(Label::new("Description"))
+                        .child(
+                            Input::new(&draft.description)
+                                .disabled(self.pending)
+                                .aria_label("Description"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .child(Label::new("Path"))
+                        .child(
+                            Input::new(&draft.path)
+                                .disabled(self.pending)
+                                .aria_label("Path"),
+                        ),
+                )
+                .child(div().flex_shrink_0().child(checkbox))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .when(draft.show_args, |row| {
+                            row.child(Label::new("Args")).child(
+                                Input::new(&draft.args)
+                                    .disabled(self.pending)
+                                    .aria_label("Args"),
+                            )
+                        }),
+                )
+                .child(div().flex_shrink_0().children(self.status.map(Label::new)));
+            panel = panel.child(Label::new("Add App")).child(body).child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_x(px(metrics.item_spacing_x))
+                    .child(
+                        Button::new("add-app-submit")
+                            .label("Add")
+                            .disabled(self.pending)
+                            .on_click(move |_, window, app| {
+                                let _ = submit_root.update(app, |root, cx| {
+                                    if root.app_editor.is_current_draft(draft_id) {
+                                        root.submit_add_app(window, cx);
+                                    }
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("add-app-cancel")
+                            .label("Cancel")
+                            .disabled(self.pending)
+                            .on_click(move |_, window, app| {
+                                let _ = cancel_root.update(app, |root, cx| {
+                                    if root.app_editor.is_current_draft(draft_id) {
+                                        root.cancel_add_app(window, cx);
+                                    }
+                                });
+                            }),
+                    ),
+            );
         } else {
             let new_root = self.root.clone();
             let close_root = self.root;
