@@ -20,6 +20,41 @@ pub struct Action {
     pub args: Option<String>,
 }
 
+/// A validated request to append one custom action.
+#[derive(Debug, Clone)]
+pub struct AddAction(Action);
+
+impl AddAction {
+    pub fn new(
+        label: &str,
+        desc: &str,
+        path: &str,
+        show_args: bool,
+        args: &str,
+    ) -> Result<Self, &'static str> {
+        if path.is_empty() || !Path::new(path).exists() {
+            return Err("Path does not exist");
+        }
+        Ok(Self(Action {
+            label: label.to_owned(),
+            desc: desc.to_owned(),
+            action: path.to_owned(),
+            args: (show_args && !args.trim().is_empty()).then(|| args.to_owned()),
+        }))
+    }
+
+    /// Apply this request to the current custom catalog without deduplication.
+    pub fn append_to(self, actions: &mut Vec<Action>) -> anyhow::Result<()> {
+        actions.push(self.0);
+        Ok(())
+    }
+
+    /// Commit this request through the canonical actions transaction.
+    pub fn commit(self, path: &str) -> anyhow::Result<Vec<Action>> {
+        update_actions(path, |actions| self.append_to(actions))
+    }
+}
+
 /// ID lookup for one immutable action catalog.
 ///
 /// The lookup owns the catalog it indexes so a resolved position can never be
@@ -208,6 +243,38 @@ mod tests {
             desc: format!("{label} description"),
             action: format!("{label}:action"),
             args: Some(format!("{label} args")),
+        }
+    }
+
+    #[test]
+    fn add_action_validates_and_appends_exact_fields_including_duplicates() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.exe");
+        std::fs::write(&target, "").unwrap();
+        let target = target.to_str().unwrap();
+        let storage = directory.path().join("actions.json");
+        let storage = storage.to_str().unwrap();
+
+        assert!(AddAction::new("", "", "", false, "").is_err());
+        assert!(AddAction::new("", "", "missing target", false, "").is_err());
+        let intent = AddAction::new(" label ", " description ", target, true, " --flag ").unwrap();
+        let first = intent.clone().commit(storage).unwrap();
+        let second = intent.commit(storage).unwrap();
+        assert_eq!(second, vec![first[0].clone(), first[0].clone()]);
+        assert_eq!(second[0].label, " label ");
+        assert_eq!(second[0].desc, " description ");
+        assert_eq!(second[0].action, target);
+        assert_eq!(second[0].args.as_deref(), Some(" --flag "));
+        assert_eq!(load_actions(storage).unwrap(), second);
+
+        for (enabled, args) in [(false, " --flag "), (true, " \t ")] {
+            let mut actions = Vec::new();
+            AddAction::new("", "", target, enabled, args)
+                .unwrap()
+                .append_to(&mut actions)
+                .unwrap();
+            assert_eq!(actions[0].args, None);
         }
     }
 

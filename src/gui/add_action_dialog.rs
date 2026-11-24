@@ -631,40 +631,46 @@ impl AddActionDialog {
                                 }
                                 Err(error) => self.feedback = Some(error.message.to_owned()),
                             }
-                        } else if self.path.is_empty() || !Path::new(&self.path).exists() {
-                            let message = "Path does not exist".to_owned();
-                            self.feedback = Some(message.clone());
-                            app.report_error_message("ui operation", message);
                         } else {
-                            let candidate = Action {
-                                label: self.label.clone(),
-                                desc: self.desc.clone(),
-                                action: self.path.clone(),
-                                args: if self.show_args && !self.args.trim().is_empty() {
-                                    Some(self.args.clone())
-                                } else {
-                                    None
-                                },
-                            };
                             let result = match &self.mode {
-                                DialogMode::Add => app.update_custom_actions(move |actions| {
-                                    actions.push(candidate);
-                                    Ok(())
+                                DialogMode::Add => crate::actions::AddAction::new(
+                                    &self.label,
+                                    &self.desc,
+                                    &self.path,
+                                    self.show_args,
+                                    &self.args,
+                                )
+                                .map(|intent| {
+                                    app.update_custom_actions(|actions| intent.append_to(actions))
                                 }),
                                 DialogMode::Edit(idx) => {
                                     let idx = *idx;
-                                    app.update_custom_actions(move |actions| {
-                                        let action = actions.get_mut(idx).ok_or_else(|| {
-                                            anyhow::anyhow!("custom action no longer exists")
-                                        })?;
-                                        *action = candidate;
-                                        Ok(())
-                                    })
+                                    if self.path.is_empty() || !Path::new(&self.path).exists() {
+                                        Err("Path does not exist")
+                                    } else {
+                                        let candidate = Action {
+                                            label: self.label.clone(),
+                                            desc: self.desc.clone(),
+                                            action: self.path.clone(),
+                                            args: if self.show_args && !self.args.trim().is_empty() {
+                                                Some(self.args.clone())
+                                            } else {
+                                                None
+                                            },
+                                        };
+                                        Ok(app.update_custom_actions(move |actions| {
+                                            let action = actions.get_mut(idx).ok_or_else(|| {
+                                                anyhow::anyhow!("custom action no longer exists")
+                                            })?;
+                                            *action = candidate;
+                                            Ok(())
+                                        }))
+                                    }
                                 }
                                 DialogMode::Repair { .. } => unreachable!(),
                             };
                             match result {
-                                Ok(()) => {
+                                Ok(Ok(())) => {
                                     self.label.clear();
                                     self.desc.clear();
                                     self.path.clear();
@@ -673,8 +679,13 @@ impl AddActionDialog {
                                     self.feedback = None;
                                     should_close = true;
                                 }
-                                Err(error) => {
+                                Ok(Err(error)) => {
                                     let message = format!("Failed to save: {error}");
+                                    self.feedback = Some(message.clone());
+                                    app.report_error_message("ui operation", message);
+                                }
+                                Err(error) => {
+                                    let message = error.to_owned();
                                     self.feedback = Some(message.clone());
                                     app.report_error_message("ui operation", message);
                                 }
