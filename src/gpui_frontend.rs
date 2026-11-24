@@ -64,7 +64,9 @@ use multi_launcher::universal_actions::{
     RootLauncherPolicy, UniversalActionInvocationContext, UniversalActionOperation,
     UniversalActionRegistry, UniversalUiIntent, action_ids,
 };
-use multi_launcher::actions::search::{CachedSearchEntry, ReadOnlySearchInput, compose_read_only_results};
+use multi_launcher::actions::search::{
+    CachedSearchEntry, ReadOnlySearchInput, compose_read_only_results_with_origin,
+};
 use multi_launcher::common::query::ActionFilterMetadata;
 use multi_launcher::clipboard_modify::clipboard::{
     ArboardClipboardBackend, ClipboardBackend, ClipboardError,
@@ -136,6 +138,29 @@ pub(crate) struct LauncherSearchStartup {
     pub usage: HashMap<String, u32>,
     pub folder_aliases_lc: HashMap<String, Option<String>>,
     pub bookmark_aliases_lc: HashMap<String, Option<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LauncherResultOrigin {
+    Saved,
+    CachedCommand,
+    Provider(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LauncherSearchResult {
+    action: Action,
+    origin: LauncherResultOrigin,
+}
+
+impl LauncherSearchResult {
+    fn saved_external(&self) -> Option<multi_launcher::commands::ExternalCommand> {
+        if self.origin == LauncherResultOrigin::Saved {
+            external_launch::saved_external(&self.action)
+        } else {
+            None
+        }
+    }
 }
 
 struct LauncherSearchCatalog {
@@ -314,8 +339,8 @@ impl LauncherSearchCatalog {
     fn compose(
         &self,
         raw_query: &str,
-        provider_actions: Vec<Action>,
-    ) -> Vec<Action> {
+        provider_actions: Vec<(String, Action)>,
+    ) -> Vec<LauncherSearchResult> {
         // Clearing GPUI Search restores the blank result state.
         // Cached commands become searchable once there is a query.
         if raw_query.trim().is_empty() {
@@ -340,10 +365,15 @@ impl LauncherSearchCatalog {
             );
         let mut scored_provider_actions = provider_actions
             .into_iter()
-            .map(|action| (action, 0.0))
+            .map(|(provider, action)| (action, 0.0, LauncherResultOrigin::Provider(provider)))
             .collect::<Vec<_>>();
-        scored_provider_actions.extend(command_fallback.scored_actions);
-        compose_read_only_results(
+        scored_provider_actions.extend(
+            command_fallback
+                .scored_actions
+                .into_iter()
+                .map(|(action, score)| (action, score, LauncherResultOrigin::CachedCommand)),
+        );
+        compose_read_only_results_with_origin(
             ReadOnlySearchInput {
                 raw_query,
                 command_cache: &[],
@@ -361,10 +391,29 @@ impl LauncherSearchCatalog {
                 usage_weight: self.usage_weight,
                 provider_results: scored_provider_actions,
             },
+            LauncherResultOrigin::Saved,
+            LauncherResultOrigin::CachedCommand,
             |_| {},
             None,
         )
         .actions
+        .into_iter()
+        .map(|(action, origin)| LauncherSearchResult { action, origin })
+        .collect()
+    }
+
+    #[cfg(test)]
+    fn compose_actions(&self, query: &str, providers: Vec<Action>) -> Vec<Action> {
+        self.compose(
+            query,
+            providers
+                .into_iter()
+                .map(|action| ("test".to_owned(), action))
+                .collect(),
+        )
+        .into_iter()
+        .map(|row| row.action)
+        .collect()
     }
 }
 
@@ -1668,13 +1717,17 @@ impl SearchCompletion {
 fn supported_launcher_search_actions(actions: Vec<Action>) -> Vec<Action> {
     actions
         .into_iter()
-        .filter(|action| match parse_action(action) {
-            Ok(command) => {
-                classify_installed_search_command(&command, ActivationSource::Click).is_ok()
-            }
-            Err(_) => false,
-        })
+        .filter(is_supported_launcher_search_action)
         .collect()
+}
+
+fn is_supported_launcher_search_action(action: &Action) -> bool {
+    match parse_action(action) {
+        Ok(command) => {
+            classify_installed_search_command(&command, ActivationSource::Click).is_ok()
+        }
+        Err(_) => false,
+    }
 }
 
 fn supported_saved_search_actions(actions: Vec<Action>) -> Vec<Action> {
@@ -2364,7 +2417,7 @@ impl ContextFavoriteReceipt {
 struct LauncherSearchResults {
     generation: u64,
     query: String,
-    actions: Vec<multi_launcher::actions::Action>,
+    actions: Vec<LauncherSearchResult>,
     selected: Option<usize>,
     layout: ResolvedQueryResultsLayout,
     page_jump: usize,
@@ -2374,7 +2427,7 @@ impl LauncherSearchResults {
     fn replace(
         &mut self,
         query: String,
-        actions: Vec<multi_launcher::actions::Action>,
+        actions: Vec<LauncherSearchResult>,
         layout: ResolvedQueryResultsLayout,
         page_jump: usize,
     ) {
@@ -2384,6 +2437,28 @@ impl LauncherSearchResults {
         self.selected = None;
         self.layout = layout;
         self.page_jump = page_jump;
+    }
+
+    #[cfg(test)]
+    fn replace_test_actions(
+        &mut self,
+        query: String,
+        actions: Vec<Action>,
+        layout: ResolvedQueryResultsLayout,
+        page_jump: usize,
+    ) {
+        self.replace(
+            query,
+            actions
+                .into_iter()
+                .map(|action| LauncherSearchResult {
+                    action,
+                    origin: LauncherResultOrigin::Saved,
+                })
+                .collect(),
+            layout,
+            page_jump,
+        );
     }
 
     fn move_selection(&mut self, movement: QuerySelectionMove) -> bool {
@@ -2444,6 +2519,16 @@ impl LauncherSearchResults {
         index: usize,
         current_query: &str,
     ) -> Option<multi_launcher::actions::Action> {
+        self.resolve_result(generation, index, current_query)
+            .map(|result| result.action)
+    }
+
+    fn resolve_result(
+        &self,
+        generation: u64,
+        index: usize,
+        current_query: &str,
+    ) -> Option<LauncherSearchResult> {
         if generation != self.generation || self.query != current_query {
             return None;
         }
@@ -7143,14 +7228,15 @@ impl RootWindow {
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool) {
         self.retire_context_favorite();
         self.retire_search_jump_mode();
-        let provider_actions = supported_launcher_search_actions(
-            multi_launcher::plugin::search_filtered_plugins(
-                self.search_catalog.providers.plugins(),
-                &query,
-                self.enabled_plugins.as_ref(),
-                self.enabled_capabilities.as_ref(),
-            ),
-        );
+        let provider_actions = multi_launcher::plugin::search_filtered_plugins_with_origin(
+            self.search_catalog.providers.plugins(),
+            &query,
+            self.enabled_plugins.as_ref(),
+            self.enabled_capabilities.as_ref(),
+        )
+        .into_iter()
+        .filter(|(_, action)| is_supported_launcher_search_action(action))
+        .collect();
         let actions = self.search_catalog.compose(&query, provider_actions);
         let layout = self
             .search_catalog
@@ -7703,22 +7789,20 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         let query = self.query.read(cx).value().to_string();
-        let Some(action) = self
+        let Some(result) = self
             .launcher_results
-            .resolve_action(generation, index, &query)
+            .resolve_result(generation, index, &query)
         else {
             return;
         };
         if !self.launcher_result_activation_is_live(origin, window, cx) {
             return;
         }
-        if let Some(command) = external_launch::saved_external(&action)
-            && self.search_catalog.actions.contains(&action)
-        {
-            self.start_external_launch(action, command, query, source, window, cx);
+        if let Some(command) = result.saved_external() {
+            self.start_external_launch(result.action, command, query, source, window, cx);
             return;
         }
-        let installed_invocation = match parse_installed_search_invocation(action, source) {
+        let installed_invocation = match parse_installed_search_invocation(result.action, source) {
             Ok(installed_invocation) => installed_invocation,
             Err(InstalledSearchActionError::QuerySet(error)) => {
                 self.launcher_search_error = Some(format!("Could not apply saved query: {error}"));
@@ -9524,7 +9608,7 @@ impl Render for RootWindow {
                         .w_full()
                         .min_w(px(0.0));
                     for absolute_index in first_index..end_index {
-                        let action = &self.launcher_results.actions[absolute_index];
+                        let action = &self.launcher_results.actions[absolute_index].action;
                         let target_id =
                             search_jump_result_target_id(result_generation, absolute_index);
                         let hint = self.search_jump_mode.hint_for(&target_id);
@@ -9560,7 +9644,7 @@ impl Render for RootWindow {
                     }
                     row.into_any_element()
                 } else {
-                    let action = &self.launcher_results.actions[first_index];
+                    let action = &self.launcher_results.actions[first_index].action;
                     let target_id = search_jump_result_target_id(result_generation, first_index);
                     let hint = self.search_jump_mode.hint_for(&target_id);
                     render_launcher_result_cell(
@@ -13251,7 +13335,9 @@ mod tests {
             let mut results = LauncherSearchResults {
                 generation: 19,
                 query: "hash".to_owned(),
-                actions: jump_test_actions(7),
+                actions: jump_test_actions(7).into_iter().map(|action| super::LauncherSearchResult {
+                    action, origin: super::LauncherResultOrigin::Saved,
+                }).collect(),
                 selected: None,
                 layout,
                 page_jump: 3,
@@ -13652,6 +13738,25 @@ mod tests {
     }
 
     #[test]
+    fn executable_authority_tracks_result_origin_and_rejects_stale_rows() {
+        use super::{LauncherResultOrigin, LauncherSearchResult};
+        let action = saved_action("Executable", r"C:\Tools\example.exe", None);
+        let catalog = completion_catalog(vec![action.clone()], true, None);
+        let rows = catalog.compose("app Executable", vec![("provider".into(), action.clone())]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], LauncherSearchResult { action: action.clone(), origin: LauncherResultOrigin::Saved });
+        assert_eq!(rows[1], LauncherSearchResult { action: action.clone(), origin: LauncherResultOrigin::Provider("provider".into()) });
+        let mut results = LauncherSearchResults::default();
+        results.replace("app Executable".into(), rows, ResolvedQueryResultsLayout::default(), 2);
+        let generation = results.generation;
+        assert!(results.resolve_result(generation, 0, "app Executable").unwrap().saved_external().is_some());
+        assert!(results.resolve_result(generation, 1, "app Executable").unwrap().saved_external().is_none());
+        assert!(results.resolve_result(generation, 0, "changed").is_none());
+        results.replace("app Executable".into(), vec![LauncherSearchResult { action, origin: LauncherResultOrigin::Provider("provider".into()) }], ResolvedQueryResultsLayout::default(), 2);
+        assert!(results.resolve_result(generation, 0, "app Executable").is_none());
+    }
+
+    #[test]
     fn saved_action_projection_changes_only_for_supported_ordered_records() {
         let action = |label: &str, command: &str| multi_launcher::actions::Action {
             label: label.into(),
@@ -13670,9 +13775,9 @@ mod tests {
         assert!(catalog.replace_saved_actions(vec![second.clone(), unsupported, first.clone()]));
         assert_eq!(catalog.actions, vec![second.clone(), first.clone()]);
         let mut results = LauncherSearchResults::default();
-        results.replace(
+        results.replace_test_actions(
             query.into(),
-            catalog.compose(query, Vec::new()),
+            catalog.compose_actions(query, Vec::new()),
             ResolvedQueryResultsLayout::default(),
             catalog.page_jump,
         );
@@ -13917,7 +14022,7 @@ mod tests {
             parse_installed_search_invocation(action.clone(), ActivationSource::Enter)
                 .is_ok_and(|invocation| matches!(invocation.route, InstalledSearchRoute::Settings))
         }));
-        let composed = enabled_catalog.compose("settings", Vec::new());
+        let composed = enabled_catalog.compose_actions("settings", Vec::new());
         assert_eq!(composed.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(composed[0].clone(), ActivationSource::Enter)
@@ -13937,7 +14042,7 @@ mod tests {
         let mut fallback_startup = startup();
         fallback_startup.actions.clear();
         let fallback_catalog = LauncherSearchCatalog::new(fallback_startup, Some(&enabled));
-        let fallback = fallback_catalog.compose("settings", Vec::new());
+        let fallback = fallback_catalog.compose_actions("settings", Vec::new());
         assert_eq!(fallback.len(), 1, "the admitted bare command is a fallback");
         assert!(matches!(
             parse_installed_search_invocation(fallback[0].clone(), ActivationSource::Enter)
@@ -13957,7 +14062,7 @@ mod tests {
         assert!(suffix_provider.is_empty());
         assert!(
             enabled_catalog
-                .compose("settings font", suffix_provider)
+                .compose_actions("settings font", suffix_provider)
                 .is_empty(),
             "unsupported typed Settings search does not leak through command fallback"
         );
@@ -13982,7 +14087,7 @@ mod tests {
             Some(&capability_disabled),
         );
         assert!(provider.is_empty(), "Search capability gates provider rows");
-        let capability_fallback = capability_disabled_catalog.compose("settings", Vec::new());
+        let capability_fallback = capability_disabled_catalog.compose_actions("settings", Vec::new());
         assert_eq!(capability_fallback.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(
@@ -14002,8 +14107,8 @@ mod tests {
             "explicit saved typed actions remain available through shared local Search"
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert!(disabled_catalog.compose("settings", Vec::new()).is_empty());
-        let saved = disabled_catalog.compose("app settings", Vec::new());
+        assert!(disabled_catalog.compose_actions("settings", Vec::new()).is_empty());
+        let saved = disabled_catalog.compose_actions("app settings", Vec::new());
         assert_eq!(saved.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(saved[0].clone(), ActivationSource::Enter)
@@ -14305,7 +14410,7 @@ mod tests {
             clicked.label = "Right-clicked fixture".into();
             clicked.args = Some("complete action".into());
             let mut results = LauncherSearchResults::default();
-            results.replace("hash".into(), vec![first.clone(), clicked.clone()], layout, 2);
+            results.replace_test_actions("hash".into(), vec![first.clone(), clicked.clone()], layout, 2);
             results.selected = Some(0);
             let receipt = ContextFavoriteReceipt {
                 serial: 1,
@@ -14323,9 +14428,9 @@ mod tests {
             assert_eq!(results.selected, Some(0));
             assert!(!receipt.matches(&results, "other", 4));
             assert!(!receipt.matches(&results, "hash", 5));
-            results.actions[1].args = Some("changed".into());
+            results.actions[1].action.args = Some("changed".into());
             assert!(!receipt.matches(&results, "hash", 4));
-            results.replace("hash".into(), vec![first, clicked], layout, 2);
+            results.replace_test_actions("hash".into(), vec![first, clicked], layout, 2);
             assert!(!receipt.matches(&results, "hash", 4));
         }
     }
@@ -14340,7 +14445,7 @@ mod tests {
             args: Some("beta argument".into()),
         };
         let mut results = LauncherSearchResults::default();
-        results.replace(
+        results.replace_test_actions(
             "hash".into(),
             vec![first.clone()],
             ResolvedQueryResultsLayout::default(),
@@ -14349,7 +14454,7 @@ mod tests {
         let sole_generation = results.generation;
         assert_eq!(results.enter_target("hash"), Some((sole_generation, 0)));
 
-        results.replace(
+        results.replace_test_actions(
             "hash".into(),
             vec![first.clone(), second.clone()],
             ResolvedQueryResultsLayout::default(),
@@ -14374,7 +14479,7 @@ mod tests {
         assert_eq!(invocation.original_action, second);
         assert_eq!(invocation.source, ActivationSource::Enter);
 
-        results.replace(
+        results.replace_test_actions(
             "hash changed".into(),
             vec![first],
             ResolvedQueryResultsLayout::default(),
@@ -14389,7 +14494,7 @@ mod tests {
         assert_eq!(results.enter_target("hash"), None);
 
         let stale_generation = results.generation;
-        results.replace(
+        results.replace_test_actions(
             "hash changed".into(),
             vec![hash_action()],
             ResolvedQueryResultsLayout::default(),
@@ -14413,7 +14518,7 @@ mod tests {
         };
         let actions = vec![first, second];
         let mut results = LauncherSearchResults::default();
-        results.replace(
+        results.replace_test_actions(
             "app QMarker".into(),
             actions.clone(),
             ResolvedQueryResultsLayout::default(),
@@ -14436,7 +14541,7 @@ mod tests {
         let previous_generation = results.generation;
         assert!(results.move_selection(QuerySelectionMove::Down));
         assert_eq!(results.selected, Some(0));
-        results.replace(
+        results.replace_test_actions(
             "app QMarker".into(),
             actions,
             ResolvedQueryResultsLayout::default(),
@@ -14459,7 +14564,7 @@ mod tests {
             .collect::<Vec<_>>();
         let layout = ResolvedQueryResultsLayout::new(true, 3);
         let mut results = LauncherSearchResults::default();
-        results.replace("app GridFixture".into(), actions.clone(), layout, 2);
+        results.replace_test_actions("app GridFixture".into(), actions.clone(), layout, 2);
 
         assert_eq!(results.layout.row_count(actions.len()), 3);
         assert_eq!(results.selected_scroll_child(), None);
@@ -14505,7 +14610,7 @@ mod tests {
     #[test]
     fn grid_claims_empty_lateral_moves_while_list_leaves_them_to_search() {
         let mut results = LauncherSearchResults::default();
-        results.replace(
+        results.replace_test_actions(
             "app Empty".into(),
             Vec::new(),
             ResolvedQueryResultsLayout::new(true, 3),
@@ -14514,7 +14619,7 @@ mod tests {
         assert!(results.can_capture_lateral_move());
         assert!(!results.move_selection(QuerySelectionMove::Right));
 
-        results.replace(
+        results.replace_test_actions(
             "hash".into(),
             vec![hash_action()],
             ResolvedQueryResultsLayout::new(false, 3),
@@ -14717,7 +14822,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut results = LauncherSearchResults::default();
-        results.replace(
+        results.replace_test_actions(
             "app KMarker".to_owned(),
             actions.clone(),
             ResolvedQueryResultsLayout::new(false, 3),
@@ -14762,7 +14867,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut results = LauncherSearchResults::default();
-        results.replace(
+        results.replace_test_actions(
             "app GridFixture".into(),
             actions,
             ResolvedQueryResultsLayout::new(true, 3),
@@ -14919,14 +15024,14 @@ mod tests {
             catalog.actions,
             vec![alpha.clone(), beta.clone(), query_set.clone()]
         );
-        let composed = catalog.compose("app QMarker", Vec::new());
+        let composed = catalog.compose_actions("app QMarker", Vec::new());
         assert_eq!(
             composed,
             vec![alpha.clone(), beta.clone(), query_set.clone()],
             "same command strings do not collapse actions with distinct arguments"
         );
         let mut results = LauncherSearchResults::default();
-        results.replace(
+        results.replace_test_actions(
             "app QMarker".into(),
             composed,
             ResolvedQueryResultsLayout::default(),
@@ -14949,7 +15054,7 @@ mod tests {
         assert_eq!(invocation.original_action, beta);
         assert_eq!(invocation.source, ActivationSource::Enter);
         assert!(
-            catalog.compose("", Vec::new()).is_empty(),
+            catalog.compose_actions("", Vec::new()).is_empty(),
             "clearing GPUI Search keeps the existing blank result scope"
         );
         assert_eq!(
@@ -14986,7 +15091,7 @@ mod tests {
             .expect("Hash installs one cached Search command");
         assert_eq!(enabled_catalog.commands, vec![hash_command.clone()]);
         assert_eq!(enabled_catalog.command_cached_entries.len(), 1);
-        assert_eq!(enabled_catalog.compose("ha", Vec::new()), vec![hash_command.clone()]);
+        assert_eq!(enabled_catalog.compose_actions("ha", Vec::new()), vec![hash_command.clone()]);
 
         let route = parse_installed_search_invocation(hash_command.clone(), ActivationSource::Enter)
             .expect("the fallback command uses the installed Query Set route");
@@ -15000,22 +15105,22 @@ mod tests {
             args: Some("full provider arguments".into()),
         };
         assert_eq!(
-            enabled_catalog.compose("ha", vec![provider.clone()]),
+            enabled_catalog.compose_actions("ha", vec![provider.clone()]),
             vec![provider],
             "an incoming provider row suppresses command fallback"
         );
         assert!(
-            enabled_catalog.compose("g ha", Vec::new()).is_empty(),
+            enabled_catalog.compose_actions("g ha", Vec::new()).is_empty(),
             "global search never offers a cached command fallback"
         );
 
         let disabled_catalog = LauncherSearchCatalog::new(startup(true), Some(&HashSet::new()));
         assert!(disabled_catalog.commands.is_empty());
-        assert!(disabled_catalog.compose("ha", Vec::new()).is_empty());
+        assert!(disabled_catalog.compose_actions("ha", Vec::new()).is_empty());
 
         let fuzzy_catalog = LauncherSearchCatalog::new(startup(false), Some(&enabled));
         assert_eq!(
-            fuzzy_catalog.compose("hsh", Vec::new()),
+            fuzzy_catalog.compose_actions("hsh", Vec::new()),
             vec![enabled_catalog.commands[0].clone()],
             "non-exact installed fallback reuses cached fuzzy command scoring"
         );
@@ -15037,7 +15142,7 @@ mod tests {
         );
         assert!(capability_disabled_provider.is_empty());
         assert_eq!(
-            enabled_catalog.compose("hash", capability_disabled_provider),
+            enabled_catalog.compose_actions("hash", capability_disabled_provider),
             vec![enabled_catalog.commands[0].clone()],
             "plugin enablement admits its command label while Search capability filters provider results"
         );
