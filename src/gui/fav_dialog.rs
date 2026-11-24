@@ -6,21 +6,28 @@ use crate::gui::theme::widgets::{
 };
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::fav::{
-    FAV_FILE, FavEntry, PrefilledFavoriteDraft, PrefilledFavoriteOrigin,
-    PrefilledFavoriteSaveError, join_command_args, load_favs, prefilled_favorite_draft,
-    replace_favs, resolve_with_plugin, save_prefilled_favorite,
+    FAV_FILE, FavEntry, FavoriteRowTarget, ManualFavoriteOrigin, PrefilledFavoriteDraft,
+    PrefilledFavoriteOrigin, PrefilledFavoriteSaveError, favorite_row_target, join_command_args,
+    load_favs, named_favorite_origin, prefilled_favorite_draft, remove_favorite_row,
+    resolve_with_plugin, save_manual_favorite, save_prefilled_favorite,
 };
 use eframe::egui;
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum FavDialogDraftOrigin {
-    #[default]
-    Manual,
+    Manual(ManualFavoriteOrigin),
     Prefilled(PrefilledFavoriteOrigin),
 }
 
+impl Default for FavDialogDraftOrigin {
+    fn default() -> Self {
+        Self::Manual(ManualFavoriteOrigin::Append)
+    }
+}
+
 enum FavSaveRequest {
-    Manual(Vec<FavEntry>),
+    Manual(ManualFavoriteOrigin, FavEntry),
+    Remove(FavoriteRowTarget),
     Prefilled(PrefilledFavoriteDraft),
 }
 
@@ -79,7 +86,7 @@ impl FavDialog {
         let _ = self.load_from(path);
         self.open = true;
         self.edit_idx = None;
-        self.draft_origin = FavDialogDraftOrigin::Manual;
+        self.draft_origin = FavDialogDraftOrigin::default();
         self.label.clear();
         self.command.clear();
         self.args.clear();
@@ -100,11 +107,12 @@ impl FavDialog {
     pub fn open_edit(&mut self, label: &str) {
         if self.load_from(FAV_FILE).is_err() {
             self.edit_idx = None;
-            self.draft_origin = FavDialogDraftOrigin::Manual;
+            self.draft_origin = FavDialogDraftOrigin::default();
             self.open = true;
             return;
         }
-        self.draft_origin = FavDialogDraftOrigin::Manual;
+        self.draft_origin =
+            FavDialogDraftOrigin::Manual(named_favorite_origin(&self.entries, label));
         if let Some(pos) = self.entries.iter().position(|e| e.label == label) {
             self.edit_idx = Some(pos);
             let entry = &self.entries[pos];
@@ -129,7 +137,7 @@ impl FavDialog {
     fn open_prefilled_add_from(&mut self, action: &Action, path: &str) {
         if self.load_from(path).is_err() {
             self.edit_idx = None;
-            self.draft_origin = FavDialogDraftOrigin::Manual;
+            self.draft_origin = FavDialogDraftOrigin::default();
             self.open = true;
             return;
         }
@@ -161,28 +169,44 @@ impl FavDialog {
         }
     }
 
-    fn commit_entries(&mut self, path: &str, candidate: Vec<FavEntry>) -> anyhow::Result<()> {
-        match replace_favs(path, candidate) {
+    fn finish_manual_save(
+        &mut self,
+        app: &mut LauncherApp,
+        result: Result<Vec<FavEntry>, PrefilledFavoriteSaveError>,
+        removing: bool,
+    ) -> bool {
+        match result {
             Ok(committed) => {
                 self.entries = committed;
                 self.load_error = None;
-                Ok(())
+                app.search();
+                app.focus_input();
+                true
             }
             Err(error) => {
-                self.load_error = Some(error.to_string());
-                Err(error)
+                if let PrefilledFavoriteSaveError::Store(store_error) = &error {
+                    self.load_error = Some(store_error.to_string());
+                }
+                let message = match (&error, removing) {
+                    (PrefilledFavoriteSaveError::StaleTarget, true) => {
+                        "Favorites changed. Reopen Favorites and retry removing this row."
+                            .to_owned()
+                    }
+                    (PrefilledFavoriteSaveError::StaleTarget, false) => {
+                        "Favorites changed while this draft was open. Reopen it before saving."
+                            .to_owned()
+                    }
+                    _ => error.to_string(),
+                };
+                app.report_error_message(
+                    "ui operation",
+                    format!(
+                        "Failed to {} favorite: {message}",
+                        if removing { "remove" } else { "save" }
+                    ),
+                );
+                false
             }
-        }
-    }
-
-    fn save(&mut self, app: &mut LauncherApp, candidate: Vec<FavEntry>) -> bool {
-        if let Err(e) = self.commit_entries(FAV_FILE, candidate) {
-            app.report_error_message("ui operation", format!("Failed to save favorites: {e}"));
-            false
-        } else {
-            app.search();
-            app.focus_input();
-            true
         }
     }
 
@@ -493,20 +517,15 @@ impl FavDialog {
                                         args_opt = a;
                                     }
                                     match &self.draft_origin {
-                                        FavDialogDraftOrigin::Manual => {
-                                            let mut candidate = self.entries.clone();
-                                            if idx == candidate.len() {
-                                                candidate.push(FavEntry {
+                                        FavDialogDraftOrigin::Manual(origin) => {
+                                            save_request = Some(FavSaveRequest::Manual(
+                                                origin.clone(),
+                                                FavEntry {
                                                     label: self.label.clone(),
                                                     action: cmd,
                                                     args: args_opt,
-                                                });
-                                            } else if let Some(entry) = candidate.get_mut(idx) {
-                                                entry.label = self.label.clone();
-                                                entry.action = cmd;
-                                                entry.args = args_opt;
-                                            }
-                                            save_request = Some(FavSaveRequest::Manual(candidate));
+                                                },
+                                            ));
                                         }
                                         FavDialogDraftOrigin::Prefilled(origin) => {
                                             save_request = Some(FavSaveRequest::Prefilled(
@@ -531,7 +550,7 @@ impl FavDialog {
                             }
                             if cancel.clicked() {
                                 self.edit_idx = None;
-                                self.draft_origin = FavDialogDraftOrigin::Manual;
+                                self.draft_origin = FavDialogDraftOrigin::default();
                                 self.add_plugin.clear();
                                 self.add_filter.clear();
                             }
@@ -554,7 +573,7 @@ impl FavDialog {
                             }
                             if add.clicked() {
                                 self.edit_idx = Some(self.entries.len());
-                                self.draft_origin = FavDialogDraftOrigin::Manual;
+                                self.draft_origin = FavDialogDraftOrigin::default();
                                 self.label.clear();
                                 self.command.clear();
                                 self.args.clear();
@@ -589,9 +608,14 @@ impl FavDialog {
                                 for idx in 0..self.entries.len() {
                                     let entry = self.entries[idx].clone();
                                     ui.horizontal_wrapped(|ui| {
-                                        if ui.button("Edit").clicked() {
+                                        if ui.button("Edit").clicked()
+                                            && let Some(target) =
+                                                favorite_row_target(&self.entries, idx)
+                                        {
                                             self.edit_idx = Some(idx);
-                                            self.draft_origin = FavDialogDraftOrigin::Manual;
+                                            self.draft_origin = FavDialogDraftOrigin::Manual(
+                                                ManualFavoriteOrigin::Existing(target),
+                                            );
                                             self.label = entry.label.clone();
                                             self.command = entry.action.clone();
                                             self.args = entry.args.clone().unwrap_or_default();
@@ -628,9 +652,9 @@ impl FavDialog {
                             });
                         }
                         if let Some(idx) = remove {
-                            let mut candidate = self.entries.clone();
-                            candidate.remove(idx);
-                            save_request = Some(FavSaveRequest::Manual(candidate));
+                            if let Some(target) = favorite_row_target(&self.entries, idx) {
+                                save_request = Some(FavSaveRequest::Remove(target));
+                            }
                         }
                     }
                 },
@@ -658,12 +682,19 @@ impl FavDialog {
         let _ = window_output;
         if let Some(save_request) = save_request {
             let saved = match save_request {
-                FavSaveRequest::Manual(candidate) => self.save(app, candidate),
                 FavSaveRequest::Prefilled(draft) => self.save_prefilled(app, path, draft),
+                FavSaveRequest::Manual(origin, entry) => {
+                    let result = save_manual_favorite(path, origin, entry);
+                    self.finish_manual_save(app, result, false)
+                }
+                FavSaveRequest::Remove(target) => {
+                    let result = remove_favorite_row(path, target);
+                    self.finish_manual_save(app, result, true)
+                }
             };
             if saved {
                 self.edit_idx = None;
-                self.draft_origin = FavDialogDraftOrigin::Manual;
+                self.draft_origin = FavDialogDraftOrigin::default();
                 self.label.clear();
                 self.command.clear();
                 self.args.clear();
@@ -742,7 +773,7 @@ fn favorites_footer_reserved_height(ui: &mut egui::Ui, labels: &[&str]) -> f32 {
 mod tests {
     use super::{FavDialog, FavWidgetLayout};
     use crate::actions::Action;
-    use crate::plugins::fav::{FavEntry, save_favs};
+    use crate::plugins::fav::{FavEntry, ManualFavoriteOrigin, save_favs, save_manual_favorite};
     use eframe::egui;
 
     fn test_app(ctx: &egui::Context, root: &std::path::Path) -> crate::gui::LauncherApp {
@@ -1088,9 +1119,12 @@ mod tests {
         assert_eq!(dialog.entries, initial);
         assert!(dialog.load_error.is_some());
         assert!(
-            dialog
-                .commit_entries(path.to_str().unwrap(), vec![fav("lost")])
-                .is_err()
+            save_manual_favorite(
+                path.to_str().unwrap(),
+                ManualFavoriteOrigin::Append,
+                fav("lost")
+            )
+            .is_err()
         );
         assert_eq!(dialog.entries, initial);
         assert_eq!(std::fs::read(path).unwrap(), invalid);

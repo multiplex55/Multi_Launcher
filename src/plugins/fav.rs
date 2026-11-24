@@ -154,6 +154,121 @@ pub fn save_prefilled_favorite(
     }
 }
 
+/// A captured row identity, checked against the canonical store on mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FavoriteRowTarget {
+    index: usize,
+    original: FavEntry,
+    matching_positions: Vec<usize>,
+}
+
+pub fn favorite_row_target(entries: &[FavEntry], index: usize) -> Option<FavoriteRowTarget> {
+    let original = entries.get(index)?.clone();
+    let matching_positions = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, entry)| (entry == &original).then_some(i))
+        .collect();
+    Some(FavoriteRowTarget {
+        index,
+        original,
+        matching_positions,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManualFavoriteOrigin {
+    Append,
+    NamedAppend(String),
+    Existing(FavoriteRowTarget),
+}
+
+pub fn named_favorite_origin(entries: &[FavEntry], label: &str) -> ManualFavoriteOrigin {
+    entries
+        .iter()
+        .position(|entry| entry.label == label)
+        .and_then(|index| favorite_row_target(entries, index))
+        .map(ManualFavoriteOrigin::Existing)
+        .unwrap_or_else(|| ManualFavoriteOrigin::NamedAppend(label.to_owned()))
+}
+
+fn checked_row(entries: &[FavEntry], target: &FavoriteRowTarget) -> bool {
+    if entries.get(target.index) != Some(&target.original) {
+        return false;
+    }
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, entry)| (entry == &target.original).then_some(i))
+        .eq(target.matching_positions.iter().copied())
+}
+
+enum ManualFavoriteMutation {
+    Save(ManualFavoriteOrigin, FavEntry),
+    Remove(FavoriteRowTarget),
+}
+
+fn manual_favorite_update(
+    path: &str,
+    mutation: ManualFavoriteMutation,
+) -> Result<Vec<FavEntry>, PrefilledFavoriteSaveError> {
+    if let ManualFavoriteMutation::Save(_, entry) = &mutation {
+        if entry.label.trim().is_empty() || entry.action.trim().is_empty() {
+            return Err(PrefilledFavoriteSaveError::InvalidDraft);
+        }
+    }
+    let mut stale = false;
+    let result = update_favs(path, |entries| {
+        match mutation {
+            ManualFavoriteMutation::Save(ManualFavoriteOrigin::Append, entry) => {
+                entries.push(entry)
+            }
+            ManualFavoriteMutation::Save(ManualFavoriteOrigin::NamedAppend(label), entry) => {
+                if entries.iter().any(|row| row.label == label) {
+                    stale = true;
+                    anyhow::bail!("named favorite now exists");
+                }
+                entries.push(entry);
+            }
+            ManualFavoriteMutation::Save(ManualFavoriteOrigin::Existing(target), entry) => {
+                if !checked_row(entries, &target) {
+                    stale = true;
+                    anyhow::bail!("favorite row changed");
+                }
+                entries[target.index] = entry;
+            }
+            ManualFavoriteMutation::Remove(target) => {
+                if !checked_row(entries, &target) {
+                    stale = true;
+                    anyhow::bail!("favorite row changed");
+                }
+                entries.remove(target.index);
+            }
+        }
+        Ok(true)
+    });
+    match result {
+        Ok(entries) => Ok(entries),
+        Err(_) if stale => Err(PrefilledFavoriteSaveError::StaleTarget),
+        Err(error) => Err(PrefilledFavoriteSaveError::Store(error)),
+    }
+}
+
+pub fn save_manual_favorite(
+    path: &str,
+    origin: ManualFavoriteOrigin,
+    entry: FavEntry,
+) -> Result<Vec<FavEntry>, PrefilledFavoriteSaveError> {
+    manual_favorite_update(path, ManualFavoriteMutation::Save(origin, entry))
+}
+
+pub fn remove_favorite_row(
+    path: &str,
+    target: FavoriteRowTarget,
+) -> Result<Vec<FavEntry>, PrefilledFavoriteSaveError> {
+    manual_favorite_update(path, ManualFavoriteMutation::Remove(target))
+}
+
 pub fn load_favs(path: &str) -> anyhow::Result<Vec<FavEntry>> {
     match load_favs_typed(path)? {
         LoadState::Missing | LoadState::Empty => Ok(Vec::new()),
@@ -797,6 +912,137 @@ mod persistence_tests {
             save_prefilled_favorite(path, append).unwrap(),
             vec![fav("new", "new-cmd", Some("arg"))]
         );
+    }
+
+    #[test]
+    fn manual_rows_preserve_concurrent_entries_and_reject_stale_targets() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        let path = path.to_str().unwrap();
+        let first = fav("same", "cmd", Some("one"));
+        let second = fav("same", "cmd", Some("two"));
+        let entries = vec![first.clone(), second.clone()];
+        let target = favorite_row_target(&entries, 1).unwrap();
+        let unrelated = fav("other", "other", None);
+        save_favs(path, &[first.clone(), second.clone(), unrelated.clone()]).unwrap();
+        let edited = fav("same", "edited", Some("two"));
+        assert_eq!(
+            save_manual_favorite(
+                path,
+                ManualFavoriteOrigin::Existing(target.clone()),
+                edited.clone()
+            )
+            .unwrap(),
+            vec![first.clone(), edited.clone(), unrelated.clone()]
+        );
+        assert!(matches!(
+            remove_favorite_row(path, target.clone()),
+            Err(PrefilledFavoriteSaveError::StaleTarget)
+        ));
+        assert!(matches!(
+            save_manual_favorite(path, ManualFavoriteOrigin::Existing(target), second.clone()),
+            Err(PrefilledFavoriteSaveError::StaleTarget)
+        ));
+        let rows = load_favs(path).unwrap();
+        let target = favorite_row_target(&rows, 1).unwrap();
+        assert_eq!(
+            remove_favorite_row(path, target).unwrap(),
+            vec![first.clone(), unrelated]
+        );
+        let rows = save_manual_favorite(path, ManualFavoriteOrigin::Append, first.clone()).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.label == "same").count(), 2);
+        let duplicate_target = favorite_row_target(&[first.clone(), rows[1].clone()], 0).unwrap();
+        save_favs(
+            path,
+            &[
+                first.clone(),
+                rows[1].clone(),
+                first.clone(),
+                rows[1].clone(),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            remove_favorite_row(path, duplicate_target),
+            Err(PrefilledFavoriteSaveError::StaleTarget)
+        ));
+        let duplicate_target = favorite_row_target(&rows, 2).unwrap();
+        save_favs(path, &[rows[1].clone(), first.clone()]).unwrap();
+        assert!(matches!(
+            remove_favorite_row(path, duplicate_target),
+            Err(PrefilledFavoriteSaveError::StaleTarget)
+        ));
+    }
+
+    #[test]
+    fn named_manual_drafts_use_exact_case_and_reject_new_matching_target() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        let path = path.to_str().unwrap();
+        let rows = vec![
+            fav("Name", "first", None),
+            fav("name", "second", None),
+            fav("Name", "third", None),
+        ];
+        assert_eq!(
+            named_favorite_origin(&rows, "Name"),
+            ManualFavoriteOrigin::Existing(favorite_row_target(&rows, 0).unwrap())
+        );
+        assert_eq!(
+            named_favorite_origin(&rows, "name"),
+            ManualFavoriteOrigin::Existing(favorite_row_target(&rows, 1).unwrap())
+        );
+        let origin = named_favorite_origin(&rows, "NAME");
+        save_favs(path, &rows).unwrap();
+        let new = fav("NAME", "new", Some("  "));
+        let saved = save_manual_favorite(path, origin.clone(), new.clone()).unwrap();
+        assert_eq!(saved.last().unwrap().args.as_deref(), Some("  "));
+        assert!(matches!(
+            save_manual_favorite(path, origin, new),
+            Err(PrefilledFavoriteSaveError::StaleTarget)
+        ));
+        std::fs::write(path, b"{broken").unwrap();
+        assert!(matches!(
+            save_manual_favorite(path, ManualFavoriteOrigin::Append, rows[0].clone()),
+            Err(PrefilledFavoriteSaveError::Store(_))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), b"{broken");
+    }
+
+    #[test]
+    fn checked_manual_favorites_cannot_write_during_recovery_conflict() {
+        use crate::common::repair_watch::{block_paths, resolve_recovered_paths};
+
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        let path_text = path.to_str().unwrap();
+        let rows = vec![fav("original", "query:owned", None)];
+        save_favs(path_text, &rows).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let live = LIVE_FAVS.get_or_create(path_text, Some(rows.clone()));
+        let target = favorite_row_target(&rows, 0).unwrap();
+
+        block_paths([path.clone()]);
+        let append = save_manual_favorite(
+            path_text,
+            ManualFavoriteOrigin::Append,
+            fav("new", "query:new", None),
+        );
+        let remove = remove_favorite_row(path_text, target);
+        resolve_recovered_paths([path.clone()]);
+
+        for result in [append, remove] {
+            assert!(matches!(
+                result,
+                Err(PrefilledFavoriteSaveError::Store(error))
+                    if error.to_string().contains("saved-target recovery needs attention")
+            ));
+        }
+        assert_eq!(std::fs::read(path).unwrap(), original_bytes);
+        assert_eq!(*live.lock().unwrap(), rows);
     }
 
     #[test]

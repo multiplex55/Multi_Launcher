@@ -437,7 +437,7 @@ Explicit GPUI PID 6996 used the precision seed `F7999AD7…` on the same final e
 Record evidence ID; goal/checkpoint and GUI/criterion IDs; actual branch/commit or dirty source fingerprint; environment; package/target/profile/features; exact command/steps; selected test names/count; build/link and execution durations separately; pass/fail/timeout/zero-selection/skipped counts; observed result; artifact identity; diagnostics and cleanup; applicable native/visual limits; reviewer disposition and evidence freshness.
 
 Never fill a result from a planned command or old historical ledger. Use a compact index with links to substantive evidence, avoiding copied raw logs. Keep private user content out of records.
-## G05-C and G06 — Action Sheet and Favorites browse batch
+## G05-C and G06 Action Sheet and Favorites browse batch
 
 **G05-ACTION-SHEET-FAVORITES-FOCUSED.** Source `1bdb2d297246d48487926625d0ad9baa20d0a0b4`. Locked two-job `fast-dev` Nextest binary link took 16 min 52 s. Run `a05724f1-5317-43c8-a80f-f75cab37ba73` passed all 26 selected library and binary tests in 9.048 s, with 8,852 skipped. It used exact Cargo and linked binary metadata, the owned `g05-action-sheet-nextest` workspace remap, the standard stack wrapper, and one test thread. Coverage includes the shared choice filter and disabled selection, egui keyboard router and caret, GPUI key classification and exact result receipts, provider admission, shared Favorites action construction, and retained load, cancellation and save receipts. The existing workspace `toast.log` SHA-256 stayed `AC33B8F741F582BAAC91A003E638B8D2D5F569C581771BD44A83AD0FF3328399`. The owned remap received its own log.
 
