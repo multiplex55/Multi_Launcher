@@ -35,6 +35,7 @@ enum Request {
 #[derive(Default)]
 pub(super) struct ResultFavorites {
     rows: Arc<[FavEntry]>,
+    browse_scroll: ScrollHandle,
     owner: Option<FocusHandle>,
     return_focus: Option<FocusHandle>,
     return_offset: Option<Point<Pixels>>,
@@ -126,6 +127,7 @@ impl ResultFavorites {
                 );
             }
             Err(error) => {
+                self.browse_scroll.set_offset(point(px(0.0), px(0.0)));
                 let verb = match operation {
                     WriteKind::Save { .. } => "save",
                     WriteKind::Remove => "remove",
@@ -371,6 +373,7 @@ impl RootWindow {
         }
         let owner = cx.focus_handle();
         state.owner = Some(owner.clone());
+        state.browse_scroll.set_offset(point(px(0.0), px(0.0)));
         state.return_focus = previous_focus;
         state.return_offset = Some(self.root_scroll.offset());
         state.status = Some("Loading Favorites…".to_owned());
@@ -734,6 +737,7 @@ impl RootWindow {
             owner,
             draft,
             rows: state.rows.clone(),
+            browse_scroll: state.browse_scroll.clone(),
             status: state.status.clone(),
             pending: state.pending.is_some(),
             pending_draft: state.pending_draft.is_some(),
@@ -762,6 +766,7 @@ pub(super) struct FavoritesPanel {
     owner: FocusHandle,
     draft: Option<FavoritesPanelDraft>,
     rows: Arc<[FavEntry]>,
+    browse_scroll: ScrollHandle,
     status: Option<String>,
     pending: bool,
     pending_draft: bool,
@@ -773,12 +778,34 @@ pub(super) struct FavoritesPanel {
     palette: SemanticPalette,
 }
 
+fn favorites_browse_viewport_budget(
+    viewport_width: f32,
+    viewport_height: f32,
+    preferred_width: f32,
+    metrics: ThemeMetrics,
+    control_height: f32,
+) -> (f32, f32) {
+    let width = preferred_width.min((viewport_width - 2.0 * metrics.window_padding).max(1.0));
+    let reserved_height = 2.0 * metrics.window_padding
+        + 2.0 * metrics.panel_padding
+        + metrics.heading_text_size.max(metrics.line_height)
+        + control_height
+        + 2.0 * metrics.item_spacing_y;
+    (width, (viewport_height - reserved_height).clamp(0.0, 280.0))
+}
+
 impl RenderOnce for FavoritesPanel {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
         let state = &self;
         let owner = &state.owner;
-        let width = state.width;
         let metrics = state.metrics;
+        let (width, body_height) = favorites_browse_viewport_budget(
+            window.viewport_size().width.as_f32(),
+            window.viewport_size().height.as_f32(),
+            state.width,
+            metrics,
+            2.0 * window.rem_size().as_f32(),
+        );
         let palette = state.palette;
         let editing = state.draft.is_some();
         let waiting = state.waiting;
@@ -923,77 +950,100 @@ impl RenderOnce for FavoritesPanel {
                         })),
                 );
             }
-        } else if state.rows.is_empty() && !state.pending {
-            panel = panel.child(Label::new("No Favorites.").id("result-favorites-empty"));
-        } else if !state.rows.is_empty() {
-            panel = panel.child(
-                div()
-                    .id("result-favorites-rows")
-                    .flex()
-                    .flex_col()
-                    .max_h(px(160.0))
-                    .overflow_y_scroll()
-                    .children(state.rows.iter().enumerate().map(|(index, row)| {
-                        let caption = match &row.args {
-                            Some(args) => format!("{} · {} {}", row.label, row.action, args),
-                            None => format!("{} · {}", row.label, row.action),
-                        };
-                        let displayed = row.clone();
-                        let remove_displayed = displayed.clone();
-                        let sequence = state.sequence;
-                        let edit_root = state.root.clone();
-                        let remove_root = state.root.clone();
-                        div()
-                            .flex()
-                            .child(Label::new(caption).id(format!("result-favorite-row-{index}")))
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "result-favorite-edit-{index}"
-                                )))
-                                .label("Edit")
-                                .tab_stop(true)
-                                .disabled(!state.loaded || state.pending)
-                                .on_click(
-                                    move |_, window, app| {
-                                        let _ = edit_root.update(app, |root, cx| {
-                                            root.edit_result_favorite(
-                                                Some((index, displayed.clone(), sequence)),
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                    },
+        } else {
+            let mut body = div()
+                .id("result-favorites-rows")
+                .flex()
+                .flex_col()
+                .gap_y(px(metrics.item_spacing_y))
+                .w_full()
+                .max_h(px(body_height))
+                .overflow_y_scroll()
+                .track_scroll(&state.browse_scroll)
+                .children(state.status.as_ref().map(|status| {
+                    Label::new(status.clone())
+                        .id("result-favorites-status")
+                        .flex_shrink_0()
+                        .w_full()
+                }));
+            if state.rows.is_empty() && state.loaded && !state.pending {
+                body = body.child(Label::new("No Favorites.").id("result-favorites-empty"));
+            } else if !state.rows.is_empty() {
+                body = body.children(state.rows.iter().enumerate().map(|(index, row)| {
+                    let caption = match &row.args {
+                        Some(args) => format!("{} · {} {}", row.label, row.action, args),
+                        None => format!("{} · {}", row.label, row.action),
+                    };
+                    let displayed = row.clone();
+                    let remove_displayed = displayed.clone();
+                    let sequence = state.sequence;
+                    let edit_root = state.root.clone();
+                    let remove_root = state.root.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .w_full()
+                        .child(
+                            Label::new(caption)
+                                .id(format!("result-favorite-row-{index}"))
+                                .w_full(),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_x(px(metrics.item_spacing_x))
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "result-favorite-edit-{index}"
+                                    )))
+                                    .label("Edit")
+                                    .tab_stop(true)
+                                    .disabled(!state.loaded || state.pending)
+                                    .on_click(
+                                        move |_, window, app| {
+                                            let _ = edit_root.update(app, |root, cx| {
+                                                root.edit_result_favorite(
+                                                    Some((index, displayed.clone(), sequence)),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "result-favorite-remove-{index}"
+                                    )))
+                                    .label("Remove")
+                                    .tab_stop(true)
+                                    .disabled(!state.loaded || state.pending)
+                                    .on_click(
+                                        move |_, window, app| {
+                                            let _ = remove_root.update(app, |root, cx| {
+                                                root.remove_result_favorite(
+                                                    index,
+                                                    remove_displayed.clone(),
+                                                    sequence,
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    ),
                                 ),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "result-favorite-remove-{index}"
-                                )))
-                                .label("Remove")
-                                .tab_stop(true)
-                                .disabled(!state.loaded || state.pending)
-                                .on_click(
-                                    move |_, window, app| {
-                                        let _ = remove_root.update(app, |root, cx| {
-                                            root.remove_result_favorite(
-                                                index,
-                                                remove_displayed.clone(),
-                                                sequence,
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                    },
-                                ),
-                            )
-                    })),
-            );
+                        )
+                }));
+            }
+            panel = panel.child(body);
         }
         panel
             .children(
                 state
-                    .status
+                    .draft
                     .as_ref()
+                    .and(state.status.as_ref())
                     .map(|status| Label::new(status.clone()).id("result-favorites-status")),
             )
             .child(controls)
@@ -1002,7 +1052,42 @@ impl RenderOnce for FavoritesPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Request, ResultFavorites};
+    use super::{Request, ResultFavorites, favorites_browse_viewport_budget};
+    use multi_launcher::gui::theme::ThemeMetrics;
+
+    #[test]
+    fn favorites_browse_budget_fits_logical_viewport() {
+        let metrics = ThemeMetrics {
+            body_text_size: 14.0,
+            heading_text_size: 18.0,
+            small_text_size: 12.0,
+            line_height: 18.0,
+            item_spacing_x: 6.0,
+            item_spacing_y: 4.0,
+            section_spacing: 8.0,
+            window_padding: 8.0,
+            panel_padding: 6.0,
+            button_padding_x: 8.0,
+            button_padding_y: 4.0,
+            corner_radius: 4.0,
+            stroke_width: 1.0,
+            shadow_blur: 8.0,
+            icon_size: 16.0,
+            row_min_height: 28.0,
+        };
+        assert_eq!(
+            favorites_browse_viewport_budget(220.0, 180.0, 400.0, metrics, 32.0),
+            (204.0, 94.0)
+        );
+        assert_eq!(
+            favorites_browse_viewport_budget(600.0, 900.0, 400.0, metrics, 32.0),
+            (400.0, 280.0)
+        );
+        assert_eq!(
+            favorites_browse_viewport_budget(10.0, 50.0, 400.0, metrics, 32.0),
+            (1.0, 0.0)
+        );
+    }
 
     #[test]
     fn result_favorites_rejects_stale_receipts_and_retires_the_matching_save_once() {
