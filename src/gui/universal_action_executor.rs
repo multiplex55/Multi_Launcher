@@ -473,7 +473,7 @@ impl LauncherApp {
                 }
             }
             UniversalActionOperation::UiIntent(intent) => {
-                self.execute_universal_ui_intent(action_id.as_str(), intent)
+                self.execute_universal_ui_intent(action_id.as_str(), intent, context.surface)
             }
         }
     }
@@ -551,13 +551,23 @@ impl LauncherApp {
         }
     }
 
-    fn execute_universal_ui_intent(&mut self, action_id: &str, intent: UniversalUiIntent) {
+    fn execute_universal_ui_intent(
+        &mut self,
+        action_id: &str,
+        intent: UniversalUiIntent,
+        surface: ActionSurface,
+    ) {
         match intent {
             UniversalUiIntent::AcknowledgeInformation => {}
-            UniversalUiIntent::EditCustomAction { index, action } => {
+            UniversalUiIntent::EditCustomAction { index, action, row } => {
                 let custom = &self.actions[..self.custom_len.min(self.actions.len())];
                 if custom.get(index) == Some(&action)
                     && let Some(target) = crate::actions::custom_action_row_target(custom, index)
+                    && match row {
+                        Some(offered) => offered == target,
+                        // Radial bindings are resolved again during dispatch.
+                        None => surface == ActionSurface::RadialMenu,
+                    }
                 {
                     self.editor.open_edit(target, &action);
                     self.show_editor = true;
@@ -1225,6 +1235,86 @@ mod tests {
     }
 
     #[test]
+    fn custom_edit_offer_targets_exact_row_and_rejects_stale_selection() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = eframe::egui::Context::default();
+        let (_root, mut app) = repair_test_app(&ctx);
+        let first = Action {
+            label: "Editor".into(),
+            desc: "First".into(),
+            action: "editor.exe".into(),
+            args: Some("--first".into()),
+        };
+        let second = Action {
+            desc: "Second".into(),
+            args: Some("--second".into()),
+            ..first.clone()
+        };
+        app.actions = Arc::new(vec![first.clone(), second.clone()]);
+        app.custom_len = 2;
+
+        let offered = app
+            .resolve_context_menu_actions(
+                &second,
+                crate::universal_actions::PinCapability::Unsupported,
+            )
+            .into_iter()
+            .find(|action| action.id == action_ids::CUSTOM_ACTION_EDIT)
+            .expect("edit is offered for the saved row");
+        assert!(matches!(
+            &offered.operation,
+            UniversalActionOperation::UiIntent(UniversalUiIntent::EditCustomAction { index: 1, action, .. })
+                if action == &second
+        ));
+
+        app.actions = Arc::new(vec![first.clone(), first.clone()]);
+        app.execute_universal_action(
+            offered.clone(),
+            ActionSurface::ContextMenu,
+            ActivationSource::Click,
+        );
+        assert!(
+            !app.editor.is_dialog_open(),
+            "a stale offer must not retarget"
+        );
+
+        app.actions = Arc::new(vec![first, second]);
+        app.execute_universal_action(offered, ActionSurface::ContextMenu, ActivationSource::Click);
+        assert!(app.editor.is_dialog_open());
+    }
+
+    #[test]
+    fn custom_edit_offer_rejects_removed_equal_duplicate() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = eframe::egui::Context::default();
+        let (_root, mut app) = repair_test_app(&ctx);
+        let duplicate = Action {
+            label: "Editor".into(),
+            desc: "Duplicate".into(),
+            action: "editor.exe".into(),
+            args: None,
+        };
+        let other = Action {
+            label: "Other".into(),
+            ..duplicate.clone()
+        };
+        app.actions = Arc::new(vec![duplicate.clone(), duplicate.clone(), other.clone()]);
+        app.custom_len = 3;
+        let offered = app
+            .resolve_context_menu_actions(
+                &duplicate,
+                crate::universal_actions::PinCapability::Unsupported,
+            )
+            .into_iter()
+            .find(|action| action.id == action_ids::CUSTOM_ACTION_EDIT)
+            .expect("edit is offered for the saved row");
+        app.actions = Arc::new(vec![duplicate, other]);
+        app.custom_len = 2;
+        app.execute_universal_action(offered, ActionSurface::ActionSheet, ActivationSource::Click);
+        assert!(!app.editor.is_dialog_open());
+    }
+
+    #[test]
     fn custom_edit_admits_only_the_current_custom_row() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = eframe::egui::Context::default();
@@ -1249,8 +1339,20 @@ mod tests {
             "edit",
             UniversalUiIntent::EditCustomAction {
                 index: 0,
-                action: stale,
+                action: current.clone(),
+                row: None,
             },
+            ActionSurface::ActionSheet,
+        );
+        assert!(!app.editor.is_dialog_open());
+        app.execute_universal_ui_intent(
+            "edit",
+            UniversalUiIntent::EditCustomAction {
+                index: 0,
+                action: stale,
+                row: None,
+            },
+            ActionSurface::RadialMenu,
         );
         assert!(!app.editor.is_dialog_open());
         app.execute_universal_ui_intent(
@@ -1258,7 +1360,9 @@ mod tests {
             UniversalUiIntent::EditCustomAction {
                 index: 1,
                 action: indexed,
+                row: None,
             },
+            ActionSurface::RadialMenu,
         );
         assert!(!app.editor.is_dialog_open());
         app.execute_universal_ui_intent(
@@ -1266,7 +1370,9 @@ mod tests {
             UniversalUiIntent::EditCustomAction {
                 index: 0,
                 action: current,
+                row: None,
             },
+            ActionSurface::RadialMenu,
         );
         assert!(app.editor.is_dialog_open());
     }

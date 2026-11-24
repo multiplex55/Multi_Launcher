@@ -142,6 +142,7 @@ impl UniversalActionProvider for GenericProvider {
                 UniversalUiIntent::EditCustomAction {
                     index,
                     action: resolved.selected_action.clone(),
+                    row: context.custom_action_row.clone(),
                 },
             ));
             actions.push(ui_action(

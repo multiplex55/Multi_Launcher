@@ -3300,6 +3300,13 @@ impl LauncherApp {
             crate::universal_actions::ActionTargetResolver.resolve(action, &resolver_context);
         let mut action_context =
             crate::universal_actions::ActionResolutionContext::new(surface, self.query.trim());
+        action_context.custom_action_row = resolved.custom_action_index.and_then(|index| {
+            if self.actions.get(index) == Some(action) {
+                crate::actions::custom_action_row_target(&self.actions[..custom_len], index)
+            } else {
+                None
+            }
+        });
         action_context.pin = pin;
         action_context.can_add_favorite = resolved.target.persistent_ref().is_some();
         match &resolved.target {

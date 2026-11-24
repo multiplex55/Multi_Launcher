@@ -332,6 +332,7 @@ pub enum UniversalUiIntent {
     EditCustomAction {
         index: usize,
         action: Action,
+        row: Option<crate::actions::CustomActionRowTarget>,
     },
     RepairCustomAction {
         index: usize,

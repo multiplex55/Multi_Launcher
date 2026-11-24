@@ -32,11 +32,16 @@ impl<'a> ActionTargetResolverContext<'a> {
     }
 
     fn custom_action_index(&self, selected: &Action) -> Option<usize> {
-        // Preserve the launcher's established identity rule. Description and
-        // args are not part of custom-action matching today.
-        self.custom_actions.iter().position(|candidate| {
-            candidate.action == selected.action && candidate.label == selected.label
-        })
+        // Prefer the actual saved row when it is present. Search results with
+        // transformed metadata still use the established legacy fallback.
+        self.custom_actions
+            .iter()
+            .position(|candidate| candidate == selected)
+            .or_else(|| {
+                self.custom_actions.iter().position(|candidate| {
+                    candidate.action == selected.action && candidate.label == selected.label
+                })
+            })
     }
 }
 
