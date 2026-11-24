@@ -15188,20 +15188,6 @@ impl LauncherApp {
     }
 }
 
-// Keep the normal close writer independently exercisable against an isolated
-// settings path without running the unrelated native/global shutdown owners.
-pub(crate) fn persist_launcher_close_preferences(
-    settings_path: &str,
-    window_size: (i32, i32),
-    pinned_panels: Vec<Panel>,
-) -> anyhow::Result<Settings> {
-    Settings::update(settings_path, |settings| {
-        settings.window_size = Some(window_size);
-        settings.pinned_panels = pinned_panels;
-        Ok(())
-    })
-}
-
 impl LauncherApp {
     fn complete_note_auxiliaries(&mut self, ctx: &egui::Context) -> (bool, bool, Vec<u64>) {
         use super::utility_window_host::{
@@ -19447,10 +19433,19 @@ mod tests {
         }
         let unchanged = ["actions.json", "query-marker-ledger.txt", "note.md"]
             .map(|name| std::fs::read(directory.path().join(name)).unwrap());
+        let close_preferences = crate::settings::LauncherClosePreferences {
+            window_size: (900, 650),
+            pinned_panels: Vec::new(),
+            file_search_ui_preferences: None,
+            calculation_pad_display: None,
+        };
         for _ in 0..2 {
-            let actual =
-                persist_launcher_close_preferences(path.to_str().unwrap(), (900, 650), Vec::new())
-                    .unwrap();
+            crate::settings::Settings::save_launcher_close_preferences(
+                path.to_str().unwrap(),
+                &close_preferences,
+            )
+            .unwrap();
+            let actual = crate::settings::Settings::read_current(&path).unwrap();
             let after = std::fs::read(&path).unwrap();
             // The real reload/save may reorder maps; compare every raw JSON key
             // and value while normalizing only the actual plugin set.

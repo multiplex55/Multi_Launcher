@@ -7,6 +7,19 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU8, Ordering};
 
+type RawSettingsObject = BTreeMap<String, Box<serde_json::value::RawValue>>;
+
+/// Root and optional feature preferences owned by the ordinary launcher close.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LauncherClosePreferences {
+    pub(crate) window_size: (i32, i32),
+    pub(crate) pinned_panels: Vec<crate::gui::Panel>,
+    pub(crate) file_search_ui_preferences:
+        Option<crate::file_search::settings::FileSearchUiPreferences>,
+    pub(crate) calculation_pad_display:
+        Option<crate::settings::CalculationPadDisplayPreferences>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsBooleanPreference {
     QueryAutocomplete,
@@ -302,6 +315,77 @@ impl Settings {
         load_effective(path)
     }
 
+    /// Persist every close-owned value in one atomic transaction while
+    /// retaining raw JSON for all unrelated Settings values.
+    pub(crate) fn save_launcher_close_preferences(
+        path: impl AsRef<Path>,
+        preferences: &LauncherClosePreferences,
+    ) -> anyhow::Result<()> {
+        let _transaction = transaction_guard();
+        let path = path.as_ref();
+        let source_bytes = read_exact_bytes(path)?;
+        let source_settings = parse_effective_settings(path, &source_bytes)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let raw_source = if source_bytes.iter().all(u8::is_ascii_whitespace) {
+            // Missing and whitespace-only stores begin from complete defaults.
+            serde_json::to_vec(&source_settings)
+                .context("failed to serialize default Settings for launcher close")?
+        } else {
+            source_bytes
+        };
+        let mut raw_settings = match serde_json::from_slice::<RawSettingsObject>(&raw_source) {
+            Ok(raw_settings) => raw_settings,
+            Err(_) => {
+                // `parse_effective_settings` above already validated this
+                // source. Older serde-compatible positional Settings roots
+                // have no raw object siblings to preserve, so canonicalize
+                // that typed value before applying the close-owned fields.
+                raw_object(raw_value(&source_settings)?.as_ref())
+                    .context("failed to canonicalize typed Settings for launcher close")?
+            }
+        };
+
+        // These root values are always written. In particular, even an equal
+        // replacement must exercise the atomic read-share-lock failure path.
+        raw_settings.insert(
+            "window_size".to_owned(),
+            raw_value(&Some(preferences.window_size))?,
+        );
+        raw_settings.insert(
+            "pinned_panels".to_owned(),
+            raw_value(&preferences.pinned_panels)?,
+        );
+
+        if let Some(ui_preferences) = &preferences.file_search_ui_preferences {
+            let mut plugin_settings = match raw_settings.get("plugin_settings") {
+                Some(raw) => raw_object(raw).context("plugin_settings must be a JSON object")?,
+                None => RawSettingsObject::new(),
+            };
+            let file_search = patch_file_search_ui_preferences(
+                plugin_settings.get("file_search").map(Box::as_ref),
+                source_settings.plugin_settings.get("file_search"),
+                ui_preferences,
+            )?;
+            plugin_settings.insert("file_search".to_owned(), file_search);
+            raw_settings.insert("plugin_settings".to_owned(), raw_value(&plugin_settings)?);
+        }
+
+        if let Some(display_preferences) = preferences.calculation_pad_display {
+            let display = raw_object_with_replacements(
+                raw_settings.get("calculation_pad_display").map(Box::as_ref),
+                &display_preferences,
+            )?;
+            raw_settings.insert("calculation_pad_display".to_owned(), display);
+        }
+
+        let candidate_bytes = serde_json::to_vec(&raw_settings)
+            .context("failed to serialize launcher close Settings transaction")?;
+        parse_effective_settings(path, &candidate_bytes)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        save_json_atomic(path, &raw_settings)
+            .context("failed to atomically persist launcher close preferences")
+    }
+
     /// Acknowledge one GPUI-owned Boolean preference without
     /// reserializing any of the other Settings values. Both the typed
     /// baseline check and raw JSON patch share the canonical Settings lock.
@@ -464,6 +548,147 @@ fn parse_effective_settings(
     })
 }
 
+fn raw_value<T: serde::Serialize + ?Sized>(value: &T) -> anyhow::Result<Box<serde_json::value::RawValue>> {
+    let value = serde_json::to_string(value).context("failed to serialize owned Settings value")?;
+    serde_json::value::RawValue::from_string(value)
+        .context("failed to retain serialized Settings value as raw JSON")
+}
+
+fn raw_object(raw: &serde_json::value::RawValue) -> anyhow::Result<RawSettingsObject> {
+    serde_json::from_str(raw.get()).context("expected a JSON object")
+}
+
+fn raw_object_with_replacements<T: serde::Serialize + ?Sized>(
+    existing: Option<&serde_json::value::RawValue>,
+    replacements: &T,
+) -> anyhow::Result<Box<serde_json::value::RawValue>> {
+    raw_object_with_raw_replacements(existing, raw_value(replacements)?.as_ref())
+}
+
+fn raw_object_with_raw_replacements(
+    existing: Option<&serde_json::value::RawValue>,
+    replacements: &serde_json::value::RawValue,
+) -> anyhow::Result<Box<serde_json::value::RawValue>> {
+    let mut object = existing
+        .and_then(|raw| serde_json::from_str::<RawSettingsObject>(raw.get()).ok())
+        .unwrap_or_default();
+    let replacement_object = raw_object(replacements)?;
+    object.extend(replacement_object);
+    raw_value(&object)
+}
+
+fn patch_file_search_metadata_preferences(
+    existing: Option<&serde_json::value::RawValue>,
+    replacements: &serde_json::value::RawValue,
+) -> anyhow::Result<Box<serde_json::value::RawValue>> {
+    let mut metadata = existing
+        .and_then(|raw| serde_json::from_str::<RawSettingsObject>(raw.get()).ok())
+        .unwrap_or_default();
+    let mut replacement_metadata = raw_object(replacements)?;
+    let mut nested_replacements = Vec::new();
+    for key in ["date", "size"] {
+        if let Some(replacement) = replacement_metadata.remove(key) {
+            let nested = raw_object_with_raw_replacements(
+                metadata.get(key).map(Box::as_ref),
+                replacement.as_ref(),
+            )?;
+            nested_replacements.push((key.to_owned(), nested));
+        }
+    }
+    metadata.extend(replacement_metadata);
+    metadata.extend(nested_replacements);
+    raw_value(&metadata)
+}
+
+fn patch_file_search_ui_preferences_raw(
+    existing: Option<&serde_json::value::RawValue>,
+    ui_preferences: &crate::file_search::settings::FileSearchUiPreferences,
+) -> anyhow::Result<Box<serde_json::value::RawValue>> {
+    let mut replacement_ui = raw_object(raw_value(ui_preferences)?.as_ref())?;
+    let mut ui = existing
+        .and_then(|raw| serde_json::from_str::<RawSettingsObject>(raw.get()).ok())
+        .unwrap_or_default();
+
+    let merged_metadata = if let Some(metadata_replacement) = replacement_ui.remove("metadata") {
+        let metadata = patch_file_search_metadata_preferences(
+            ui.get("metadata").map(Box::as_ref),
+            metadata_replacement.as_ref(),
+        )?;
+        Some(metadata)
+    } else {
+        None
+    };
+    ui.extend(replacement_ui);
+    if let Some(metadata) = merged_metadata {
+        ui.insert("metadata".to_owned(), metadata);
+    }
+    raw_value(&ui)
+}
+
+fn patch_file_search_ui_preferences(
+    existing: Option<&serde_json::value::RawValue>,
+    source_value: Option<&serde_json::Value>,
+    ui_preferences: &crate::file_search::settings::FileSearchUiPreferences,
+) -> anyhow::Result<Box<serde_json::value::RawValue>> {
+    let Some(existing) = existing else {
+        // Preserve sparse existing Settings objects. FileSearch defaults are
+        // supplied by its serde(default) type.
+        let mut file_search = RawSettingsObject::new();
+        file_search.insert("ui_preferences".to_owned(), raw_value(ui_preferences)?);
+        return raw_value(&file_search);
+    };
+
+    let existing_object = serde_json::from_str::<RawSettingsObject>(existing.get()).ok();
+    // Match the previous `Settings.plugin_settings` Value deserialization:
+    // duplicate object members use the last value, and serde-compatible
+    // positional structs remain valid inputs.
+    let typed_settings = source_value.and_then(|value| {
+        serde_json::from_value::<crate::file_search::settings::FileSearchSettings>(value.clone())
+            .ok()
+    });
+    if let Some(mut typed_settings) = typed_settings {
+        if let Some(mut file_search) = existing_object {
+            let ui = patch_file_search_ui_preferences_raw(
+                file_search.get("ui_preferences").map(Box::as_ref),
+                ui_preferences,
+            )?;
+            file_search.insert("ui_preferences".to_owned(), ui);
+            return raw_value(&file_search);
+        }
+
+        // The previous typed `Value` path also accepted serde's positional
+        // struct representation. It has no object siblings to retain, so
+        // materialize the parsed backend fields and replace only its UI state.
+        typed_settings.ui_preferences = ui_preferences.clone();
+        return raw_value(&typed_settings);
+    }
+
+    // Match the previous typed fallback for an invalid legacy File Search
+    // value, while retaining unknown raw siblings at both nested levels.
+    let defaults = crate::file_search::settings::FileSearchSettings {
+        ui_preferences: ui_preferences.clone(),
+        ..Default::default()
+    };
+    let default_fields = raw_object(raw_value(&defaults)?.as_ref())?;
+    let mut file_search = existing_object.unwrap_or_default();
+    // FileSearchSettings accepts this legacy alias only while deserializing.
+    // Once defaults are written under the canonical key, retaining both would
+    // make serde reject the saved object as a duplicate field.
+    file_search.remove("global_content_search_roots");
+    for (key, value) in default_fields {
+        if key == "ui_preferences" {
+            let ui = patch_file_search_ui_preferences_raw(
+                file_search.get(&key).map(Box::as_ref),
+                ui_preferences,
+            )?;
+            file_search.insert(key, ui);
+        } else {
+            file_search.insert(key, value);
+        }
+    }
+    raw_value(&file_search)
+}
+
 /// SHA-256 of the exact persisted settings bytes. Missing files hash as empty
 /// bytes, matching the radial authoring store's empty-source convention.
 pub fn settings_file_sha256(path: impl AsRef<Path>) -> anyhow::Result<String> {
@@ -499,8 +724,9 @@ fn load_effective(path: impl AsRef<Path>) -> anyhow::Result<Settings> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SettingsBooleanPreference, SettingsBooleanSaveAcknowledgement,
-        SettingsBooleanSaveError, SettingsBooleanSaveRequest, SettingsBooleanSaveToken, Settings,
+        LauncherClosePreferences, SettingsBooleanPreference,
+        SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError,
+        SettingsBooleanSaveRequest, SettingsBooleanSaveToken, Settings,
         settings_file_sha256, transaction_guard,
     };
     use crate::common::persistence::{LoadState, PersistenceError};
@@ -686,6 +912,298 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn launcher_close_patch_preserves_raw_top_level_and_nested_tokens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let opaque = r#"{ "large": 90071992547409931234567890123456789, "nested": {"keep": [1, 2]} }"#;
+        let mut source = String::from(
+            r#"{"window_size":[800,600],"pinned_panels":["HelpWindow"],"future_top":"#,
+        );
+        source.push_str(opaque);
+        source.push_str(
+            r#","plugin_settings":{"file_search":{"global_content_search_roots":["legacy-root"],"max_search_results":11,"max_search_results":17,"future_search":"#,
+        );
+        source.push_str(opaque);
+        source.push_str(r#","ui_preferences":{"whole_word":false,"future_ui":"#);
+        source.push_str(opaque);
+        source.push_str(r#", "metadata":{"future_metadata":"#);
+        source.push_str(opaque);
+        source.push_str(r#", "date":{"future_date":"#);
+        source.push_str(opaque);
+        source.push_str(r#"}, "size":{"future_size":"#);
+        source.push_str(opaque);
+        source.push_str(r#"}}}},"opaque_plugin":"#);
+        source.push_str(opaque);
+        source.push_str(
+            r#"},"calculation_pad_display":{"number_mode":"Fixed","word_wrap":false,"future_display":"#,
+        );
+        source.push_str(opaque);
+        source.push_str("}}");
+        std::fs::write(&path, source).unwrap();
+
+        let mut ui_preferences = crate::file_search::settings::FileSearchUiPreferences::default();
+        ui_preferences.whole_word = true;
+        ui_preferences.filename_sort =
+            crate::file_search::settings::FileSearchFilenameSort::FilenameDescending;
+        let display = crate::settings::CalculationPadDisplayPreferences {
+            word_wrap: true,
+            number_mode: crate::settings::CalculationPadNumberMode::Scientific,
+            ..Default::default()
+        };
+        let preferences = LauncherClosePreferences {
+            window_size: (900, 650),
+            pinned_panels: vec![crate::gui::Panel::FileSearchDialog],
+            file_search_ui_preferences: Some(ui_preferences),
+            calculation_pad_display: Some(display),
+        };
+
+        Settings::save_launcher_close_preferences(&path, &preferences).unwrap();
+        let saved = Settings::read_current(&path).unwrap();
+        assert_eq!(saved.window_size, Some((900, 650)));
+        assert_eq!(
+            saved.pinned_panels,
+            vec![crate::gui::Panel::FileSearchDialog]
+        );
+        assert!(saved.calculation_pad_display.word_wrap);
+        assert_eq!(
+            saved.calculation_pad_display.number_mode,
+            crate::settings::CalculationPadNumberMode::Scientific
+        );
+        let typed_file_search: crate::file_search::settings::FileSearchSettings =
+            serde_json::from_value(saved.plugin_settings["file_search"].clone()).unwrap();
+        assert_eq!(typed_file_search.max_search_results, 17);
+
+        let raw = serde_json::from_slice::<BTreeMap<
+            String,
+            Box<serde_json::value::RawValue>,
+        >>(&std::fs::read(&path).unwrap())
+        .unwrap();
+        assert_eq!(raw["future_top"].get(), opaque);
+        let plugins = super::raw_object(raw["plugin_settings"].as_ref()).unwrap();
+        assert_eq!(plugins["opaque_plugin"].get(), opaque);
+        let file_search = super::raw_object(plugins["file_search"].as_ref()).unwrap();
+        assert_eq!(file_search["future_search"].get(), opaque);
+        assert_eq!(file_search["max_search_results"].get(), "17");
+        assert_eq!(
+            file_search["global_content_search_roots"].get(),
+            r#"["legacy-root"]"#,
+            "the legacy File Search root spelling remains intact"
+        );
+        let ui = super::raw_object(file_search["ui_preferences"].as_ref()).unwrap();
+        assert_eq!(ui["future_ui"].get(), opaque);
+        assert_eq!(ui["whole_word"].get(), "true");
+        assert_eq!(ui["filename_sort"].get(), r#""filename_descending""#);
+        let metadata = super::raw_object(ui["metadata"].as_ref()).unwrap();
+        assert_eq!(metadata["future_metadata"].get(), opaque);
+        assert_eq!(
+            super::raw_object(metadata["date"].as_ref()).unwrap()["future_date"].get(),
+            opaque
+        );
+        assert_eq!(
+            super::raw_object(metadata["size"].as_ref()).unwrap()["future_size"].get(),
+            opaque
+        );
+        let display = super::raw_object(raw["calculation_pad_display"].as_ref()).unwrap();
+        assert_eq!(display["future_display"].get(), opaque);
+        assert_eq!(display["number_mode"].get(), r#""Scientific""#);
+        assert_eq!(display["word_wrap"].get(), "true");
+    }
+
+    #[test]
+    fn launcher_close_patch_keeps_typed_file_search_fallback_and_unknown_siblings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let opaque = r#"{ "large": 90071992547409931234567890123456789 }"#;
+        let mut source = String::from(
+            r#"{"plugin_settings":{"file_search":{"global_content_search_roots":["legacy-invalid-root"],"max_search_results":"invalid","future_search":"#,
+        );
+        source.push_str(opaque);
+        source.push_str(r#","ui_preferences":{"whole_word":false,"future_ui":"#);
+        source.push_str(opaque);
+        source.push_str("}}}}");
+        std::fs::write(&path, source).unwrap();
+
+        let ui_preferences = crate::file_search::settings::FileSearchUiPreferences {
+            whole_word: true,
+            ..Default::default()
+        };
+        let preferences = LauncherClosePreferences {
+            window_size: (700, 500),
+            pinned_panels: Vec::new(),
+            file_search_ui_preferences: Some(ui_preferences),
+            calculation_pad_display: None,
+        };
+        Settings::save_launcher_close_preferences(&path, &preferences).unwrap();
+
+        let raw = serde_json::from_slice::<BTreeMap<
+            String,
+            Box<serde_json::value::RawValue>,
+        >>(&std::fs::read(&path).unwrap())
+        .unwrap();
+        let plugins = super::raw_object(raw["plugin_settings"].as_ref()).unwrap();
+        let file_search = super::raw_object(plugins["file_search"].as_ref()).unwrap();
+        assert!(!file_search.contains_key("global_content_search_roots"));
+        let expected_roots =
+            crate::file_search::settings::FileSearchSettings::default().global_search_roots;
+        assert_eq!(
+            file_search["global_search_roots"].get(),
+            serde_json::to_string(&expected_roots).unwrap()
+        );
+        assert_eq!(file_search["max_search_results"].get(), "500");
+        assert_eq!(file_search["future_search"].get(), opaque);
+        let ui = super::raw_object(file_search["ui_preferences"].as_ref()).unwrap();
+        assert_eq!(ui["whole_word"].get(), "true");
+        assert_eq!(ui["future_ui"].get(), opaque);
+        let saved = Settings::read_current(&path).unwrap();
+        let file_search: crate::file_search::settings::FileSearchSettings =
+            serde_json::from_value(saved.plugin_settings["file_search"].clone()).unwrap();
+        assert_eq!(file_search.global_search_roots, expected_roots);
+    }
+
+    #[test]
+    fn launcher_close_patch_materializes_legacy_file_search_sequence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let legacy_file_search = r#"[["legacy-root"],["keep-excluded"],17]"#;
+        let source = format!(
+            r#"{{"plugin_settings":{{"file_search":{legacy_file_search}}}}}"#
+        );
+        std::fs::write(&path, source).unwrap();
+
+        let legacy_value: serde_json::Value =
+            serde_json::from_str(legacy_file_search).unwrap();
+        let mut expected: crate::file_search::settings::FileSearchSettings =
+            serde_json::from_value(legacy_value).unwrap();
+        let ui_preferences = crate::file_search::settings::FileSearchUiPreferences {
+            whole_word: true,
+            ..Default::default()
+        };
+        expected.ui_preferences = ui_preferences.clone();
+        let preferences = LauncherClosePreferences {
+            window_size: (700, 500),
+            pinned_panels: Vec::new(),
+            file_search_ui_preferences: Some(ui_preferences),
+            calculation_pad_display: None,
+        };
+
+        Settings::save_launcher_close_preferences(&path, &preferences).unwrap();
+
+        let saved = Settings::read_current(&path).unwrap();
+        let actual: crate::file_search::settings::FileSearchSettings =
+            serde_json::from_value(saved.plugin_settings["file_search"].clone()).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.global_search_roots,
+            vec![std::path::PathBuf::from("legacy-root")]
+        );
+        assert_eq!(actual.excluded_directory_names, vec!["keep-excluded"]);
+        assert_eq!(actual.max_search_results, 17);
+
+        let raw = serde_json::from_slice::<super::RawSettingsObject>(
+            &std::fs::read(&path).unwrap(),
+        )
+        .unwrap();
+        let plugins = super::raw_object(raw["plugin_settings"].as_ref()).unwrap();
+        let file_search = super::raw_object(plugins["file_search"].as_ref()).unwrap();
+        assert_eq!(file_search["global_search_roots"].get(), r#"["legacy-root"]"#);
+        assert_eq!(
+            file_search["excluded_directory_names"].get(),
+            r#"["keep-excluded"]"#
+        );
+        assert_eq!(file_search["max_search_results"].get(), "17");
+    }
+
+    #[test]
+    fn launcher_close_patch_keeps_sparse_objects_and_defaults_empty_stores() {
+        let directory = tempfile::tempdir().unwrap();
+        let sparse = directory.path().join("sparse.json");
+        let opaque = r#"{ "future": 90071992547409931234567890123456789 }"#;
+        std::fs::write(&sparse, format!(r#"{{"opaque":{opaque}}}"#)).unwrap();
+        let preferences = LauncherClosePreferences {
+            window_size: (777, 555),
+            pinned_panels: vec![crate::gui::Panel::HelpWindow],
+            file_search_ui_preferences: None,
+            calculation_pad_display: None,
+        };
+        Settings::save_launcher_close_preferences(&sparse, &preferences).unwrap();
+        let saved = Settings::read_current(&sparse).unwrap();
+        assert_eq!(saved.window_size, Some((777, 555)));
+        assert_eq!(saved.pinned_panels, vec![crate::gui::Panel::HelpWindow]);
+        let sparse_raw = serde_json::from_slice::<BTreeMap<
+            String,
+            Box<serde_json::value::RawValue>,
+        >>(&std::fs::read(&sparse).unwrap())
+        .unwrap();
+        assert_eq!(sparse_raw.len(), 3);
+        assert_eq!(sparse_raw["opaque"].get(), opaque);
+        assert!(!sparse_raw.contains_key("plugin_settings"));
+        assert!(!sparse_raw.contains_key("calculation_pad_display"));
+
+        let sparse_feature = directory.path().join("sparse-feature.json");
+        std::fs::write(
+            &sparse_feature,
+            format!(r#"{{"opaque":{opaque}}}"#),
+        )
+        .unwrap();
+        let ui_preferences = crate::file_search::settings::FileSearchUiPreferences {
+            whole_word: true,
+            ..Default::default()
+        };
+        let feature_preferences = LauncherClosePreferences {
+            file_search_ui_preferences: Some(ui_preferences),
+            ..preferences.clone()
+        };
+        Settings::save_launcher_close_preferences(&sparse_feature, &feature_preferences).unwrap();
+        let feature_raw = serde_json::from_slice::<BTreeMap<
+            String,
+            Box<serde_json::value::RawValue>,
+        >>(&std::fs::read(&sparse_feature).unwrap())
+        .unwrap();
+        let feature_plugins = super::raw_object(feature_raw["plugin_settings"].as_ref()).unwrap();
+        assert_eq!(feature_plugins.len(), 1);
+        let file_search =
+            super::raw_object(feature_plugins["file_search"].as_ref()).unwrap();
+        assert_eq!(file_search.len(), 1);
+        assert!(file_search.contains_key("ui_preferences"));
+
+        let missing = directory.path().join("missing.json");
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, b" \r\n\t").unwrap();
+        for path in [&missing, &empty] {
+            Settings::save_launcher_close_preferences(path, &preferences).unwrap();
+            let saved = Settings::read_current(path).unwrap();
+            assert_eq!(saved.hotkey, Settings::default().hotkey);
+            assert_eq!(saved.help_hotkey, Settings::default().help_hotkey);
+            assert_eq!(saved.offscreen_pos, Settings::default().offscreen_pos);
+            let raw = serde_json::from_slice::<BTreeMap<
+                String,
+                Box<serde_json::value::RawValue>,
+            >>(&std::fs::read(path).unwrap())
+            .unwrap();
+            assert!(raw.contains_key("hotkey"));
+            assert!(raw.contains_key("radial"));
+            assert_eq!(raw["window_size"].get(), "[777,555]");
+        }
+    }
+
+    #[test]
+    fn launcher_close_rejects_malformed_settings_without_replacing_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let malformed = b"{broken";
+        std::fs::write(&path, malformed).unwrap();
+        let preferences = LauncherClosePreferences {
+            window_size: (777, 555),
+            pinned_panels: Vec::new(),
+            file_search_ui_preferences: None,
+            calculation_pad_display: None,
+        };
+
+        assert!(Settings::save_launcher_close_preferences(&path, &preferences).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), malformed);
     }
 
     #[test]

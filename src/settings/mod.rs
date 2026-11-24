@@ -8,6 +8,7 @@ pub mod utility_presentations;
 pub use defaults::*;
 pub use io::{set_settings_path, settings_path};
 pub use model::*;
+pub(crate) use store::LauncherClosePreferences;
 pub use store::{
     SettingsBooleanPreference, SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError,
     SettingsBooleanSaveRequest, SettingsBooleanSaveToken,

@@ -159,7 +159,6 @@ pub use crate::settings_save::SettingsSaveWorkerRegistry;
 pub(crate) use radial_editor::{
     AuthoringBindingEditorIdentity, BindingEditorScope, BindingEditorSlot, BindingEditorSurface,
 };
-pub(crate) use render::persist_launcher_close_preferences;
 pub use state::AuthoringProviderSearchRequest;
 pub(crate) use state::{AuthoringProviderSearchPurpose, AuthoringProviderTestPayload};
 pub(crate) use zip_extractor_dialog::ZipExtractorDialog;
@@ -1786,12 +1785,12 @@ impl LauncherApp {
 
     pub(crate) fn settings_save_close_preferences(
         &self,
-    ) -> crate::settings_save::LauncherClosePreferences {
+    ) -> crate::settings::LauncherClosePreferences {
         let file_search_ui_preferences = self
             .file_search_dialog
             .ui_preferences_dirty
             .then(|| self.file_search_dialog.ui_preferences.clone());
-        crate::settings_save::LauncherClosePreferences {
+        crate::settings::LauncherClosePreferences {
             window_size: self.window_size,
             pinned_panels: self.pinned_panels.clone(),
             file_search_ui_preferences,

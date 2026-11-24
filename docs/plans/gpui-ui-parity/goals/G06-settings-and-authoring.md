@@ -2,6 +2,8 @@
 
 **Status:** The first GPUI Settings menu, bare typed route and retained autocomplete preference passed the scoped Windows and Rust verification. The broader editor, its child surfaces and the full settings round trip remain in implementation. [First native Settings save](../gui/settings-main.md#first-native-settings-save)
 
+The ordinary egui close prerequisite passed native and focused Rust verification. EgUI close saved root geometry while preserving unowned Settings values. GPUI reopened the same profile and the checked reverse restart continued to refuse a failed close write. [G06-D ordinary close evidence](../VALIDATION_LOG.md#g06-d-ordinary-egui-close-preservation)
+
 **Owner:** G06 settings/authoring implementer, with G02 for persistence and plugin contracts. Use the existing migration branch.
 
 ## Objective and dependencies

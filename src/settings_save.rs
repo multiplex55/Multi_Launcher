@@ -4,7 +4,9 @@ use crate::gui::LauncherApp;
 use crate::hotkey::reconfiguration::{
     AppliedHotkeyReconfiguration, HotkeyApplySubmissionError, HotkeyReconfigurationError,
 };
-use crate::settings::{Settings, SettingsBooleanPreference, SettingsBooleanSaveToken};
+use crate::settings::{
+    LauncherClosePreferences, Settings, SettingsBooleanPreference, SettingsBooleanSaveToken,
+};
 use crate::settings::utility_dialog_sizes::{
     UtilitySizeAcknowledgement, UtilitySizeMutation, UtilitySizePreference, UtilitySizeRevision,
     UtilityToolKey, persist_mutation,
@@ -655,15 +657,6 @@ fn restore_map_value(
     } else {
         map.remove(key);
     }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct LauncherClosePreferences {
-    pub(crate) window_size: (i32, i32),
-    pub(crate) pinned_panels: Vec<crate::gui::Panel>,
-    pub(crate) file_search_ui_preferences:
-        Option<crate::file_search::settings::FileSearchUiPreferences>,
-    pub(crate) calculation_pad_display: Option<crate::settings::CalculationPadDisplayPreferences>,
 }
 
 #[derive(Default)]
@@ -1923,7 +1916,7 @@ impl LauncherApp {
                 slot.preferences.take()
             };
             if let Some(preferences) = preferences
-                && let Err(error) = persist_launcher_close_preferences(&path, &preferences)
+                && let Err(error) = Settings::save_launcher_close_preferences(&path, &preferences)
             {
                 tracing::error!(%error, "failed to persist launcher preferences during settings-save shutdown");
                 worker_settings_save_workers.record_close_preference_failure(format!(
@@ -2106,7 +2099,9 @@ impl LauncherApp {
                 return;
             }
         }
-        if let Err(error) = persist_launcher_close_preferences(&self.settings_path, &preferences) {
+        if let Err(error) =
+            Settings::save_launcher_close_preferences(&self.settings_path, &preferences)
+        {
             tracing::error!(%error, "failed to persist launcher close preferences");
             self.settings_save_workers
                 .record_close_preference_failure(format!(
@@ -2554,39 +2549,6 @@ fn rollback_after_failure(
             "{operation_error}; restoring this save's persisted fields failed: {error}"
         )),
     }
-}
-
-fn persist_launcher_close_preferences(
-    path: &str,
-    preferences: &LauncherClosePreferences,
-) -> anyhow::Result<()> {
-    crate::gui::persist_launcher_close_preferences(
-        path,
-        preferences.window_size,
-        preferences.pinned_panels.clone(),
-    )?;
-    if preferences.file_search_ui_preferences.is_some()
-        || preferences.calculation_pad_display.is_some()
-    {
-        Settings::update(path, |settings| {
-            if let Some(ui_preferences) = &preferences.file_search_ui_preferences {
-                let mut file_search: crate::file_search::settings::FileSearchSettings = settings
-                    .plugin_settings
-                    .get("file_search")
-                    .and_then(|value| serde_json::from_value(value.clone()).ok())
-                    .unwrap_or_default();
-                file_search.ui_preferences = ui_preferences.clone();
-                settings
-                    .plugin_settings
-                    .insert("file_search".into(), serde_json::to_value(file_search)?);
-            }
-            if let Some(display) = preferences.calculation_pad_display {
-                settings.calculation_pad_display = display;
-            }
-            Ok(())
-        })?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
