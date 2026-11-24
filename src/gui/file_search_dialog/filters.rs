@@ -3,17 +3,16 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::file_search::model::{
-    ContentMatchMode, FileTypeFilter, FilenameMatchMode, SearchRequest, SearchScope,
-};
+use crate::file_search::model::{ContentMatchMode, FileTypeFilter, FilenameMatchMode, SearchRequest};
 use crate::file_search::predicate::{
     DateMode, DatePreference, MetadataPreferences, SizeMode, SizePreference, SizeUnit,
 };
 use crate::file_search::settings::{FileSearchContentSort, FileSearchFilenameSort};
+use crate::file_search::request::{self, RequestInput, RootScope};
 use eframe::egui;
 
 use super::{
-    resolve_valid_roots, FileSearchDialogState, FileSearchMode, FileSearchRequestError,
+    FileSearchDialogState, FileSearchMode, FileSearchRequestError,
     FileSearchScopeMode,
 };
 
@@ -29,19 +28,6 @@ macro_rules! register_filter_target {
             $order,
         )
     };
-}
-
-impl FileSearchRequestError {
-    pub fn user_message(&self) -> &str {
-        match self {
-            Self::EmptySearchText => "Enter search text before searching.",
-            Self::EmptyGlobalRoots => {
-                "Configure at least one valid global search root in File Search settings."
-            }
-            Self::EmptyDirectoryRoots => "Choose at least one valid root directory first.",
-            Self::InvalidMetadata(message) => message,
-        }
-    }
 }
 
 pub fn normalize_extension_input(input: &str) -> Vec<String> {
@@ -109,63 +95,33 @@ impl FileSearchDialogState {
         }
     }
 
+    fn request_input(&self) -> RequestInput<'_> {
+        RequestInput {
+            text: &self.search_text,
+            kind: self.selected_mode.into(),
+            scope: match self.selected_scope {
+                FileSearchScopeMode::Global => RootScope::Global,
+                FileSearchScopeMode::Directory => RootScope::Directory,
+            },
+            custom_roots: if self.selected_scope == FileSearchScopeMode::Directory {
+                self.custom_roots.iter().map(PathBuf::from).collect()
+            } else {
+                Vec::new()
+            },
+            case_sensitive: self.case_sensitive,
+            include_hidden: self.include_hidden,
+            settings: &self.settings,
+            preferences: &self.ui_preferences,
+            excluded_directory_names: self.effective_excluded_directory_names(),
+        }
+    }
+
     pub fn build_search_request(&self) -> Result<SearchRequest, FileSearchRequestError> {
-        let mut request = self.build_semantic_request()?;
-        request.metadata = request
-            .metadata_preferences
-            .capture(request.kind, request.max_file_size_bytes)
-            .map_err(FileSearchRequestError::InvalidMetadata)?;
-        Ok(request)
+        request::build_request(&self.request_input())
     }
 
     pub(super) fn build_semantic_request(&self) -> Result<SearchRequest, FileSearchRequestError> {
-        let text = self.search_text.trim();
-        if text.is_empty() {
-            return Err(FileSearchRequestError::EmptySearchText);
-        }
-        let scope = match self.selected_scope {
-            FileSearchScopeMode::Global => {
-                let roots = resolve_valid_roots(self.settings.global_search_roots.clone());
-                if roots.is_empty() {
-                    return Err(FileSearchRequestError::EmptyGlobalRoots);
-                }
-                SearchScope::Roots { roots }
-            }
-            FileSearchScopeMode::Directory => {
-                let roots = resolve_valid_roots(self.custom_roots.iter().map(PathBuf::from));
-                if roots.is_empty() {
-                    return Err(FileSearchRequestError::EmptyDirectoryRoots);
-                }
-                SearchScope::Roots { roots }
-            }
-        };
-
-        Ok(SearchRequest {
-            kind: self.selected_mode.into(),
-            scope,
-            text: text.to_string(),
-            case_sensitive: self.case_sensitive,
-            include_hidden_files: self.include_hidden,
-            max_results: self.settings.max_search_results.max(1),
-            max_file_size_bytes: self.settings.max_content_search_file_size_bytes.max(1),
-            included_extensions: self.ui_preferences.included_extensions.clone(),
-            excluded_extensions: self.ui_preferences.excluded_extensions.clone(),
-            excluded_directory_names: self.effective_excluded_directory_names(),
-            filename_match_mode: self.ui_preferences.filename_match_mode,
-            content_match_mode: self.ui_preferences.content_match_mode,
-            whole_word: self.ui_preferences.whole_word,
-            file_type_filter: match self.selected_mode {
-                _ if self.ui_preferences.metadata.size.mode
-                    != crate::file_search::predicate::SizeMode::Any =>
-                {
-                    FileTypeFilter::FilesOnly
-                }
-                FileSearchMode::Filename => self.ui_preferences.file_type_filter,
-                FileSearchMode::Content => FileTypeFilter::FilesOnly,
-            },
-            metadata_preferences: self.ui_preferences.metadata.clone(),
-            metadata: Default::default(),
-        })
+        request::build_semantic_request(&self.request_input())
     }
 
     pub fn filters_changed_since_last_search(&self) -> bool {

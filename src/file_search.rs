@@ -12,6 +12,7 @@ pub mod path_identity;
 pub mod predicate;
 pub mod preview;
 pub mod query;
+pub mod request;
 pub mod ripgrep;
 pub mod settings;
 pub mod sorting;

@@ -1,6 +1,6 @@
 # G07 — File Search, results, previews, and diagnostics
 
-**Status:** Pending. **Owner:** G07 implementer with the shared search-service owner. No tests or migration changes have occurred while drafting. Use the program's single migration branch.
+**Status:** In implementation. **Owner:** G07 implementer with the shared search-service owner. The first selected-file checkpoint serves the G04 Hash pilot and begins the shared request boundary. [Current checkpoint](../gui/file-search.md#first-gpui-selected-file-checkpoint)
 
 ## Objective and dependencies
 

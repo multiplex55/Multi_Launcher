@@ -110,13 +110,7 @@ pub enum FileSearchEscapeAction {
     Close,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileSearchRequestError {
-    EmptySearchText,
-    EmptyGlobalRoots,
-    EmptyDirectoryRoots,
-    InvalidMetadata(String),
-}
+pub use crate::file_search::request::RequestError as FileSearchRequestError;
 
 pub fn handle_escape_action(status: SearchStatus) -> FileSearchEscapeAction {
     if status == SearchStatus::Running {
@@ -270,27 +264,7 @@ fn filename_table_row_height(ui: &mut egui::Ui) -> f32 {
     (height * pixels_per_point).ceil() / pixels_per_point
 }
 
-pub fn dedup_search_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    let mut seen = std::collections::HashSet::new();
-    let mut deduped = Vec::new();
-    for path in paths {
-        if seen.insert(crate::file_search::sorting::path_identity(&path)) {
-            deduped.push(path);
-        }
-    }
-    deduped
-}
-
-pub fn resolve_valid_roots(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    dedup_search_paths(paths.into_iter().filter_map(|path| {
-        let trimmed = path.to_string_lossy().trim().to_owned();
-        if trimmed.is_empty() {
-            return None;
-        }
-        let path = PathBuf::from(trimmed);
-        path.canonicalize().ok().filter(|p| p.is_dir())
-    }))
-}
+pub use crate::file_search::request::{dedup_search_paths, resolve_valid_roots};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectedFileSearchResultPayload {
