@@ -32,7 +32,7 @@ pub(crate) struct PluginHostActions {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PluginSelection {
     enabled_plugins: Vec<String>,
-    enabled_capabilities: HashMap<String, Vec<String>>,
+    enabled_capabilities: Option<HashMap<String, Vec<String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -42,7 +42,7 @@ pub struct PluginEditor {
     host_epoch: u64,
     selection_revision: u64,
     enabled_plugins: Vec<String>,
-    enabled_capabilities: HashMap<String, Vec<String>>,
+    enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     available: Vec<(String, String, Vec<String>)>,
     filter: String,
     #[cfg(test)]
@@ -70,15 +70,7 @@ impl PluginEditor {
             None => info.iter().map(|(n, _, _)| n.clone()).collect(),
         };
 
-        // Likewise enable all advertised capabilities per plugin when the
-        // settings don't provide a map.
-        let enabled_capabilities = match &settings.enabled_capabilities {
-            Some(map) => map.clone(),
-            None => info
-                .iter()
-                .map(|(name, _, caps)| (name.clone(), caps.clone()))
-                .collect(),
-        };
+        let enabled_capabilities = settings.enabled_capabilities.clone();
 
         Self {
             host_open: false,
@@ -155,32 +147,7 @@ impl PluginEditor {
         let enabled_plugins =
             (!all_plugins_enabled).then(|| self.enabled_plugins.iter().cloned().collect());
 
-        let mut default_caps = true;
-        for (name, _, caps) in &self.available {
-            if !self.enabled_plugins.contains(name) {
-                continue;
-            }
-            match self.enabled_capabilities.get(name) {
-                Some(enabled) => {
-                    if enabled.len() != caps.len() || !caps.iter().all(|cap| enabled.contains(cap))
-                    {
-                        default_caps = false;
-                        break;
-                    }
-                }
-                None if !caps.is_empty() => {
-                    default_caps = false;
-                    break;
-                }
-                None => {}
-            }
-        }
-        let enabled_capabilities =
-            if default_caps && self.enabled_capabilities.len() == self.enabled_plugins.len() {
-                None
-            } else {
-                Some(self.enabled_capabilities.clone())
-            };
+        let enabled_capabilities = self.enabled_capabilities.clone();
         app.begin_settings_save(
             ctx,
             crate::settings_save::SettingsSaveIntent::plugin_selection(
@@ -359,16 +326,7 @@ impl PluginEditor {
                                         );
                                     }
                                     if response.changed() {
-                                        if enabled {
-                                            if !self.enabled_plugins.contains(name) {
-                                                self.enabled_plugins.push(name.clone());
-                                            }
-                                        } else if let Some(pos) =
-                                            self.enabled_plugins.iter().position(|n| n == name)
-                                        {
-                                            self.enabled_plugins.remove(pos);
-                                            self.enabled_capabilities.remove(name);
-                                        }
+                                        set_plugin_enabled(&mut self.enabled_plugins, name, enabled);
                                         changed = true;
                                     }
                                     ui.label(desc);
@@ -376,11 +334,9 @@ impl PluginEditor {
                                 ui.indent(name, |ui| {
                                     ui.add_enabled_ui(enabled, |ui| {
                                         for cap in caps {
-                                            let entry = self
-                                                .enabled_capabilities
-                                                .entry(name.clone())
-                                                .or_default();
-                                            let mut cap_enabled = entry.contains(cap);
+                                            let mut cap_enabled = capability_enabled(
+                                                self.enabled_capabilities.as_ref(), name, cap,
+                                            );
                                             let label = if cap == "show_full_path" {
                                                 "show full path always".to_string()
                                             } else {
@@ -398,15 +354,13 @@ impl PluginEditor {
                                                 );
                                             }
                                             if response.changed() {
-                                                if cap_enabled {
-                                                    if !entry.contains(cap) {
-                                                        entry.push(cap.clone());
-                                                    }
-                                                } else if let Some(pos) =
-                                                    entry.iter().position(|c| c == cap)
-                                                {
-                                                    entry.remove(pos);
-                                                }
+                                                set_capability(
+                                                    &mut self.enabled_capabilities,
+                                                    name,
+                                                    caps,
+                                                    cap,
+                                                    cap_enabled,
+                                                );
                                                 changed = true;
                                             }
                                         }
@@ -427,6 +381,58 @@ impl PluginEditor {
         PluginHostActions { presentation_request, changed: first && !ctx.will_discard() && changed, close: runtime.can_close && first && allowed && !ctx.will_discard() && !open, catalog_revision: runtime.catalog_revision, before, candidate: self.selection(), selection_revision, filter_before, filter_after, navigation: navigation.cloned(), #[cfg(test)] test_button }
     }
 
+}
+
+fn set_plugin_enabled(enabled_plugins: &mut Vec<String>, name: &str, enabled: bool) {
+    if enabled {
+        if !enabled_plugins.iter().any(|entry| entry == name) {
+            enabled_plugins.push(name.to_owned());
+        }
+    } else {
+        enabled_plugins.retain(|entry| entry != name);
+    }
+}
+
+fn capability_enabled(
+    capabilities: Option<&HashMap<String, Vec<String>>>,
+    name: &str,
+    capability: &str,
+) -> bool {
+    if capability == "search" {
+        return crate::settings::provider_search_capability_enabled(capabilities, name);
+    }
+    capabilities.and_then(|map| map.get(name)).map_or_else(
+        || !(name == "folders" && capability == "show_full_path"),
+        |entry| entry.iter().any(|value| value == capability),
+    )
+}
+
+fn set_capability(
+    capabilities: &mut Option<HashMap<String, Vec<String>>>,
+    name: &str,
+    advertised: &[String],
+    capability: &str,
+    enabled: bool,
+) {
+    let inherited = || {
+        let mut entry: Vec<String> = advertised.iter()
+            .filter(|cap| capability_enabled(None, name, cap))
+            .cloned()
+            .collect();
+        if !entry.iter().any(|cap| cap == "search") {
+            entry.push("search".to_owned());
+        }
+        entry
+    };
+    let entry = capabilities.get_or_insert_with(HashMap::new)
+        .entry(name.to_owned()).or_insert_with(inherited);
+    if enabled {
+        if !entry.iter().any(|value| value == capability) {
+            entry.push(capability.to_owned());
+        }
+    } else {
+        entry.retain(|value| value != capability);
+    }
 }
 
 fn plugin_jump_target(scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: crate::gui::jump_mode::TargetKind, order: &mut u64) {
@@ -500,6 +506,90 @@ fn validated_navigation_plugin_row<'a>(
 #[cfg(test)]
 mod hosted_selection_tests {
     use super::*;
+
+    #[test]
+    fn hosted_sparse_capability_render_does_not_materialize_rows() {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.enabled_capabilities = Some(HashMap::from([("timer".into(), vec!["completion_dialog".into()])]));
+        let available = vec![
+            ("folders".into(), String::new(), vec!["search".into(), "show_full_path".into()]),
+            ("timer".into(), String::new(), vec!["search".into(), "completion_dialog".into()]),
+        ];
+        let mut editor = PluginEditor::with_available(&settings, available);
+        let before = editor.selection();
+        let context = egui::Context::default();
+        let runtime = PluginHostRuntime {
+            pending: false, can_close: true, catalog_revision: 0, catalog: None, navigation: None,
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 900.0))),
+            focused: true,
+            ..Default::default()
+        };
+        let mut actions = None;
+        let output = context.run_ui(input, |ui| {
+            actions = Some(editor.render_host(&context, &runtime, true, true, Some(ui),
+                crate::gui::utility_host::UtilityPresentation::Docked, None));
+        });
+        output.drop_without_applying_deltas();
+        assert!(!actions.unwrap().changed);
+        assert!(editor.selection() == before);
+        assert!(capability_enabled(editor.enabled_capabilities.as_ref(), "folders", "search"));
+        assert!(!capability_enabled(editor.enabled_capabilities.as_ref(), "folders", "show_full_path"));
+        assert!(!capability_enabled(editor.enabled_capabilities.as_ref(), "timer", "search"));
+        assert!(capability_enabled(editor.enabled_capabilities.as_ref(), "timer", "completion_dialog"));
+    }
+
+    #[test]
+    fn disabling_membership_preserves_google_search_denial() {
+        let mut enabled = vec!["web_search".to_owned()];
+        let capabilities = Some(HashMap::from([
+            ("web_search".to_owned(), Vec::new()),
+            ("other".to_owned(), vec!["opaque".to_owned()]),
+        ]));
+        let before = capabilities.clone();
+        set_plugin_enabled(&mut enabled, "web_search", false);
+        assert!(enabled.is_empty());
+        assert_eq!(capabilities, before);
+        let override_membership = std::collections::HashSet::from(["web_search".to_owned()]);
+        let provider = crate::plugins_builtin::WebSearchPlugin;
+        let rows = crate::plugin::search_filtered_plugins(
+            [&provider as &dyn crate::plugin::Plugin], "g cat", Some(&override_membership), capabilities.as_ref(),
+        );
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn editing_sparse_capabilities_retains_defaults_and_hidden_search() {
+        let mut capabilities = None;
+        let timer = vec!["search".into(), "completion_dialog".into()];
+        set_capability(&mut capabilities, "timer", &timer, "search", false);
+        assert_eq!(capabilities.as_ref().unwrap()["timer"], ["completion_dialog"]);
+        let folders = vec!["search".into(), "show_full_path".into()];
+        set_capability(&mut capabilities, "folders", &folders, "search", false);
+        assert!(capabilities.as_ref().unwrap()["folders"].is_empty());
+        let hidden = vec!["other_capability".into()];
+        set_capability(&mut capabilities, "hotfolder", &hidden, "other_capability", false);
+        assert_eq!(capabilities.as_ref().unwrap()["hotfolder"], ["search"]);
+        assert!(capability_enabled(capabilities.as_ref(), "hotfolder", "search"));
+    }
+
+    #[test]
+    fn explicit_capability_rows_preserve_unknowns_and_empty_state() {
+        let mut capabilities = Some(HashMap::from([
+            ("timer".to_owned(), vec!["opaque".to_owned(), "search".to_owned(), "completion_dialog".to_owned()]),
+            ("other".to_owned(), Vec::new()),
+        ]));
+        assert!(!capability_enabled(capabilities.as_ref(), "other", "search"));
+        let timer = vec!["search".into(), "completion_dialog".into()];
+        set_capability(&mut capabilities, "timer", &timer, "search", false);
+        assert_eq!(capabilities.as_ref().unwrap()["timer"], ["opaque", "completion_dialog"]);
+        assert!(capabilities.as_ref().unwrap()["other"].is_empty());
+        set_capability(&mut capabilities, "other", &timer, "completion_dialog", true);
+        assert_eq!(capabilities.unwrap()["other"], ["completion_dialog"]);
+    }
 
     #[test]
     fn newer_committed_plugin_selection_invalidates_staged_candidate() {
