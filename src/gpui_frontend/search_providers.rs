@@ -165,6 +165,7 @@ impl InstalledLauncherProviders {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WebProvider {
+    Google,
     Reddit,
     Runescape,
     Weather,
@@ -173,7 +174,8 @@ pub(super) enum WebProvider {
 }
 
 impl WebProvider {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
+        Self::Google,
         Self::Reddit,
         Self::Runescape,
         Self::Weather,
@@ -183,6 +185,7 @@ impl WebProvider {
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "web_search" => Some(Self::Google),
             "reddit" => Some(Self::Reddit),
             "runescape_search" => Some(Self::Runescape),
             "weather" => Some(Self::Weather),
@@ -194,6 +197,7 @@ impl WebProvider {
 
     pub(super) fn plugin(self) -> &'static dyn multi_launcher::plugin::Plugin {
         match self {
+            Self::Google => &multi_launcher::plugins_builtin::WebSearchPlugin,
             Self::Reddit => &multi_launcher::plugins::reddit::RedditPlugin,
             Self::Runescape => &multi_launcher::plugins::runescape::RunescapeSearchPlugin,
             Self::Weather => &multi_launcher::plugins::weather::WeatherPlugin,
@@ -209,10 +213,24 @@ impl WebProvider {
         enabled: Option<&HashSet<String>>,
         caps: Option<&std::collections::HashMap<String, Vec<String>>>,
     ) -> bool {
-        multi_launcher::plugin::search_filtered_plugins([self.plugin()], query, enabled, caps)
+        search_routed([self.plugin()], query, enabled, caps)
             .iter()
-            .any(|row| row == action)
+            .any(|(name, row)| Self::from_name(name) == Some(self) && row == action)
     }
+}
+
+/// Preserve the foreground launcher's exclusive, raw `g ` route.
+pub(super) fn search_routed<'a>(
+    plugins: impl IntoIterator<Item = &'a dyn multi_launcher::plugin::Plugin>,
+    query: &str,
+    enabled: Option<&HashSet<String>>,
+    caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Vec<(String, Action)> {
+    let google_only = query.trim().to_lowercase().starts_with("g ")
+        .then(|| HashSet::from(["web_search".to_owned()]));
+    multi_launcher::plugin::search_filtered_plugins_with_origin(
+        plugins, query, google_only.as_ref().or(enabled), caps,
+    )
 }
 
 fn admitted_commands(provider: &dyn multi_launcher::plugin::Plugin) -> Vec<Action> {
@@ -251,7 +269,7 @@ mod tests {
             let disabled = HashMap::from([(name.to_owned(), Vec::new())]);
             assert!(!super::WebProvider::from_name(name).unwrap().is_current(query, &rows[0].1, Some(&enabled), Some(&disabled)));
         }
-        assert!(super::WebProvider::from_name("web_search").is_none());
+        assert_eq!(super::WebProvider::from_name("web_search"), Some(super::WebProvider::Google));
     }
 
     struct Fixture {
@@ -287,6 +305,35 @@ mod tests {
             action: command.into(),
             args: None,
         }
+    }
+
+    #[test]
+    fn google_exclusive_route_preserves_shared_query_and_capability_policy() {
+        let google = multi_launcher::plugins_builtin::WebSearchPlugin;
+        let competitor = Fixture {
+            name: "competitor", prefix: "g", rows: vec![action("competitor", "other")], commands: Vec::new(),
+        };
+        let providers: [&dyn Plugin; 2] = [&google, &competitor];
+        let disabled = HashSet::from(["competitor".to_owned()]);
+        let query = "g Café+Tea";
+        let rows = super::search_routed(providers, query, Some(&disabled), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "web_search");
+        assert_eq!(rows[0].1.action, "https://www.google.com/search?q=Caf%C3%A9%2BTea");
+        assert!(super::WebProvider::Google.is_current(query, &rows[0].1, Some(&disabled), None));
+        let no_search = HashMap::from([("web_search".to_owned(), Vec::new())]);
+        assert!(super::search_routed(providers, query, Some(&disabled), Some(&no_search)).is_empty());
+        assert!(!super::WebProvider::Google.is_current(query, &rows[0].1, Some(&disabled), Some(&no_search)));
+        assert!(super::search_routed(providers, "G cat", Some(&disabled), None).is_empty());
+        let tab = super::search_routed(providers, "g\tcat", Some(&disabled), None);
+        assert_eq!(tab.len(), 1);
+        assert_eq!(tab[0].0, "competitor");
+        let enabled = HashSet::from(["web_search".to_owned()]);
+        assert!(super::search_routed(providers, "kind:https g cat", Some(&disabled), None).is_empty());
+        let filtered = super::search_routed(providers, "kind:https g cat", Some(&enabled), None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].1.action, "https://www.google.com/search?q=cat");
+        assert!(super::search_routed(providers, "g ", Some(&enabled), None).is_empty());
     }
 
     #[test]

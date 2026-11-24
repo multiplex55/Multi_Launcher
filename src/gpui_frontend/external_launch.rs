@@ -856,6 +856,7 @@ mod tests {
         use super::{checked_web_association_with, provider_association, AssociationKind};
         use crate::gpui_frontend::{LauncherResultOrigin, search_providers::WebProvider};
         for (provider, name, query) in [
+            (WebProvider::Google, "web_search", "g Café+Tea"),
             (WebProvider::Reddit, "reddit", "red snow & ice"),
             (WebProvider::Runescape, "runescape_search", "rs dragon sword"),
             (WebProvider::Runescape, "runescape_search", "osrs dragon sword"),

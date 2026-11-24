@@ -6649,7 +6649,7 @@ impl RootWindow {
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool) {
         self.retire_context_favorite();
         self.retire_search_jump_mode();
-        let raw_provider_actions = multi_launcher::plugin::search_filtered_plugins_with_origin(
+        let raw_provider_actions = search_providers::search_routed(
             self.search_catalog.providers.plugins(),
             &query,
             self.enabled_plugins.as_ref(),
@@ -13742,6 +13742,45 @@ mod tests {
         assert_eq!(rows[0].action, raw[0].1);
     }
 
+    #[test]
+    fn google_route_preserves_bare_cached_command_and_exclusive_projection() {
+        let enabled = HashSet::from(["web_search".to_owned()]);
+        let mut catalog = completion_catalog(Vec::new(), true, Some(&enabled));
+        let cached = catalog.compose("g", Vec::new(), true);
+        assert!(cached.iter().any(|row| row.action.action == "query:g "));
+        let disabled_catalog = completion_catalog(Vec::new(), true, Some(&HashSet::new()));
+        assert!(
+            !disabled_catalog
+                .compose("g", Vec::new(), true)
+                .iter()
+                .any(|row| row.action.action == "query:g ")
+        );
+        let query = "g Café+Tea";
+        let rows = super::search_providers::search_routed(
+            catalog.providers.plugins(),
+            query,
+            Some(&HashSet::new()),
+            None,
+        );
+        assert_eq!(rows.len(), 1);
+        let composed = catalog.compose(query, rows.clone(), false);
+        assert_eq!(composed.len(), 1);
+        assert_eq!(composed[0].action, rows[0].1);
+
+        let fallback = saved_action("G Café+Tea", "query:g Café+Tea", None);
+        catalog
+            .command_cached_entries
+            .push(multi_launcher::actions::search::CachedSearchEntry::from_action(&fallback));
+        catalog.commands.push(fallback.clone());
+        assert!(
+            catalog
+                .compose("Café+Tea", Vec::new(), true)
+                .iter()
+                .any(|row| row.action == fallback)
+        );
+        assert!(catalog.compose("G Café+Tea", Vec::new(), true).is_empty());
+    }
+
     #[cfg(windows)]
     #[test]
     fn visibility_deactivation_wakes_idle_and_retires_pending_requests() {
@@ -14404,9 +14443,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14435,7 +14474,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 11 } else { 10 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 12 } else { 11 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(
