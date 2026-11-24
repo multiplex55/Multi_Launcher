@@ -20,6 +20,44 @@ pub(super) fn saved_external(action: &Action) -> Option<ExternalCommand> {
     ordinary_external(&multi_launcher::commands::parse_action(action).ok()?).cloned()
 }
 
+/// Admit only saved document paths whose external arguments are absent or blank.
+pub(super) fn saved_document(action: &Action) -> Option<ExternalCommand> {
+    let command = multi_launcher::commands::parse_action(action).ok()?;
+    document_external(action, &command).cloned()
+}
+
+pub(super) fn document_external<'a>(
+    action: &Action,
+    command: &'a multi_launcher::commands::Command,
+) -> Option<&'a ExternalCommand> {
+    if action
+        .args
+        .as_deref()
+        .is_some_and(|args| !args.trim().is_empty())
+    {
+        return None;
+    }
+    let multi_launcher::commands::Command::External(command) = command else {
+        return None;
+    };
+    if command.namespace.is_some()
+        || command.target != action.action
+        || command
+            .args
+            .as_deref()
+            .is_some_and(|args| !args.trim().is_empty())
+        || !ordinary_path(&command.target, false)
+    {
+        return None;
+    }
+    let leaf = command.target.rsplit(['\\', '/']).next()?;
+    let extension = leaf.rsplit_once('.')?.1;
+    ["txt", "rtf", "pdf", "docx", "xlsx", "pptx"]
+        .iter()
+        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        .then_some(command)
+}
+
 pub(super) fn ordinary_external(
     command: &multi_launcher::commands::Command,
 ) -> Option<&ExternalCommand> {
@@ -180,6 +218,7 @@ impl Stamp {
 pub(super) enum AssociationKind {
     Folder,
     Bookmark,
+    SavedDocument,
     Web(super::search_providers::WebProvider),
 }
 
@@ -225,6 +264,7 @@ fn association_command(kind: AssociationKind, action: &Action) -> Option<Externa
     }
     let valid = match kind {
         AssociationKind::Folder => ordinary_path(&command.target, false),
+        AssociationKind::SavedDocument => false,
         AssociationKind::Bookmark | AssociationKind::Web(_) => {
             let raw = command.target.as_str();
             let authority = raw
@@ -256,6 +296,11 @@ fn checked_association(
     command: &ExternalCommand,
     query: &str,
 ) -> anyhow::Result<()> {
+    if kind == AssociationKind::SavedDocument {
+        return checked_document_association_with(action, command, |target| {
+            multi_launcher::actions::exec::launch_association(target)
+        });
+    }
     if let AssociationKind::Web(provider) = kind {
         return checked_web_association_with(provider, action, command, query, |target| {
             multi_launcher::actions::exec::launch_association(target)
@@ -293,7 +338,7 @@ fn checked_association_with(
                 action,
             )?
         }
-        AssociationKind::Web(_) => false,
+        AssociationKind::Web(_) | AssociationKind::SavedDocument => false,
     };
     anyhow::ensure!(current, "The Search result is stale; refresh and try again");
     if kind == AssociationKind::Folder {
@@ -301,6 +346,36 @@ fn checked_association_with(
             std::path::Path::new(&command.target).is_dir(),
             "The folder is unavailable"
         );
+    }
+    launch(&command.target)
+}
+
+fn checked_document_association_with(
+    action: &Action,
+    command: &ExternalCommand,
+    launch: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        saved_document(action).as_ref() == Some(command),
+        "Invalid saved document target"
+    );
+    let path = std::path::absolute(&command.target)
+        .map_err(|error| anyhow::anyhow!("Document path is unavailable: {error}"))?;
+    for ancestor in path.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+        let metadata = std::fs::symlink_metadata(ancestor)
+            .map_err(|error| anyhow::anyhow!("Document path is unavailable: {error}"))?;
+        #[cfg(windows)]
+        let reparse = {
+            use std::os::windows::fs::MetadataExt;
+            use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        };
+        #[cfg(not(windows))]
+        let reparse = metadata.file_type().is_symlink();
+        anyhow::ensure!(!reparse, "Document path contains a reparse point");
+        if ancestor == path.as_path() {
+            anyhow::ensure!(metadata.is_file(), "Document target is not a file");
+        }
     }
     launch(&command.target)
 }
@@ -849,6 +924,86 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn saved_document_association_checks_file_and_forwards_exact_target() {
+        use super::{checked_document_association_with, saved_document};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Mixed Case.PDF");
+        std::fs::write(&file, b"document").unwrap();
+        let action = Action {
+            label: "Document".into(),
+            desc: String::new(),
+            action: file.to_str().unwrap().to_owned(),
+            args: Some("  ".into()),
+        };
+        let command = saved_document(&action).expect("ordinary document");
+        let mut calls = Vec::new();
+        checked_document_association_with(&action, &command, |target| {
+            calls.push(target.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, [action.action.clone()]);
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            checked_document_association_with(&action, &command, |_| panic!(
+                "missing file launched"
+            ))
+            .is_err()
+        );
+        std::fs::create_dir(&file).unwrap();
+        assert!(
+            checked_document_association_with(&action, &command, |_| panic!("directory launched"))
+                .is_err()
+        );
+        let mut invalid = action.clone();
+        for extension in ["txt", "rtf", "pdf", "docx", "xlsx", "pptx"] {
+            invalid.action = format!(r"C:\Docs\document.{extension}");
+            invalid.args = None;
+            assert!(saved_document(&invalid).is_some());
+        }
+        invalid = action.clone();
+        invalid.args = Some("--argument".into());
+        assert!(saved_document(&invalid).is_none());
+        for path in [
+            "https://example.com/file.pdf",
+            r"C:\x\file.lnk",
+            r"C:\x\file.exe",
+            r"\\?\C:\x\file.txt",
+        ] {
+            invalid.action = path.into();
+            invalid.args = None;
+            assert!(saved_document(&invalid).is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_document_rejects_symlink_components() {
+        use super::{checked_document_association_with, saved_document};
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        std::fs::write(actual.join("file.txt"), b"document").unwrap();
+        std::os::unix::fs::symlink(&actual, dir.path().join("link")).unwrap();
+        let action = Action {
+            label: "Document".into(),
+            desc: String::new(),
+            action: dir
+                .path()
+                .join("link/file.txt")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            args: None,
+        };
+        let command = saved_document(&action).unwrap();
+        assert!(
+            checked_document_association_with(&action, &command, |_| panic!("symlink launched"))
+                .is_err()
+        );
     }
 
     #[test]

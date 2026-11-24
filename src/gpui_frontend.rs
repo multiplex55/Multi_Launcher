@@ -171,6 +171,12 @@ struct LauncherSearchResult {
 }
 
 impl LauncherSearchResult {
+    fn saved_document(&self) -> Option<multi_launcher::commands::ExternalCommand> {
+        (self.origin == LauncherResultOrigin::Saved)
+            .then(|| external_launch::saved_document(&self.action))
+            .flatten()
+    }
+
     fn saved_external(&self) -> Option<multi_launcher::commands::ExternalCommand> {
         if self.origin == LauncherResultOrigin::Saved {
             external_launch::saved_external(&self.action)
@@ -1767,6 +1773,7 @@ fn supported_saved_search_actions(actions: Vec<Action>) -> Vec<Action> {
         .filter(|action| {
             parse_action(action).is_ok_and(|command| {
                 external_launch::ordinary_external(&command).is_some()
+                    || external_launch::document_external(action, &command).is_some()
                     || classify_installed_search_command(&command, ActivationSource::Click).is_ok()
             })
         })
@@ -7468,6 +7475,18 @@ impl RootWindow {
             {
                 self.open_file_search(window, cx);
             }
+            return;
+        }
+        if let Some(command) = result.saved_document() {
+            self.start_external_launch(
+                result.action,
+                command,
+                query,
+                source,
+                Some(external_launch::AssociationKind::SavedDocument),
+                window,
+                cx,
+            );
             return;
         }
         if let Some(command) = result.saved_external() {
@@ -13934,6 +13953,38 @@ mod tests {
         assert!(pending.take_requested_visible().is_none());
         assert!(pending.take_requested_hash_focus().is_none());
         assert!(!pending.request_external_hide(0));
+    }
+
+    #[test]
+    fn saved_document_projection_keeps_exact_origin_and_rejects_stale_rows() {
+        use super::LauncherResultOrigin;
+        let action = saved_action("Manual", r"C:\Docs\Manual.pdf", Some(" "));
+        let catalog = completion_catalog(vec![action.clone()], true, None);
+        let rows = catalog.compose(
+            "app Manual",
+            vec![("provider".into(), action.clone())],
+            false,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].origin, LauncherResultOrigin::Saved);
+        assert!(rows[0].saved_document().is_some());
+        assert!(rows[1].saved_document().is_none());
+        let mut results = LauncherSearchResults::default();
+        results.replace(
+            "app Manual".into(),
+            rows,
+            ResolvedQueryResultsLayout::default(),
+            2,
+        );
+        let generation = results.generation;
+        assert!(
+            results
+                .resolve_result(generation, 0, "app Manual")
+                .unwrap()
+                .saved_document()
+                .is_some()
+        );
+        assert!(results.resolve_result(generation, 0, "changed").is_none());
     }
 
     #[test]

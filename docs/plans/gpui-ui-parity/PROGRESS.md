@@ -19,7 +19,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue G05 saved document activation through the existing App Editor and shared external launch worker. Plugin Editor Search controls passed the focused batch and matched Windows persistence replay. The G05 launcher layout checkpoint now includes top-centered Search and the matched 1516 × 937 verification baseline. G04 still needs matched egui Clipboard digest and Copy and mixed DPI. G01 still needs a known-duration F2 replay with an owned external foreground target. |
+| Current next action | Continue the G05 anchored Search layout. The saved-document checkpoint passed six focused tests and matched Windows replay at 1516 × 937. The captures establish the existing Search placement in both frontends. G04 still needs matched egui Clipboard digest and Copy and mixed DPI. G01 still needs a known-duration F2 replay with an owned external foreground target. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
