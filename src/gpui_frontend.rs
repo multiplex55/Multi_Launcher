@@ -2382,7 +2382,7 @@ struct RootWindow {
     app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     hash_window: HashWindowState,
-    hash_file_search_return: Option<file_search::SelectionReceipt>,
+    hash_return: Option<HashReturnReceipt>,
     hash_window_revision: Arc<AtomicU64>,
     hash_mount_generation: Arc<AtomicU64>,
     hash_mount_counter: u64,
@@ -3474,6 +3474,13 @@ enum HashOpenIntent {
     File(PathBuf),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HashReturnReceipt {
+    FileSearch(file_search::SelectionReceipt),
+    #[cfg(windows)]
+    Downloads(downloads_triage::InspectReceipt),
+}
+
 struct HashMountConfig {
     jump_controller: JumpModeController,
     session: Arc<Mutex<HashSession>>,
@@ -4371,7 +4378,7 @@ async fn remove_and_wait_for_hash_window(cx: &mut AsyncApp, retiring: RetiringHa
 async fn restore_root_search_focus_after_hash_close(
     root: WeakEntity<RootWindow>,
     close_revision: u64,
-    file_search_return: Option<file_search::SelectionReceipt>,
+    return_receipt: Option<HashReturnReceipt>,
     retired_docked_focus: Option<FocusHandle>,
     cx: &mut AsyncApp,
 ) {
@@ -4427,25 +4434,36 @@ async fn restore_root_search_focus_after_hash_close(
         if !still_current {
             return;
         }
-        if let Some(receipt) = file_search_return {
+        if let Some(receipt) = return_receipt {
             let may_leave_focus = window.focused(cx).is_none_or(|focus| {
                 !root.focus_handle.contains(&focus, window)
                     || retired_docked_focus.as_ref().is_some_and(|owner| owner.contains(&focus, window))
             });
-            if let Some(view) = root.file_search.clone().filter(|view| view.entity_id() == receipt.owner) {
-                if may_leave_focus || view.read(cx).hash_action_is_focused(window) {
-                    let restored = view.update(cx, |view, cx| {
-                        view.restore_receipt_focus(&receipt, cx.entity_id(), window, cx)
-                    });
-                    if restored {
-                        root.root_scroll.scroll_to_top_of_item(root.file_search_scroll_item());
-                        return;
-                    }
+            let restored = match receipt {
+                HashReturnReceipt::FileSearch(receipt) => {
+                    if let Some(view) = root.file_search.clone().filter(|view| view.entity_id() == receipt.owner) {
+                        if may_leave_focus || view.read(cx).hash_action_is_focused(window) {
+                            let restored = view.update(cx, |view, cx| view.restore_receipt_focus(&receipt, cx.entity_id(), window, cx));
+                            if restored { root.root_scroll.scroll_to_top_of_item(root.file_search_scroll_item()); }
+                            restored
+                        } else { false }
+                    } else { false }
                 }
-            }
-            if !may_leave_focus {
-                return;
-            }
+                #[cfg(windows)]
+                HashReturnReceipt::Downloads(receipt) => {
+                    if let Some(view) = root.downloads_triage.clone().filter(|view| view.entity_id() == receipt.owner) {
+                        if may_leave_focus || view.read(cx).inspect_is_focused(window) {
+                            let restored = view.update(cx, |view, cx| view.restore_receipt_focus(&receipt, cx.entity_id(), window, cx));
+                            if restored {
+                                let index = root.file_search_scroll_item() + usize::from(root.file_search.as_ref().is_some_and(|view| view.read(cx).open));
+                                root.root_scroll.scroll_to_top_of_item(index);
+                            }
+                            restored
+                        } else { false }
+                    } else { false }
+                }
+            };
+            if restored || !may_leave_focus { return; }
         }
         // Restore logical focus while Windows independently chooses the next foreground window.
         root.query.focus_handle(cx).focus(window, cx);
@@ -7251,7 +7269,7 @@ impl RootWindow {
         );
         match outcome {
             Ok(()) => {
-                self.hash_file_search_return = Some(receipt);
+                self.hash_return = Some(HashReturnReceipt::FileSearch(receipt));
                 if self.hash_window.mode() == Some(HashPresentationMode::Docked) {
                     self.root_scroll.scroll_to_top_of_item(self.docked_hash_scroll_item());
                 }
@@ -7566,7 +7584,7 @@ impl RootWindow {
                     let close_revision = hash_window_revision
                         .fetch_add(1, Ordering::AcqRel)
                         .wrapping_add(1);
-                    let file_search_return = root.hash_file_search_return.take();
+                    let return_receipt = root.hash_return.take();
                     let root_for_retirement = root_for_retirement.clone();
                     cx.spawn(async move |_, cx| {
                         let _operation = operation;
@@ -7589,7 +7607,7 @@ impl RootWindow {
                             restore_root_search_focus_after_hash_close(
                                 root_for_retirement.clone(),
                                 close_revision,
-                                file_search_return,
+                                return_receipt,
                                 None,
                                 cx,
                             )
@@ -7612,7 +7630,7 @@ impl RootWindow {
     ) -> Result<(), String> {
         let file = match intent {
             HashOpenIntent::Default => {
-                self.hash_file_search_return = None;
+                self.hash_return = None;
                 None
             }
             HashOpenIntent::File(path) => {
@@ -8478,7 +8496,7 @@ impl RootWindow {
         let close_revision = self.hash_window_revision
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
-        let file_search_return = self.hash_file_search_return.take();
+        let return_receipt = self.hash_return.take();
         self.hash_open_error = None;
         cx.notify();
 
@@ -8510,7 +8528,7 @@ impl RootWindow {
             };
             if retired {
                 restore_root_search_focus_after_hash_close(
-                    root.clone(), close_revision, file_search_return, retired_docked_focus, cx,
+                    root.clone(), close_revision, return_receipt, retired_docked_focus, cx,
                 ).await;
             }
         })
@@ -11965,7 +11983,7 @@ pub(crate) fn run_foundation_window(
                 app_data_root: app_data_root.clone(),
                 file_search_settings: file_search_settings.clone(),
                 hash_window: HashWindowState::Closed,
-                hash_file_search_return: None,
+                hash_return: None,
                 hash_window_revision: window_revision_for_root,
                 hash_mount_generation: hash_mount_generation_for_root,
                 hash_mount_counter: 0,
