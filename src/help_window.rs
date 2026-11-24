@@ -2,6 +2,9 @@ use crate::actions::Action;
 use crate::gui::LauncherApp;
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::launcher::command_help::{command_prefixes, example_line, matches_filter};
+use crate::launcher::quick_help::{
+    GuideBlock, QUICK_HELP_GUIDE, matches_provider_filter,
+};
 use eframe::egui;
 
 #[derive(Default)]
@@ -54,7 +57,6 @@ impl HelpWindow {
                         .inner;
                     let mut infos = app.plugins.plugin_infos();
                     infos.sort_by(|a, b| a.0.cmp(&b.0));
-                    let filt = self.filter.to_lowercase();
                     #[cfg(test)]
                     let mut content_targets = [None; 3];
                     let _body = egui::ScrollArea::vertical()
@@ -63,202 +65,71 @@ impl HelpWindow {
                         .min_scrolled_height(0.0)
                         .max_height(ui.available_height().max(0.0))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Hotkeys").strong());
-                            if let Some(hk) = &app.hotkey_str {
-                                ui.label(format!("Toggle launcher: {hk}"));
-                            }
-                            if let Some(hk) = &app.quit_hotkey_str {
-                                ui.label(format!("Quit launcher: {hk}"));
-                            }
-                            if let Some(hk) = &app.help_hotkey_str {
-                                ui.label(format!("Help overlay: {hk}"));
-                            }
-                            ui.label(egui::RichText::new("Hotkey Directory").strong());
-                            ui.label(
-                                "Open Settings > Hotkeys > Hotkey Directory to search configured shortcuts and actions, such as End, paste, or macro. Active means the runtime acknowledged the route; Pending is still being applied, and Unknown means no reliable acknowledgement is available. Other statuses include Disabled, Invalid, Conflict, Unsupported, Omitted by precedence, and Unavailable. Conflict details name competing routes. Not configurable entries have no current editor. Edit opens the owning settings or editor, where its existing Save and Cancel controls apply.",
-                            );
-                            ui.label(
-                                "In Settings, Search settings finds existing controls. Choose a result to reveal and focus that control; search does not change or save it, and it does not enable unavailable controls. Use the owning section's normal Save, Apply, or Cancel controls.",
-                            );
-                            ui.label(egui::RichText::new("Saved target repair").strong());
-                            ui.label(
-                                "Type missing and choose the exact check missing command to inspect saved targets. From a saved custom app or folder result, choose Repair target… to edit a replacement path and confirm it. Custom apps can use a file/application or folder; saved folders require a folder. Choosing a path does not launch it. Unavailable or ambiguous saved records are reported without changing them.",
-                            );
-                            ui.label(egui::RichText::new("Table Utility").strong());
-                            ui.label(
-                                "Type table for the general viewer or csv for the strict CSV viewer; opened files are never modified and clipboard reads happen only after Paste Text. Table defaults to Auto delimiter, headers off, lenient row widths, and numeric sorting when all values are finite (10 MiB, 50,000 rows, 128 columns, 48 MiB of cells, 16 MiB per output). CSV defaults to comma, headers on, strict widths, and Unicode-lowercase lexical sort (16 MiB, 100,000 rows, 256 columns, 64 MiB of cells, 64 MiB per output); both profiles share a one-million-cell limit. Cell values remain strings, preserving leading zeroes, large identifiers, and whitespace. Equal-sort ties retain original row order. Opening .csv/.tsv selects comma/tab, while other extensions and pasted text use the visible delimiter. Filter is case-insensitive literal text. Copy CSV/TSV, JSON, and Save JSON use selected visible rows and source-order columns. JSON Auto explains when it falls back to arrays for missing, blank, or duplicate headers. After a failed CSV reparse, Copy Previous Valid CSV explicitly exports the last successful options once reads/parses finish. After a failed table edit, the last successful data remains visible but outputs stay disabled until the current source parses successfully. Large sources retain full text and show a bounded preview.",
-                            );
-                            ui.label(egui::RichText::new("Image Comparison").strong());
-                            ui.label(
-                                "Type imgdiff to compare two session-only images. Open A… and Open B… choose PNG, JPEG, BMP, or GIF files (16,777,216 pixels per image maximum); Paste A and Paste B read bounded CF_DIB images only when selected. A failed replacement keeps the last accepted image. A, B, Wipe, and Difference show top-left-aligned images without resizing; the exact RGBA comparison includes alpha and transparent-pixel RGB values. Inputs and results are cleared when the dialog closes.",
-                            );
-                            ui.label(egui::RichText::new("Duplicate Finder").strong());
-                            ui.label(
-                                "Type dff to open Duplicate Finder, select folders, and explicitly start a read-only scan. It is bounded to 32 roots, 250,000 files, 350,000 entries, 100,000 directories, depth 256, and 64 MiB of path metadata. Reparse points and cloud placeholders are excluded. Same-sized files are checked with streamed hashes and exact byte comparison; hard-link aliases count as one file identity. Matches without reliable identity are separated from verified totals. Open, Reveal, and Copy Paths revalidate each exact displayed alias; logical duplicate bytes are not guaranteed recoverable disk space. No files are changed.",
-                            );
-                            let older_query = ui.label("Older query: Ctrl+Up");
-                            #[cfg(test)]
-                            {
-                                content_targets[0] = Some(older_query.rect);
-                            }
-                            #[cfg(not(test))]
-                            let _ = older_query;
-                            ui.label("Newer query / restore draft: Ctrl+Down");
-                            ui.label(egui::RichText::new("Jump Mode").strong());
-                            ui.label(
-                                "Jump Mode is off by default. Enable Jump Mode in Settings and save. On supported screens, Shift+Space shows hints for visible, enabled controls. Typing a hint only focuses or highlights its control; a later, separate Enter, Space, or normal typing interacts with it. Escape cancels hints. Existing Save, Apply, and confirmation steps still require their normal action.",
-                            );
-                            ui.label(
-                                "Coverage includes File Search; Snippets; Clipboard History; Dashboard commands and simple widgets; JSON, Regex, and XML tools; Mouse Settings and Gestures; Rename and Replace; and Dashboard and Radial editors. Pointer-only canvas drags, capture or recording, native picker internals, unknown popups, and hidden, clipped, or disabled controls are not hint targets.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Launcher search").strong());
-                            ui.label(
-                                "Search applications, indexed files and enabled providers in one result list. Use app <query> for the action catalog or a plugin prefix such as fs, note, o, cs, paste or replace for its commands.",
-                            );
-                            ui.label(
-                                "Empty queries can show the dashboard. Pinned queries and Omni Search provider controls remain available. File Search uses its own Global/Directory search roots.",
-                            );
-                            ui.label(
-                                "Inline result descriptions show up to seven words and can shorten further to fit. The full action and its existing help and details remain available.",
-                            );
-                            ui.label(
-                                "Ordinary utility windows remember Dock or Pop Out across close and restart without reopening automatically. Children inherit a popped-out parent; direct and docked-parent opens use the child's preference. Reopening a live tool preserves its draft.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("File Search").strong());
-                            ui.label(
-                                "Clear results cancels the current search and clears rows, selection, preview, refinement and diagnostics. Query, roots, filters and sort remain; press Search to run again. Filename contains matches a literal contiguous part of the leaf name, including its extension.",
-                            );
-                            ui.label(
-                                "Filters includes Date Modified and File Size. Changes take effect when you press Search. The content-reading size limit remains separate from the File Size filter. When a filtered filename search would otherwise use Everything, it uses WalkDir instead and may be slower.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Calculation Pad").strong());
-                            ui.label(
-                                "Dependencies… opens a read-only explorer of current Pad rows and their upstream inputs and downstream dependents. Select a relationship or use Go to source to navigate. Inspect bits… offers labels-only Import labels… and Export labels…; these do not change Pad source or working bits.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Folder Size").strong());
-                            ui.label(
-                                "Table, Treemap and Both share the current directory and selection. Click a tile to select it, double-click a directory to drill down, and use Up to return. Changing views or size reuses the current scan; only Scan or Refresh starts another. Partial, unknown and skipped entries remain identified.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Screen Recorder").strong());
-                            ui.label(
-                                "Duration accepts 0 for Unlimited or 1–1,000 seconds; arrows and the wheel step by 25 while typed values stay exact. Unlimited removes the automatic time stop, not Stop or target and encoder safeguards. The active limit is frozen when recording starts; the countdown is separate.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Snippets").strong());
-                            ui.label(
-                                "Use cs to edit saved snippets. Tags are metadata; select multiple tag chips to require all of them. The editor's Test / Preview resolves a draft without saving or copying.",
-                            );
-                            ui.label(
-                                "Automatic values: {{sys.date}}, {{sys.time}}, {{sys.clipboard}}, {{sys.window_title}}. Date/time default to %Y-%m-%d and %H:%M:%S and accept :<format>; unavailable clipboard/title values are empty. {{date}} is still an ordinary prompted field.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Paste Sequences").strong());
-                            ui.label(
-                                "Use paste to open the editor. Run Once keeps a draft in memory; Save stores authored literal text as plaintext and clipboard steps as expiring history references.",
-                            );
-                            ui.label(
-                                "Add Snippet and Add Clipboard Item open an inline source picker. Search snippets by alias, tags, and visible text; hidden bodies stay concealed. A selected template preview is raw and unevaluated. Insert selected adds a reference to the draft; it does not copy or run the source, and the source is rechecked at insertion.",
-                            );
-                            ui.label(
-                                "Commands: paste <query>, paste:run:<id>, paste:start, paste:next, paste:cancel. Saved sequence shortcuts use the application's chord syntax.",
-                            );
-                            ui.label("Choose Automatic, Manual advance, or Paste-to-Advance (Ctrl+V). Each step uses the current eligible application; invocation context only freezes template values. Paste-to-Advance uses one real Ctrl+V per step, with time to settle between presses. After completion the final item stays on the clipboard for ordinary pasting.");
-                            ui.label(app.paste_sequence_shortcut_summary());
-                            if let Some(presentation) = &app.sequence_routes {
-                                for (id, chord) in &presentation.starts {
-                                    ui.label(format!("Sequence {} Start: {chord}", id.get()));
+                            for block in QUICK_HELP_GUIDE {
+                                match *block {
+                                    GuideBlock::Heading(text) => {
+                                        ui.label(egui::RichText::new(text).strong());
+                                    }
+                                    GuideBlock::Paragraph(text) => {
+                                        let response = ui.label(text);
+                                        #[cfg(test)]
+                                        if text == "Older query: Ctrl+Up" {
+                                            content_targets[0] = Some(response.rect);
+                                        }
+                                        #[cfg(not(test))]
+                                        let _ = response;
+                                    }
+                                    GuideBlock::WrappedParagraph(text) => {
+                                        ui.add(
+                                            egui::Label::new(text)
+                                                .wrap_mode(egui::TextWrapMode::Wrap),
+                                        );
+                                    }
+                                    GuideBlock::Monospace(text) => {
+                                        ui.monospace(text);
+                                    }
+                                    GuideBlock::Separator => {
+                                        ui.separator();
+                                    }
+                                    GuideBlock::Hotkeys => {
+                                        for (label, hotkey) in [
+                                            ("Toggle launcher", app.hotkey_str.as_deref()),
+                                            ("Quit launcher", app.quit_hotkey_str.as_deref()),
+                                            ("Help overlay", app.help_hotkey_str.as_deref()),
+                                        ] {
+                                            if let Some(hotkey) = hotkey {
+                                                ui.label(format!("{label}: {hotkey}"));
+                                            }
+                                        }
+                                    }
+                                    GuideBlock::PasteSequenceSummary => {
+                                        ui.label(app.paste_sequence_shortcut_summary());
+                                    }
+                                    GuideBlock::SequenceStarts => {
+                                        if let Some(presentation) = &app.sequence_routes {
+                                            for (id, chord) in &presentation.starts {
+                                                ui.label(format!("Sequence {} Start: {chord}", id.get()));
+                                            }
+                                        }
+                                    }
+                                    GuideBlock::Providers => {
+                                        for (name, description, _) in &infos {
+                                            if !matches_provider_filter(&self.filter, name, description) {
+                                                continue;
+                                            }
+                                            let provider_row = ui.add(
+                                                egui::Label::new(format!("{name}: {description}"))
+                                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                                            );
+                                            #[cfg(test)]
+                                            if name == "Help fixture plugin 11" {
+                                                content_targets[1] = Some(provider_row.rect);
+                                            }
+                                            #[cfg(not(test))]
+                                            let _ = provider_row;
+                                        }
+                                    }
                                 }
-                            }
-                            ui.label("Settings > Paste Sequences, also reached through Playback Settings in the editor, configures playback controls and optional Escape cancellation. Cancel Run or configured Cancel ends early; Esc also cancels when enabled and available. Empty shortcuts are disabled. Conflicting defaults can be inactive; custom conflicts retain the previous routes. Each saved sequence can have its own optional Start shortcut.");
-                            ui.separator();
-                            ui.label(egui::RichText::new("Explorer Tabs").strong());
-                            ui.label("Search explorertabs to manage saved folder lists or run a saved list. Commands explorertabs:open, explorertabs:run:<id>, and explorertabs:cancel can also be assigned to actions or shortcuts. Runs use the saved list and report verified, unverified, and remaining folders.");
-                            ui.separator();
-                            ui.label(egui::RichText::new("Reusable macro parameters").strong());
-                            ui.label(
-                                "In the Signature Editor, String parameters can be Text, File picker, Folder picker, or an ordered Choice list with an optional default. Browse fills a path, and selecting a choice fills its value; neither runs the macro. Review the values and choose Run separately. Canceled or unavailable file and folder choosers leave the path editable.",
-                            );
-                            ui.label(
-                                "Add Action → Programs & Launcher → Open Folder or Open URL to author a direct open. Folder Browse only fills the path; Run opens it in Explorer. No folder or bookmark record is created. For example, use C:\\Users\\You\\AppData\\Local\\Temp\\DirectOpenDemo or https://example.test/. URLs must be explicit HTTP(S).",
-                            );
-                            ui.label(
-                                "Templates use ${name} for a current runtime value and $${name} for literal ${name}. String, Number, Boolean, and Point values use the shared formatting; Null is rejected. Folder existence and access are checked when the step runs. A URL handoff to Windows does not prove the site loaded, and canceling after handoff does not close the external window. Direct opens are unavailable in unattended Hot Folder runs.",
-                            );
-                            ui.label(
-                                "Read Clipboard Text reads into a named String variable when its step runs. Write Clipboard Text writes an exact literal or String variable only when its step runs; neither action pastes text or restores earlier clipboard contents.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Diff text workflows").strong());
-                            ui.label(
-                                "In Diff, choose Compare Text… to type both sides or use Paste Left/Paste Right for explicit clipboard input. Text input is limited to 8 MiB and 100,000 lines per side. Edit Inputs… changes that memory comparison; Save Left As… and Save Right As… choose explicit destinations, while file comparisons keep their ordinary Save behavior.",
-                            );
-                            ui.label(
-                                "To align, select a source line and choose Align from selected line, then select a line in the other pane and confirm. A multi-line selection uses its focused line. Cancel abandons the pending endpoint; accepted Left ↔ Right alignments can be revealed or removed. Alignment changes layout only and never edits or saves text. A hidden alignment target reveals the full row view.",
-                            );
-                            ui.label(
-                                "Ignore selected lines adds reversible whole-line ranges; regex rules can instead mark matching differences unimportant. Raw equality describes the original text, while effective equality reflects comparison rules and ignored ranges. Bookmarks belong to the current comparison. Identical only and the Differences only context control change the view; navigation to a hidden target reveals all rows.",
-                            );
-                            ui.label(
-                                "Compare selected lines with Clipboard reads plain text once, only after you choose it, and opens a temporary memory comparison with the captured source on the left. Back returns to the original comparison with its edits and annotations. The clipboard text is not added to recents or saved history.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Screenshot pinboard").strong());
-                            ui.label(
-                                "Each session-only pin has an Opacity control from 10% to 100% (default 100%) in its toolbar and Pin List row. Pending and failed requests are distinguished from the confirmed native value. Opacity changes the displayed window, not the source image used by Copy Image or Save As.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Brightness").strong());
-                            ui.label(
-                                "Type bright and choose the bright: edit brightness result to open the named physical-monitor list. Refresh explicitly reads monitor information; choose a supported device, adjust its draft, and press Set. Unsupported devices have no invented percentage. The legacy bright <0–100> action remains a separate numeric route that targets all enumerated physical monitors.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Markup editor").strong());
-                            ui.label(
-                                "Zoom and Text Size share a row above Tools when the editor is wide enough; at narrow widths they wrap onto separate lines.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Dashboard").strong());
-                            ui.add(
-                                egui::Label::new(
-                                    "Open Settings → Dashboard → Customize Dashboard... to edit \
-                                     widget layout plus plugin-aware settings such as note/todo queries, \
-                                     context links, or weather location.",
-                                )
-                                .wrap_mode(egui::TextWrapMode::Wrap),
-                            );
-                            ui.label(
-                                "Show preview uses matching S markers in the slot list and grid. Hover highlights the partner; the tooltip identifies its widget and position. * marks selection and ! marks a conflict.",
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("Linked context").strong());
-                            ui.monospace("todo add Draft release @note:release-plan");
-                            ui.monospace("note add Release Notes @todo:todo-123");
-                            ui.monospace("cal add tomorrow 09:00 Kickoff @todo:todo-123");
-                            ui.label("Use note/todo right-click menus to link existing items.");
-                            ui.separator();
-                            ui.label(egui::RichText::new("Commands").strong());
-                            for (name, desc, _) in &infos {
-                                if !filt.is_empty()
-                                    && !name.to_lowercase().contains(&filt)
-                                    && !desc.to_lowercase().contains(&filt)
-                                {
-                                    continue;
-                                }
-                                let description = ui.add(
-                                    egui::Label::new(format!("{name}: {desc}"))
-                                        .wrap_mode(egui::TextWrapMode::Wrap),
-                                );
-                                #[cfg(test)]
-                                if name == "Help fixture plugin 11" {
-                                    content_targets[1] = Some(description.rect);
-                                }
-                                #[cfg(not(test))]
-                                let _ = description;
                             }
                         });
                     #[cfg(test)]
