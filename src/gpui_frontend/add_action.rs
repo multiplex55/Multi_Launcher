@@ -1,5 +1,50 @@
 use super::*;
 
+const ACTIONS_FILE: &str = "actions.json";
+type CatalogAction = multi_launcher::actions::Action;
+
+fn catalog_filter(filter: &str) -> String {
+    if filter.trim().is_empty() {
+        String::new()
+    } else {
+        filter.to_lowercase()
+    }
+}
+
+fn catalog_matches(action: &CatalogAction, query: &str) -> bool {
+    query.is_empty()
+        || action.label.to_lowercase().contains(query)
+        || action.desc.to_lowercase().contains(query)
+        || action.action.to_lowercase().contains(query)
+}
+
+#[derive(Default)]
+struct CatalogReads {
+    revision: u64,
+    pending: Option<u64>,
+}
+
+impl CatalogReads {
+    fn invalidate(&mut self) {
+        self.revision = self.revision.wrapping_add(1).max(1);
+        self.pending = None;
+    }
+
+    fn begin(&mut self) -> u64 {
+        self.invalidate();
+        self.pending = Some(self.revision);
+        self.revision
+    }
+
+    fn finish(&mut self, receipt: u64) -> bool {
+        if self.pending != Some(receipt) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+}
+
 pub(super) const APP_WRITE_CLOSE_STATUS: &str =
     "Wait for the Add App save to finish before closing Multi Launcher.";
 pub(super) const APP_WRITE_RESTART_STATUS: &str =
@@ -19,6 +64,12 @@ fn clear_app_diagnostic(status: &mut Option<String>) {
 pub(super) struct AppEditorState {
     pub(super) open: bool,
     draft: Option<AddAppDraft>,
+    filter: Option<Entity<InputState>>,
+    filter_subscription: Option<Subscription>,
+    catalog: Arc<[CatalogAction]>,
+    catalog_error: Option<String>,
+    reads: CatalogReads,
+    catalog_scroll: ScrollHandle,
     status: Option<String>,
     writes: AddAppWrites,
     owner_focus: FocusHandle,
@@ -76,6 +127,12 @@ impl AppEditorState {
         Self {
             open: false,
             draft: None,
+            filter: None,
+            filter_subscription: None,
+            catalog: Arc::from([]),
+            catalog_error: None,
+            reads: CatalogReads::default(),
+            catalog_scroll: ScrollHandle::new(),
             status: None,
             writes: AddAppWrites::default(),
             owner_focus: cx.focus_handle(),
@@ -121,12 +178,15 @@ impl AppEditorState {
         Some(receipt)
     }
 
-    fn finish_write(&mut self, receipt: u64, result: Result<(), String>) -> bool {
+    fn finish_write(&mut self, receipt: u64, result: Result<Vec<CatalogAction>, String>) -> bool {
         if !self.writes.finish(receipt) {
             return false;
         }
         match result {
-            Ok(()) => {
+            Ok(rows) => {
+                self.reads.invalidate();
+                self.catalog = rows.into();
+                self.catalog_error = None;
                 self.draft = None;
                 self.status = None;
             }
@@ -169,14 +229,63 @@ impl RootWindow {
                 origin.filter(|focus| self.focus_handle.contains(focus, window));
             self.app_editor.return_scroll = Some(self.root_scroll.offset());
             self.app_editor.open = true;
+            if self.app_editor.filter.is_none() {
+                let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter apps"));
+                let subscription = cx.subscribe(&filter, |root, source, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change)
+                        && root
+                            .app_editor
+                            .filter
+                            .as_ref()
+                            .is_some_and(|filter| *filter == source)
+                    {
+                        cx.notify();
+                    }
+                });
+                self.app_editor.filter = Some(filter);
+                self.app_editor.filter_subscription = Some(subscription);
+            }
+            self.refresh_app_catalog(window, cx);
         }
-        self.root_scroll.scroll_to_top_of_item(self.app_editor_scroll_item());
+        self.root_scroll
+            .scroll_to_top_of_item(self.app_editor_scroll_item());
         if let Some(draft) = &self.app_editor.draft {
             draft.label.focus_handle(cx).focus(window, cx);
         } else {
             self.app_editor.new_focus.focus(window, cx);
         }
         cx.notify();
+    }
+
+    fn refresh_app_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.app_editor.open {
+            return;
+        }
+        let receipt = self.app_editor.reads.begin();
+        let task = cx.background_executor().spawn(async move {
+            multi_launcher::actions::load_actions(ACTIONS_FILE)
+                .map_err(|error| format!("Could not load app catalog: {error:#}"))
+        });
+        let root = cx.entity().downgrade();
+        let window_handle = window.window_handle();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = window_handle.update(cx, |_, _, app| {
+                let _ = root.update(app, |root, cx| {
+                    if root.app_editor.open && root.app_editor.reads.finish(receipt) {
+                        match result {
+                            Ok(rows) => {
+                                root.app_editor.catalog = rows.into();
+                                root.app_editor.catalog_error = None;
+                            }
+                            Err(error) => root.app_editor.catalog_error = Some(error),
+                        }
+                        cx.notify();
+                    }
+                });
+            });
+        })
+        .detach();
     }
 
     fn new_app_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -205,7 +314,8 @@ impl RootWindow {
             .map(|(index, handle)| {
                 cx.on_focus(handle, window, move |root, window, cx| {
                     if window.is_window_active() && root.app_editor.is_current_draft(draft_id) {
-                        root.root_scroll.scroll_to_top_of_item(root.app_editor_scroll_item());
+                        root.root_scroll
+                            .scroll_to_top_of_item(root.app_editor_scroll_item());
                         if let Some(draft) = &root.app_editor.draft {
                             draft.scroll.scroll_to_item(index);
                             cx.notify();
@@ -227,7 +337,8 @@ impl RootWindow {
             {
                 return;
             }
-            root.root_scroll.scroll_to_top_of_item(root.app_editor_scroll_item());
+            root.root_scroll
+                .scroll_to_top_of_item(root.app_editor_scroll_item());
             if let Some(index) = handles.iter().position(|handle| handle.is_focused(window)) {
                 if let Some(draft) = &root.app_editor.draft {
                     draft.scroll.scroll_to_item(index);
@@ -266,7 +377,6 @@ impl RootWindow {
         };
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            const ACTIONS_FILE: &str = "actions.json";
             multi_launcher::actions::AddAction::new(
                 &snapshot.label,
                 &snapshot.description,
@@ -278,7 +388,6 @@ impl RootWindow {
             .and_then(|action| {
                 action
                     .commit(ACTIONS_FILE)
-                    .map(|_| ())
                     .map_err(|error| format!("Could not save Add App: {error:#}"))
             })
         });
@@ -337,6 +446,7 @@ impl RootWindow {
         let restore = self.app_editor.owner_focus.contains_focused(window, cx)
             && !self.restart_admission.is_fenced();
         self.app_editor.open = false;
+        self.app_editor.reads.invalidate();
         self.app_editor.draft = None;
         self.app_editor.status = None;
         let origin = self.app_editor.return_focus.take();
@@ -384,6 +494,11 @@ pub(super) struct AppEditorPanel {
     new_focus: FocusHandle,
     arguments_focus: FocusHandle,
     draft: Option<AddAppPanelDraft>,
+    filter: Option<Entity<InputState>>,
+    catalog: Arc<[CatalogAction]>,
+    catalog_error: Option<String>,
+    catalog_loading: bool,
+    catalog_scroll: ScrollHandle,
     status: Option<String>,
     pending: bool,
 }
@@ -414,6 +529,11 @@ impl AppEditorPanel {
             new_focus: state.new_focus.clone(),
             arguments_focus: state.arguments_focus.clone(),
             status: state.status.clone(),
+            filter: state.filter.clone(),
+            catalog: state.catalog.clone(),
+            catalog_error: state.catalog_error.clone(),
+            catalog_loading: state.reads.pending.is_some(),
+            catalog_scroll: state.catalog_scroll.clone(),
             pending: state.write_pending(),
             draft: state.draft.as_ref().map(|draft| AddAppPanelDraft {
                 label: draft.label.clone(),
@@ -428,7 +548,7 @@ impl AppEditorPanel {
 }
 
 impl RenderOnce for AppEditorPanel {
-    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, app: &mut App) -> impl IntoElement {
         let metrics = self.metrics;
         let mut panel = div()
             .id("app-editor")
@@ -504,7 +624,8 @@ impl RenderOnce for AppEditorPanel {
                     if root.app_editor.is_current_draft(draft_id)
                         && root.app_editor.owner_focus.contains_focused(window, cx)
                     {
-                        root.root_scroll.scroll_to_top_of_item(root.app_editor_scroll_item());
+                        root.root_scroll
+                            .scroll_to_top_of_item(root.app_editor_scroll_item());
                         cx.notify();
                     }
                 });
@@ -609,8 +730,67 @@ impl RenderOnce for AppEditorPanel {
             );
         } else {
             let new_root = self.root.clone();
-            let close_root = self.root;
+            let close_root = self.root.clone();
+            let refresh_root = self.root;
+            let filter_text = self
+                .filter
+                .as_ref()
+                .map(|filter| catalog_filter(filter.read(app).value().as_str()))
+                .unwrap_or_default();
+            let rows = self
+                .catalog
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| catalog_matches(row, &filter_text))
+                .map(|(index, row)| {
+                    let mut item = div()
+                        .id(("app-catalog-row", index))
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .child(Label::new(row.label.clone()))
+                        .child(Label::new(row.desc.clone()))
+                        .child(Label::new(row.action.clone()));
+                    if let Some(args) = &row.args {
+                        item = item
+                            .child(Label::new("Arguments"))
+                            .child(Label::new(args.clone()));
+                    }
+                    item
+                })
+                .collect::<Vec<_>>();
+            let reserved_height = 2.0 * metrics.window_padding
+                + 2.0 * metrics.panel_padding
+                + metrics.heading_text_size.max(metrics.line_height)
+                + 3.0 * metrics.row_min_height
+                + 6.0 * metrics.item_spacing_y;
+            let body_height = (window.viewport_size().height.as_f32() - reserved_height).max(40.0);
             panel = panel
+                .children(
+                    self.filter
+                        .as_ref()
+                        .map(|filter| Input::new(filter).aria_label("Filter apps")),
+                )
+                .child(
+                    div()
+                        .id("app-catalog-list")
+                        .flex()
+                        .flex_col()
+                        .gap_y(px(metrics.item_spacing_y))
+                        .max_h(px(body_height))
+                        .flex_shrink_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.catalog_scroll)
+                        .children(self.catalog_loading.then(|| Label::new("Loading apps…")))
+                        .children(self.catalog_error.map(Label::new))
+                        .children(rows),
+                )
+                .child(Button::new("app-editor-refresh").label("Refresh").on_click(
+                    move |_, window, app| {
+                        let _ = refresh_root
+                            .update(app, |root, cx| root.refresh_app_catalog(window, cx));
+                    },
+                ))
                 .child(
                     Button::new("app-editor-new")
                         .label("New App")
@@ -632,7 +812,7 @@ impl RenderOnce for AppEditorPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::AddAppWrites;
+    use super::{AddAppWrites, CatalogAction, CatalogReads, catalog_filter, catalog_matches};
 
     #[test]
     fn add_app_write_accepts_only_live_receipt_once() {
@@ -648,5 +828,37 @@ mod tests {
         assert!(!writes.finish(first));
         assert_eq!(writes.pending, Some(second));
         assert!(writes.finish(second));
+    }
+
+    #[test]
+    fn catalog_filter_matches_egui_literal_rules() {
+        let row = CatalogAction {
+            label: "My App".into(),
+            desc: "A Description".into(),
+            action: "C:/Tools/Run.exe".into(),
+            args: Some("secret args".into()),
+        };
+        let matches = |filter| catalog_matches(&row, &catalog_filter(filter));
+        assert!(matches("  "));
+        assert!(matches("APP"));
+        assert!(matches("description"));
+        assert!(matches("TOOLS"));
+        assert!(!matches(" app "));
+        assert!(!matches("secret"));
+    }
+
+    #[test]
+    fn catalog_reads_reject_superseded_and_retired_receipts() {
+        let mut reads = CatalogReads::default();
+        let first = reads.begin();
+        let second = reads.begin();
+        assert!(!reads.finish(first));
+        assert!(reads.finish(second));
+        assert!(!reads.finish(second));
+        let before_close_or_commit = reads.begin();
+        reads.invalidate();
+        let reopened = reads.begin();
+        assert!(!reads.finish(before_close_or_commit));
+        assert!(reads.finish(reopened));
     }
 }
