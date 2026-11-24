@@ -245,7 +245,7 @@ pub fn parse_app_prefix(query: &str) -> Option<&str> {
 }
 
 /// Inputs to the ordered, read-only launcher composition boundary.
-pub struct ReadOnlySearchInput<'a, M> {
+pub struct ReadOnlySearchInput<'a, M, P = (Action, f32)> {
     pub raw_query: &'a str,
     pub command_cache: &'a [Action],
     pub local_actions: &'a [Action],
@@ -260,7 +260,7 @@ pub struct ReadOnlySearchInput<'a, M> {
     pub collect_candidate_count: bool,
     pub usage: &'a HashMap<String, u32>,
     pub usage_weight: f32,
-    pub provider_results: Vec<(Action, f32)>,
+    pub provider_results: Vec<P>,
 }
 
 /// Optional adapter-owned instrumentation at the scoring, sorting and final
@@ -288,8 +288,8 @@ pub struct ReadOnlySearchStats {
     pub empty_browse_catalog_materialized: usize,
 }
 
-pub struct ReadOnlySearchResults {
-    pub actions: Vec<Action>,
+pub struct ReadOnlySearchResults<R = Action> {
+    pub actions: Vec<R>,
     pub stats: ReadOnlySearchStats,
 }
 
@@ -298,21 +298,81 @@ pub struct ReadOnlySearchResults {
 /// Actions through to the result list.
 pub fn compose_read_only_results<M, F>(
     input: ReadOnlySearchInput<'_, M>,
+    on_local_clone: F,
+    observer: Option<&mut dyn ReadOnlySearchObserver>,
+) -> ReadOnlySearchResults
+where
+    M: FuzzyMatcher,
+    F: FnMut(&Action),
+{
+    compose_read_only_results_impl(
+        input,
+        (),
+        (),
+        |(action, score)| (action, score, ()),
+        |action, ()| action,
+        on_local_clone,
+        observer,
+    )
+}
+
+/// A full action and its adapter-owned provenance stay together during sorting.
+pub type ReadOnlySearchResultsWithOrigin<T> = ReadOnlySearchResults<(Action, T)>;
+
+/// Compose through the same scoring and stable ordering as the flat API.
+pub fn compose_read_only_results_with_origin<M, F, T: Clone>(
+    input: ReadOnlySearchInput<'_, M, (Action, f32, T)>,
+    saved_origin: T,
+    command_origin: T,
+    on_local_clone: F,
+    observer: Option<&mut dyn ReadOnlySearchObserver>,
+) -> ReadOnlySearchResultsWithOrigin<T>
+where
+    M: FuzzyMatcher,
+    F: FnMut(&Action),
+{
+    compose_read_only_results_impl(
+        input,
+        saved_origin,
+        command_origin,
+        |row| row,
+        |action, origin| (action, origin),
+        on_local_clone,
+        observer,
+    )
+}
+
+fn compose_read_only_results_impl<M, F, T: Clone, P, R>(
+    input: ReadOnlySearchInput<'_, M, P>,
+    saved_origin: T,
+    command_origin: T,
+    mut provider_row: impl FnMut(P) -> (Action, f32, T),
+    mut result_row: impl FnMut(Action, T) -> R,
     mut on_local_clone: F,
     mut observer: Option<&mut dyn ReadOnlySearchObserver>,
-) -> ReadOnlySearchResults
+) -> ReadOnlySearchResults<R>
 where
     M: FuzzyMatcher,
     F: FnMut(&Action),
 {
     let trimmed = input.raw_query.trim();
     if trimmed.is_empty() {
-        let mut actions = input.command_cache.to_vec();
-        actions.extend(input.local_actions.iter().map(|action| Action {
-            label: format!("{APP_PREFIX} {}", action.label),
-            desc: action.desc.clone(),
-            action: action.action.clone(),
-            args: action.args.clone(),
+        let mut actions: Vec<_> = input
+            .command_cache
+            .iter()
+            .cloned()
+            .map(|action| result_row(action, command_origin.clone()))
+            .collect();
+        actions.extend(input.local_actions.iter().map(|action| {
+            result_row(
+                Action {
+                    label: format!("{APP_PREFIX} {}", action.label),
+                    desc: action.desc.clone(),
+                    action: action.action.clone(),
+                    args: action.args.clone(),
+                },
+                saved_origin.clone(),
+            )
         }));
         return ReadOnlySearchResults {
             actions,
@@ -359,10 +419,14 @@ where
     };
 
     let provider_actions_retained_moved = input.provider_results.len();
-    let mut scored = local_search.scored_actions;
-    scored.extend(input.provider_results);
+    let mut scored: Vec<_> = local_search
+        .scored_actions
+        .into_iter()
+        .map(|(action, score)| (action, score, saved_origin.clone()))
+        .collect();
+    scored.extend(input.provider_results.into_iter().map(&mut provider_row));
     let sort_input_len = scored.len();
-    for (action, score) in &mut scored {
+    for (action, score, _) in &mut scored {
         *score += input.usage.get(&action.action).copied().unwrap_or(0) as f32 * input.usage_weight;
     }
     let sort_started = observer
@@ -382,7 +446,10 @@ where
     if let Some(observer) = observer.as_deref_mut() {
         observer.materialization_started();
     }
-    let actions: Vec<Action> = scored.into_iter().map(|(action, _)| action).collect();
+    let actions = scored
+        .into_iter()
+        .map(|(action, _, origin)| result_row(action, origin))
+        .collect();
     if let Some(observer) = observer.as_deref_mut() {
         observer.materialization_completed(final_scored_entries_moved);
     }
@@ -441,6 +508,119 @@ mod tests {
             action: "hash:open".into(),
             args: Some(args.into()),
         }
+    }
+
+    #[test]
+    fn filtered_provider_origins_survive_composition_and_stable_sort() {
+        use super::compose_read_only_results_with_origin;
+        use crate::plugin::{Plugin, search_filtered_plugins, search_filtered_plugins_with_origin};
+        use std::collections::HashSet;
+
+        struct Provider(&'static str, Action);
+        impl Plugin for Provider {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                "test provider"
+            }
+            fn capabilities(&self) -> &[&str] {
+                &["search"]
+            }
+            fn query_prefixes(&self) -> &[&str] {
+                &["app"]
+            }
+            fn search(&self, _: &str) -> Vec<Action> {
+                vec![self.1.clone()]
+            }
+        }
+        let duplicate = action("QMarker", "same argument");
+        let first = Provider("first", duplicate.clone());
+        let second = Provider("second", duplicate.clone());
+        let disabled = Provider("disabled", duplicate.clone());
+        let providers = [&first as &dyn Plugin, &second, &disabled];
+        let enabled = HashSet::from([
+            "first".to_owned(),
+            "second".to_owned(),
+            "disabled".to_owned(),
+        ]);
+        let caps = HashMap::from([
+            ("first".to_owned(), vec!["search".to_owned()]),
+            ("second".to_owned(), vec!["search".to_owned()]),
+            ("disabled".to_owned(), Vec::new()),
+        ]);
+        let query = "APP QMarker kind:hash id:hash:open";
+        let rows =
+            search_filtered_plugins_with_origin(providers, query, Some(&enabled), Some(&caps));
+        assert_eq!(
+            rows,
+            vec![
+                ("first".to_owned(), duplicate.clone()),
+                ("second".to_owned(), duplicate.clone())
+            ]
+        );
+        assert_eq!(
+            search_filtered_plugins(providers, query, Some(&enabled), Some(&caps)),
+            vec![duplicate.clone(), duplicate.clone()]
+        );
+        assert!(
+            search_filtered_plugins_with_origin(
+                providers,
+                "other QMarker",
+                Some(&enabled),
+                Some(&caps)
+            )
+            .is_empty()
+        );
+        assert!(
+            search_filtered_plugins_with_origin(
+                providers,
+                query,
+                Some(&HashSet::new()),
+                Some(&caps)
+            )
+            .is_empty()
+        );
+
+        let cached = [CachedSearchEntry::from_action(&duplicate)];
+        let metadata = [ActionFilterMetadata::from_action(&duplicate)];
+        let aliases = HashMap::new();
+        let matcher = SkimMatcherV2::default();
+        let usage = HashMap::from([(duplicate.action.clone(), 2)]);
+        let output = compose_read_only_results_with_origin(
+            ReadOnlySearchInput {
+                raw_query: query,
+                command_cache: &[],
+                local_actions: std::slice::from_ref(&duplicate),
+                local_cached_entries: &cached,
+                local_filter_metadata: &metadata,
+                folder_aliases_lc: &aliases,
+                bookmark_aliases_lc: &aliases,
+                matcher: &matcher,
+                match_exact: true,
+                fuzzy_weight: 1.0,
+                collect_search_stats: false,
+                collect_candidate_count: false,
+                usage: &usage,
+                usage_weight: 0.5,
+                provider_results: rows
+                    .into_iter()
+                    .map(|(origin, action)| (action, 0.0, origin))
+                    .collect(),
+            },
+            "saved".to_owned(),
+            "command".to_owned(),
+            |_| {},
+            None,
+        );
+        assert_eq!(
+            output.actions,
+            vec![
+                (duplicate.clone(), "saved".to_owned()),
+                (duplicate.clone(), "first".to_owned()),
+                (duplicate, "second".to_owned()),
+            ]
+        );
     }
 
     #[test]

@@ -1384,6 +1384,39 @@ pub fn search_filtered_plugins<'a>(
     enabled_plugins: Option<&HashSet<String>>,
     enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> Vec<Action> {
+    search_filtered_plugins_mapped(
+        plugins,
+        query,
+        enabled_plugins,
+        enabled_caps,
+        |_, action| action,
+    )
+}
+
+/// Run the same provider routing as `search_filtered_plugins`, retaining the
+/// identity of the provider that produced each complete action.
+pub fn search_filtered_plugins_with_origin<'a>(
+    plugins: impl IntoIterator<Item = &'a dyn Plugin>,
+    query: &str,
+    enabled_plugins: Option<&HashSet<String>>,
+    enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Vec<(String, Action)> {
+    search_filtered_plugins_mapped(
+        plugins,
+        query,
+        enabled_plugins,
+        enabled_caps,
+        |name, action| (name.to_owned(), action),
+    )
+}
+
+fn search_filtered_plugins_mapped<'a, R>(
+    plugins: impl IntoIterator<Item = &'a dyn Plugin>,
+    query: &str,
+    enabled_plugins: Option<&HashSet<String>>,
+    enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    mut map: impl FnMut(&str, Action) -> R,
+) -> Vec<R> {
     let (filtered_query, filters) = split_action_filters(query);
     let mut results = Vec::new();
     let perf_enabled = crate::performance::enabled();
@@ -1396,11 +1429,11 @@ pub fn search_filtered_plugins<'a>(
         let timer = crate::performance::Timer::start_if(perf_enabled);
         let found = plugin.search(query_plan.query);
         timer.finish_plugin(name);
-        results.extend(filter_plugin_search_results(
-            found,
-            &filters,
-            query_plan.apply_action_filters,
-        ));
+        results.extend(
+            filter_plugin_search_results(found, &filters, query_plan.apply_action_filters)
+                .into_iter()
+                .map(|action| map(name, action)),
+        );
     }
     results
 }
