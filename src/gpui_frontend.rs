@@ -5,7 +5,7 @@ mod action_sheet;
 mod appearance;
 mod favorites;
 
-use favorites::{FAVORITES_SAVE_PENDING, ResultFavorites};
+use favorites::{FAVORITES_WRITE_PENDING, ResultFavorites};
 
 use std::{
     cell::{Cell, RefCell},
@@ -3872,7 +3872,7 @@ enum RootCloseBlocker {
     HashClipboard(&'static str),
     HashFilePicker,
     ToastLogOpen,
-    FavoritesSave,
+    FavoritesWrite,
     BooleanPreferenceSave,
 }
 
@@ -9181,8 +9181,8 @@ impl RootWindow {
             Some(RootCloseBlocker::ToastLogOpen) => {
                 self.restart_status = Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
             }
-            Some(RootCloseBlocker::FavoritesSave) => {
-                self.restart_status = Some(FAVORITES_SAVE_PENDING.to_owned());
+            Some(RootCloseBlocker::FavoritesWrite) => {
+                self.restart_status = Some(FAVORITES_WRITE_PENDING.to_owned());
             }
             Some(RootCloseBlocker::BooleanPreferenceSave) => {
                 if !self.prepare_boolean_preference_close(cx) {
@@ -9208,14 +9208,18 @@ impl RootWindow {
         clipboard_message: Option<&'static str>,
         file_picker_pending: bool,
     ) -> Option<RootCloseBlocker> {
-        self.result_favorites.save_pending().then_some(RootCloseBlocker::FavoritesSave)
-            .or_else(|| root_close_blocker(
-                clipboard_message,
-                file_picker_pending,
-                self.toast_log_external_open_pending,
-                self.settings_editor.pending.is_some(),
-                self.command_help.pending.is_some(),
-            ))
+        self.result_favorites
+            .write_pending()
+            .then_some(RootCloseBlocker::FavoritesWrite)
+            .or_else(|| {
+                root_close_blocker(
+                    clipboard_message,
+                    file_picker_pending,
+                    self.toast_log_external_open_pending,
+                    self.settings_editor.pending.is_some(),
+                    self.command_help.pending.is_some(),
+                )
+            })
     }
 }
 
@@ -12086,9 +12090,9 @@ pub(crate) fn run_foundation_window(
                         });
                         false
                     }
-                    Some(RootCloseBlocker::FavoritesSave) => {
+                    Some(RootCloseBlocker::FavoritesWrite) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
-                            root.restart_status = Some(FAVORITES_SAVE_PENDING.to_owned());
+                            root.restart_status = Some(FAVORITES_WRITE_PENDING.to_owned());
                             cx.notify();
                         });
                         false

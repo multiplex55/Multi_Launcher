@@ -11,20 +11,22 @@ use gpui_kit::*;
 use multi_launcher::actions::Action;
 use multi_launcher::gui::theme::{SemanticPalette, ThemeMetrics};
 use multi_launcher::plugins::fav::{
-    FAV_FILE, FavEntry, ManualFavoriteOrigin, PrefilledFavoriteDraft, PrefilledFavoriteSaveError,
-    favorite_row_target, load_favs, named_favorite_origin, prefilled_favorite_draft,
-    save_manual_favorite, save_prefilled_favorite,
+    FAV_FILE, FavEntry, FavoriteRowTarget, ManualFavoriteOrigin, PrefilledFavoriteDraft,
+    PrefilledFavoriteSaveError, favorite_row_target, load_favs, named_favorite_origin,
+    prefilled_favorite_draft, remove_favorite_row, save_manual_favorite, save_prefilled_favorite,
 };
 
 use super::{RootWindow, appearance};
 
-pub(super) const FAVORITES_SAVE_PENDING: &str =
-    "Wait for the Favorites save to finish before closing Multi Launcher.";
+pub(super) const FAVORITES_WRITE_PENDING: &str =
+    "Wait for the Favorites write to finish before closing Multi Launcher.";
+const FAVORITES_RESTART_WRITE_PENDING: &str =
+    "Wait for the Favorites write to finish before switching to egui.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Request {
     Load(u64),
-    Save(u64),
+    Write(u64),
 }
 
 #[derive(Default)]
@@ -52,13 +54,13 @@ impl ResultFavorites {
             .is_some_and(|owner| owner.contains_focused(window, cx))
     }
 
-    pub(super) fn save_pending(&self) -> bool {
-        matches!(self.pending, Some(Request::Save(_)))
+    pub(super) fn write_pending(&self) -> bool {
+        matches!(self.pending, Some(Request::Write(_)))
     }
 
     pub(super) fn restart_blocker(&self) -> Option<&'static str> {
-        if self.save_pending() {
-            Some("Wait for the Favorites save to finish before switching to egui.")
+        if self.write_pending() {
+            Some(FAVORITES_RESTART_WRITE_PENDING)
         } else if self.draft.is_some() || self.pending_draft.is_some() {
             Some("Save or cancel the current Favorites draft before switching to egui.")
         } else {
@@ -79,6 +81,71 @@ impl ResultFavorites {
         true
     }
 
+    fn row_target(
+        &self,
+        index: usize,
+        displayed: &FavEntry,
+        sequence: u64,
+    ) -> Option<FavoriteRowTarget> {
+        if !self.is_open()
+            || !self.loaded
+            || self.pending.is_some()
+            || self.draft.is_some()
+            || self.sequence != sequence
+            || self.rows.get(index) != Some(displayed)
+        {
+            return None;
+        }
+        favorite_row_target(&self.rows, index)
+    }
+
+    fn finish_write(
+        &mut self,
+        request: Request,
+        operation: WriteKind,
+        result: Result<Vec<FavEntry>, PrefilledFavoriteSaveError>,
+    ) -> bool {
+        if !self.consume(request) {
+            return false;
+        }
+        match result {
+            Ok(rows) => {
+                self.rows = rows.into();
+                if matches!(operation, WriteKind::Save { .. }) {
+                    self.draft = None;
+                }
+                self.status = Some(
+                    match operation {
+                        WriteKind::Save { .. } => "Favorite saved.",
+                        WriteKind::Remove => "Favorite removed.",
+                    }
+                    .to_owned(),
+                );
+            }
+            Err(error) => {
+                let verb = match operation {
+                    WriteKind::Save { .. } => "save",
+                    WriteKind::Remove => "remove",
+                };
+                if matches!(error, PrefilledFavoriteSaveError::Store(_)) {
+                    self.loaded = false;
+                    self.status = Some(format!(
+                        "Could not {verb} Favorite: {error}. Close and reopen Favorites to reload."
+                    ));
+                } else if matches!(error, PrefilledFavoriteSaveError::StaleTarget) {
+                    self.status = Some(match operation {
+                        WriteKind::Remove => "Favorites changed before this row could be removed. Close and reopen Favorites to reload.".to_owned(),
+                        WriteKind::Save { prefilled: false } => "Favorites changed while this draft was open. Reopen it before saving.".to_owned(),
+                        WriteKind::Save { prefilled: true } => format!("Could not save Favorite: {error}"),
+                    });
+                } else {
+                    self.status = Some(format!("Could not {verb} Favorite: {error}"));
+                }
+            }
+        }
+        true
+    }
+
     fn retire_load(&mut self) {
         if matches!(self.pending, Some(Request::Load(_))) {
             self.pending = None;
@@ -93,6 +160,20 @@ impl ResultFavorites {
         }
         had_draft || was_prefilling
     }
+}
+
+#[derive(Clone, Copy)]
+enum WriteKind {
+    Save { prefilled: bool },
+    Remove,
+}
+
+enum FavoriteWrite {
+    Save {
+        origin: DraftOrigin,
+        entry: FavEntry,
+    },
+    Remove(FavoriteRowTarget),
 }
 
 #[derive(Clone)]
@@ -318,10 +399,7 @@ impl RootWindow {
             return;
         }
         let (origin, entry) = if let Some((index, displayed, sequence)) = row {
-            if state.sequence != sequence || state.rows.get(index) != Some(&displayed) {
-                return;
-            }
-            let Some(target) = favorite_row_target(&state.rows, index) else {
+            let Some(target) = state.row_target(index, &displayed, sequence) else {
                 return;
             };
             (
@@ -369,27 +447,70 @@ impl RootWindow {
             args: Some(args),
         };
         let origin = fields.origin.clone();
-        let prefilled = matches!(&origin, DraftOrigin::Prefilled(_));
+        self.write_result_favorite(FavoriteWrite::Save { origin, entry }, window, cx);
+    }
+
+    fn remove_result_favorite(
+        &mut self,
+        index: usize,
+        displayed: FavEntry,
+        sequence: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self
+            .result_favorites
+            .row_target(index, &displayed, sequence)
+        else {
+            return;
+        };
+        self.write_result_favorite(FavoriteWrite::Remove(target), window, cx);
+    }
+
+    fn write_result_favorite(
+        &mut self,
+        write: FavoriteWrite,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = match &write {
+            FavoriteWrite::Save { origin, .. } => WriteKind::Save {
+                prefilled: matches!(origin, DraftOrigin::Prefilled(_)),
+            },
+            FavoriteWrite::Remove(_) => WriteKind::Remove,
+        };
         let Some(permit) = self.restart_admission.admit() else {
             return;
         };
-        let request = Request::Save(state.next());
+        let state = &mut self.result_favorites;
+        let request = Request::Write(state.next());
         state.pending = Some(request);
-        state.status = Some("Saving Favorite…".to_owned());
+        state.status = Some(
+            match kind {
+                WriteKind::Save { .. } => "Saving Favorite…",
+                WriteKind::Remove => "Removing Favorite…",
+            }
+            .to_owned(),
+        );
         if let Some(owner) = &state.owner {
             owner.focus(window, cx);
         }
 
         let task = cx.background_executor().spawn(async move {
-            match origin {
-                DraftOrigin::Prefilled(mut draft) => {
+            match write {
+                FavoriteWrite::Save {
+                    origin: DraftOrigin::Prefilled(mut draft),
+                    entry,
+                } => {
                     draft.label = entry.label;
                     draft.action = entry.action;
                     draft.args = Some(entry.args.unwrap_or_default());
                     save_prefilled_favorite(FAV_FILE, draft)
                 }
-                DraftOrigin::Manual(origin) => {
-                    let mut entry = entry;
+                FavoriteWrite::Save {
+                    origin: DraftOrigin::Manual(origin),
+                    mut entry,
+                } => {
                     if entry
                         .args
                         .as_ref()
@@ -399,40 +520,21 @@ impl RootWindow {
                     }
                     save_manual_favorite(FAV_FILE, origin, entry)
                 }
+                FavoriteWrite::Remove(target) => remove_favorite_row(FAV_FILE, target),
             }
         });
         let root = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             let result = task.await;
             let _ = root.update(cx, |root, cx| {
-                let state = &mut root.result_favorites;
-                if !state.consume(request) {
+                if !root.result_favorites.finish_write(request, kind, result) {
                     return;
                 }
-                if root.restart_status.as_deref() == Some(FAVORITES_SAVE_PENDING) {
+                if matches!(
+                    root.restart_status.as_deref(),
+                    Some(FAVORITES_WRITE_PENDING | FAVORITES_RESTART_WRITE_PENDING)
+                ) {
                     root.restart_status = None;
-                }
-                match result {
-                    Ok(rows) => {
-                        state.rows = rows.into();
-                        state.draft = None;
-                        state.status = Some("Favorite saved.".to_owned());
-                    }
-                    Err(error) => {
-                        if matches!(error, PrefilledFavoriteSaveError::Store(_)) {
-                            state.loaded = false;
-                            state.status = Some(format!("Could not save Favorite: {error}. Close and reopen Favorites to reload."));
-                        } else if !prefilled
-                            && matches!(error, PrefilledFavoriteSaveError::StaleTarget)
-                        {
-                            state.status = Some(
-                                "Favorites changed while this draft was open. Reopen it before saving."
-                                    .to_owned(),
-                            );
-                        } else {
-                            state.status = Some(format!("Could not save Favorite: {error}"));
-                        }
-                    }
                 }
                 cx.notify();
             });
@@ -444,7 +546,7 @@ impl RootWindow {
 
     pub(super) fn dismiss_result_favorites(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = &mut self.result_favorites;
-        if state.save_pending() {
+        if state.write_pending() {
             return;
         }
         if state.cancel_draft() {
@@ -481,7 +583,7 @@ impl RootWindow {
         let state = &self.result_favorites;
         let owner = state.owner.as_ref()?;
         let editing = state.draft.is_some();
-        let waiting = state.save_pending();
+        let waiting = state.write_pending();
         let dismiss_label = if editing || state.pending_draft.is_some() {
             "Cancel"
         } else {
@@ -560,42 +662,61 @@ impl RootWindow {
         } else if state.rows.is_empty() && state.pending.is_none() {
             panel = panel.child(Label::new("No Favorites.").id("result-favorites-empty"));
         } else if !state.rows.is_empty() {
-            panel = panel.child(
-                div()
-                    .id("result-favorites-rows")
-                    .flex()
-                    .flex_col()
-                    .max_h(px(160.0))
-                    .overflow_y_scroll()
-                    .children(state.rows.iter().enumerate().map(|(index, row)| {
-                        let caption = match &row.args {
-                            Some(args) => format!("{} · {} {}", row.label, row.action, args),
-                            None => format!("{} · {}", row.label, row.action),
-                        };
-                        let displayed = row.clone();
-                        let sequence = state.sequence;
-                        div()
-                            .flex()
-                            .child(Label::new(caption).id(format!("result-favorite-row-{index}")))
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "result-favorite-edit-{index}"
-                                )))
-                                .label("Edit")
-                                .tab_stop(true)
-                                .disabled(!state.loaded || state.pending.is_some())
-                                .on_click(cx.listener(
-                                    move |root, _, window, cx| {
+            panel =
+                panel.child(
+                    div()
+                        .id("result-favorites-rows")
+                        .flex()
+                        .flex_col()
+                        .max_h(px(160.0))
+                        .overflow_y_scroll()
+                        .children(state.rows.iter().enumerate().map(|(index, row)| {
+                            let caption = match &row.args {
+                                Some(args) => format!("{} · {} {}", row.label, row.action, args),
+                                None => format!("{} · {}", row.label, row.action),
+                            };
+                            let displayed = row.clone();
+                            let remove_displayed = displayed.clone();
+                            let sequence = state.sequence;
+                            div()
+                                .flex()
+                                .child(
+                                    Label::new(caption).id(format!("result-favorite-row-{index}")),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "result-favorite-edit-{index}"
+                                    )))
+                                    .label("Edit")
+                                    .tab_stop(true)
+                                    .disabled(!state.loaded || state.pending.is_some())
+                                    .on_click(cx.listener(move |root, _, window, cx| {
                                         root.edit_result_favorite(
                                             Some((index, displayed.clone(), sequence)),
                                             window,
                                             cx,
                                         )
-                                    },
-                                )),
-                            )
-                    })),
-            );
+                                    })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "result-favorite-remove-{index}"
+                                    )))
+                                    .label("Remove")
+                                    .tab_stop(true)
+                                    .disabled(!state.loaded || state.pending.is_some())
+                                    .on_click(cx.listener(move |root, _, window, cx| {
+                                        root.remove_result_favorite(
+                                            index,
+                                            remove_displayed.clone(),
+                                            sequence,
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                                )
+                        })),
+                );
         }
         Some(
             panel
@@ -621,15 +742,60 @@ mod tests {
         state.pending = Some(Request::Load(2));
         assert!(!state.consume(Request::Load(1)));
         assert!(state.consume(Request::Load(2)));
-        state.pending = Some(Request::Save(3));
-        assert!(state.save_pending());
+        state.pending = Some(Request::Write(3));
+        assert!(state.write_pending());
         assert!(state.restart_blocker().is_some());
         assert!(!state.consume(Request::Load(3)));
-        assert_eq!(state.pending, Some(Request::Save(3)));
-        assert!(state.consume(Request::Save(3)));
-        assert!(!state.consume(Request::Save(3)));
-        assert!(!state.save_pending());
+        assert_eq!(state.pending, Some(Request::Write(3)));
+        assert!(state.consume(Request::Write(3)));
+        assert!(!state.consume(Request::Write(3)));
+        assert!(!state.write_pending());
         assert!(state.restart_blocker().is_none());
+    }
+
+    #[test]
+    fn remove_acknowledgement_is_matched_and_preserves_last_good_on_errors() {
+        use super::{FavEntry, PrefilledFavoriteSaveError, WriteKind};
+        let row = FavEntry {
+            label: "same".into(),
+            action: "cmd".into(),
+            args: Some("one".into()),
+        };
+        let other = FavEntry {
+            args: Some("two".into()),
+            ..row.clone()
+        };
+        let mut state = ResultFavorites::default();
+        state.rows = vec![row.clone(), other.clone()].into();
+        state.loaded = true;
+        state.pending = Some(Request::Write(4));
+        assert!(!state.finish_write(Request::Write(3), WriteKind::Remove, Ok(vec![])));
+        assert_eq!(&*state.rows, &[row.clone(), other.clone()]);
+        assert!(state.finish_write(
+            Request::Write(4),
+            WriteKind::Remove,
+            Err(PrefilledFavoriteSaveError::StaleTarget)
+        ));
+        assert!(state.loaded);
+        assert!(state.status.as_deref().unwrap().contains("removed"));
+        assert_eq!(&*state.rows, &[row.clone(), other.clone()]);
+        state.pending = Some(Request::Write(5));
+        assert!(state.finish_write(
+            Request::Write(5),
+            WriteKind::Remove,
+            Err(PrefilledFavoriteSaveError::Store(anyhow::anyhow!(
+                "malformed"
+            )))
+        ));
+        assert!(!state.loaded);
+        assert_eq!(&*state.rows, &[row.clone(), other]);
+        assert!(state.status.as_deref().unwrap().contains("reopen"));
+        state.loaded = true; // A fresh successful load re-enables mutations.
+        state.pending = Some(Request::Write(6));
+        assert!(state.finish_write(Request::Write(6), WriteKind::Remove, Ok(vec![row.clone()])));
+        assert_eq!(&*state.rows, &[row]);
+        assert_eq!(state.status.as_deref(), Some("Favorite removed."));
+        assert!(!state.finish_write(Request::Write(6), WriteKind::Remove, Ok(vec![])));
     }
 
     #[test]
