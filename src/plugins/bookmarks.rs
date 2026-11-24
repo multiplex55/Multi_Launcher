@@ -79,111 +79,118 @@ impl BookmarksPlugin {
     }
 
     fn search_internal(&self, trimmed: &str) -> Vec<Action> {
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm")
-            && (rest.trim().is_empty() || rest.trim().eq_ignore_ascii_case("add"))
-        {
+        let query = parse_bookmark_query(trimmed);
+        match query {
+            BookmarkQuery::Dialog | BookmarkQuery::Add(_) | BookmarkQuery::Rejected => {
+                project_bookmark_query(query, &[], &self.matcher)
+            }
+            BookmarkQuery::Remove(_) | BookmarkQuery::List(_) => {
+                let guard = match self.data.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return Vec::new(),
+                };
+                project_bookmark_query(query, &guard, &self.matcher)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BookmarkQuery<'a> {
+    Dialog,
+    Add(&'a str),
+    Remove(&'a str),
+    List(&'a str),
+    Rejected,
+}
+
+fn parse_bookmark_query(query: &str) -> BookmarkQuery<'_> {
+    let trimmed = query.trim();
+    if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm")
+        && (rest.trim().is_empty() || rest.trim().eq_ignore_ascii_case("add"))
+    {
+        return BookmarkQuery::Dialog;
+    }
+    if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm add ") {
+        let url = rest.trim();
+        if !url.is_empty() {
+            return BookmarkQuery::Add(url);
+        }
+    }
+    if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm rm") {
+        return BookmarkQuery::Remove(rest.trim());
+    }
+    if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm list") {
+        return BookmarkQuery::List(rest.trim());
+    }
+    match crate::common::strip_prefix_ci(trimmed, "bm") {
+        Some(rest) => BookmarkQuery::List(rest.trim()),
+        None => BookmarkQuery::Rejected,
+    }
+}
+
+fn project_bookmark_query(
+    query: BookmarkQuery<'_>,
+    entries: &[BookmarkEntry],
+    matcher: &SkimMatcherV2,
+) -> Vec<Action> {
+    let (filter, remove) = match query {
+        BookmarkQuery::Dialog => return vec![Action {
+            label: "bm: add bookmark".into(),
+            desc: "Bookmark".into(),
+            action: "bookmark:dialog".into(),
+            args: None,
+        }],
+        BookmarkQuery::Add(url) => {
+            let norm = normalize_url(url);
             return vec![Action {
-                label: "bm: add bookmark".into(),
+                label: format!("Add bookmark {norm}"),
                 desc: "Bookmark".into(),
-                action: "bookmark:dialog".into(),
+                action: format!("bookmark:add:{norm}"),
                 args: None,
             }];
         }
-
-        const ADD_PREFIX: &str = "bm add ";
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
-            let url = rest.trim();
-            if !url.is_empty() {
-                let norm = normalize_url(url);
-                return vec![Action {
-                    label: format!("Add bookmark {norm}"),
-                    desc: "Bookmark".into(),
-                    action: format!("bookmark:add:{norm}"),
-                    args: None,
-                }];
-            }
-        }
-        const RM_PREFIX: &str = "bm rm";
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
-            let filter = rest.trim();
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
-            return guard
-                .iter()
-                .filter(|b| {
-                    self.matcher.fuzzy_match(&b.url, filter).is_some()
-                        || b.alias
-                            .as_ref()
-                            .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
-                            .unwrap_or(false)
-                })
-                .map(|b| Action {
-                    label: format!("Remove bookmark {}", b.url.clone()),
-                    desc: "Bookmark".into(),
-                    action: format!("bookmark:remove:{}", b.url.clone()),
-                    args: None,
-                })
-                .collect();
-        }
-        const LIST_PREFIX: &str = "bm list";
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
-            let filter = rest.trim();
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
-            return guard
-                .iter()
-                .filter(|b| {
-                    self.matcher.fuzzy_match(&b.url, filter).is_some()
-                        || b.alias
-                            .as_ref()
-                            .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
-                            .unwrap_or(false)
-                })
-                .map(|b| {
-                    let label = b.alias.clone().unwrap_or_else(|| b.url.clone());
-                    Action {
-                        label,
-                        desc: "Bookmark".into(),
-                        action: b.url.clone(),
-                        args: None,
-                    }
-                })
-                .collect();
-        }
-        const PREFIX: &str = "bm";
-        let rest = match crate::common::strip_prefix_ci(trimmed, PREFIX) {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
-        let filter = rest.trim();
-        let guard = match self.data.lock() {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard
-            .iter()
-            .filter(|b| {
-                self.matcher.fuzzy_match(&b.url, filter).is_some()
-                    || b.alias
-                        .as_ref()
-                        .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
-                        .unwrap_or(false)
-            })
-            .map(|b| {
-                let label = b.alias.clone().unwrap_or_else(|| b.url.clone());
+        BookmarkQuery::Rejected => return Vec::new(),
+        BookmarkQuery::Remove(filter) => (filter, true),
+        BookmarkQuery::List(filter) => (filter, false),
+    };
+    entries
+        .iter()
+        .filter(|entry| {
+            matcher.fuzzy_match(&entry.url, filter).is_some()
+                || entry
+                    .alias
+                    .as_ref()
+                    .map(|alias| matcher.fuzzy_match(alias, filter).is_some())
+                    .unwrap_or(false)
+        })
+        .map(|entry| {
+            if remove {
                 Action {
-                    label,
+                    label: format!("Remove bookmark {}", entry.url),
                     desc: "Bookmark".into(),
-                    action: b.url.clone(),
+                    action: format!("bookmark:remove:{}", entry.url),
                     args: None,
                 }
-            })
-            .collect()
-    }
+            } else {
+                Action {
+                    label: entry.alias.clone().unwrap_or_else(|| entry.url.clone()),
+                    desc: "Bookmark".into(),
+                    action: entry.url.clone(),
+                    args: None,
+                }
+            }
+        })
+        .collect()
+}
+
+/// Project a bookmark query against borrowed entries in provider order.
+pub(crate) fn query_bookmark_entries(query: &str, entries: &[BookmarkEntry]) -> Vec<Action> {
+    project_bookmark_query(
+        parse_bookmark_query(query),
+        entries,
+        &SkimMatcherV2::default(),
+    )
 }
 
 fn normalize_url(url: &str) -> String {
@@ -467,6 +474,78 @@ mod tests {
             url: url.into(),
             alias: alias.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn borrowed_query_preserves_live_shapes_order_and_stored_urls() {
+        let entries = vec![
+            bookmark("http://first.example/path", Some("Shared First")),
+            bookmark("https://second.example", Some("Shared Second")),
+            bookmark("https://plain.example", None),
+        ];
+        let plugin = BookmarksPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(entries.clone())),
+            cache: Arc::new(Mutex::new(LruCache::new(4))),
+            watcher: None,
+        };
+        for query in [
+            "bm", "bm ", "BM add", "bm add http://example", "bm list shared",
+            "bm rm shared", "bm first.example", "bmlist shared", "other",
+        ] {
+            assert_eq!(
+                query_bookmark_entries(query, &entries),
+                plugin.search_internal(query.trim()),
+                "{query}"
+            );
+        }
+        assert_eq!(query_bookmark_entries("bm ", &entries)[0].action, "bookmark:dialog");
+        assert_eq!(
+            query_bookmark_entries("BM ADD http://example", &entries)[0].action,
+            "bookmark:add:https://www.example"
+        );
+        let listed = query_bookmark_entries("bm list shared", &entries);
+        assert_eq!(
+            listed.iter().map(|a| a.action.as_str()).collect::<Vec<_>>(),
+            vec!["http://first.example/path", "https://second.example"]
+        );
+        assert_eq!(listed[0].label, "Shared First");
+        let removed = query_bookmark_entries("bm rm shared", &entries);
+        assert_eq!(removed[0].action, "bookmark:remove:http://first.example/path");
+        assert_eq!(removed[1].action, "bookmark:remove:https://second.example");
+        assert_eq!(
+            query_bookmark_entries("bm first.example", &entries)[0].action,
+            "http://first.example/path"
+        );
+        assert_eq!(
+            query_bookmark_entries("bm plain.example", &entries)[0].label,
+            "https://plain.example"
+        );
+        assert!(query_bookmark_entries("other", &entries).is_empty());
+    }
+
+    #[test]
+    fn data_free_queries_do_not_require_bookmark_lock() {
+        let data = Arc::new(Mutex::new(Vec::new()));
+        let poisoned = Arc::clone(&data);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison test lock");
+        })
+        .join();
+        let plugin = BookmarksPlugin {
+            matcher: SkimMatcherV2::default(),
+            data,
+            cache: Arc::new(Mutex::new(LruCache::new(4))),
+            watcher: None,
+        };
+        assert_eq!(plugin.search_internal("bm")[0].action, "bookmark:dialog");
+        assert_eq!(
+            plugin.search_internal("bm add example")[0].action,
+            "bookmark:add:https://www.example"
+        );
+        assert!(plugin.search_internal("other").is_empty());
+        assert!(plugin.search_internal("bm list").is_empty());
     }
 
     #[test]
