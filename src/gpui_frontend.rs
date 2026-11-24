@@ -6,6 +6,7 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod favorites;
+mod hash_jump;
 mod jump_mode;
 mod search_providers;
 
@@ -3440,6 +3441,7 @@ struct RetiringHashWindow {
 }
 
 struct HashMountConfig {
+    jump_controller: JumpModeController,
     session: Arc<Mutex<HashSession>>,
     wake_signal: Arc<HashWakeSignal>,
     file_picker_pending: Arc<AtomicBool>,
@@ -3771,6 +3773,7 @@ fn create_hash_generator_view(
     config: HashMountConfig,
 ) -> Entity<HashGeneratorWindow> {
     let HashMountConfig {
+        jump_controller,
         session,
         wake_signal,
         file_picker_pending,
@@ -4007,12 +4010,31 @@ fn create_hash_generator_view(
             },
         );
 
+        let jump = hash_jump::HashJump::new(jump_controller, cx);
+        let focus_handle = cx.focus_handle();
+        let focus_out = cx.on_focus_out(
+            &focus_handle,
+            window,
+            |this: &mut HashGeneratorWindow, _, window, cx| {
+                if !this.focus_handle.contains_focused(window, cx) && this.jump.controller.retire()
+                {
+                    cx.notify();
+                }
+            },
+        );
+        let activation =
+            cx.observe_window_activation(window, |this: &mut HashGeneratorWindow, window, cx| {
+                if !window.is_window_active() && this.jump.controller.retire() {
+                    cx.notify();
+                }
+            });
         HashGeneratorWindow {
+            jump,
             text,
             expected,
             source,
             algorithm,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             session,
             wake_signal,
             file_picker_pending,
@@ -4041,6 +4063,8 @@ fn create_hash_generator_view(
                 expected_subscription,
                 source_subscription,
                 algorithm_subscription,
+                focus_out,
+                activation,
             ],
         }
     })
@@ -7394,6 +7418,7 @@ impl RootWindow {
         );
         let root = cx.entity().downgrade();
         let mount_config = HashMountConfig {
+            jump_controller: self.search_jump_mode.fresh(),
             session: Arc::clone(&self.hash_session),
             wake_signal: Arc::clone(&self.hash_wake_signal),
             file_picker_pending: Arc::clone(&self.hash_file_picker_pending),
@@ -7627,6 +7652,7 @@ impl RootWindow {
         let size_write_error = self.hash_size_write_error.clone();
         let utility_presentations = self.utility_presentations.clone();
         let root_visibility = self.root_visibility.clone();
+        let jump_controller = self.search_jump_mode.fresh();
         let setup_session = Arc::clone(&session);
         let setup_active_mount_generation = Arc::clone(&active_mount_generation);
         let setup_restart_admission = Arc::clone(&restart_admission);
@@ -7635,6 +7661,7 @@ impl RootWindow {
         cx.spawn(async move |_, cx| {
             let _operation = operation;
             let mount_config = HashMountConfig {
+                jump_controller,
                 session,
                 wake_signal,
                 file_picker_pending,
@@ -9718,6 +9745,7 @@ impl Render for RootWindow {
 }
 
 struct HashGeneratorWindow {
+    jump: hash_jump::HashJump,
     text: Entity<TextareaState>,
     expected: Entity<TextareaState>,
     source: Entity<SelectState<Vec<HashSourceChoice>>>,
@@ -10250,6 +10278,87 @@ impl HashGeneratorWindow {
         cx.notify();
     }
 
+    fn hash_control_eligibility(&self) -> hash_jump::HashEligibility {
+        let current = self.is_current_mount();
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clipboard = self.clipboard_pending.kind();
+        hash_jump::HashEligibility {
+            current,
+            mode: session.mode(),
+            presentation: self.mode,
+            has_job: session.has_job(),
+            is_running: session.is_running(),
+            picker_pending: self.file_picker_pending.load(Ordering::Acquire),
+            clipboard_pending: clipboard != HashClipboardPendingKind::Idle,
+            clipboard_copy_pending: clipboard == HashClipboardPendingKind::Copy,
+            can_copy_digest: session.can_copy_digest() && session.result().is_some(),
+        }
+    }
+
+    fn hash_jump_owns_input(&self, window: &Window, cx: &App) -> bool {
+        window.is_window_active()
+            && hash_escape_capture_should_close(
+                &window.context_stack(),
+                self.focus_handle.contains_focused(window, cx),
+                self.file_picker_pending.load(Ordering::Acquire),
+            )
+    }
+
+    fn handle_jump_keydown(
+        &mut self,
+        receipt: PhysicalKeydown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if receipt.virtual_key == 0x1b {
+            self.jump.controller.release_fresh_key(receipt);
+        }
+        if !self.is_current_mount() || !self.hash_jump_owns_input(window, cx) {
+            if self.jump.controller.retire() {
+                cx.notify();
+            }
+            return false;
+        }
+        let (consumed, repaint, target) = self.jump.key(receipt, self.mount_generation);
+        if let Some(target) = target {
+            let current = self.jump.frame.borrow().as_ref().is_some_and(|frame| {
+                frame.generation == self.mount_generation && frame.has_target(&target)
+            });
+            if current && let SemanticTargetId::Named(name) = target.semantic() {
+                if let Some(role) = hash_jump::HashControl::from_name(name)
+                    && self.hash_control_eligibility().allows(role)
+                {
+                    match role {
+                        hash_jump::HashControl::Source => {
+                            self.source.update(cx, |state, cx| state.focus(window, cx))
+                        }
+                        hash_jump::HashControl::Algorithm => self
+                            .algorithm
+                            .update(cx, |state, cx| state.focus(window, cx)),
+                        hash_jump::HashControl::Text => {
+                            self.text.focus_handle(cx).focus(window, cx)
+                        }
+                        hash_jump::HashControl::Expected => {
+                            self.expected.focus_handle(cx).focus(window, cx)
+                        }
+                        _ => {
+                            if let Some(focus) = self.jump.button(role) {
+                                focus.focus(window, cx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if repaint {
+            cx.notify();
+        }
+        consumed
+    }
+
     fn handle_escape(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
         if !self.is_current_mount()
             || !hash_escape_capture_should_close(
@@ -10260,13 +10369,16 @@ impl HashGeneratorWindow {
         {
             return false;
         }
+        if self.jump.controller.owns_key(0x1b) {
+            return true;
+        }
         self.request_close(cx);
         true
     }
 }
 
 impl Render for HashGeneratorWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let resolved = appearance::current(cx);
         let metrics = resolved.metrics;
         let palette = resolved.palette;
@@ -10312,6 +10424,17 @@ impl Render for HashGeneratorWindow {
         let clipboard_pending_kind = self.clipboard_pending.kind();
         let clipboard_copy_pending = clipboard_pending_kind == HashClipboardPendingKind::Copy;
         let clipboard_pending = clipboard_pending_kind != HashClipboardPendingKind::Idle;
+        let eligibility = hash_jump::HashEligibility {
+            current: can_interact,
+            mode,
+            presentation: self.mode,
+            has_job,
+            is_running,
+            picker_pending: file_picker_pending,
+            clipboard_pending,
+            clipboard_copy_pending,
+            can_copy_digest: can_copy_digest && digest.is_some(),
+        };
         let clipboard_pending_status = hash_clipboard_pending_feedback(clipboard_pending_kind);
         let picker_feedback = if file_picker_pending {
             Some("Choose a file to hash…".to_owned())
@@ -10361,6 +10484,29 @@ impl Render for HashGeneratorWindow {
             HashInputMode::Clipboard => "Clipboard",
         };
         let algorithm_name = algorithm.name();
+        if self.jump.controller.is_active()
+            && (!can_interact || !self.hash_jump_owns_input(window, cx))
+        {
+            self.jump.controller.retire();
+        }
+        let generation = self.mount_generation;
+        let jump_draft = self
+            .jump
+            .controller
+            .enabled
+            .then(|| Rc::new(RefCell::new(JumpGeometryDraft::new(generation))));
+        let jump_frame = Rc::clone(&self.jump.frame);
+        let expected_generation = self.jump.controller.session_generation();
+        let expected_ids = Rc::new(self.jump.controller.target_ids().to_vec());
+        let alphabet = self.jump.controller.alphabet.clone();
+        let jump_render = hash_jump::HashJumpRender {
+            jump: &self.jump,
+            generation,
+            draft: jump_draft.clone(),
+            eligibility,
+            palette,
+            metrics,
+        };
 
         div()
             .flex()
@@ -10369,6 +10515,13 @@ impl Render for HashGeneratorWindow {
             .p(px(metrics.window_padding))
             .track_focus(&self.focus_handle)
             .key_context("HashGeneratorWindow")
+            .when(self.jump.controller.is_active(), |this| {
+                this.capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                    if this.jump.controller.retire() {
+                        cx.notify();
+                    }
+                }))
+            })
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape"
                     && event.keystroke.modifiers == Modifiers::default()
@@ -10417,26 +10570,26 @@ impl Render for HashGeneratorWindow {
                             .line_height(px(metrics.line_height)),
                     )
                     .child(
-                        Select::new(&self.source)
+                        jump_render.wrap(Select::new(&self.source)
                             .accessibility_label("Hash input source")
                             .placeholder("Choose source")
-                            .disabled(!can_interact || file_picker_pending || clipboard_copy_pending),
+                            .disabled(!eligibility.allows(hash_jump::HashControl::Source)), hash_jump::HashControl::Source),
                     )
                     .child(
-                        Button::new("load-hash-clipboard")
+                        jump_render.wrap(Button::new("load-hash-clipboard").track_focus(&self.jump.clipboard)
                             .label("Load Clipboard")
                             .tab_stop(true)
-                            .disabled(!can_interact || clipboard_pending)
+                            .disabled(!eligibility.allows(hash_jump::HashControl::Clipboard))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_clipboard(cx);
-                            })),
+                            })), hash_jump::HashControl::Clipboard),
                     )
                     .when(mode == HashInputMode::Text, |this| {
                         this.child(
-                            Textarea::new(&self.text)
+                            jump_render.wrap(Textarea::new(&self.text)
                                 .aria_label("Text to hash")
                                 .tab_index(0)
-                                .readonly(!can_interact || clipboard_copy_pending),
+                                .readonly(!eligibility.allows(hash_jump::HashControl::Text)), hash_jump::HashControl::Text),
                         )
                     })
                     .when(mode == HashInputMode::Clipboard, |this| {
@@ -10461,20 +10614,20 @@ impl Render for HashGeneratorWindow {
                                 .line_height(px(metrics.line_height)),
                         )
                             .child(
-                                Button::new("choose-hash-file")
+                                jump_render.wrap(Button::new("choose-hash-file").track_focus(&self.jump.file)
                                     .label("Choose File")
                                     .tab_stop(true)
-                                    .disabled(!can_interact || file_picker_pending || clipboard_copy_pending)
+                                    .disabled(!eligibility.allows(hash_jump::HashControl::File))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.choose_file(window, cx);
-                                    })),
+                                    })), hash_jump::HashControl::File),
                             )
                     })
                     .child(
-                        Textarea::new(&self.expected)
+                        jump_render.wrap(Textarea::new(&self.expected)
                             .aria_label("Expected digest")
                             .tab_index(0)
-                            .readonly(!can_interact || clipboard_copy_pending),
+                            .readonly(!eligibility.allows(hash_jump::HashControl::Expected)), hash_jump::HashControl::Expected),
                     )
                     .children(
                         comparison_label.map(|(label, color)| {
@@ -10486,9 +10639,9 @@ impl Render for HashGeneratorWindow {
                         }),
                     )
                     .child(
-                        Select::new(&self.algorithm)
+                        jump_render.wrap(Select::new(&self.algorithm)
                             .accessibility_label("Hash algorithm")
-                            .disabled(!can_interact || clipboard_copy_pending),
+                            .disabled(!eligibility.allows(hash_jump::HashControl::Algorithm)), hash_jump::HashControl::Algorithm),
                     )
                     .children(
                         algorithm.security_notice().map(|notice| {
@@ -10510,40 +10663,40 @@ impl Render for HashGeneratorWindow {
                             .line_height(px(metrics.line_height)),
                     )
                     .child(
-                        Button::new("calculate-hash")
+                        jump_render.wrap(Button::new("calculate-hash").track_focus(&self.jump.calculate)
                             .label("Calculate")
                             .tab_stop(true)
-                            .disabled(has_job || !can_interact || clipboard_copy_pending)
+                            .disabled(!eligibility.allows(hash_jump::HashControl::Calculate))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.calculate_hash(cx);
-                            })),
+                            })), hash_jump::HashControl::Calculate),
                     )
                     .child(
-                        Button::new("dock-hash-generator")
+                        jump_render.wrap(Button::new("dock-hash-generator").track_focus(&self.jump.dock)
                             .label("Dock (Ctrl+Shift+D)")
                             .tab_stop(true)
-                            .disabled(!can_interact || clipboard_copy_pending || self.mode == HashPresentationMode::Docked)
+                            .disabled(!eligibility.allows(hash_jump::HashControl::Dock))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.request_rehost(HashPresentationMode::Docked, cx);
-                            })),
+                            })), hash_jump::HashControl::Dock),
                     )
                     .child(
-                        Button::new("popout-hash-generator")
+                        jump_render.wrap(Button::new("popout-hash-generator").track_focus(&self.jump.popout)
                             .label("Pop Out (Ctrl+Shift+P)")
                             .tab_stop(true)
-                            .disabled(!can_interact || clipboard_copy_pending || self.mode == HashPresentationMode::Popout)
+                            .disabled(!eligibility.allows(hash_jump::HashControl::Popout))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.request_rehost(HashPresentationMode::Popout, cx);
-                            })),
+                            })), hash_jump::HashControl::Popout),
                     )
                     .child(
-                        Button::new("close-hash-generator")
+                        jump_render.wrap(Button::new("close-hash-generator").track_focus(&self.jump.close)
                             .label("Close Hash Generator")
                             .tab_stop(true)
-                            .disabled(!can_interact || clipboard_pending)
+                            .disabled(!eligibility.allows(hash_jump::HashControl::Close))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.request_close(cx);
-                            })),
+                            })), hash_jump::HashControl::Close),
                     )
                     .children(progress_label.map(|label| {
                         Label::new(label)
@@ -10567,13 +10720,13 @@ impl Render for HashGeneratorWindow {
                     }))
                     .when(can_copy_digest && digest.is_some(), |this| {
                         this.child(
-                            Button::new("copy-hash-digest")
+                            jump_render.wrap(Button::new("copy-hash-digest").track_focus(&self.jump.copy)
                                 .label("Copy Digest")
                                 .tab_stop(true)
-                                .disabled(!can_interact || clipboard_pending || file_picker_pending)
+                                .disabled(!eligibility.allows(hash_jump::HashControl::Copy))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.copy_digest(cx);
-                                })),
+                                })), hash_jump::HashControl::Copy),
                         )
                     })
                     .children(error.map(|error| {
@@ -10625,15 +10778,24 @@ impl Render for HashGeneratorWindow {
                             .line_height(px(metrics.line_height))
                     }))
                     .children(is_running.then(|| {
-                        Button::new("cancel-hash")
+                        jump_render.wrap(Button::new("cancel-hash").track_focus(&self.jump.cancel)
                             .label("Cancel")
                             .tab_stop(true)
-                            .disabled(!can_interact || clipboard_copy_pending)
+                            .disabled(!eligibility.allows(hash_jump::HashControl::Cancel))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.cancel_hash(cx);
-                            }))
+                            })), hash_jump::HashControl::Cancel)
                     })),
             )
+            .children(jump_draft.map(|draft| jump_geometry_publisher(
+                draft, jump_frame, cx.entity().downgrade(), expected_generation, expected_ids, alphabet, metrics,
+                |owner, frame, window, cx, geometry_changed| {
+                    let retired = if owner.is_current_mount() && owner.hash_jump_owns_input(window, cx) {
+                        owner.jump.controller.reconcile_frame(Some(frame))
+                    } else { owner.jump.controller.retire() };
+                    if retired || (geometry_changed && owner.jump.controller.is_active() && frame.matches_active_session) { cx.notify(); }
+                },
+            )))
             .overflow_y_scrollbar()
             .id(format!(
                 "hash-generator-tool-scroll-{}",
@@ -11619,15 +11781,27 @@ pub(crate) fn run_foundation_window(
                         let Some(receipt) = receipt else {
                             return;
                         };
-                        if !context_stack_has_primary(&event.context_stack, "LauncherSearch")
-                            || context_stack_has_primary(
-                                &event.context_stack,
-                                "HashGeneratorWindow",
-                            )
-                        {
+                        let is_hash = context_stack_has_primary(&event.context_stack, "HashGeneratorWindow");
+                        if is_hash {
+                            let _ = root.update(cx, |root, cx| {
+                                let (view, native, event_window_matches, visible) = match &root.hash_window {
+                                    HashWindowState::Docked { view, .. } => (view.clone(), root.native_window,
+                                        root.root_window.is_some_and(|root_window| root_window.window_id() == window.window_handle().window_id()),
+                                        root.root_visibility.active.load(Ordering::Acquire) && root.root_visibility.visible.load(Ordering::Acquire)),
+                                    HashWindowState::Popout { view, window: hash_window, .. } => (view.clone(), view.read(cx).native_window,
+                                        hash_window.window_id() == window.window_handle().window_id(), true),
+                                    HashWindowState::Closed => return,
+                                };
+                                let Some(native) = native.filter(|native| native_window_is_valid(*native)) else { return; };
+                                if !visible || !event_window_matches || receipt.hwnd != native.identity.hwnd
+                                    || current_foreground_identity() != Some(native.identity) { return; }
+                                view.update(cx, |view, cx| {
+                                    if view.handle_jump_keydown(receipt, window, cx) { cx.stop_propagation(); }
+                                });
+                            });
                             return;
                         }
-
+                        if !context_stack_has_primary(&event.context_stack, "LauncherSearch") { return; }
                         let _ = root.update(cx, |root, cx| {
                             let Some(native_root) = root
                                 .native_window
@@ -12749,6 +12923,66 @@ mod tests {
             assert_eq!(action.label, "Fixture action 6");
             assert_eq!(action.args.as_deref(), Some("full-action-payload-6"));
         }
+    }
+
+    #[test]
+    fn hash_jump_rejects_roles_when_live_eligibility_changes() {
+        use super::hash_jump::{HashControl, HashEligibility};
+        let mut state = HashEligibility {
+            current: true, mode: super::HashInputMode::Text,
+            presentation: super::HashPresentationMode::Docked, has_job: false,
+            is_running: false, picker_pending: false, clipboard_pending: false,
+            clipboard_copy_pending: false, can_copy_digest: true,
+        };
+        assert!(state.allows(HashControl::Text));
+        assert!(state.allows(HashControl::Calculate));
+        assert!(state.allows(HashControl::Copy));
+        state.mode = super::HashInputMode::File;
+        state.has_job = true;
+        state.can_copy_digest = false;
+        assert!(!state.allows(HashControl::Text));
+        assert!(!state.allows(HashControl::Calculate));
+        assert!(!state.allows(HashControl::Copy));
+        assert!(state.allows(HashControl::File));
+        state.picker_pending = true;
+        assert!(!state.allows(HashControl::File));
+        state.current = false;
+        assert!(!state.allows(HashControl::Expected));
+    }
+
+    #[test]
+    fn hash_jump_target_roles_are_mount_scoped() {
+        use super::hash_jump::{HashControl, HashJump};
+        let target = HashJump::id(14, HashControl::Calculate);
+        assert_eq!(target.generation(), TargetGeneration(14));
+        assert_ne!(target, HashJump::id(15, HashControl::Calculate));
+        let multi_launcher::launcher::jump_mode::SemanticTargetId::Named(name) = target.semantic()
+        else {
+            panic!("Hash controls use named targets")
+        };
+        assert_eq!(HashControl::from_name(name), Some(HashControl::Calculate));
+        assert_eq!(HashControl::from_name("uninstalled"), None);
+    }
+
+    #[test]
+    fn hash_jump_escape_ownership_survives_cancel_until_fresh_key() {
+        let chord = JumpModeChord::default();
+        let frame = jump_test_frame(51, &[0], ResolvedQueryResultsLayout::default());
+        let mut jump = JumpModeController::new(true, chord, HintAlphabet::default());
+        assert!(
+            jump.process_key_down(jump_leader(chord), Some(&frame), 51)
+                .session_transition
+        );
+        let escape = physical_keydown(0, 0x1b);
+        assert!(jump.process_key_down(escape, Some(&frame), 51).consumed);
+        assert!(!jump.is_active());
+        assert!(jump.owns_key(0x1b));
+        let mut held = escape;
+        held.held = true;
+        assert!(jump.process_key_down(held, Some(&frame), 51).consumed);
+        assert!(jump.owns_key(0x1b));
+        assert!(!jump.process_key_down(escape, Some(&frame), 51).consumed);
+        assert!(!jump.owns_key(0x1b));
     }
 
     #[test]

@@ -188,6 +188,30 @@ impl JumpModeController {
         }
     }
 
+    pub(super) fn fresh(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            chord_vk: self.chord_vk,
+            chord_modifiers: self.chord_modifiers,
+            alphabet: self.alphabet.clone(),
+            session: None,
+            generation: None,
+            target_ids: Vec::new(),
+            held_owned_vkeys: HashSet::new(),
+            revision: 0,
+        }
+    }
+
+    pub(super) fn release_fresh_key(&mut self, receipt: PhysicalKeydown) {
+        if !receipt.held {
+            self.held_owned_vkeys.remove(&receipt.virtual_key);
+        }
+    }
+
+    pub(super) fn owns_key(&self, virtual_key: u16) -> bool {
+        self.held_owned_vkeys.contains(&virtual_key)
+    }
+
     pub(super) fn revision(&self) -> u64 {
         self.revision
     }
