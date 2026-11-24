@@ -8,7 +8,7 @@ G05 owns `universal-action-sheet`. Exact Ctrl+Enter from Search opens the curren
 
 Select `production_action_sheet_router_consumes_exact_ctrl_enter_and_preserves_tab`, `action_sheet_escape_preserves_query_and_does_not_activate_result` and `sheet_selection_preserves_keyboard_and_mouse_activation_sources`.
 
-`G05-EGUI-ACTION-SHEET-HELP` verifies the actual Ctrl+Enter route, independent filter and Escape with Search focus. `G05-EGUI-ACTION-SHEET-EXECUTE` verifies the keyboard-filtered Execute action opens one Hash Generator and closing it restores the exact launcher query. GPUI remains pending.
+`G05-EGUI-ACTION-SHEET-HELP` verifies the actual Ctrl+Enter route, independent filter and Escape with Search focus. `G05-EGUI-ACTION-SHEET-EXECUTE` verifies the keyboard-filtered Execute action opens one Hash Generator and closing it restores the exact launcher query.
 
 ## First native GPUI action sheet checkpoint
 
@@ -18,4 +18,4 @@ Give the Kit dialog its own focus, filter and available-choice selection. Preser
 
 Type-check the app and test configurations with `fast-dev`. Add focused receipt, focus, modifier and navigation tests and include the existing egui router, Escape and source selectors. Native replay on the later linked artifact uses an owned Hash and Help profile with an absent Favorites store and both Paste Sequence shortcuts disabled. Exercise Favorites filter and Escape, a real Favorites draft and Cancel, then the filtered Execute action opening one Hash Generator. Verify one hash action, retained launcher query and scoped Calculate and Escape behavior. Keep unavailable destinations and geometry in their existing parity scope.
 
-The first GPUI Action Sheet is implemented and type-checked. The modal uses the shared filter and selection logic. Its enabled destinations use the existing installed Search dispatcher and checked Favorites draft owner. The native hide path retires its owned dialog and asynchronous Hash completion preserves the modal's focus. Batch tests and Windows replay remain pending, including actual modifier and Tab ownership, hide and reopen, and both deferred destinations.
+The first GPUI Action Sheet passed focused Rust and Windows replay for Ctrl+Enter, independent filtering, Shift+Enter, Escape, Shift+Tab to Close and both deferred destinations. A nested filter popup owned the first Escape. Minimize and restore retired the sheet and allowed a fresh open. The native global hotkey, modal title and accurate active focus in UI Automation, wider destinations and geometry remain open. Hash Escape is tracked in G04. [Batch evidence](../VALIDATION_LOG.md#g05-c-and-g06-action-sheet-and-favorites-browse-batch)

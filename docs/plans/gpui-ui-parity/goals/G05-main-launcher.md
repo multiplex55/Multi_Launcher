@@ -6,6 +6,8 @@ The first [Settings menu and bare typed entry](../gui/settings-main.md#first-nat
 
 The first [Command Help checkpoint](../gui/command-help.md#first-native-command-help-checkpoint) passed native and focused Rust verification for Command List, Linking Guide and typed Help, shared filter and acknowledged Show examples for currently installed GPUI providers. [Quick Help](../gui/quick-help.md#first-native-quick-help-checkpoint) passed the menu, filters, Guide, compact scroll and scoped Escape replay. The first [result context and Favorites route](../gui/launcher-result-context-menu.md#first-native-result-context-menu-checkpoint) passed List Save, exact egui reopen and offscreen Grid with Cancel. The held shortcut, broader catalog and other action groups and geometry remain pending.
 
+The first GPUI Universal Action Sheet passed focused and native evidence for its exact Search chord, filter, tabbed Close, nested Escape, minimize and restore, and both typed Execute and Add to Favorites destinations. Exact Favorites browse also passed under `fav`, `fav add` and sheet Execute. Global hotkey delivery, wider action groups and modal UI Automation remain open. [Batch evidence](../VALIDATION_LOG.md#g05-c-and-g06-action-sheet-and-favorites-browse-batch)
+
 ## Objective and dependencies
 
 Recreate the complete launcher interaction in GPUI Kit: opening from the existing global trigger, editing a query, navigating the same results, invoking the same actions, and returning focus according to the existing policy. Preserve the application's compact working layout and command language while applying the agreed visual specification. A search box displaying plausible results is not this goal's acceptance result.

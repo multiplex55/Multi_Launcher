@@ -39,6 +39,8 @@ Use the already-borrowed Kit root `Window` for a docked view and the independent
 
 The first native round trip exercised Dock and Pop Out with the root visible and retained the draft and digest across both mounts. The confirmed GPUI-to-egui restart reopened the saved Popout presentation from the same root. See `G04-C2-INITIAL-HOSTING` and `G04-C2-FOCUS-RESTART`. The G01 global hotkey injection remains unverified. Hidden-root behavior requires a separate successful visibility action or physical input.
 
+The G05 Action Sheet batch opened one docked Hash from Search, calculated the expected digest through Hash's Ctrl+Enter and closed and restored exact Search through Ctrl+W. Escape in the focused GPUI Text field left Hash open, while the egui Action Sheet Execute baseline closed the tool. Track scoped Escape under HASH-08. [Batch evidence](../VALIDATION_LOG.md#g05-c-and-g06-action-sheet-and-favorites-browse-batch)
+
 ## Clipboard actions
 
 Explicit Load and Copy use `ArboardClipboardBackend`. The read reaches the existing protected reader and its timeout policy. Accepted GPUI operations run outside the UI thread and `HashSession` lock, with one root-owned in-flight operation. `HashSession` owns shared snapshot, error and digest feedback. Load keeps a prior snapshot on failure and invalidates the earlier result only on a changed source. An empty string is a valid loaded snapshot. GPUI shows the byte count and current feedback.
