@@ -128,6 +128,9 @@ impl ResultFavorites {
             }
             Err(error) => {
                 self.browse_scroll.set_offset(point(px(0.0), px(0.0)));
+                if let Some(draft) = &self.draft {
+                    draft.scroll.set_offset(point(px(0.0), px(0.0)));
+                }
                 let verb = match operation {
                     WriteKind::Save { .. } => "save",
                     WriteKind::Remove => "remove",
@@ -194,6 +197,7 @@ enum DraftOrigin {
 }
 
 struct FavoriteFields {
+    scroll: ScrollHandle,
     origin: DraftOrigin,
     original: FavEntry,
     label: FavoriteField,
@@ -246,6 +250,7 @@ impl FavoriteFields {
             }
         });
         Self {
+            scroll: ScrollHandle::default(),
             category,
             filter,
             _subscriptions: vec![category_subscription, filter_subscription],
@@ -515,6 +520,7 @@ impl RootWindow {
             args: (!args.trim().is_empty()).then_some(args),
         };
         if entry.label.trim().is_empty() || entry.action.trim().is_empty() {
+            fields.scroll.set_offset(point(px(0.0), px(0.0)));
             state.status = Some("Label and command are required".to_owned());
             cx.notify();
             return;
@@ -724,6 +730,7 @@ impl RootWindow {
                         })
                 });
             FavoritesPanelDraft {
+                scroll: draft.scroll.clone(),
                 label: draft.label.input.clone(),
                 command: draft.command.input.clone(),
                 args: draft.args.input.clone(),
@@ -752,6 +759,7 @@ impl RootWindow {
 }
 
 struct FavoritesPanelDraft {
+    scroll: ScrollHandle,
     label: Entity<TextareaState>,
     command: Entity<TextareaState>,
     args: Entity<TextareaState>,
@@ -778,7 +786,7 @@ pub(super) struct FavoritesPanel {
     palette: SemanticPalette,
 }
 
-fn favorites_browse_viewport_budget(
+fn favorites_viewport_budget(
     viewport_width: f32,
     viewport_height: f32,
     preferred_width: f32,
@@ -799,7 +807,7 @@ impl RenderOnce for FavoritesPanel {
         let state = &self;
         let owner = &state.owner;
         let metrics = state.metrics;
-        let (width, body_height) = favorites_browse_viewport_budget(
+        let (width, body_height) = favorites_viewport_budget(
             window.viewport_size().width.as_f32(),
             window.viewport_size().height.as_f32(),
             state.width,
@@ -877,14 +885,30 @@ impl RenderOnce for FavoritesPanel {
                     .text_size(px(metrics.heading_text_size)),
             );
         if let Some(draft) = &state.draft {
+            let mut body = div()
+                .id("result-favorites-form")
+                .flex()
+                .flex_col()
+                .gap_y(px(metrics.item_spacing_y))
+                .w_full()
+                .max_h(px(body_height))
+                .overflow_y_scroll()
+                .track_scroll(&draft.scroll)
+                .children(state.status.as_ref().map(|status| {
+                    Label::new(status.clone())
+                        .id("result-favorites-status")
+                        .flex_shrink_0()
+                        .w_full()
+                }));
             for (label, field) in [
                 ("Label", &draft.label),
                 ("Command", &draft.command),
                 ("Args", &draft.args),
             ] {
-                panel = panel.child(
+                body = body.child(
                     div()
                         .id(label)
+                        .flex_shrink_0()
                         .flex()
                         .flex_col()
                         .child(Label::new(label).id("result-favorite-field-label"))
@@ -897,32 +921,43 @@ impl RenderOnce for FavoritesPanel {
                 );
             }
             let disabled = waiting || !state.loaded;
-            panel = panel
-                .child(Label::new("Category").id("result-favorite-category-label"))
+            body = body
                 .child(
-                    Select::new(&draft.category)
-                        .accessibility_label("Category")
-                        .placeholder("Select")
-                        .disabled(disabled),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .child(Label::new("Category").id("result-favorite-category-label"))
+                        .child(
+                            Select::new(&draft.category)
+                                .accessibility_label("Category")
+                                .placeholder("Select")
+                                .disabled(disabled),
+                        ),
                 )
-                .child(Label::new("Filter").id("result-favorite-filter-label"))
                 .child(
-                    Input::new(&draft.filter)
-                        .aria_label("Filter")
-                        .tab_index(0)
-                        .readonly(disabled),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .child(Label::new("Filter").id("result-favorite-filter-label"))
+                        .child(
+                            Input::new(&draft.filter)
+                                .aria_label("Filter")
+                                .tab_index(0)
+                                .readonly(disabled),
+                        ),
                 );
             if let Some((category, filter, choices)) = &draft.choices {
                 let category = category.clone();
                 let filter = filter.clone();
                 let draft_id = draft.category.clone();
-                panel = panel.child(
+                body = body.child(
                     div()
                         .id("result-favorite-choices")
+                        .flex_shrink_0()
                         .flex()
                         .flex_col()
-                        .max_h(px(160.0))
-                        .overflow_y_scroll()
                         .children(choices.iter().cloned().enumerate().map(|(index, choice)| {
                             let caption = format!("{} - {}", choice.label, choice.desc);
                             let category = category.clone();
@@ -950,6 +985,7 @@ impl RenderOnce for FavoritesPanel {
                         })),
                 );
             }
+            panel = panel.child(body);
         } else {
             let mut body = div()
                 .id("result-favorites-rows")
@@ -1038,25 +1074,17 @@ impl RenderOnce for FavoritesPanel {
             }
             panel = panel.child(body);
         }
-        panel
-            .children(
-                state
-                    .draft
-                    .as_ref()
-                    .and(state.status.as_ref())
-                    .map(|status| Label::new(status.clone()).id("result-favorites-status")),
-            )
-            .child(controls)
+        panel.child(controls)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Request, ResultFavorites, favorites_browse_viewport_budget};
+    use super::{Request, ResultFavorites, favorites_viewport_budget};
     use multi_launcher::gui::theme::ThemeMetrics;
 
     #[test]
-    fn favorites_browse_budget_fits_logical_viewport() {
+    fn favorites_viewport_budget_fits_logical_viewport() {
         let metrics = ThemeMetrics {
             body_text_size: 14.0,
             heading_text_size: 18.0,
@@ -1076,15 +1104,15 @@ mod tests {
             row_min_height: 28.0,
         };
         assert_eq!(
-            favorites_browse_viewport_budget(220.0, 180.0, 400.0, metrics, 32.0),
+            favorites_viewport_budget(220.0, 180.0, 400.0, metrics, 32.0),
             (204.0, 94.0)
         );
         assert_eq!(
-            favorites_browse_viewport_budget(600.0, 900.0, 400.0, metrics, 32.0),
+            favorites_viewport_budget(600.0, 900.0, 400.0, metrics, 32.0),
             (400.0, 280.0)
         );
         assert_eq!(
-            favorites_browse_viewport_budget(10.0, 50.0, 400.0, metrics, 32.0),
+            favorites_viewport_budget(10.0, 50.0, 400.0, metrics, 32.0),
             (1.0, 0.0)
         );
     }
