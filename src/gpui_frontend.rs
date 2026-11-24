@@ -6198,11 +6198,8 @@ impl RootWindow {
             session.set_mode(snapshot.drafts.hash.mode);
             session.set_algorithm(snapshot.drafts.hash.algorithm);
         }
-        self.root_visibility.active.store(false, Ordering::Release);
+        self.root_visibility.deactivate();
         self.retire_search_jump_mode();
-        self.root_visibility
-            .request_revision
-            .fetch_add(1, Ordering::AcqRel);
         self.coordinate_hud_probe_closing
             .store(true, Ordering::Release);
         self.coordinate_hud_probe_status = "Closing GPUI services for the egui restart…".to_owned();
@@ -11676,6 +11673,7 @@ struct RootVisibility {
     visible: Arc<AtomicBool>,
     request_revision: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
+    retired: Arc<AtomicBool>,
     #[cfg(windows)]
     request_sender: Arc<Mutex<Option<Sender<()>>>>,
     #[cfg(windows)]
@@ -11711,6 +11709,7 @@ impl RootVisibility {
             visible: Arc::new(AtomicBool::new(true)),
             request_revision: Arc::new(AtomicU64::new(0)),
             active: Arc::new(AtomicBool::new(false)),
+            retired: Arc::new(AtomicBool::new(false)),
             #[cfg(windows)]
             request_sender: Arc::new(Mutex::new(None)),
             #[cfg(windows)]
@@ -11722,77 +11721,110 @@ impl RootVisibility {
 
     #[cfg(windows)]
     fn bind_request_sender(&self, sender: Sender<()>) {
-        if let Ok(mut slot) = self.request_sender.lock() {
+        if let Ok(mut slot) = self.request_sender.lock()
+            && !self.retired.load(Ordering::Acquire)
+        {
             *slot = Some(sender);
         }
     }
 
-    fn request_visible(&self, visible: bool) -> bool {
-        self.queue_visible(RootVisibilityRequest::Set(visible))
+    #[cfg(windows)]
+    fn activate(&self) -> bool {
+        let Ok(sender) = self.request_sender.lock() else {
+            return false;
+        };
+        if self.retired.load(Ordering::Acquire) || sender.is_none() {
+            return false;
+        }
+        self.active.store(true, Ordering::Release);
+        true
+    }
+
+    /// Retire queued work and wake the blocking receiver exactly once.
+    fn deactivate(&self) {
+        #[cfg(windows)]
+        {
+            let mut sender = self
+                .request_sender
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.retired.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            self.active.store(false, Ordering::Release);
+            self.request_revision.fetch_add(1, Ordering::AcqRel);
+            *self
+                .requested_visible
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            self.requested_hash_focus.store(0, Ordering::Release);
+            if let Some(sender) = sender.take() {
+                let _ = sender.send(());
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if !self.retired.swap(true, Ordering::AcqRel) {
+                self.active.store(false, Ordering::Release);
+                self.request_revision.fetch_add(1, Ordering::AcqRel);
+            }
+        }
     }
 
     fn request_external_hide(&self, revision: u64) -> bool {
-        self.queue_visible(RootVisibilityRequest::HideAfterExternalLaunch(revision))
+        self.queue_visible(RootVisibilityRequest::HideAfterExternalLaunch(revision), None)
     }
 
-    fn queue_visible(&self, request: RootVisibilityRequest) -> bool {
+    fn queue_visible(&self, request: RootVisibilityRequest, hash_focus: Option<u64>) -> bool {
         #[cfg(windows)]
         {
-            if !self.active.load(Ordering::Acquire) {
+            // Serialize request publication with retirement, including Hash focus.
+            let Ok(sender) = self.request_sender.lock() else {
+                return false;
+            };
+            if !self.active.load(Ordering::Acquire) || self.retired.load(Ordering::Acquire) {
                 return false;
             }
-            if let Ok(mut pending) = self.requested_visible.lock() {
-                if !request.is_current(
-                    self.request_revision.load(Ordering::Acquire),
-                    self.visible.load(Ordering::Acquire),
-                    pending.is_some(),
-                ) {
-                    return false;
-                }
-                *pending = Some(request);
-            } else {
+            let Some(sender) = sender.as_ref() else {
+                return false;
+            };
+            let Ok(mut pending) = self.requested_visible.lock() else {
+                return false;
+            };
+            if !request.is_current(
+                self.request_revision.load(Ordering::Acquire),
+                self.visible.load(Ordering::Acquire),
+                pending.is_some(),
+            ) {
                 return false;
             }
-            if let Ok(sender) = self.request_sender.lock()
-                && sender
-                    .as_ref()
-                    .is_some_and(|sender| sender.send(()).is_ok())
-            {
+            if let Some(generation) = hash_focus {
+                self.requested_hash_focus.store(generation, Ordering::Release);
+            }
+            *pending = Some(request);
+            if sender.send(()).is_ok() {
                 return true;
             }
-            if let Ok(mut pending) = self.requested_visible.lock() {
-                *pending = None;
+            *pending = None;
+            if let Some(generation) = hash_focus {
+                let _ = self.requested_hash_focus.compare_exchange(
+                    generation,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
             }
             false
         }
         #[cfg(not(windows))]
         {
-            let _ = request;
+            let _ = (request, hash_focus);
             false
         }
     }
 
     fn request_hash_visible(&self, mount_generation: u64) -> bool {
-        #[cfg(windows)]
-        {
-            self.requested_hash_focus
-                .store(mount_generation, Ordering::Release);
-            if self.request_visible(true) {
-                return true;
-            }
-            let _ = self.requested_hash_focus.compare_exchange(
-                mount_generation,
-                0,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-            false
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = mount_generation;
-            false
-        }
+        self.queue_visible(RootVisibilityRequest::Set(true), Some(mount_generation))
     }
 
     #[cfg(windows)]
@@ -11806,11 +11838,13 @@ impl RootVisibility {
     #[cfg(windows)]
     fn accept_requested_visible(&self, request: RootVisibilityRequest) -> Option<(u64, bool)> {
         let pending = self.requested_visible.lock().ok()?;
-        if !request.is_current(
-            self.request_revision.load(Ordering::Acquire),
-            self.visible.load(Ordering::Acquire),
-            pending.is_some(),
-        ) {
+        if !self.active.load(Ordering::Acquire)
+            || !request.is_current(
+                self.request_revision.load(Ordering::Acquire),
+                self.visible.load(Ordering::Acquire),
+                pending.is_some(),
+            )
+        {
             return None;
         }
         let visible = match request {
@@ -12037,6 +12071,7 @@ pub(crate) fn run_foundation_window(
     let restart_admission_for_hotkey = Arc::clone(&restart_admission);
     let restart_admission_for_quick_help_capture = Arc::clone(&restart_admission);
     let visibility = RootVisibility::new();
+    let visibility_after_run = visibility.clone();
     let visibility_for_quit = visibility.clone();
     let visibility_for_root = visibility.clone();
     let restart_retiring = Arc::new(AtomicBool::new(false));
@@ -12109,7 +12144,7 @@ pub(crate) fn run_foundation_window(
                 });
             }
             settings_save_workers_for_quit.begin_shutdown();
-            visibility_for_quit.active.store(false, Ordering::Release);
+            visibility_for_quit.deactivate();
             restart_admission_for_quit.fence();
             coordinate_hud_probe_closing_for_quit.store(true, Ordering::Release);
             hash_wake_signal_for_quit.close();
@@ -12804,7 +12839,12 @@ pub(crate) fn run_foundation_window(
             {
                 listener.activate();
             }
-            visibility.active.store(true, Ordering::Release);
+            if !visibility.activate() {
+                *startup_error_sink.borrow_mut() =
+                    Some("Could not activate the GPUI visibility owner.".to_owned());
+                cx.quit();
+                return;
+            }
 
             let root_window = root_window;
             let root_view = root_view;
@@ -13043,6 +13083,7 @@ pub(crate) fn run_foundation_window(
         }
     });
 
+    visibility_after_run.deactivate();
     let restart_exit = restart_exit_after_run.borrow_mut().take();
 
     hash_wake_signal.close();
@@ -13835,6 +13876,45 @@ mod tests {
         let with_commands = completion_catalog(Vec::new(), true, None);
         assert!(!with_commands.compose("ha", Vec::new(), true).is_empty());
         assert!(with_commands.compose("ha", Vec::new(), false).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn visibility_deactivation_wakes_idle_and_retires_pending_requests() {
+        use super::RootVisibility;
+        use std::sync::{
+            atomic::Ordering,
+            mpsc::{TryRecvError, channel},
+        };
+
+        let idle = RootVisibility::new();
+        let (tx, rx) = channel();
+        idle.bind_request_sender(tx);
+        assert!(idle.activate());
+        let revision = idle.request_revision.load(Ordering::Acquire);
+        idle.deactivate();
+        assert_eq!(rx.try_recv(), Ok(()));
+        idle.deactivate();
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+        assert!(!idle.is_current(revision, true));
+        assert!(!idle.request_external_hide(revision));
+        assert!(!idle.request_hash_visible(7));
+        let (late_tx, late_rx) = channel();
+        idle.bind_request_sender(late_tx);
+        assert!(!idle.activate());
+        assert_eq!(late_rx.try_recv(), Err(TryRecvError::Disconnected));
+
+        let pending = RootVisibility::new();
+        let (tx, rx) = channel();
+        pending.bind_request_sender(tx);
+        assert!(pending.activate());
+        assert!(pending.request_hash_visible(9));
+        assert_eq!(rx.try_recv(), Ok(()));
+        pending.deactivate();
+        assert_eq!(rx.try_recv(), Ok(()));
+        assert!(pending.take_requested_visible().is_none());
+        assert!(pending.take_requested_hash_focus().is_none());
+        assert!(!pending.request_external_hide(0));
     }
 
     #[test]

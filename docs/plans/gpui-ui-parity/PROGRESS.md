@@ -19,7 +19,7 @@ G05 Folder and Bookmark Search passed 29 focused tests and native activation on 
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Replay configured global invocation and foreground restoration on the verified Windows artifact and retire the GPUI visibility wake owner on shutdown. Continue the Hash Generator pilot and its provider dependencies. |
+| Current next action | Retire the GPUI visibility wake owner on quit and accepted restart. The matched F2 probe recorded zero consumed wakes, leaving native delivery and foreground restoration open. Continue the Hash Generator pilot and its provider dependencies. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
