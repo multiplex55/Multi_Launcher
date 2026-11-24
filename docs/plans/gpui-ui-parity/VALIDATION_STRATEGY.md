@@ -42,7 +42,11 @@ Capture behavior before moving ownership out of LauncherApp. Preserve expected c
 
 ## 4. Select the target before the case filter
 
-Case filters restrict execution but may not sufficiently restrict Cargo compilation. Select a package and library/integration target first, then a case filter. Reuse the current warmed Cargo profile where appropriate. `fast-dev` exists and is an available option, not a compulsory new cache build for every task.
+Case filters restrict execution but may not sufficiently restrict Cargo compilation. Select a package and library, binary or integration target first, then a case filter. Use the existing `fast-dev` profile for routine progress and targeted testing. Keep its cache and use a different profile only for a concrete dependency, diagnostic or release acceptance requirement.
+
+Use `cargo check --locked --profile fast-dev` for coherent implementation increments. Include the affected test code when its target can be checked proportionately. Records can advance to implemented and type-checked before linking. Keep the selectors and Windows obligations for the combined run. Aim for three to five related slices per verification batch, using earlier checks for high-risk persistence, destructive operations, native lifecycle, security or shared-engine contracts when dependent work needs that evidence.
+
+Use a single active Cargo invocation with measured compilation parallelism. Keep serial test execution where Windows resources or fixtures require it, along with the existing Nextest stack wrapper. Record actual compile/link and test time separately. Use Cargo timings for the first build profile measurement and when investigating a concrete slowdown. Build one executable at a meaningful batch boundary and run the related native workflows on that artifact. Record tested, natively verified and formally accepted separately.
 
 Current registered grouped integration targets:
 

@@ -316,6 +316,9 @@ path = "tests/suites/pure.rs"
 inherits = "dev"
 debug = "line-tables-only"
 
+[profile.fast-dev.package."*"]
+debug = false
+
 # Production settings for ordinary release builds; retain panic unwinding.
 [profile.release]
 opt-level = 3
