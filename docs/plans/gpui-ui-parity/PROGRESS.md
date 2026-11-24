@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G06 folder and bookmark Favorites authoring passed 20 focused tests and the Windows replay. Native Pick preserved the authored Folder Label and Args. Bookmark Save resolved the exact stored URL, and explicit egui read both committed records from the same store. Source failure kept the draft and supported Category retry or Clear. G05 compact width and the G04/G06 utility Settings correction have their scoped evidence. The first Add App form is next. There are 219 source-backed GUI records and zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Favorites provider evidence](VALIDATION_LOG.md#g06-folder-and-bookmark-favorites-authoring) · [Compact width evidence](VALIDATION_LOG.md#g05-compact-launcher-width)
+G06 first native Add App passed 10 focused tests and the corrected Windows replay. The real menu, compact keyboard form, held-file failure with exact draft retention, single checked retry and explicit egui readback have scoped evidence. Folder and bookmark Favorites authoring and G05 compact launcher width retain their scoped evidence. The saved custom catalog and checked Edit/Remove are next. There are 219 source-backed GUI records and zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Add App evidence](VALIDATION_LOG.md#g06-first-native-add-app) · [Favorites provider evidence](VALIDATION_LOG.md#g06-folder-and-bookmark-favorites-authoring)
 
 ## Execution kickoff
 

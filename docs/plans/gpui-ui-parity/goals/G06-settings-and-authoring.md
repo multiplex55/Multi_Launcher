@@ -4,7 +4,7 @@
 
 The ordinary egui close prerequisite passed native and focused Rust verification. EgUI close saved root geometry while preserving unowned Settings values. GPUI reopened the same profile and the checked reverse restart continued to refuse a failed close write. [G06-D ordinary close evidence](../VALIDATION_LOG.md#g06-d-ordinary-egui-close-preservation)
 
-GPUI Favorites has scoped focused and native evidence for List/Grid prefill, typed Browse, exact-case named drafts, Add/Edit/Remove, compact layout, saved pin, and malformed-store refusal and recovery. Folder and bookmark authoring passed the scoped GPUI and egui round trip. The first Add App form is next. Full provider coverage and Data Recovery decisions remain open. [Favorites evidence](../VALIDATION_LOG.md#g06-folder-and-bookmark-favorites-authoring) · [Add App packet](../gui/add-action.md#first-native-add-app-packet)
+GPUI Favorites has scoped native and focused evidence for List/Grid prefill, typed Browse, exact-case named drafts, Add/Edit/Remove, compact layout, saved pin, and malformed-store refusal and recovery. Folder and bookmark authoring passed the scoped GPUI and egui round trip. The first Add App form passed its real route, compact validation, atomic failure and retry, and egui readback. The saved custom catalog and checked Edit/Remove are next. Full provider coverage and Data Recovery decisions remain open. [Favorites evidence](../VALIDATION_LOG.md#g06-folder-and-bookmark-favorites-authoring) · [Add App evidence](../VALIDATION_LOG.md#g06-first-native-add-app)
 
 **Owner:** G06 settings/authoring implementer, with G02 for persistence and plugin contracts. Use the existing migration branch.
 
