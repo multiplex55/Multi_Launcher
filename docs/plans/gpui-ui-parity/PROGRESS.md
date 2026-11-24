@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-The shared G04/G06 utility Settings correction passed 22 focused tests and the Windows replay. Pop Out and native resize independently preserved the unowned Settings values. The first Favorites toolbar and docked and popout Hash Escape have their scoped evidence. Compact launcher width is next, followed by folder and bookmark authoring. There are 219 source-backed GUI records and zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers and active UI Automation focus remain open. [Toolbar and Hash evidence](VALIDATION_LOG.md#g05-and-g06-favorites-toolbar-and-g04-hash-escape-batch) · [Settings evidence](VALIDATION_LOG.md#g04-and-g06-utility-settings-preservation)
+G05 compact launcher width passed 12 focused tests and the Windows replay. The compact Grid and List retained Search, navigation and action identity. The pinned Favorites toolbar, Settings companion and independent docked Hash grip worked at compact width. The preceding G04/G06 Settings correction preserved unrelated values through independent native Pop Out and resize. G06 folder and bookmark authoring is next. There are 219 source-backed GUI records and zero fully accepted GPUI product GUIs. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Compact width evidence](VALIDATION_LOG.md#g05-compact-launcher-width) · [Utility Settings evidence](VALIDATION_LOG.md#g04-and-g06-utility-settings-preservation)
 
 ## Execution kickoff
 
