@@ -1,0 +1,513 @@
+use super::*;
+use gpui_kit::base::Selectable;
+use multi_launcher::gui::action_sheet::ActionSheetChoices;
+use multi_launcher::universal_actions::UniversalAction;
+
+pub(super) struct Sheet {
+    serial: u64,
+    generation: u64,
+    row: usize,
+    query: String,
+    action: Action,
+    revision: u64,
+    return_focus: FocusHandle,
+    owner: FocusHandle,
+    filter_focus: FocusHandle,
+    shell: Option<FocusHandle>,
+    choices: ActionSheetChoices,
+    _subscription: Subscription,
+    retirement_pending: bool,
+}
+
+impl Sheet {
+    fn owns_focus(&self, window: &Window, cx: &App) -> bool {
+        self.owner.contains_focused(window, cx)
+            || self
+                .shell
+                .as_ref()
+                .is_some_and(|shell| shell.contains_focused(window, cx))
+    }
+}
+
+fn snapshot_matches(
+    results: &LauncherSearchResults,
+    generation: u64,
+    row: usize,
+    query: &str,
+    action: &Action,
+    revision: u64,
+    current_revision: u64,
+) -> bool {
+    revision == current_revision
+        && results.resolve_action(generation, row, query).as_ref() == Some(action)
+}
+
+fn sheet_key_owned(key: &str, modified: bool, nested_popup: bool, navigation_focus: bool) -> bool {
+    matches!(key, "escape" | "up" | "down" | "enter")
+        && !(key == "escape" && nested_popup)
+        && !(key == "enter" && !modified && !navigation_focus)
+}
+
+impl RootWindow {
+    fn sheet_receipt_current(&self, sheet: &Sheet, window: &Window, cx: &Context<Self>) -> bool {
+        #[cfg(windows)]
+        if !self.native_window.is_some_and(|native| {
+            self.root_visibility
+                .is_current_visible_revision(sheet.revision, native)
+        }) {
+            return false;
+        }
+        self.action_sheet_serial == sheet.serial
+            && self.root_visibility.visible.load(Ordering::Acquire)
+            && self.root_visibility.active.load(Ordering::Acquire)
+            && window.is_window_active()
+            && self
+                .root_window
+                .is_some_and(|root| root.window_id() == window.window_handle().window_id())
+            && !self.restart_admission.is_fenced()
+            && !self.file_menu_open
+            && !self.settings_menu_open
+            && !self.help_menu_open
+            && self.context_favorite_popup.is_none()
+            && self.query.read(cx).value().as_str() == sheet.query
+            && snapshot_matches(
+                &self.launcher_results,
+                sheet.generation,
+                sheet.row,
+                &sheet.query,
+                &sheet.action,
+                sheet.revision,
+                self.root_visibility
+                    .request_revision
+                    .load(Ordering::Acquire),
+            )
+    }
+
+    pub(super) fn retire_action_sheet_now(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        allow_unfocused: bool,
+    ) {
+        let Some(sheet) = self.action_sheet.as_ref() else {
+            return;
+        };
+        if self.action_sheet_serial == sheet.serial {
+            self.action_sheet_serial = self.action_sheet_serial.wrapping_add(1);
+        }
+        // Search admits this dialog only when no Kit dialog exists, and the
+        // restart alert retires it before opening. Thus on hide it is the sole
+        // active Kit dialog, even while its input popup owns focus.
+        if (sheet.owns_focus(window, cx) || allow_unfocused)
+            && !context_stack_has_primary(&window.context_stack(), "AlertDialog")
+        {
+            self.action_sheet = None;
+            window.close_dialog(cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn retire_stale_action_sheet(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sheet) = self.action_sheet.as_ref() else {
+            return;
+        };
+        if self.sheet_receipt_current(sheet, window, cx) {
+            return;
+        }
+        if self.action_sheet_serial == sheet.serial {
+            self.action_sheet_serial = self.action_sheet_serial.wrapping_add(1);
+        }
+        if sheet.retirement_pending || !sheet.owns_focus(window, cx) {
+            return;
+        }
+        let serial = sheet.serial;
+        self.action_sheet.as_mut().unwrap().retirement_pending = true;
+        let root = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let _ = root.update(cx, |root, cx| {
+                let Some(sheet) = root
+                    .action_sheet
+                    .as_mut()
+                    .filter(|sheet| sheet.serial == serial)
+                else {
+                    return;
+                };
+                sheet.retirement_pending = false;
+                if !sheet.owns_focus(window, cx)
+                    || context_stack_has_primary(&window.context_stack(), "PopupMenu")
+                {
+                    return;
+                }
+                root.action_sheet = None;
+                window.close_dialog(cx);
+                cx.notify();
+            });
+        });
+    }
+
+    pub(super) fn open_action_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input_operation(window, cx).is_none()
+            || self.action_sheet.is_some()
+            || window.has_active_dialog(cx)
+            || self.context_favorite_popup.is_some()
+            || self.file_menu_open
+            || self.settings_menu_open
+            || self.help_menu_open
+        {
+            return;
+        }
+        let query = self.query.read(cx).value().to_string();
+        let Some((generation, row)) = self.launcher_results.enter_target(&query) else {
+            return;
+        };
+        let Some(action) = self
+            .launcher_results
+            .resolve_action(generation, row, &query)
+        else {
+            return;
+        };
+        let resolver = ActionTargetResolverContext::new(
+            &self.search_catalog.folder_aliases_lc,
+            &self.search_catalog.bookmark_aliases_lc,
+            &self.search_catalog.actions,
+        );
+        let target = ActionTargetResolver.resolve(&action, &resolver);
+        let mut context = ActionResolutionContext::new(ActionSurface::ActionSheet, &query);
+        context.can_add_favorite = target.target.persistent_ref().is_some();
+        let mut actions = UniversalActionRegistry.resolve(&target, &context);
+        actions.retain(|choice| match &choice.operation {
+            UniversalActionOperation::InvokePrimary(candidate) => {
+                candidate == &action
+                    && parse_installed_search_invocation(candidate.clone(), ActivationSource::Enter)
+                        .is_ok()
+            }
+            UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
+                action: candidate,
+            }) => candidate == &action && context.can_add_favorite,
+            _ => false,
+        });
+        let choices = ActionSheetChoices::new(actions, &self.search_catalog.matcher);
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter actions"));
+        let owner = cx.focus_handle();
+        self.action_sheet_serial = self.action_sheet_serial.wrapping_add(1);
+        let serial = self.action_sheet_serial;
+        let subscription = cx.subscribe_in(
+            &filter,
+            window,
+            move |root, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if let Some(sheet) = root
+                        .action_sheet
+                        .as_mut()
+                        .filter(|sheet| sheet.serial == serial)
+                    {
+                        sheet.choices.set_filter(
+                            input.read(cx).value().to_string(),
+                            &root.search_catalog.matcher,
+                        );
+                        window.refresh();
+                        cx.notify();
+                    }
+                }
+            },
+        );
+        self.action_sheet = Some(Sheet {
+            serial,
+            generation,
+            row,
+            query,
+            action,
+            revision: self
+                .root_visibility
+                .request_revision
+                .load(Ordering::Acquire),
+            return_focus: self.query.focus_handle(cx),
+            owner: owner.clone(),
+            filter_focus: filter.focus_handle(cx),
+            shell: None,
+            choices,
+            _subscription: subscription,
+            retirement_pending: false,
+        });
+        self.fresh_search_enter = None;
+        self.retire_search_jump_mode();
+        let root = cx.entity().downgrade();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                filter.focus_handle(cx).focus(window, cx);
+            }
+            let mut rows = div().flex().flex_col();
+            if let Some(root) = root.upgrade() {
+                let root_state = root.read(cx);
+                if let Some(sheet) = root_state
+                    .action_sheet
+                    .as_ref()
+                    .filter(|sheet| sheet.serial == serial)
+                {
+                    if sheet.choices.filtered_actions().next().is_none() {
+                        rows = rows.child(Label::new("No matching actions"));
+                    }
+                    for (position, choice) in sheet.choices.filtered_actions().cloned().enumerate()
+                    {
+                        let presentation =
+                            choice.effective_presentation(ActionSurface::ActionSheet);
+                        let selected = sheet.choices.selected_position() == Some(position);
+                        let mut text = presentation.label;
+                        if let Some(short) = presentation.short_label {
+                            text.push_str(&format!(" ({short})"));
+                        }
+                        if let Some(description) = presentation.description {
+                            text.push_str(&format!(" — {description}"));
+                        }
+                        if let Some(reason) = choice.availability.disabled_reason() {
+                            text.push_str(&format!(" — {reason}"));
+                        }
+                        let weak = root.downgrade();
+                        rows = rows.child(
+                            Button::new(("sheet-choice", position))
+                                .label(text)
+                                .selected(selected)
+                                .disabled(!choice.is_available())
+                                .on_click(move |event, window, cx| {
+                                    let choice = choice.clone();
+                                    let source = result_click_source(event.is_keyboard());
+                                    let _ = weak.update(cx, |root, cx| {
+                                        root.finish_action_sheet(
+                                            serial,
+                                            Some((choice, source)),
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        );
+                    }
+                }
+            }
+            let close_root = root.clone();
+            let close =
+                Button::new("close-action-sheet")
+                    .label("Close")
+                    .on_click(move |_, window, cx| {
+                        let _ = close_root.update(cx, |root, cx| {
+                            root.finish_action_sheet(serial, None, window, cx)
+                        });
+                    });
+            dialog
+                .title("Actions")
+                .keyboard(false)
+                .close_button(false)
+                .overlay_closable(false)
+                .child(
+                    div()
+                        .track_focus(&owner)
+                        .key_context("ActionSheet")
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(Input::new(&filter).aria_label("Filter actions"))
+                        .child(
+                            div()
+                                .id("action-sheet-rows")
+                                .max_h(px(320.))
+                                .overflow_y_scroll()
+                                .child(rows),
+                        )
+                        .child(close),
+                )
+        });
+        // Kit focuses a new, separate dialog shell synchronously before its
+        // first content render. Capture it so hide can retire even that interval.
+        if let Some(sheet) = self
+            .action_sheet
+            .as_mut()
+            .filter(|sheet| sheet.serial == serial)
+        {
+            sheet.shell = window.focused(cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn action_sheet_key(
+        &mut self,
+        event: &KeystrokeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(sheet) = self.action_sheet.as_ref() else {
+            return false;
+        };
+        if !sheet.owns_focus(window, cx) {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        // A nested popup owns Escape and must get the first opportunity to dismiss.
+        if !sheet_key_owned(
+            key,
+            event.keystroke.modifiers != Modifiers::default(),
+            context_stack_has_primary(&event.context_stack, "PopupMenu"),
+            sheet.filter_focus.is_focused(window)
+                || sheet.owner.is_focused(window)
+                || sheet
+                    .shell
+                    .as_ref()
+                    .is_some_and(|shell| shell.is_focused(window)),
+        ) {
+            return false;
+        }
+        if event.keystroke.modifiers != Modifiers::default() {
+            return true;
+        }
+        let serial = sheet.serial;
+        match key {
+            "escape" => self.finish_action_sheet(serial, None, window, cx),
+            "enter" => {
+                let selected = sheet.choices.selected_invocation(ActivationSource::Enter);
+                if let Some(choice) = selected {
+                    self.finish_action_sheet(serial, Some(choice), window, cx);
+                }
+            }
+            "up" | "down" => {
+                if let Some(sheet) = self.action_sheet.as_mut() {
+                    sheet
+                        .choices
+                        .move_selection(if key == "up" { -1 } else { 1 });
+                }
+                window.refresh();
+                cx.notify();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn finish_action_sheet(
+        &mut self,
+        serial: u64,
+        selected: Option<(UniversalAction, ActivationSource)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sheet) = self
+            .action_sheet
+            .as_ref()
+            .filter(|sheet| sheet.serial == serial)
+        else {
+            return;
+        };
+        if !sheet.owns_focus(window, cx)
+            || context_stack_has_primary(&window.context_stack(), "PopupMenu")
+        {
+            return;
+        }
+        let current = self.sheet_receipt_current(sheet, window, cx);
+        if selected.is_some() && !current {
+            return;
+        }
+        if selected.as_ref().is_some_and(|(choice, _)| {
+            !sheet
+                .choices
+                .filtered_actions()
+                .any(|current| current == choice && current.is_available())
+        }) {
+            return;
+        }
+        let sheet = self.action_sheet.take().unwrap();
+        window.close_dialog(cx);
+        if current {
+            sheet.return_focus.focus(window, cx);
+        }
+        let Some((selected, source)) = selected else {
+            cx.notify();
+            return;
+        };
+        let root = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let _ = root.update(cx, |root, cx| {
+                if root.action_sheet_serial != serial
+                    || root.action_sheet.is_some()
+                    || !root.sheet_receipt_current(&sheet, window, cx)
+                    || !sheet.return_focus.is_focused(window)
+                    || window.has_active_dialog(cx)
+                {
+                    return;
+                }
+                root.action_sheet_serial = root.action_sheet_serial.wrapping_add(1);
+                match selected.operation {
+                    UniversalActionOperation::InvokePrimary(action) if action == sheet.action => {
+                        root.activate_launcher_result(
+                            sheet.generation,
+                            sheet.row,
+                            source,
+                            LauncherResultActivationOrigin::DeferredSearchEnter,
+                            window,
+                            cx,
+                        )
+                    }
+                    UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
+                        action,
+                    }) if action == sheet.action => {
+                        root.open_result_favorites(action, Some(sheet.return_focus), window, cx)
+                    }
+                    _ => {}
+                }
+            });
+        });
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Action, LauncherSearchResults, ResolvedQueryResultsLayout};
+    use super::{sheet_key_owned, snapshot_matches};
+
+    #[test]
+    fn receipt_rejects_changed_result_generation_payload_and_visibility() {
+        let action = Action {
+            label: "Hash".into(),
+            desc: "fixture".into(),
+            action: "hash".into(),
+            args: None,
+        };
+        let mut results = LauncherSearchResults::default();
+        let layout = ResolvedQueryResultsLayout::new(false, 1);
+        results.replace("hash".into(), vec![action.clone()], layout, 1);
+        let generation = results.generation;
+        assert!(snapshot_matches(
+            &results, generation, 0, "hash", &action, 4, 4
+        ));
+        assert!(!snapshot_matches(
+            &results, generation, 0, "other", &action, 4, 4
+        ));
+        assert!(!snapshot_matches(
+            &results, generation, 0, "hash", &action, 4, 5
+        ));
+        results.actions[0].args = Some("changed".into());
+        assert!(!snapshot_matches(
+            &results, generation, 0, "hash", &action, 4, 4
+        ));
+        results.replace("hash".into(), vec![action.clone()], layout, 1);
+        assert!(!snapshot_matches(
+            &results, generation, 0, "hash", &action, 4, 4
+        ));
+    }
+
+    #[test]
+    fn action_sheet_keeps_navigation_and_yields_tab_and_nested_escape() {
+        for key in ["escape", "up", "down", "enter"] {
+            assert!(sheet_key_owned(key, false, false, true));
+        }
+        assert!(!sheet_key_owned("tab", false, false, true));
+        assert!(!sheet_key_owned("escape", false, true, true));
+        // After Tab reaches an action or Close, Enter belongs to that button.
+        assert!(!sheet_key_owned("enter", false, false, false));
+        assert!(sheet_key_owned("enter", true, false, false));
+        assert!(sheet_key_owned("enter", false, false, true));
+    }
+}

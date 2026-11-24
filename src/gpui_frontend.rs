@@ -1,6 +1,7 @@
 use std::pin::Pin;
 #[cfg(windows)]
 use std::sync::mpsc::{Receiver, Sender, channel};
+mod action_sheet;
 mod appearance;
 mod favorites;
 
@@ -1690,7 +1691,7 @@ fn single_line_history_queries<'a>(queries: impl IntoIterator<Item = &'a str>) -
 
 #[derive(Clone, Copy)]
 enum GpuiBoundAction {
-    ToggleSecondaryWindow,
+    OpenActionSheet,
     ToggleCoordinateHudProbe,
     OpenHashGenerator,
     FocusDockedHashResize,
@@ -1716,9 +1717,9 @@ struct GpuiBoundKey {
 const GPUI_BOUND_KEYS: &[GpuiBoundKey] = &[
     GpuiBoundKey {
         chord: "ctrl-enter",
-        context: "RootWindow",
-        label: "Open or dismiss retained window",
-        action: GpuiBoundAction::ToggleSecondaryWindow,
+        context: "LauncherSearch",
+        label: "Open action sheet",
+        action: GpuiBoundAction::OpenActionSheet,
     },
     GpuiBoundKey {
         chord: "f6",
@@ -1786,10 +1787,8 @@ fn gpui_key_bindings() -> Vec<KeyBinding> {
     GPUI_BOUND_KEYS
         .iter()
         .map(|binding| match binding.action {
-            GpuiBoundAction::ToggleSecondaryWindow => KeyBinding::new(
-                binding.chord,
-                ToggleSecondaryWindow,
-                Some(binding.context),
+            GpuiBoundAction::OpenActionSheet => KeyBinding::new(
+                binding.chord, OpenActionSheet, Some(binding.context),
             ),
             GpuiBoundAction::ToggleCoordinateHudProbe => KeyBinding::new(
                 binding.chord,
@@ -1951,7 +1950,7 @@ fn display_gpui_chord(chord: &str) -> String {
 }
 
 gpui_kit::actions!([
-    ToggleSecondaryWindow,
+    OpenActionSheet,
     ToggleCoordinateHudProbe,
     ToggleSettings,
     CloseApplication,
@@ -2120,6 +2119,8 @@ struct RootWindow {
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_catalog: LauncherSearchCatalog,
     launcher_results: LauncherSearchResults,
+    action_sheet: Option<action_sheet::Sheet>,
+    action_sheet_serial: u64,
     context_favorite_popup: Option<ContextFavoritePopup>,
     context_favorite_serial: u64,
     result_favorites: ResultFavorites,
@@ -4767,7 +4768,8 @@ async fn restore_root_search_focus_after_hash_close(
     cx: &mut AsyncApp,
 ) {
     let target = root.update(cx, |root, cx| {
-        let may_restore_search = root.root_visibility.visible.load(Ordering::Acquire)
+        let may_restore_search = root.action_sheet.is_none()
+            && root.root_visibility.visible.load(Ordering::Acquire)
             && root_search_focus_is_current(
                 root.hash_window.mode(),
                 root.hash_window.mount_generation(),
@@ -4798,6 +4800,7 @@ async fn restore_root_search_focus_after_hash_close(
             .root_window
             .is_some_and(|handle| handle.window_id() == root_window.window_id());
         let still_current = root_handle_matches
+            && root.action_sheet.is_none()
             && root.root_visibility.visible.load(Ordering::Acquire)
             && root_search_focus_is_current(
                 root.hash_window.mode(),
@@ -5781,6 +5784,8 @@ impl RootWindow {
     }
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.retire_action_sheet_now(window, cx, true);
+        if self.action_sheet.is_some() { return; }
         self.retire_context_favorite();
         let Some(context) = self.restart_context.clone() else {
             self.restart_status = Some(format!(
@@ -6267,7 +6272,7 @@ impl RootWindow {
     }
 
     fn quick_help_focus_change_allowed(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.context_favorite_popup.is_some() || self.result_favorites.owns_focus(window, cx) {
+        if self.action_sheet.is_some() || self.context_favorite_popup.is_some() || self.result_favorites.owns_focus(window, cx) {
             return false;
         }
         let contexts = window.context_stack();
@@ -8429,6 +8434,7 @@ impl RootWindow {
                         let native_root_is_current = !cfg!(windows)
                             || root.native_window.is_some_and(native_window_is_valid);
                         if root_handle_matches
+                            && root.action_sheet.is_none()
                             && mount_matches
                             && native_root_is_current
                         {
@@ -9187,6 +9193,7 @@ impl RootWindow {
 impl Render for RootWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_pending_help_filter_sync(window, cx);
+        self.retire_stale_action_sheet(window, cx);
         if self.context_favorite_popup.as_ref().is_some_and(|popup| {
             !self.context_favorite_is_live(&popup.receipt, window, cx)
         }) {
@@ -9477,6 +9484,10 @@ impl Render for RootWindow {
                 .id("launcher-search-input")
                 .relative()
                 .key_context("LauncherSearch")
+                .capture_action(cx.listener(|root, _: &OpenActionSheet, window, cx| {
+                    root.open_action_sheet(window, cx);
+                    cx.stop_propagation();
+                }))
                 .capture_action(cx.listener(|root, _: &IndentInline, window, cx| {
                     if root.accept_search_completion(true, window, cx) {
                         cx.stop_propagation();
@@ -9660,7 +9671,7 @@ impl Render for RootWindow {
                     .children(result_rows)
             }))
             .child(
-                Label::new("Ctrl+Enter: open or dismiss the retained window")
+                Label::new("Use the button to open or dismiss the retained window")
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height)),
             )
@@ -9879,9 +9890,6 @@ impl Render for RootWindow {
                 if this.forward_docked_hash_action(DockedHashAction::Close, window, cx) {
                     cx.stop_propagation();
                 }
-            }))
-            .on_action(cx.listener(|this, _: &ToggleSecondaryWindow, _, cx| {
-                this.open_or_toggle_secondary(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleCoordinateHudProbe, _, cx| {
                 this.toggle_coordinate_hud_probe(cx);
@@ -11632,6 +11640,8 @@ pub(crate) fn run_foundation_window(
                 enabled_capabilities: enabled_capabilities.clone(),
                 search_catalog: search_catalog_for_root,
                 launcher_results: initial_launcher_results,
+                action_sheet: None,
+                action_sheet_serial: 0,
                 context_favorite_popup: None,
                 context_favorite_serial: 0,
                 result_favorites: ResultFavorites::default(),
@@ -11739,6 +11749,17 @@ pub(crate) fn run_foundation_window(
                 restart_exit: restart_exit_for_root,
                 restart_failure: restart_failure_for_root,
             });
+            let sheet_subscription = root.update(cx, |_, cx| {
+                let root = root.downgrade();
+                cx.intercept_keystrokes(move |event, window, cx| {
+                    let _ = root.update(cx, |root, cx| {
+                        if root.action_sheet_key(event, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    });
+                })
+            });
+            appearance_subscription_sink.borrow_mut().push(sheet_subscription);
             #[cfg(windows)]
             {
                 let keypad_subscription = root.update(cx, |_, cx| {
@@ -11955,6 +11976,7 @@ pub(crate) fn run_foundation_window(
                         root.search_input_is_live(window, cx),
                           root.file_menu_open || root.settings_menu_open || root.help_menu_open
                               || root.context_favorite_popup.is_some()
+                              || root.action_sheet.is_some()
                               || root.result_favorites.owns_focus(window, cx),
                     ) {
                         root.accept_search_completion(false, window, cx);
@@ -11967,6 +11989,7 @@ pub(crate) fn run_foundation_window(
             let activation_subscription = root.update(cx, |_, cx| {
                 cx.observe_window_activation(window, |root, window, cx| {
                     if !window.is_window_active() {
+                        root.retire_action_sheet_now(window, cx, false);
                         root.retire_context_favorite();
                         root.retire_search_jump_mode();
                         root.revoke_search_completion_focus();
@@ -12286,11 +12309,12 @@ pub(crate) fn run_foundation_window(
                         |root, window, cx| {
                             root.revoke_search_completion_focus();
                             if !desired_visible {
+                                root.retire_action_sheet_now(window, cx, true);
                                 root.retire_context_favorite();
                                 root.retire_search_jump_mode();
                             }
                             let mut search_focus_selected = false;
-                            if desired_visible {
+                            if desired_visible && root.action_sheet.is_none() {
                                 let docked_mount_generation = match &root.hash_window {
                                     HashWindowState::Docked {
                                         mount_generation, ..
@@ -12314,7 +12338,7 @@ pub(crate) fn run_foundation_window(
                                 } else {
                                     root.query.focus_handle(cx).focus(window, cx);
                                 }
-                            } else {
+                            } else if !desired_visible {
                                 root.cancel_docked_hash_preview();
                             }
                             (root.native_window, search_focus_selected)

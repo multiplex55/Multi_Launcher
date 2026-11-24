@@ -31,7 +31,7 @@ pub(crate) struct ActionSheetState {
 
 /// Renderer-neutral filter and selection state for a snapshot of sheet actions.
 #[derive(Default)]
-pub(crate) struct ActionSheetChoices {
+pub struct ActionSheetChoices {
     pub(crate) actions: Vec<UniversalAction>,
     pub(crate) filter: String,
     pub(crate) filtered_indices: Vec<usize>,
@@ -155,7 +155,15 @@ impl ActionSheetState {
 }
 
 impl ActionSheetChoices {
-    pub(crate) fn new(actions: Vec<UniversalAction>, matcher: &SkimMatcherV2) -> Self {
+    pub fn filtered_actions(&self) -> impl Iterator<Item = &UniversalAction> {
+        self.filtered_indices.iter().map(|index| &self.actions[*index])
+    }
+
+    pub fn selected_position(&self) -> Option<usize> {
+        self.selected_index
+    }
+
+    pub fn new(actions: Vec<UniversalAction>, matcher: &SkimMatcherV2) -> Self {
         let mut choices = Self {
             actions,
             ..Self::default()
@@ -164,7 +172,7 @@ impl ActionSheetChoices {
         choices
     }
 
-    pub(crate) fn set_filter(&mut self, filter: String, matcher: &SkimMatcherV2) {
+    pub fn set_filter(&mut self, filter: String, matcher: &SkimMatcherV2) {
         self.filter = filter;
         self.rebuild_filter(matcher);
     }
@@ -208,7 +216,7 @@ impl ActionSheetChoices {
             .or_else(|| (!self.filtered_indices.is_empty()).then_some(0))
     }
 
-    pub(crate) fn move_selection(&mut self, delta: isize) {
+    pub fn move_selection(&mut self, delta: isize) {
         if self.filtered_indices.is_empty() {
             self.selected_index = None;
             return;
@@ -242,7 +250,7 @@ impl ActionSheetChoices {
             .cloned()
     }
 
-    pub(crate) fn selected_invocation(
+    pub fn selected_invocation(
         &self,
         source: ActivationSource,
     ) -> Option<(UniversalAction, ActivationSource)> {

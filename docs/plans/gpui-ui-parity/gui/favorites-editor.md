@@ -17,3 +17,11 @@ Extract the renderer-neutral prefill and checked save used by Add to Favorites, 
 Review and type-check the adopted path and the cases for exact arguments, a latest unrelated entry, stale refusal and missing or malformed data. Run their targeted combination before the Windows Add to Favorites Save. Reuse the canonical result through the separate [GPUI List/Grid popup checkpoint](launcher-result-context-menu.md#first-native-result-context-menu-checkpoint). If implementation changes repair or publication ordering, verify that boundary before dependent source proceeds.
 
 The shared draft and egui Save route passed scoped source review and the combined tests. The draft exposes label, command and arguments to both frontends and retains the captured origin inside the library. Windows verified the GPUI context-result draft, Cancel, Save, and egui reopening the exact canonical row. The remaining Favorites routes and authoring controls are still in scope for G06. [Batch evidence](../VALIDATION_LOG.md#g05-c-and-g06-quick-help-and-favorites-batch)
+
+### Favorites browse from Search
+
+After the Universal Action Sheet source freezes, route bare `fav` and exact `fav add` to the existing GPUI Favorites owner. The benchmark egui provider emits `fav:dialog:` for both. Reuse the canonical result construction and empty-label typed command, following the current Favorites plugin enablement and Search capability rules. Use a stateless installed provider for these routes and advertise the supported commands through the existing cache and Help collection.
+
+Use one asynchronous canonical read path for browse and prefill. Browse opens without a draft and never writes. Preserve the current request identity, last-good rows, errors, active draft and acknowledged saves. Cancel during prefill retains the browse load. An ordinary Close retires a pending browse load. A fresh open reads the current file and Escape restores live Search focus and scroll.
+
+Queue focused cases for exact query forms, command admission, provider gates and load receipts with the Action Sheet tests. In Windows use the owned Favorites-enabled fixture to activate both queries, observe the earlier saved row, and verify the exact Search query, focus and unchanged store hash. Later Favorites authoring evidence covers named Add, manual Add/Edit/Remove and provider choices.

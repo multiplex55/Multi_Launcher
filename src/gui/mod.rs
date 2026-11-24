@@ -1,4 +1,4 @@
-pub(crate) mod action_sheet;
+pub mod action_sheet;
 mod actions;
 mod activity_dialog;
 mod add_action_dialog;
