@@ -331,6 +331,7 @@ pub enum UniversalUiIntent {
     AcknowledgeInformation,
     EditCustomAction {
         index: usize,
+        action: Action,
     },
     RepairCustomAction {
         index: usize,

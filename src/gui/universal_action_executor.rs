@@ -554,12 +554,18 @@ impl LauncherApp {
     fn execute_universal_ui_intent(&mut self, action_id: &str, intent: UniversalUiIntent) {
         match intent {
             UniversalUiIntent::AcknowledgeInformation => {}
-            UniversalUiIntent::EditCustomAction { index } => {
-                if let Some(action) = self.actions.get(index).cloned() {
-                    self.editor.open_edit(index, &action);
+            UniversalUiIntent::EditCustomAction { index, action } => {
+                let custom = &self.actions[..self.custom_len.min(self.actions.len())];
+                if custom.get(index) == Some(&action)
+                    && let Some(target) = crate::actions::custom_action_row_target(custom, index)
+                {
+                    self.editor.open_edit(target, &action);
                     self.show_editor = true;
                 } else {
-                    self.report_error_message("universal_action", "Custom action not found");
+                    self.report_error_message(
+                        "universal_action",
+                        "Custom action not found or changed",
+                    );
                 }
             }
             UniversalUiIntent::RepairCustomAction { index: _, action } => {
@@ -1216,6 +1222,53 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         (root, app)
+    }
+
+    #[test]
+    fn custom_edit_admits_only_the_current_custom_row() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = eframe::egui::Context::default();
+        let (_root, mut app) = repair_test_app(&ctx);
+        let current = Action {
+            label: "Current".into(),
+            desc: "Description".into(),
+            action: "current.exe".into(),
+            args: Some("--current".into()),
+        };
+        let indexed = Action {
+            label: "Indexed".into(),
+            ..current.clone()
+        };
+        let stale = Action {
+            args: None,
+            ..current.clone()
+        };
+        app.actions = std::sync::Arc::new(vec![current.clone(), indexed.clone()]);
+        app.custom_len = 1;
+        app.execute_universal_ui_intent(
+            "edit",
+            UniversalUiIntent::EditCustomAction {
+                index: 0,
+                action: stale,
+            },
+        );
+        assert!(!app.editor.is_dialog_open());
+        app.execute_universal_ui_intent(
+            "edit",
+            UniversalUiIntent::EditCustomAction {
+                index: 1,
+                action: indexed,
+            },
+        );
+        assert!(!app.editor.is_dialog_open());
+        app.execute_universal_ui_intent(
+            "edit",
+            UniversalUiIntent::EditCustomAction {
+                index: 0,
+                action: current,
+            },
+        );
+        assert!(app.editor.is_dialog_open());
     }
 
     #[test]

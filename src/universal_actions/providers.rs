@@ -139,7 +139,10 @@ impl UniversalActionProvider for GenericProvider {
                 ActionIconKey::Edit,
                 ActionGroup::OpenEdit,
                 ActionPriority::Normal,
-                UniversalUiIntent::EditCustomAction { index },
+                UniversalUiIntent::EditCustomAction {
+                    index,
+                    action: resolved.selected_action.clone(),
+                },
             ));
             actions.push(ui_action(
                 action_ids::CUSTOM_ACTION_REPAIR_TARGET,

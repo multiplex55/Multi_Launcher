@@ -1,4 +1,4 @@
-use crate::actions::Action;
+use crate::actions::{Action, CustomActionRowTarget};
 #[cfg(test)]
 use crate::actions_editor::ScrollLayoutObservation;
 use crate::gui::LauncherApp;
@@ -124,8 +124,8 @@ enum DialogMode {
     /// Add a new command when confirmed.
     #[default]
     Add,
-    /// Edit the command at the given index when confirmed.
-    Edit(usize),
+    /// Edit the captured custom command when confirmed.
+    Edit(CustomActionRowTarget),
     Repair {
         selected: SelectedTarget,
         replacement_kind: FilesystemTargetKind,
@@ -176,8 +176,8 @@ impl AddActionDialog {
         self.mode = DialogMode::Add;
     }
 
-    /// Start editing an existing command at `idx` with the given values.
-    pub fn open_edit(&mut self, idx: usize, act: &Action) {
+    /// Start editing the captured custom command with the given values.
+    pub fn open_edit(&mut self, target: CustomActionRowTarget, act: &Action) {
         self.open = true;
         self.label = act.label.clone();
         self.desc = act.desc.clone();
@@ -185,7 +185,7 @@ impl AddActionDialog {
         self.args = act.args.clone().unwrap_or_default();
         self.show_args = act.args.is_some();
         self.feedback = None;
-        self.mode = DialogMode::Edit(idx);
+        self.mode = DialogMode::Edit(target);
     }
 
     pub fn open_repair(&mut self, selected: SelectedTarget) {
@@ -607,7 +607,6 @@ impl AddActionDialog {
                     #[cfg(feature = "qa-framebuffer-capture")]
                     qa_controls.push(target_repair_control_paint(ui, "confirm", &primary));
                     if primary.clicked() && !repair_pending {
-                        use std::path::Path;
                         if matches!(&self.mode, DialogMode::Repair { .. }) {
                             let selected = match &self.mode {
                                 DialogMode::Repair { selected, .. } => selected.clone(),
@@ -643,30 +642,19 @@ impl AddActionDialog {
                                 .map(|intent| {
                                     app.update_custom_actions(|actions| intent.append_to(actions))
                                 }),
-                                DialogMode::Edit(idx) => {
-                                    let idx = *idx;
-                                    if self.path.is_empty() || !Path::new(&self.path).exists() {
-                                        Err("Path does not exist")
-                                    } else {
-                                        let candidate = Action {
-                                            label: self.label.clone(),
-                                            desc: self.desc.clone(),
-                                            action: self.path.clone(),
-                                            args: if self.show_args && !self.args.trim().is_empty() {
-                                                Some(self.args.clone())
-                                            } else {
-                                                None
-                                            },
-                                        };
-                                        Ok(app.update_custom_actions(move |actions| {
-                                            let action = actions.get_mut(idx).ok_or_else(|| {
-                                                anyhow::anyhow!("custom action no longer exists")
-                                            })?;
-                                            *action = candidate;
-                                            Ok(())
-                                        }))
-                                    }
-                                }
+                                DialogMode::Edit(target) => crate::actions::EditAction::new(
+                                    target.clone(),
+                                    &self.label,
+                                    &self.desc,
+                                    &self.path,
+                                    self.show_args,
+                                    &self.args,
+                                )
+                                .map(|intent| {
+                                    app.update_custom_actions(move |actions| {
+                                        intent.apply_to(actions).map_err(anyhow::Error::new)
+                                    })
+                                }),
                                 DialogMode::Repair { .. } => unreachable!(),
                             };
                             match result {

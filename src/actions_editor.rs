@@ -103,8 +103,12 @@ impl ActionsEditor {
     }
 
     /// Open the dialog for editing an existing app.
-    pub fn open_edit(&mut self, idx: usize, act: &crate::actions::Action) {
-        self.dialog.open_edit(idx, act);
+    pub fn open_edit(
+        &mut self,
+        target: crate::actions::CustomActionRowTarget,
+        act: &crate::actions::Action,
+    ) {
+        self.dialog.open_edit(target, act);
     }
 
     pub(crate) fn open_repair(&mut self, selected: crate::target_repair::SelectedTarget) {
@@ -206,7 +210,8 @@ impl ActionsEditor {
                 ui.separator();
                 let query = self.search.to_lowercase();
                 let has_query = !self.search.trim().is_empty();
-                let mut remove: Option<usize> = None;
+                let mut remove = None;
+                let custom_len = app.custom_len.min(app.actions.len());
                 let parent_max_rect = ui.max_rect();
                 let parent_clip_rect = ui.clip_rect();
                 let list_output = egui::ScrollArea::vertical()
@@ -241,30 +246,33 @@ impl ActionsEditor {
                                     });
                                 }
                                 ui.horizontal_wrapped(|ui| {
-                                    let edit = ui.button("Edit");
-                                    if edit.clicked() {
-                                        self.dialog.open_edit(idx, act);
-                                    }
-                                    if idx < app.custom_len.min(app.actions.len())
-                                        && ui.button("Repair target…").clicked()
-                                    {
-                                        self.dialog.open_repair(
-                                            crate::target_repair::SelectedTarget::action_with_kind(
-                                                act.clone(),
-                                                idx,
-                                                crate::target_repair::ActionTargetKind::FileOrFolder,
-                                            ),
-                                        );
-                                    }
-                                    let remove_button = ui.button("Remove");
-                                    if with_button_emphasis(
-                                        ui,
-                                        remove_button,
-                                        ButtonEmphasis::Destructive,
-                                    )
-                                    .clicked()
-                                    {
-                                        remove = Some(idx);
+                                    if idx < custom_len {
+                                        if ui.button("Edit").clicked()
+                                            && let Some(target) = crate::actions::custom_action_row_target(
+                                                &app.actions[..custom_len], idx,
+                                            )
+                                        {
+                                            self.dialog.open_edit(target, act);
+                                        }
+                                        if ui.button("Repair target…").clicked() {
+                                            self.dialog.open_repair(
+                                                crate::target_repair::SelectedTarget::action_with_kind(
+                                                    act.clone(),
+                                                    idx,
+                                                    crate::target_repair::ActionTargetKind::FileOrFolder,
+                                                ),
+                                            );
+                                        }
+                                        let remove_button = ui.button("Remove");
+                                        if with_button_emphasis(
+                                            ui,
+                                            remove_button,
+                                            ButtonEmphasis::Destructive,
+                                        ).clicked() {
+                                            remove = crate::actions::custom_action_row_target(
+                                                &app.actions[..custom_len], idx,
+                                            );
+                                        }
                                     }
                                 });
                             });
@@ -288,11 +296,11 @@ impl ActionsEditor {
                 #[cfg(not(test))]
                 let _ = (parent_max_rect, parent_clip_rect, list_output);
 
-                if let Some(i) = remove
+                if let Some(target) = remove
                     && let Err(e) = app.update_custom_actions(move |actions| {
-                        anyhow::ensure!(i < actions.len(), "only custom actions can be removed");
-                        actions.remove(i);
-                        Ok(())
+                        crate::actions::RemoveAction::new(target)
+                            .apply_to(actions)
+                            .map_err(anyhow::Error::new)
                     })
                 {
                     app.report_error("ui operation", format!("Failed to save: {e}"));
@@ -350,6 +358,71 @@ mod tests {
     }
 
     #[test]
+    fn checked_editor_mutation_rejects_stale_store_and_preserves_indexed_tail() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, directory.path());
+        let target_path = directory.path().join("target.exe");
+        std::fs::write(&target_path, "").unwrap();
+        let original = crate::actions::Action {
+            label: "Original".into(),
+            desc: "Description".into(),
+            action: target_path.to_string_lossy().into_owned(),
+            args: Some("--exact".into()),
+        };
+        let indexed = crate::actions::Action {
+            label: "Indexed".into(),
+            ..original.clone()
+        };
+        app.actions = Arc::new(vec![original.clone(), indexed.clone()]);
+        app.custom_len = 1;
+        crate::actions::save_actions(&app.actions_path, &[original.clone()]).unwrap();
+        let selected =
+            crate::actions::custom_action_row_target(&app.actions[..app.custom_len], 0).unwrap();
+        let changed = crate::actions::Action {
+            args: None,
+            ..original.clone()
+        };
+        crate::actions::save_actions(&app.actions_path, &[changed.clone()]).unwrap();
+        let version = crate::actions::actions_version();
+        let before = std::fs::read(&app.actions_path).unwrap();
+        let edit = crate::actions::EditAction::new(
+            selected.clone(),
+            "Edited",
+            "Description",
+            &original.action,
+            false,
+            "",
+        )
+        .unwrap();
+        let error = app
+            .update_custom_actions(|actions| edit.apply_to(actions).map_err(anyhow::Error::new))
+            .unwrap_err();
+        assert!(error.is::<crate::actions::StaleCustomAction>());
+        let error = app
+            .update_custom_actions(|actions| {
+                crate::actions::RemoveAction::new(selected)
+                    .apply_to(actions)
+                    .map_err(anyhow::Error::new)
+            })
+            .unwrap_err();
+        assert!(error.is::<crate::actions::StaleCustomAction>());
+        assert_eq!(std::fs::read(&app.actions_path).unwrap(), before);
+        assert_eq!(crate::actions::actions_version(), version);
+        assert_eq!(&*app.actions, &[original, indexed.clone()]);
+        let selected = crate::actions::custom_action_row_target(&[changed], 0).unwrap();
+        app.update_custom_actions(|actions| {
+            crate::actions::RemoveAction::new(selected)
+                .apply_to(actions)
+                .map_err(anyhow::Error::new)
+        })
+        .unwrap();
+        assert_eq!(&*app.actions, &[indexed]);
+        assert_eq!(app.custom_len, 0);
+    }
+
+    #[test]
     fn constrained_editor_and_add_form_keep_full_commands_and_footer_reachable_without_publication()
     {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
@@ -369,7 +442,10 @@ mod tests {
         let version_before = crate::actions::actions_version();
 
         let mut editor = ActionsEditor::default();
-        editor.open_edit(0, &long_action);
+        editor.open_edit(
+            crate::actions::custom_action_row_target(&app.actions[..app.custom_len], 0).unwrap(),
+            &long_action,
+        );
         let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 260.0));
         let input = || egui::RawInput {
             screen_rect: Some(screen_rect),
