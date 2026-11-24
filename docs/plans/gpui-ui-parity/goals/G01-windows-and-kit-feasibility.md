@@ -1,6 +1,6 @@
 # G01 — Prove the actual Windows frontend foundation
 
-**Status: Validation pending.** G01-A/B startup and focused input are verified, G01-C has native utility and controller evidence, and G01-D built and launched the ordinary release and observed explicit fallback. The global invocation, foreground restoration, hidden-root, passive HUD and display placement criteria still need native evidence. See the [validation log](../VALIDATION_LOG.md).
+**Status: Validation pending.** G01-A/B startup and focused input are verified, G01-C has native utility and controller evidence, and G01-D built and launched the ordinary release and observed explicit fallback. Configured launch hide kept an independent Hash window usable and Dock restored the same root. Global invocation, foreground restoration, passive HUD and display placement criteria still need native evidence. See the [saved application replay](../VALIDATION_LOG.md#g02-and-g05-ordinary-saved-application-execution).
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 

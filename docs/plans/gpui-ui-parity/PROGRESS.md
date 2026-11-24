@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G06 saved custom App Editor catalog and checked Edit/Remove passed 17 selected tests and the owned Windows replay. GPUI verified compact filtering, stale refusal and recovery, exact multiline Args, Search updates, immediate Remove and Add publication. Explicit egui read the same saved catalog. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [App Editor evidence](VALIDATION_LOG.md#g06-saved-custom-app-editor-catalog-and-checked-editing) · [Favorites provider evidence](VALIDATION_LOG.md#g06-folder-and-bookmark-favorites-authoring)
+G02/G05 ordinary saved application execution passed 25 focused tests and matching Windows GPUI and egui launches. The replay verified missing-executable refusal, clear-after-run with inline Usage failure, and configured hide with independent Hash calculation and Dock restoration. G06 saved custom App Editor catalog and checked Edit/Remove retain their scoped evidence. Runtime inventory closure, broader providers, mixed DPI and active UI Automation focus remain open. [Saved application evidence](VALIDATION_LOG.md#g02-and-g05-ordinary-saved-application-execution) · [App Editor evidence](VALIDATION_LOG.md#g06-saved-custom-app-editor-catalog-and-checked-editing)
 
 ## Execution status
 
@@ -19,7 +19,7 @@ G06 saved custom App Editor catalog and checked Edit/Remove passed 17 selected t
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | General application execution and broader provider admission, then global invocation and window restoration and completion of the Hash Generator pilot. |
+| Current next action | Admit live Folder and Bookmark Search through the existing provider and launch owners. Then prioritize global invocation and foreground restoration and complete the Hash Generator pilot. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

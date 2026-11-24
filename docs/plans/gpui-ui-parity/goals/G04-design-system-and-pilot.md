@@ -1,6 +1,6 @@
 # G04 — Create reusable Kit components and one complete real GUI
 
-**Status: In implementation.** The real Kit Hash Generator has shared Text, File and Clipboard operations, native picker and streamed cancellation evidence, retained Dock and Pop Out, and persisted keyboard and pointer geometry. The compact footer is reachable with the wheel and scrollbar in both hosts. Docked accessibility focus, mixed DPI, hidden-root lifetime, Jump Mode and the remaining component acceptance are open. See the [Hash Generator record](../gui/hash-generator.md) and [checkpoints](../CHECKPOINTS.md).
+**Status: In implementation.** The real Kit Hash Generator has shared Text, File and Clipboard operations, native picker and streamed cancellation evidence, retained Dock and Pop Out, and persisted keyboard and pointer geometry. The compact footer is reachable with the wheel and scrollbar in both hosts. The popout calculated while the launcher was hidden by the configured app-launch policy and rehosted its exact result through Dock. Docked accessibility focus, mixed DPI, global invocation, Jump Mode and the remaining component acceptance are open. See the [Hash Generator record](../gui/hash-generator.md) and [checkpoints](../CHECKPOINTS.md).
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
