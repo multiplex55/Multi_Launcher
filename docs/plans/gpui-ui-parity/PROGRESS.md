@@ -21,7 +21,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue the G04 Clipboard digest and Copy replay using the checked Windows artifact and an owned fixture, then return to launcher execution and provider coverage. Mixed DPI and G01 known-duration F2 with an owned external foreground target remain open. G05 visual density, control alignment and workspace parity remain in implementation. |
+| Current next action | Continue the next G05 general execution admission and provider packet. G04 matched native Clipboard Load, SHA-256 comparison and Copy passed in both frontends. Mixed DPI and G01 known-duration F2 with an owned external foreground target remain open. G05 visual density, control alignment and workspace parity remain in implementation. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

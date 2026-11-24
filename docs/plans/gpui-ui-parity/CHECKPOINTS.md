@@ -939,3 +939,7 @@ The real GPUI App Editor saved the literal document path. Search passed it to th
 ## G05 top-centered Search and scroll ownership
 
 Search stays in a responsive header above the results and docked content. Review and the first Windows artifact caught an offscreen Hash dock and two moving scroll offsets. The corrected build revealed docked Hash from an overflowing query, kept wheel movement local until a result boundary, and returned Search navigation to the visible selection. Twelve focused tests and matched 1516 × 937 Windows captures verified the scoped behavior, including Tab, Grid Jump and compact dock scrolling. G05 remains in implementation for broader visual density, spacing, control alignment and workspace parity. [Exact receipts](VALIDATION_LOG.md#g05-top-centered-search-and-scroll-ownership)
+
+## G04 matched Windows Clipboard Load and Copy
+
+Both frontends loaded the owned three-byte snapshot, matched the known SHA-256, and copied its exact value. With the same executable and 1516 × 937 roots, native paste into an empty Expected Digest field confirmed the clipboard write in each frontend. The owned fixture exited cleanly in both modes. The rest of Hash acceptance remains open for mixed DPI, global invocation and the remaining host and presentation criteria. [Exact receipts](VALIDATION_LOG.md#g04-matched-windows-clipboard-load-and-copy)
