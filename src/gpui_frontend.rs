@@ -7792,13 +7792,19 @@ impl RootWindow {
                 return;
             }
         }
-        if let LauncherResultOrigin::Indexed { generation, index } = &result.origin {
-            if let Some(snapshot) = self.indexed_applications.snapshot.as_ref() {
-                if snapshot.admits(*generation, *index, &self.search_catalog.actions[self.search_catalog.saved_count..], &result.action) {
-                    let roots = snapshot.roots.clone();
-                    let command = multi_launcher::commands::ExternalCommand { target: result.action.action.clone(), args: None, namespace: None };
-                    self.start_indexed_launch(result.action, command, roots, query, source, result.display_label, window, cx);
-                }
+        if matches!(&result.origin, LauncherResultOrigin::Indexed { .. }) {
+            if let Some(roots) = indexed_applications::admitted_result(
+                &result,
+                self.indexed_applications.snapshot.as_ref(),
+                &self.search_catalog.actions[self.search_catalog.saved_count..],
+            ) {
+                let command = multi_launcher::commands::ExternalCommand {
+                    target: result.action.action.clone(), args: None, namespace: None,
+                };
+                self.start_indexed_launch(
+                    result.action, command, roots.to_vec(), query, source,
+                    result.display_label, window, cx,
+                );
             }
             return;
         }

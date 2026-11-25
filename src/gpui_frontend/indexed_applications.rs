@@ -35,6 +35,20 @@ impl Identity {
     }
 }
 
+pub(super) fn admitted_result<'a>(
+    result: &super::LauncherSearchResult,
+    identity: Option<&'a Identity>,
+    indexed_actions: &[Action],
+) -> Option<&'a [std::path::PathBuf]> {
+    let super::LauncherResultOrigin::Indexed { generation, index } = &result.origin else {
+        return None;
+    };
+    let identity = identity?;
+    identity
+        .admits(*generation, *index, indexed_actions, &result.action)
+        .then_some(identity.roots.as_slice())
+}
+
 pub(super) struct Snapshot {
     pub config: IndexConfig,
     pub generation: u64,

@@ -8,7 +8,7 @@ pub(super) struct Sheet {
     generation: u64,
     row: usize,
     query: String,
-    action: Action,
+    result: LauncherSearchResult,
     revision: u64,
     return_focus: FocusHandle,
     owner: FocusHandle,
@@ -34,12 +34,23 @@ fn snapshot_matches(
     generation: u64,
     row: usize,
     query: &str,
-    action: &Action,
+    result: &LauncherSearchResult,
     revision: u64,
     current_revision: u64,
 ) -> bool {
     revision == current_revision
-        && results.resolve_action(generation, row, query).as_ref() == Some(action)
+        && results.resolve_result(generation, row, query).as_ref() == Some(result)
+}
+
+fn primary_allowed(
+    result: &LauncherSearchResult,
+    candidate: &Action,
+    indexed_current: bool,
+) -> bool {
+    candidate == &result.action
+        && (parse_installed_search_invocation(candidate.clone(), ActivationSource::Enter).is_ok()
+            || result.saved_external().is_some()
+            || indexed_current)
 }
 
 fn sheet_key_owned(key: &str, modified: bool, nested_popup: bool, navigation_focus: bool) -> bool {
@@ -75,7 +86,7 @@ impl RootWindow {
                 sheet.generation,
                 sheet.row,
                 &sheet.query,
-                &sheet.action,
+                &sheet.result,
                 sheet.revision,
                 self.root_visibility
                     .request_revision
@@ -174,26 +185,35 @@ impl RootWindow {
         {
             return;
         }
-        let indexed = matches!(action.origin, LauncherResultOrigin::Indexed { .. });
-        let action = action.action;
+        let indexed = matches!(&action.origin, LauncherResultOrigin::Indexed { .. });
+        let indexed_current = indexed_applications::admitted_result(
+            &action,
+            self.indexed_applications.snapshot.as_ref(),
+            &self.search_catalog.actions[self.search_catalog.saved_count..],
+        )
+        .is_some();
+        let result = action;
+        let action = &result.action;
         let resolver = ActionTargetResolverContext::new(
             &self.search_catalog.folder_aliases_lc,
             &self.search_catalog.bookmark_aliases_lc,
-            if indexed { &[] } else { self.search_catalog.saved_actions() },
+            if indexed {
+                &[]
+            } else {
+                self.search_catalog.saved_actions()
+            },
         );
-        let target = ActionTargetResolver.resolve(&action, &resolver);
+        let target = ActionTargetResolver.resolve(action, &resolver);
         let mut context = ActionResolutionContext::new(ActionSurface::ActionSheet, &query);
         context.can_add_favorite = target.target.persistent_ref().is_some();
         let mut actions = UniversalActionRegistry.resolve(&target, &context);
         actions.retain(|choice| match &choice.operation {
             UniversalActionOperation::InvokePrimary(candidate) => {
-                candidate == &action
-                    && parse_installed_search_invocation(candidate.clone(), ActivationSource::Enter)
-                        .is_ok()
+                primary_allowed(&result, candidate, indexed_current)
             }
             UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
                 action: candidate,
-            }) => candidate == &action && context.can_add_favorite,
+            }) => candidate == action && context.can_add_favorite,
             _ => false,
         });
         let choices = ActionSheetChoices::new(actions, &self.search_catalog.matcher);
@@ -226,7 +246,7 @@ impl RootWindow {
             generation,
             row,
             query,
-            action,
+            result,
             revision: self
                 .root_visibility
                 .request_revision
@@ -445,7 +465,9 @@ impl RootWindow {
                 }
                 root.action_sheet_serial = root.action_sheet_serial.wrapping_add(1);
                 match selected.operation {
-                    UniversalActionOperation::InvokePrimary(action) if action == sheet.action => {
+                    UniversalActionOperation::InvokePrimary(action)
+                        if action == sheet.result.action =>
+                    {
                         root.activate_launcher_result(
                             sheet.generation,
                             sheet.row,
@@ -457,7 +479,7 @@ impl RootWindow {
                     }
                     UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
                         action,
-                    }) if action == sheet.action => {
+                    }) if action == sheet.result.action => {
                         root.open_result_favorites(action, Some(sheet.return_focus), window, cx)
                     }
                     _ => {}
@@ -470,8 +492,11 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Action, LauncherSearchResults, ResolvedQueryResultsLayout};
-    use super::{sheet_key_owned, snapshot_matches};
+    use super::super::{
+        Action, LauncherResultOrigin, LauncherSearchResult, LauncherSearchResults,
+        ResolvedQueryResultsLayout,
+    };
+    use super::{primary_allowed, sheet_key_owned, snapshot_matches};
 
     #[test]
     fn receipt_rejects_changed_result_generation_payload_and_visibility() {
@@ -485,23 +510,116 @@ mod tests {
         let layout = ResolvedQueryResultsLayout::new(false, 1);
         results.replace_test_actions("hash".into(), vec![action.clone()], layout, 1);
         let generation = results.generation;
+        let result = results.actions[0].clone();
         assert!(snapshot_matches(
-            &results, generation, 0, "hash", &action, 4, 4
+            &results, generation, 0, "hash", &result, 4, 4
         ));
         assert!(!snapshot_matches(
-            &results, generation, 0, "other", &action, 4, 4
+            &results, generation, 0, "other", &result, 4, 4
         ));
         assert!(!snapshot_matches(
-            &results, generation, 0, "hash", &action, 4, 5
+            &results, generation, 0, "hash", &result, 4, 5
         ));
+        results.actions[0].origin = LauncherResultOrigin::Provider("forged".into());
+        assert!(!snapshot_matches(
+            &results, generation, 0, "hash", &result, 4, 4
+        ));
+        results.actions[0].origin = LauncherResultOrigin::Saved;
         results.actions[0].action.args = Some("changed".into());
         assert!(!snapshot_matches(
-            &results, generation, 0, "hash", &action, 4, 4
+            &results, generation, 0, "hash", &result, 4, 4
         ));
         results.replace_test_actions("hash".into(), vec![action.clone()], layout, 1);
         assert!(!snapshot_matches(
-            &results, generation, 0, "hash", &action, 4, 4
+            &results, generation, 0, "hash", &result, 4, 4
         ));
+    }
+
+    #[test]
+    fn primary_execution_requires_saved_or_current_indexed_authority() {
+        let action = Action {
+            label: "App".into(),
+            desc: "fixture".into(),
+            action: r"C:\Apps\Tool.exe".into(),
+            args: None,
+        };
+        let mut result = LauncherSearchResult {
+            action: action.clone(),
+            origin: LauncherResultOrigin::Saved,
+            display_label: Some("app App".into()),
+            hide_description: false,
+        };
+        assert!(primary_allowed(&result, &action, false));
+        for target in [
+            r"C:\Apps\Link.lnk",
+            r"C:\Apps\Notes.txt",
+            "https://example.com",
+            r"C:\Apps\Folder",
+        ] {
+            let excluded = Action {
+                action: target.into(),
+                ..action.clone()
+            };
+            result.action = excluded.clone();
+            assert!(
+                !primary_allowed(&result, &excluded, false),
+                "unexpected primary route: {target}"
+            );
+        }
+        result.action = action.clone();
+        result.origin = LauncherResultOrigin::Provider("forged".into());
+        assert!(!primary_allowed(&result, &action, false));
+        result.origin = LauncherResultOrigin::CachedCommand;
+        assert!(!primary_allowed(&result, &action, false));
+        let indexed_action = Action {
+            label: "Tool.exe".into(),
+            desc: r"\\?\C:\Apps\Tool.exe".into(),
+            action: r"\\?\C:\Apps\Tool.exe".into(),
+            args: None,
+        };
+        result.action = indexed_action.clone();
+        result.origin = LauncherResultOrigin::Indexed {
+            generation: 8,
+            index: 0,
+        };
+        let identity = super::super::indexed_applications::Identity {
+            generation: 8,
+            roots: vec![std::path::PathBuf::from(r"C:\Apps")],
+        };
+        #[cfg(windows)]
+        assert!(super::super::indexed_applications::row_matches(&indexed_action, &identity.roots));
+        let current = super::super::indexed_applications::admitted_result(
+            &result,
+            Some(&identity),
+            std::slice::from_ref(&indexed_action),
+        )
+        .is_some();
+        assert!(primary_allowed(&result, &indexed_action, current));
+        assert!(!primary_allowed(&result, &indexed_action, false));
+        result.origin = LauncherResultOrigin::Indexed {
+            generation: 9,
+            index: 0,
+        };
+        assert!(
+            super::super::indexed_applications::admitted_result(
+                &result,
+                Some(&identity),
+                std::slice::from_ref(&indexed_action),
+            )
+            .is_none()
+        );
+        let mut changed = indexed_action.clone();
+        changed.args = Some("changed".into());
+        assert!(!primary_allowed(&result, &changed, true));
+        let installed = Action {
+            label: "Hash".into(),
+            desc: "".into(),
+            action: "hash:open".into(),
+            args: None,
+        };
+        result.action = installed.clone();
+        result.origin = LauncherResultOrigin::CachedCommand;
+        assert!(primary_allowed(&result, &installed, false));
     }
 
     #[test]
