@@ -1,5 +1,5 @@
 //! Virtualized JSON tree presentation, backed by checked shared-session receipts.
-use super::json_utility::JsonView;
+use super::json_utility::JsonWorkspace;
 use super::*;
 use multi_launcher::json_transform::JsonSearchFields;
 use multi_launcher::json_utility_session::{TreeCopyKind, TreeStamp};
@@ -8,11 +8,11 @@ use gpui_kit::base::Selectable;
 use gpui_kit::component::Sizable as _;
 
 fn apply_row(
-    view: &mut JsonView,
+    view: &mut JsonWorkspace,
     stamp: TreeStamp,
     id: multi_launcher::json_transform::JsonTreeNodeId,
     toggle: bool,
-    cx: &mut Context<JsonView>,
+    cx: &mut Context<JsonWorkspace>,
 ) {
     if !view.open || !view.tree_mode || view.admission.is_fenced() {
         return;
@@ -29,10 +29,12 @@ fn apply_row(
     }
 }
 
-pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElement {
+pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) -> AnyElement {
     let stamp = view.session.tree_stamp();
     let count = view.session.tree_row_count();
     let owner = cx.entity().downgrade();
+    let mount = view.mount_receipt();
+    let row_mount = mount.clone();
     let rows = gpui_kit::uniform_list("json-tree-rows", count, move |range, _, app| {
         let Some(entity) = owner.upgrade() else {
             return Vec::<AnyElement>::new();
@@ -46,6 +48,8 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
                 let id = row.id;
                 let select_owner = owner.clone();
                 let toggle_owner = owner.clone();
+                let select_mount = row_mount.clone();
+                let toggle_mount = row_mount.clone();
                 let mut line = div()
                     .id(SharedString::from(format!(
                         "json-tree-row-{}-{}",
@@ -67,6 +71,7 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
                         .label(if row.expanded { "▾" } else { "▸" }).small()
                         .tab_stop(true)
                         .on_click(move |_, _, app| {
+                            if !toggle_mount.is_current() { return; }
                             let _ = toggle_owner
                                 .update(app, |view, cx| apply_row(view, stamp, id, true, cx));
                         }),
@@ -81,6 +86,7 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
                             .label(label).small().selected(row.selected)
                             .tab_stop(true)
                             .on_click(move |_, _, app| {
+                                if !select_mount.is_current() { return; }
                                 let _ = select_owner
                                     .update(app, |view, cx| apply_row(view, stamp, id, false, cx));
                             }),
@@ -92,11 +98,13 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
     })
     .track_scroll(&view.tree_scroll)
     .size_full();
+    let clear_mount = mount.clone();
     let mut fields = div().flex().flex_wrap().gap_2().child(
         Button::new("json-clear-tree-search")
             .label("Clear search")
             .tab_stop(true)
-            .on_click(cx.listener(|view, _, window, cx| {
+            .on_click(cx.listener(move |view, _, window, cx| {
+                if !clear_mount.is_current() { return; }
                 if !view.open || !view.tree_mode || view.admission.is_fenced() {
                     return;
                 }
@@ -113,6 +121,7 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
         ("Values", JsonSearchFields::Values),
         ("Both", JsonSearchFields::Both),
     ] {
+        let field_mount = mount.clone();
         let selected = view.session.tree_search_fields() == field;
         fields = fields.child(
             Button::new(SharedString::from(format!("json-search-{label}")))
@@ -123,6 +132,7 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
                 })
                 .tab_stop(true)
                 .on_click(cx.listener(move |view, _, _, cx| {
+                    if !field_mount.is_current() { return; }
                     if !view.open || !view.tree_mode || view.admission.is_fenced() {
                         return;
                     }
@@ -144,12 +154,14 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
     let enabled = stamp.is_some() && active.is_some() && !pending;
     let mut controls = div().flex().flex_wrap().gap_2();
     for (label, previous) in [("Previous", true), ("Next", false)] {
+        let navigation_mount = mount.clone();
         controls = controls.child(
             Button::new(SharedString::from(format!("json-match-{label}")))
                 .label(label)
                 .tab_stop(enabled)
                 .disabled(!enabled)
                 .on_click(cx.listener(move |view, _, _, cx| {
+                    if !navigation_mount.is_current() { return; }
                     if !view.open || !view.tree_mode || view.admission.is_fenced() {
                         return;
                     }
@@ -166,11 +178,13 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
     }
     if let Some(stamp) = stamp {
         for (label, expanded) in [("Expand Branch", true), ("Collapse Branch", false)] {
+            let branch_mount = mount.clone();
             controls = controls.child(
                 Button::new(SharedString::from(format!("json-branch-{label}")))
                     .label(label)
                     .tab_stop(true)
                     .on_click(cx.listener(move |view, _, _, cx| {
+                        if !branch_mount.is_current() { return; }
                         if view.open && view.tree_mode && !view.admission.is_fenced()
                             && view.session.tree_stamp() == Some(stamp) {
                             view.tree_epoch.fetch_add(1, Ordering::AcqRel);
@@ -185,13 +199,14 @@ pub(super) fn render(view: &mut JsonView, cx: &mut Context<JsonView>) -> AnyElem
             ("Copy Subtree", TreeCopyKind::Subtree),
             ("Copy JSON Pointer", TreeCopyKind::Pointer),
         ] {
+            let copy_mount = mount.clone();
             let available = !view.lane.active;
             controls = controls.child(
                 Button::new(SharedString::from(format!("json-tree-{label}")))
                     .label(label)
                     .tab_stop(available)
                     .disabled(!available)
-                    .on_click(cx.listener(move |view, _, _, cx| view.copy_tree(stamp, kind, cx))),
+                    .on_click(cx.listener(move |view, _, _, cx| { if copy_mount.is_current() { view.copy_tree(stamp, kind, cx); } })),
             );
         }
     }

@@ -24,6 +24,7 @@ mod hash_dock;
 mod wake;
 mod json_utility;
 mod json_tree;
+mod utility_mount;
 use wake::HashWakeSignal;
 mod indexed_applications;
 mod window_search;
@@ -2628,7 +2629,7 @@ struct RootWindow {
     // The root owns the shared center independently of Hash presentation mounts.
     activity_center: multi_launcher::activity::ActivityCenter,
     activity_view: Option<Entity<activity::ActivityView>>,
-    json_view: Option<Entity<json_utility::JsonView>>,
+    json_view: Option<Entity<json_utility::JsonWorkspace>>,
     hash_wake_signal: Arc<HashWakeSignal>,
     hash_file_picker_pending: Arc<AtomicBool>,
     hash_clipboard_pending: Arc<HashClipboardPendingState>,
@@ -5906,6 +5907,7 @@ impl RootWindow {
         self.indexed_applications.retire();
         self.retire_search_jump_mode();
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
+        self.retire_json_workspace(cx);
         #[cfg(windows)]
         if let Some(view) = self.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.coordinate_hud_probe_closing
@@ -9787,6 +9789,7 @@ impl RootWindow {
             return;
         }
         if let Some(view) = &self.file_search { view.read(cx).retire_explorer(); }
+        self.retire_json_workspace(cx);
         self.window_search.retire();
         self.file_search_probe.retire();
         self.indexed_applications.retire();
@@ -12196,6 +12199,7 @@ pub(crate) fn run_foundation_window(
                     }
                     root.retire_search_jump_mode();
                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
+                    root.retire_json_workspace(cx);
                     #[cfg(windows)]
                     if let Some(view) = root.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.drain_hash_native_geometry(cx, true);
@@ -12731,6 +12735,7 @@ pub(crate) fn run_foundation_window(
                     None => {
                         let _ = root_for_window_close.update(app, |root, cx| {
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
+                            root.retire_json_workspace(cx);
                             root.window_search.retire(); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });
@@ -12759,6 +12764,7 @@ pub(crate) fn run_foundation_window(
                         if close_now {
                             let _ = root_for_window_close.update(app, |root, cx| {
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
+                            root.retire_json_workspace(cx);
                             root.window_search.retire(); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });

@@ -34,6 +34,9 @@ fn receipt_current(open: bool, epoch: u64, expected: u64, active: bool) -> bool 
 fn effect_epochs_current(source: u64, expected: u64, tree: Option<(u64, u64)>) -> bool {
     source == expected && tree.is_none_or(|(current, expected)| current == expected)
 }
+fn mounted_effect_current(mount: &super::utility_mount::MountReceipt, source: u64, expected: u64, tree: Option<(u64, u64)>) -> bool {
+    mount.is_current() && effect_epochs_current(source, expected, tree)
+}
 
 fn apply_paste_result(
     session: &mut JsonEditorState,
@@ -99,13 +102,14 @@ struct GuardedClipboard {
     native: Option<NativeWindow>,
     admission: Arc<RestartAdmission>,
     tree_guard: Option<(Arc<AtomicU64>, u64)>,
+    mount: super::utility_mount::MountReceipt,
 }
 impl ClipboardBackend for GuardedClipboard {
     fn read_text(&self) -> Result<String, ClipboardError> {
         ArboardClipboardBackend.read_text()
     }
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
-        if !effect_epochs_current(self.epoch.load(Ordering::Acquire), self.expected,
+        if !mounted_effect_current(&self.mount, self.epoch.load(Ordering::Acquire), self.expected,
                 self.tree_guard.as_ref().map(|(epoch, expected)| (epoch.load(Ordering::Acquire), *expected)))
             || self.admission.is_fenced()
             || !native_root_current(&self.visibility, self.visibility_revision, self.native)
@@ -118,20 +122,28 @@ impl ClipboardBackend for GuardedClipboard {
     }
 }
 
-pub(super) struct JsonView {
-    pub(super) open: bool,
-    root: WeakEntity<RootWindow>,
+pub(super) struct JsonMount {
+    receipt: super::utility_mount::MountReceipt,
     root_window: AnyWindowHandle,
-    pub(super) admission: Arc<RestartAdmission>,
-    pub(super) visibility: RootVisibility,
     pub(super) native: Option<NativeWindow>,
     input: Entity<TextareaState>,
     pub(super) tree_search: Entity<InputState>,
     pub(super) tree_scroll: gpui_kit::UniformListScrollHandle,
-    pub(super) tree_mode: bool,
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
     return_scroll: Option<Point<Pixels>>,
+    escape_waiting: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+pub(super) struct JsonWorkspace {
+    pub(super) open: bool,
+    root: WeakEntity<RootWindow>,
+    pub(super) admission: Arc<RestartAdmission>,
+    pub(super) visibility: RootVisibility,
+    mount_owner: super::utility_mount::MountOwner,
+    mount: JsonMount,
+    pub(super) tree_mode: bool,
     pub(super) session: JsonEditorState,
     intent: JsonUtilityIntent,
     pub(super) epoch: Arc<AtomicU64>,
@@ -140,22 +152,18 @@ pub(super) struct JsonView {
     pub(super) lane: ClipboardLane,
     initial_projection: Option<(u64, u64)>,
     checking: Option<u64>,
-    escape_waiting: bool,
-    _subscriptions: Vec<Subscription>,
 }
-impl JsonView {
-    fn new(
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        root: WeakEntity<RootWindow>,
-        root_window: AnyWindowHandle,
-        admission: Arc<RestartAdmission>,
-        visibility: RootVisibility,
-        native: Option<NativeWindow>,
-        intent: JsonUtilityIntent,
-        return_focus: Option<FocusHandle>,
-        return_scroll: Point<Pixels>,
-    ) -> Self {
+impl std::ops::Deref for JsonWorkspace {
+    type Target = JsonMount;
+    fn deref(&self) -> &Self::Target { &self.mount }
+}
+impl std::ops::DerefMut for JsonWorkspace {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.mount }
+}
+impl JsonMount {
+    fn new(window: &mut Window, cx: &mut Context<JsonWorkspace>, owner: &super::utility_mount::MountOwner,
+        root_window: AnyWindowHandle, native: Option<NativeWindow>, return_focus: Option<FocusHandle>, return_scroll: Point<Pixels>) -> Self {
+        let receipt = owner.attach();
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(5, 12)
@@ -163,20 +171,22 @@ impl JsonView {
         });
         let focus = cx.focus_handle();
         let tree_search = cx.new(|cx| InputState::new(window, cx).placeholder("Keys or values"));
-        let search_subscription = cx.subscribe(&tree_search, |this: &mut Self, input: Entity<InputState>, event: &InputEvent, cx: &mut Context<Self>| {
-            if !matches!(event, InputEvent::Change) || !this.open || !this.tree_mode || this.admission.is_fenced() { return; }
+        let search_receipt = receipt.clone();
+        let search_subscription = cx.subscribe(&tree_search, move |this: &mut JsonWorkspace, input: Entity<InputState>, event: &InputEvent, cx: &mut Context<JsonWorkspace>| {
+            if !search_receipt.is_current() || !matches!(event, InputEvent::Change) || !this.open || !this.tree_mode || this.admission.is_fenced() { return; }
             this.tree_epoch.fetch_add(1, Ordering::AcqRel);
             let fields = this.session.tree_search_fields();
             this.session.tree_set_search(input.read(cx).value().to_string(), fields);
             this.service(cx);
         });
+        let input_receipt = receipt.clone();
         let subscription = cx.subscribe(
             &input,
-            |this: &mut Self,
+            move |this: &mut JsonWorkspace,
              input: Entity<TextareaState>,
              event: &InputEvent,
-             cx: &mut Context<Self>| {
-                if !matches!(event, InputEvent::Change) || !this.open || this.admission.is_fenced()
+             cx: &mut Context<JsonWorkspace>| {
+                if !input_receipt.is_current() || !matches!(event, InputEvent::Change) || !this.open || this.admission.is_fenced()
                 {
                     return;
                 }
@@ -192,35 +202,43 @@ impl JsonView {
                 }
             },
         );
-        let focus_subscription =
-            cx.on_focus_out(&focus, window, |this, _, _, _| this.escape_waiting = false);
+        let focus_receipt = receipt.clone();
+        let focus_subscription = cx.on_focus_out(&focus, window, move |this: &mut JsonWorkspace, _, _, _| { if focus_receipt.is_current() { this.escape_waiting = false; } });
+        Self { receipt, root_window, native, input, tree_search, tree_scroll: gpui_kit::UniformListScrollHandle::default(),
+            focus, return_focus, return_scroll: Some(return_scroll), escape_waiting: false,
+            _subscriptions: vec![subscription, focus_subscription, search_subscription] }
+    }
+}
+impl JsonWorkspace {
+    pub(super) fn mount_receipt(&self) -> super::utility_mount::MountReceipt { self.mount.receipt.clone() }
+    fn replace_mount(&mut self, root_window: AnyWindowHandle, native: Option<NativeWindow>, origin: Option<FocusHandle>, offset: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let mount = JsonMount::new(window, cx, &self.mount_owner, root_window, native, origin, offset);
+        let text = self.session.source().to_owned();
+        let query = self.session.tree_search_query().to_owned();
+        mount.input.update(cx, |input, cx| input.set_value(text, window, cx));
+        mount.tree_search.update(cx, |input, cx| input.set_value(query, window, cx));
+        self.mount = mount;
+    }
+    fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        root: WeakEntity<RootWindow>,
+        root_window: AnyWindowHandle,
+        admission: Arc<RestartAdmission>,
+        visibility: RootVisibility,
+        native: Option<NativeWindow>,
+        intent: JsonUtilityIntent,
+        return_focus: Option<FocusHandle>,
+        return_scroll: Point<Pixels>,
+    ) -> Self {
+        let mount_owner = super::utility_mount::MountOwner::default();
+        let mount = JsonMount::new(window, cx, &mount_owner, root_window, native, return_focus, return_scroll);
         let mut session = JsonEditorState::default();
         session.begin_initialize();
-        Self {
-            open: false,
-            root,
-            root_window,
-            admission,
-            visibility,
-            native,
-            input,
-            tree_search,
-            tree_scroll: gpui_kit::UniformListScrollHandle::default(),
-            tree_mode: false,
-            focus,
-            return_focus,
-            return_scroll: Some(return_scroll),
-            session,
-            intent,
-            epoch: Arc::new(AtomicU64::new(1)),
-            tree_epoch: Arc::new(AtomicU64::new(1)),
-            wake: Arc::new(HashWakeSignal::default()),
-            lane: ClipboardLane::default(),
-            initial_projection: None,
-            checking: None,
-            escape_waiting: false,
-            _subscriptions: vec![subscription, focus_subscription, search_subscription],
-        }
+        Self { open: false, root, admission, visibility, mount_owner, mount, tree_mode: false, session, intent,
+            epoch: Arc::new(AtomicU64::new(1)), tree_epoch: Arc::new(AtomicU64::new(1)),
+            wake: Arc::new(HashWakeSignal::default()), lane: ClipboardLane::default(),
+            initial_projection: None, checking: None }
     }
     pub(super) fn service(&mut self, cx: &mut Context<Self>) {
         let before_tree = self.session.tree_stamp();
@@ -253,7 +271,9 @@ impl JsonView {
             self.checking = None;
         }
         if let Some(index) = self.session.tree_take_reveal() {
-            self.tree_scroll.scroll_to_item(index, gpui_kit::ScrollStrategy::Nearest);
+            if self.mount.receipt.is_current() {
+                self.tree_scroll.scroll_to_item(index, gpui_kit::ScrollStrategy::Nearest);
+            }
         }
         cx.notify();
     }
@@ -268,6 +288,11 @@ impl JsonView {
         self.epoch.fetch_add(1, Ordering::AcqRel);
         let first_open = !self.open;
         if first_open {
+            if !self.mount.receipt.is_current() {
+                let root_window = self.root_window;
+                let native = self.native;
+                self.replace_mount(root_window, native, origin.clone(), offset, window, cx);
+            }
             self.wake.close();
             self.session.close();
             self.session = JsonEditorState::default();
@@ -321,19 +346,19 @@ impl JsonView {
     fn start_wake(&self, cx: &mut Context<Self>) {
         let wake = self.wake.clone();
         let owner = cx.entity().downgrade();
-        let root_window = self.root_window;
         cx.spawn(async move |_, cx| {
             while wake.wait().await {
                 let Some(view) = owner.upgrade() else {
                     break;
                 };
+                let root_window = cx.update(|app| view.read(app).root_window);
                 let Ok(current) =
                     update_kit_window_content(root_window, &view, cx, |view, window, cx| {
                         if !view.open {
                             return false;
                         }
                         view.service(cx);
-                        view.sync_input(window, cx);
+                        if view.mount.receipt.is_current() { view.sync_input(window, cx); }
                         true
                     })
                 else {
@@ -360,7 +385,7 @@ impl JsonView {
         let expected = self.epoch.load(Ordering::Acquire);
         let visibility_revision = self.visibility.request_revision.load(Ordering::Acquire);
         let owner = cx.entity().downgrade();
-        let root_window = self.root_window;
+        let mount = self.mount.receipt.clone();
         let task = cx.background_executor().spawn(async move {
             let _permit = permit;
             ArboardClipboardBackend.read_text()
@@ -370,13 +395,14 @@ impl JsonView {
             let Some(view) = owner.upgrade() else {
                 return;
             };
+            let root_window = cx.update(|app| view.read(app).root_window);
             let _ = update_kit_window_content(root_window, &view, cx, |view, window, cx| {
                 view.lane.active = false;
                 if !receipt_current(
                     view.open,
                     view.epoch.load(Ordering::Acquire),
                     expected,
-                    !view.admission.is_fenced()
+                    mount.is_current() && !view.admission.is_fenced()
                         && native_root_current(&view.visibility, visibility_revision, view.native),
                 ) {
                     if view.checking == Some(expected) {
@@ -430,9 +456,10 @@ impl JsonView {
         let visibility = self.visibility.clone();
         let native = self.native;
         let admission = self.admission.clone();
+        let mount = self.mount.receipt.clone();
+        let worker_mount = mount.clone();
         let text = self.session.source().to_owned();
         let owner = cx.entity().downgrade();
-        let root_window = self.root_window;
         let task = cx.background_executor().spawn(async move {
             let _permit = permit;
             let mut session = JsonEditorState::default();
@@ -445,6 +472,7 @@ impl JsonView {
                 native,
                 admission,
                 tree_guard: None,
+                mount: worker_mount,
             });
             session
         });
@@ -453,13 +481,14 @@ impl JsonView {
             let Some(view) = owner.upgrade() else {
                 return;
             };
+            let root_window = cx.update(|app| view.read(app).root_window);
             let _ = update_kit_window_content(root_window, &view, cx, |view, _, cx| {
                 view.lane.active = false;
                 if receipt_current(
                     view.open,
                     view.epoch.load(Ordering::Acquire),
                     expected,
-                    !view.admission.is_fenced()
+                    mount.is_current() && !view.admission.is_fenced()
                         && native_root_current(&view.visibility, visibility_revision, view.native),
                 ) {
                     view.session.accept_copy_feedback(&result);
@@ -479,17 +508,19 @@ impl JsonView {
         let expected = self.epoch.load(Ordering::Acquire);
         let expected_tree = self.tree_epoch.load(Ordering::Acquire);
         let visibility_revision = self.visibility.request_revision.load(Ordering::Acquire);
-        let backend = GuardedClipboard { epoch: self.epoch.clone(), expected, visibility: self.visibility.clone(), visibility_revision, native: self.native, admission: self.admission.clone(), tree_guard: Some((self.tree_epoch.clone(), expected_tree)) };
-        let owner = cx.entity().downgrade(); let root_window = self.root_window;
+        let mount = self.mount.receipt.clone();
+        let backend = GuardedClipboard { epoch: self.epoch.clone(), expected, visibility: self.visibility.clone(), visibility_revision, native: self.native, admission: self.admission.clone(), tree_guard: Some((self.tree_epoch.clone(), expected_tree)), mount: mount.clone() };
+        let owner = cx.entity().downgrade();
         let task = cx.background_executor().spawn(async move { let _permit = permit; let result = request.execute(&backend); (request, result) });
         cx.spawn(async move |_, cx| {
             let (request, result) = task.await;
             let Some(view) = owner.upgrade() else { return; };
+            let root_window = cx.update(|app| view.read(app).root_window);
             let _ = update_kit_window_content(root_window, &view, cx, |view, _, cx| {
                 view.lane.active = false;
                 if receipt_current(view.open && view.tree_mode, view.epoch.load(Ordering::Acquire), expected,
                     effect_epochs_current(view.epoch.load(Ordering::Acquire), expected, Some((view.tree_epoch.load(Ordering::Acquire), expected_tree)))
-                    && !view.admission.is_fenced() && native_root_current(&view.visibility, visibility_revision, view.native)) {
+                    && mount.is_current() && !view.admission.is_fenced() && native_root_current(&view.visibility, visibility_revision, view.native)) {
                     view.session.finish_tree_copy(&request, result);
                 }
                 view.drain_initial(cx); cx.notify();
@@ -531,18 +562,12 @@ impl JsonView {
             return;
         }
         let owned = window.is_window_active() && self.focus.contains_focused(window, cx);
-        self.open = false;
-        self.epoch.fetch_add(1, Ordering::AcqRel);
-        self.lane.invalidate();
-        self.initial_projection = None;
-        self.checking = None;
-        self.wake.close();
-        self.session.close();
-        self.session = JsonEditorState::default();
-        self.input
-            .update(cx, |input, cx| input.set_value("", window, cx));
         let origin = self.return_focus.take();
         let offset = self.return_scroll.take();
+        self.shutdown();
+        self.input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.tree_search.update(cx, |input, cx| input.set_value("", window, cx));
+        self.tree_scroll = gpui_kit::UniformListScrollHandle::default();
         let _ = self.root.update(cx, |root, cx| {
             panel_stack::retire(&mut root.panel_stack, Panel::JsonUtilityDialog);
             if owned && !root.restart_admission.is_fenced() {
@@ -560,6 +585,20 @@ impl JsonView {
             cx.notify();
         });
         cx.notify();
+    }
+    pub(super) fn shutdown(&mut self) {
+        self.open = false;
+        self.mount_owner.retire();
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.lane.invalidate();
+        self.initial_projection = None;
+        self.checking = None;
+        self.wake.close();
+        self.session.close();
+        self.session = JsonEditorState::default();
+        self.mount._subscriptions.clear();
+        self.return_focus = None;
+        self.return_scroll = None;
     }
     pub(super) fn draft(&self) -> Option<String> {
         self.open.then(|| self.session.source().to_owned())
@@ -582,14 +621,25 @@ impl JsonView {
         true
     }
 }
-impl Drop for JsonView {
+impl Drop for JsonWorkspace {
     fn drop(&mut self) {
+        self.mount_owner.retire();
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.wake.close();
     }
 }
-impl Render for JsonView {
+impl Render for JsonWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mount = self.mount_receipt();
+        let escape_action = mount.clone();
+        let escape_key = mount.clone();
+        let escape_release = mount.clone();
+        let paste_mount = mount.clone();
+        let clear_mount = mount.clone();
+        let copy_mount = mount.clone();
+        let close_mount = mount.clone();
+        let text_mount = mount.clone();
+        let tree_mount = mount.clone();
         let first = self.intent == JsonUtilityIntent::Minify;
         let checking = self.checking.is_some();
         let actions = if first {
@@ -600,12 +650,13 @@ impl Render for JsonView {
         let buttons = actions
             .into_iter()
             .map(|(name, action)| {
+                let mount = mount.clone();
                 Button::new(SharedString::from(format!("json-{name}")))
                     .label(name)
                     .tab_stop(!checking)
                     .disabled(checking)
                     .on_click(
-                        cx.listener(move |view, _, window, cx| view.transform(action, window, cx)),
+                        cx.listener(move |view, _, window, cx| { if mount.is_current() { view.transform(action, window, cx); } }),
                     )
             })
             .collect::<Vec<_>>();
@@ -627,22 +678,22 @@ impl Render for JsonView {
             .p_3()
             .track_focus(&self.focus)
             .capture_action(
-                cx.listener(|view, _: &gpui_kit::base::input::Escape, window, cx| {
-                    if view.escape(window, cx, false) {
+                cx.listener(move |view, _: &gpui_kit::base::input::Escape, window, cx| {
+                    if escape_action.is_current() && view.escape(window, cx, false) {
                         cx.stop_propagation();
                     }
                 }),
             )
-            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape"
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if escape_key.is_current() && event.keystroke.key == "escape"
                     && event.keystroke.modifiers == Modifiers::default()
                     && view.escape(window, cx, event.is_held)
                 {
                     cx.stop_propagation();
                 }
             }))
-            .capture_key_up(cx.listener(|view, event: &gpui_kit::KeyUpEvent, _, _| {
-                if event.keystroke.key == "escape" {
+            .capture_key_up(cx.listener(move |view, event: &gpui_kit::KeyUpEvent, _, _| {
+                if escape_release.is_current() && event.keystroke.key == "escape" {
                     view.escape_waiting = false;
                 }
             }))
@@ -658,31 +709,31 @@ impl Render for JsonView {
                             .label("Paste")
                             .tab_stop(!self.lane.active)
                             .disabled(self.lane.active)
-                            .on_click(cx.listener(|view, _, _, cx| view.read_clipboard(false, cx))),
+                            .on_click(cx.listener(move |view, _, _, cx| { if paste_mount.is_current() { view.read_clipboard(false, cx); } })),
                     )
                     .child(
                         Button::new("json-clear")
                             .label("Clear")
                             .tab_stop(true)
-                            .on_click(cx.listener(|view, _, window, cx| view.clear(window, cx))),
+                            .on_click(cx.listener(move |view, _, window, cx| { if clear_mount.is_current() { view.clear(window, cx); } })),
                     )
                     .child(
                         Button::new("json-copy")
                             .label("Copy Result")
                             .tab_stop(!self.lane.active && !checking)
                             .disabled(self.lane.active || checking)
-                            .on_click(cx.listener(|view, _, _, cx| view.copy(cx))),
+                            .on_click(cx.listener(move |view, _, _, cx| { if copy_mount.is_current() { view.copy(cx); } })),
                     )
                     .child(
                         Button::new("json-close")
                             .label("Close")
                             .tab_stop(true)
-                            .on_click(cx.listener(|view, _, window, cx| view.close(window, cx))),
+                            .on_click(cx.listener(move |view, _, window, cx| { if close_mount.is_current() { view.close(window, cx); } })),
                     ),
             )
             .child(div().flex().gap_2()
-                .child(Button::new("json-view-text").label("Text").tab_stop(true).on_click(cx.listener(|view, _, _, cx| { if view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = false; } cx.notify(); })))
-                .child(Button::new("json-view-tree").label("Tree").tab_stop(true).on_click(cx.listener(|view, _, _, cx| { if !view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = true; } cx.notify(); }))))
+                .child(Button::new("json-view-text").label("Text").tab_stop(true).on_click(cx.listener(move |view, _, _, cx| { if !text_mount.is_current() { return; } if view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = false; } cx.notify(); })))
+                .child(Button::new("json-view-tree").label("Tree").tab_stop(true).on_click(cx.listener(move |view, _, _, cx| { if !tree_mount.is_current() { return; } if !view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = true; } cx.notify(); }))))
             .when(!self.tree_mode, |this| this.child(Textarea::new(&self.input).aria_label("JSON text").tab_index(0)))
             .children(tree_panel)
             .children(self.checking.is_some().then(|| {
@@ -709,6 +760,9 @@ impl Render for JsonView {
     }
 }
 impl RootWindow {
+    pub(super) fn retire_json_workspace(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.json_view.take() { view.update(cx, |view, _| view.shutdown()); }
+    }
     pub(super) fn open_json_utility(
         &mut self,
         intent: JsonUtilityIntent,
@@ -740,7 +794,7 @@ impl RootWindow {
             view.clone()
         } else {
             cx.new(|cx| {
-                JsonView::new(
+                JsonWorkspace::new(
                     window,
                     cx,
                     root,
@@ -783,7 +837,7 @@ impl RootWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardLane, OpenHost, apply_paste_result, effect_epochs_current, provider_is_current, receipt_current,
+        ClipboardLane, OpenHost, apply_paste_result, effect_epochs_current, mounted_effect_current, provider_is_current, receipt_current,
     };
     use multi_launcher::{
         commands::{Command, JsonUtilityCommand, JsonUtilityIntent, parse_action},
@@ -864,6 +918,32 @@ mod tests {
         assert!(!effect_epochs_current(4, 4, Some((8, 7))));
         assert!(effect_epochs_current(4, 4, Some((8, 8))));
         assert!(!effect_epochs_current(5, 4, None));
+    }
+
+    #[test]
+    fn mount_receipt_invalidation_does_not_change_session_or_lane() {
+        use super::super::utility_mount::MountOwner;
+        use multi_launcher::json_utility_session::JsonEditorState;
+        let owner = MountOwner::default();
+        let old = owner.attach();
+        let mut session = JsonEditorState::default();
+        session.set_source("{\"draft\":1}".into());
+        let mut lane = ClipboardLane::default();
+        lane.active = true;
+        lane.queue_initial(4, 8);
+        lane.queue_initial(5, 8);
+        let current = owner.attach();
+        assert!(!old.is_current());
+        assert!(current.is_current());
+        assert!(!mounted_effect_current(&old, 1, 1, None));
+        assert!(mounted_effect_current(&current, 1, 1, None));
+        assert_eq!(session.source(), "{\"draft\":1}");
+        assert_eq!(lane.take_ready(), None);
+        lane.active = false;
+        assert_eq!(lane.take_ready(), Some((5, 8)));
+        owner.retire();
+        assert!(!current.is_current());
+        assert!(!mounted_effect_current(&current, 1, 1, None));
     }
 
     #[test]
