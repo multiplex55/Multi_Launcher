@@ -283,22 +283,37 @@ fn checked_with(
     launch(&shortcut)
 }
 
+fn spawn_shortcut_with(
+    shortcut: &Shortcut,
+    is_current: impl FnOnce() -> bool,
+    spawn: impl FnOnce(&mut std::process::Command) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut command = std::process::Command::new(&shortcut.target);
+    command.current_dir(&shortcut.directory);
+    if !shortcut.arguments.is_empty() {
+        command.raw_arg(&shortcut.arguments);
+    }
+    anyhow::ensure!(is_current(), "Indexed application is no longer current");
+    spawn(&mut command)
+}
+
 pub fn launch_shortcut(path: impl AsRef<OsStr>) -> anyhow::Result<()> {
+    launch_shortcut_if_current(path, || true)
+}
+
+/// Recheck the caller's authority after all shortcut validation and command setup.
+pub fn launch_shortcut_if_current(
+    path: impl AsRef<OsStr>,
+    is_current: impl FnOnce() -> bool,
+) -> anyhow::Result<()> {
     checked_with(
         Path::new(path.as_ref()),
         check_local_object,
         read_shortcut,
-        |shortcut| {
-            let mut command = std::process::Command::new(&shortcut.target);
-            command.current_dir(&shortcut.directory);
-            if !shortcut.arguments.is_empty() {
-                command.raw_arg(&shortcut.arguments);
-            }
-            command
-                .spawn()
-                .context("Cannot launch shortcut executable")?;
+        |shortcut| spawn_shortcut_with(shortcut, is_current, |command| {
+            command.spawn().context("Cannot launch shortcut executable")?;
             Ok(())
-        },
+        }),
     )
 }
 
@@ -315,6 +330,23 @@ mod tests {
             flags: 0xBB,
             show: SW_SHOWNORMAL.0,
         }
+    }
+
+    #[test]
+    fn shortcut_revocation_after_validation_prevents_spawn() {
+        use std::cell::Cell;
+        let current = Cell::new(true);
+        let path = Path::new(r"C:\Links\Tool.lnk");
+        let result = checked_with(
+            path,
+            |path, _| {
+                if path == Path::new(r"C:\Work Folder") { current.set(false); }
+                Ok(())
+            },
+            |_| Ok(shortcut()),
+            |shortcut| spawn_shortcut_with(shortcut, || current.get(), |_| panic!("revoked shortcut spawned")),
+        );
+        assert_eq!(result.unwrap_err().to_string(), "Indexed application is no longer current");
     }
 
     #[test]

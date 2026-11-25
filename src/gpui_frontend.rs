@@ -341,6 +341,14 @@ impl LauncherSearchCatalog {
         true
     }
 
+    fn clear_index(&mut self) {
+        self.actions.truncate(self.saved_count);
+        self.cached_entries.truncate(self.saved_count);
+        self.filter_metadata.truncate(self.saved_count);
+        self.index_generation = None;
+        self.indexed_completion_index = None;
+    }
+
     fn install_index(&mut self, snapshot: indexed_applications::Snapshot) -> indexed_applications::Identity {
         self.actions.truncate(self.saved_count);
         self.cached_entries.truncate(self.saved_count);
@@ -350,7 +358,7 @@ impl LauncherSearchCatalog {
         self.filter_metadata.extend(snapshot.metadata);
         self.index_generation = Some(snapshot.generation);
         self.indexed_completion_index = Some(snapshot.completion_index);
-        indexed_applications::Identity { generation: snapshot.generation, roots: snapshot.roots, raw_actions: snapshot.raw_actions }
+        indexed_applications::Identity { generation: snapshot.generation, roots: snapshot.roots, raw_actions: snapshot.raw_actions, authority: Arc::new(AtomicBool::new(true)) }
     }
 
     fn saved_actions(&self) -> &[Action] {
@@ -1280,6 +1288,8 @@ struct SettingsEditorPanel {
     available: bool,
     dirty: bool,
     status: Option<String>,
+    index_busy: bool,
+    index_status: Option<String>,
     width: f32,
     metrics: multi_launcher::gui::theme::ThemeMetrics,
     palette: multi_launcher::gui::theme::SemanticPalette,
@@ -1780,6 +1790,7 @@ impl RenderOnce for SettingsEditorPanel {
             );
 
         let save_root = self.root.clone();
+        let reload_root = self.root.clone();
         let cancel_root = self.root;
         div()
             .id("settings-editor")
@@ -1807,6 +1818,19 @@ impl RenderOnce for SettingsEditorPanel {
                     .line_height(px(self.metrics.line_height)),
             )
             .child(checkbox)
+            .child(
+                Button::new("settings-reload-application-index")
+                    .label("Reload application index")
+                    .disabled(self.index_busy || self.saving || self.reading)
+                    .on_click(move |_, _, app| {
+                        let _ = reload_root.update(app, |root, cx| root.reload_application_index(cx));
+                    }),
+            )
+            .children(self.index_status.map(|status| {
+                Label::new(status).id("settings-index-status")
+                    .text_size(px(self.metrics.small_text_size))
+                    .line_height(px(self.metrics.line_height))
+            }))
             .children(status.map(|message| {
                 Label::new(message)
                     .id("settings-save-status")
@@ -7810,7 +7834,7 @@ impl RootWindow {
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Indexed { .. }) {
-            if let Some(roots) = indexed_applications::admitted_result(
+            if let Some(authority) = indexed_applications::admitted_result(
                 &result,
                 self.indexed_applications.snapshot.as_ref(),
                 &self.search_catalog.actions[self.search_catalog.saved_count..],
@@ -7819,7 +7843,7 @@ impl RootWindow {
                     target: result.action.action.clone(), args: None, namespace: None,
                 };
                 self.start_indexed_launch(
-                    result.action, command, roots.to_vec(), query, source,
+                    result.action, command, authority, query, source,
                     result.display_label, window, cx,
                 );
             }
@@ -10093,6 +10117,8 @@ impl Render for RootWindow {
             available: self.settings_editor.available,
             dirty: self.settings_editor.is_dirty(),
             status: self.settings_editor.status.clone(),
+            index_busy: self.indexed_applications.busy(),
+            index_status: self.indexed_applications.status.clone(),
             width: root_controls_width,
             metrics,
             palette,

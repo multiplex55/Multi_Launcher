@@ -11,17 +11,58 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Default)]
-pub(super) struct Owner {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Reading,
+    Scanning,
+}
+
+struct Operation {
+    epoch: u64,
+    phase: Phase,
+    config: Option<IndexConfig>,
     cancelled: Arc<AtomicBool>,
     coordinator: Arc<Mutex<Option<Arc<IndexCoordinator>>>>,
+}
+impl Operation {
+    fn stop(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        let coordinator = self
+            .coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(coordinator) = coordinator {
+            let _ = coordinator.shutdown();
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Owner {
+    retired: bool,
+    next_epoch: u64,
+    active: Option<Operation>,
+    pub status: Option<String>,
     pub snapshot: Option<Identity>,
+}
+
+#[derive(Clone)]
+pub(super) struct LaunchAuthority {
+    pub roots: Vec<std::path::PathBuf>,
+    current: Arc<AtomicBool>,
+}
+impl LaunchAuthority {
+    pub(super) fn is_current(&self) -> bool {
+        self.current.load(Ordering::Acquire)
+    }
 }
 
 pub(super) struct Identity {
     pub generation: u64,
     pub roots: Vec<std::path::PathBuf>,
     pub raw_actions: Arc<Vec<Action>>,
+    pub authority: Arc<AtomicBool>,
 }
 
 impl Identity {
@@ -32,22 +73,27 @@ impl Identity {
         actions: &[Action],
         action: &Action,
     ) -> bool {
-        self.generation == generation && actions.get(index) == Some(action)
+        self.authority.load(Ordering::Acquire)
+            && self.generation == generation
+            && actions.get(index) == Some(action)
     }
 }
 
-pub(super) fn admitted_result<'a>(
+pub(super) fn admitted_result(
     result: &super::LauncherSearchResult,
-    identity: Option<&'a Identity>,
+    identity: Option<&Identity>,
     indexed_actions: &[Action],
-) -> Option<&'a [std::path::PathBuf]> {
+) -> Option<LaunchAuthority> {
     let super::LauncherResultOrigin::Indexed { generation, index } = &result.origin else {
         return None;
     };
     let identity = identity?;
     identity
         .admits(*generation, *index, indexed_actions, &result.action)
-        .then_some(identity.roots.as_slice())
+        .then(|| LaunchAuthority {
+            roots: identity.roots.clone(),
+            current: identity.authority.clone(),
+        })
 }
 
 pub(super) struct Snapshot {
@@ -62,16 +108,60 @@ pub(super) struct Snapshot {
 }
 
 impl Owner {
-    pub fn retire(&mut self) {
-        self.cancelled.store(true, Ordering::Release);
-        let coordinator = self
-            .coordinator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(coordinator) = coordinator {
-            let _ = coordinator.shutdown();
+    pub fn busy(&self) -> bool {
+        self.active.is_some()
+    }
+
+    fn begin(&mut self, phase: Phase, config: Option<IndexConfig>) -> Option<u64> {
+        if self.retired || self.active.is_some() {
+            return None;
         }
+        self.next_epoch = self.next_epoch.checked_add(1)?;
+        let epoch = self.next_epoch;
+        self.active = Some(Operation {
+            epoch,
+            phase,
+            config,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            coordinator: Arc::new(Mutex::new(None)),
+        });
+        Some(epoch)
+    }
+
+    fn matches(&self, epoch: u64, phase: Phase, config: Option<&IndexConfig>) -> bool {
+        !self.retired
+            && self.active.as_ref().is_some_and(|operation| {
+                operation.epoch == epoch
+                    && operation.phase == phase
+                    && operation.config.as_ref() == config
+                    && !operation.cancelled.load(Ordering::Acquire)
+            })
+    }
+
+    fn finish(&mut self, epoch: u64) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|operation| operation.epoch == epoch)
+        {
+            if let Some(operation) = self.active.take() {
+                operation.stop();
+            }
+        }
+    }
+
+    fn revoke_snapshot(&mut self) {
+        if let Some(identity) = self.snapshot.take() {
+            identity.authority.store(false, Ordering::Release);
+        }
+    }
+
+    pub fn retire(&mut self) {
+        self.retired = true;
+        if let Some(operation) = self.active.take() {
+            operation.stop();
+        }
+        self.revoke_snapshot();
     }
 }
 impl Drop for Owner {
@@ -144,10 +234,12 @@ pub(super) fn row_matches(action: &Action, roots: &[std::path::PathBuf]) -> bool
 pub(super) fn checked_launch_with(
     action: &Action,
     roots: &[std::path::PathBuf],
+    is_current: impl Fn() -> bool,
     launch_executable: impl FnOnce(&str) -> anyhow::Result<()>,
     launch_shortcut: impl FnOnce(&str) -> anyhow::Result<()>,
     launch_document: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(is_current(), "Indexed application is no longer current");
     anyhow::ensure!(
         row_matches(action, roots),
         "Invalid indexed application target"
@@ -155,6 +247,7 @@ pub(super) fn checked_launch_with(
     let target = ordinary_target(&action.action)
         .ok_or_else(|| anyhow::anyhow!("Invalid indexed application path"))?;
     multi_launcher::actions::exec::checked_local_file(std::path::Path::new(target.dos))?;
+    anyhow::ensure!(is_current(), "Indexed application is no longer current");
     match target.kind {
         IndexedKind::Executable => launch_executable(&action.action),
         IndexedKind::Shortcut => launch_shortcut(target.dos),
@@ -166,6 +259,7 @@ pub(super) fn checked_launch_with(
 pub(super) fn checked_launch_with(
     _: &Action,
     _: &[std::path::PathBuf],
+    _: impl Fn() -> bool,
     _: impl FnOnce(&str) -> anyhow::Result<()>,
     _: impl FnOnce(&str) -> anyhow::Result<()>,
     _: impl FnOnce(&str) -> anyhow::Result<()>,
@@ -276,39 +370,159 @@ impl RootWindow {
     pub(super) fn start_application_index(&mut self, cx: &mut Context<Self>) {
         let config = self.search_catalog.index_config.clone();
         if config.roots().is_empty() {
+            self.indexed_applications.status = Some("No index paths configured.".into());
             return;
         }
-        let cancelled = self.indexed_applications.cancelled.clone();
-        let slot = self.indexed_applications.coordinator.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { scan(config, cancelled, slot) });
+        let Some(epoch) = self
+            .indexed_applications
+            .begin(Phase::Scanning, Some(config.clone()))
+        else {
+            return;
+        };
+        self.indexed_applications.status = Some("Scanning application index…".into());
+        self.scan_application_index(epoch, config, cx);
+    }
+
+    pub(super) fn reload_application_index(&mut self, cx: &mut Context<Self>) {
+        if !self.settings_editor.open
+            || self.settings_editor.pending.is_some()
+            || self.settings_editor.read_pending.is_some()
+            || self.restart_admission.is_fenced()
+        {
+            return;
+        }
+        let Some(epoch) = self.indexed_applications.begin(Phase::Reading, None) else {
+            return;
+        };
+        self.indexed_applications.status = Some("Reading index settings…".into());
+        let path = self.settings_path.clone();
+        let task = cx.background_executor().spawn(async move {
+            multi_launcher::settings::Settings::read_current(path).map(|settings| {
+                IndexConfig::new(
+                    settings.index_paths.unwrap_or_default(),
+                    settings.max_indexed_items,
+                )
+            })
+        });
         let owner = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             let result = task.await;
             let _ = owner.update(cx, |root, cx| {
-                if root.indexed_applications.cancelled.load(Ordering::Acquire)
-                    || root.restart_admission.is_fenced()
+                if !root
+                    .indexed_applications
+                    .matches(epoch, Phase::Reading, None)
                 {
                     return;
                 }
+                if root.restart_admission.is_fenced() {
+                    root.indexed_applications.finish(epoch);
+                    root.indexed_applications.status = Some("Index reload cancelled.".into());
+                    cx.notify();
+                    return;
+                }
+                let config = match result {
+                    Ok(config) => config,
+                    Err(error) => {
+                        root.indexed_applications.finish(epoch);
+                        root.indexed_applications.status =
+                            Some(format!("Could not read index settings: {error:#}"));
+                        cx.notify();
+                        return;
+                    }
+                };
+                if config != root.search_catalog.index_config {
+                    root.indexed_applications.revoke_snapshot();
+                    root.search_catalog.clear_index();
+                    root.search_catalog.index_config = config.clone();
+                    if !config.roots().is_empty() {
+                        root.refresh_after_application_index(cx);
+                    }
+                }
+                if config.roots().is_empty() {
+                    root.indexed_applications.revoke_snapshot();
+                    root.search_catalog.clear_index();
+                    root.app_editor.set_index(epoch, Arc::new(Vec::new()));
+                    root.indexed_applications.finish(epoch);
+                    root.indexed_applications.status = Some("No index paths configured.".into());
+                    root.refresh_after_application_index(cx);
+                    cx.notify();
+                    return;
+                }
+                if let Some(operation) = root.indexed_applications.active.as_mut() {
+                    operation.phase = Phase::Scanning;
+                    operation.config = Some(config.clone());
+                }
+                root.indexed_applications.status = Some("Scanning application index…".into());
+                root.scan_application_index(epoch, config, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_after_application_index(&mut self, cx: &mut Context<Self>) {
+        let query = self.query.read(cx).value().to_string();
+        self.search_completion
+            .reset_for_query(&self.search_catalog, &query);
+        if query_needs_refresh(&query) {
+            self.refresh_launcher_results_with_viewport(query, false, cx);
+        }
+    }
+
+    fn scan_application_index(&mut self, epoch: u64, config: IndexConfig, cx: &mut Context<Self>) {
+        let Some(operation) = self.indexed_applications.active.as_ref() else {
+            return;
+        };
+        let cancelled = operation.cancelled.clone();
+        let slot = operation.coordinator.clone();
+        let scan_config = config.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { scan(scan_config, cancelled, slot) });
+        let owner = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = owner.update(cx, |root, cx| {
+                if !root
+                    .indexed_applications
+                    .matches(epoch, Phase::Scanning, Some(&config))
+                {
+                    return;
+                }
+                if root.restart_admission.is_fenced() {
+                    root.indexed_applications.finish(epoch);
+                    root.indexed_applications.status = Some("Index reload cancelled.".into());
+                    cx.notify();
+                    return;
+                }
+                root.indexed_applications.finish(epoch);
                 match result {
-                    Ok(snapshot) if snapshot.config == root.search_catalog.index_config => {
+                    Ok(mut snapshot)
+                        if snapshot.config == config
+                            && config == root.search_catalog.index_config =>
+                    {
+                        // Coordinator generations restart for each scan; the application epoch does not.
+                        snapshot.generation = epoch;
+                        root.indexed_applications.revoke_snapshot();
                         let identity = root.search_catalog.install_index(snapshot);
+                        let count = identity.raw_actions.len();
                         root.app_editor
                             .set_index(identity.generation, identity.raw_actions.clone());
                         root.indexed_applications.snapshot = Some(identity);
-                        let query = root.query.read(cx).value().to_string();
-                        root.search_completion
-                            .reset_for_query(&root.search_catalog, &query);
-                        if query_needs_refresh(&query) {
-                            root.refresh_launcher_results_with_viewport(query, false, cx);
-                        }
-                        cx.notify();
+                        root.indexed_applications.status = Some(format!("Indexed {count} items."));
+                        root.refresh_after_application_index(cx);
                     }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(error = %error, "Application index unavailable"),
+                    Ok(_) => {
+                        root.indexed_applications.status =
+                            Some("Index result was superseded.".into())
+                    }
+                    Err(error) => {
+                        root.indexed_applications.status =
+                            Some(format!("Could not scan application index: {error:#}"))
+                    }
                 }
+                cx.notify();
             });
         })
         .detach();
@@ -320,7 +534,7 @@ mod tests {
     use super::{checked_launch_with, ordinary_target, root_contains, row_matches};
     use multi_launcher::actions::Action;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, atomic::AtomicBool};
 
     fn row(path: &str) -> Action {
         Action {
@@ -329,6 +543,69 @@ mod tests {
             action: path.into(),
             args: None,
         }
+    }
+
+    #[test]
+    fn reload_epochs_fence_stale_phases_and_revoke_old_authority() {
+        use super::{Identity, Owner, Phase};
+        use multi_launcher::indexer::coordinator::IndexConfig;
+        use std::sync::atomic::Ordering;
+        let config = IndexConfig::new(vec![r"C:\Apps".into()], Some(8));
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut owner = Owner::default();
+        owner.snapshot = Some(Identity {
+            generation: 1,
+            roots: Vec::new(),
+            raw_actions: Arc::new(Vec::new()),
+            authority: flag.clone(),
+        });
+        let first = owner.begin(Phase::Reading, None).unwrap();
+        assert!(owner.matches(first, Phase::Reading, None));
+        assert!(owner.begin(Phase::Reading, None).is_none());
+        // A failed read or same-configuration scan does not revoke the accepted index.
+        owner.finish(first);
+        assert!(flag.load(Ordering::Acquire));
+        let second = owner.begin(Phase::Scanning, Some(config.clone())).unwrap();
+        assert_ne!(first, second);
+        assert!(!owner.matches(first, Phase::Scanning, Some(&config)));
+        assert!(!owner.matches(second, Phase::Reading, None));
+        assert!(owner.matches(second, Phase::Scanning, Some(&config)));
+        owner.finish(second);
+        assert!(flag.load(Ordering::Acquire));
+        // A changed/empty configuration or successful replacement retires queued effects.
+        owner.revoke_snapshot();
+        assert!(!flag.load(Ordering::Acquire));
+        owner.retire();
+        assert!(owner.begin(Phase::Reading, None).is_none());
+    }
+
+    #[test]
+    fn revoked_index_authority_stops_effect_after_file_validation() {
+        use std::cell::Cell;
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let root_text = root.to_str().unwrap();
+        let root_dos = PathBuf::from(root_text.strip_prefix(r"\\?\").unwrap_or(root_text));
+        let file = temp.path().join("Tool.exe");
+        std::fs::write(&file, b"fixture").unwrap();
+        let canonical = std::fs::canonicalize(file).unwrap();
+        let action = row(canonical.to_str().unwrap());
+        let checks = Cell::new(0);
+        assert!(
+            checked_launch_with(
+                &action,
+                &[root_dos],
+                || {
+                    checks.set(checks.get() + 1);
+                    checks.get() == 1
+                },
+                |_| panic!("revoked executable launched"),
+                |_| panic!("shortcut launched"),
+                |_| panic!("document launched")
+            )
+            .is_err()
+        );
+        assert_eq!(checks.get(), 2);
     }
 
     #[test]
@@ -348,6 +625,7 @@ mod tests {
             generation: 4,
             roots: Vec::new(),
             raw_actions: Arc::new(Vec::new()),
+            authority: Arc::new(AtomicBool::new(true)),
         };
         let first = row(r"C:\Apps\Tool.exe");
         let replacement = row(r"C:\Apps\Other.exe");
@@ -394,6 +672,7 @@ mod tests {
         checked_launch_with(
             &action,
             &[root_dos.clone()],
+            || true,
             |_| panic!("document dispatched as executable"),
             |_| panic!("document dispatched as shortcut"),
             |path| {
@@ -410,6 +689,7 @@ mod tests {
             checked_launch_with(
                 &action,
                 &[root_dos.clone()],
+                || true,
                 |_| panic!("missing executable"),
                 |_| panic!("missing shortcut"),
                 |_| panic!("missing document"),
@@ -421,6 +701,7 @@ mod tests {
             checked_launch_with(
                 &action,
                 &[root_dos],
+                || true,
                 |_| panic!("directory executable"),
                 |_| panic!("directory shortcut"),
                 |_| panic!("directory document"),
@@ -444,6 +725,7 @@ mod tests {
         checked_launch_with(
             &action,
             &[root_dos.clone()],
+            || true,
             |_| panic!("shortcut dispatched as executable"),
             |path| {
                 calls.push(path.to_owned());
@@ -458,6 +740,7 @@ mod tests {
             checked_launch_with(
                 &action,
                 &[root_dos.clone()],
+                || true,
                 |_| panic!("missing executable"),
                 |_| panic!("missing shortcut"),
                 |_| panic!("missing document"),
@@ -469,6 +752,7 @@ mod tests {
             checked_launch_with(
                 &action,
                 &[root_dos],
+                || true,
                 |_| panic!("directory executable"),
                 |_| panic!("directory shortcut"),
                 |_| panic!("directory document"),
@@ -495,6 +779,7 @@ mod tests {
         checked_launch_with(
             &action,
             &[root_dos.clone()],
+            || true,
             |target| {
                 calls.push(target.to_owned());
                 Ok(())
@@ -509,6 +794,7 @@ mod tests {
             checked_launch_with(
                 &action,
                 &[root_dos],
+                || true,
                 |_| panic!("stale indexed file launched"),
                 |_| panic!("stale shortcut launched"),
                 |_| panic!("stale document launched")

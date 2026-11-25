@@ -270,7 +270,7 @@ The shared composer supplies the command rows followed by the saved rows in cata
 
 GPUI starts a one-time stock scan of the configured absolute local index roots. It preserves the stock item cap and adds eligible executable rows after saved actions in blank browse and `app` Search. Indexed rows retain their own source identity through scoring and App Editor updates. Completion data is built off the UI thread. Publication updates suggestions for the current text and refreshes results only for blank and `app` Search.
 
-The existing launch worker checks the selected row's local path again before passing the exact stock target to the shared process launcher. History and Usage retain the stock target spelling. Live index settings, rescans, other discovery sources and large-catalog rendering remain open. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-indexed-local-windows-executable-execution)
+The existing launch worker checks the selected row's local path again before passing the exact stock target to the shared process launcher. History and Usage retain the stock target spelling. Other discovery sources and large Search catalog rendering remain open. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-indexed-local-windows-executable-execution)
 
 ## Checked indexed Windows shortcuts
 
@@ -279,6 +279,10 @@ Ordinary indexed `.lnk` rows use the same index provenance and checked worker. T
 ## Checked indexed local documents
 
 Indexed `.txt`, `.rtf`, `.pdf`, `.docx`, `.xlsx` and `.pptx` rows use the checked worker when their stock path and active index identity still match. The worker verifies the regular local file and gives its DOS path to the shared Windows association. Search and the Action Sheet preserve the stock indexed path for History and Usage. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-checked-indexed-local-documents)
+
+## Live application index reload
+
+Settings → Edit Settings → Reload application index reads the committed index roots and cap and scans again, including when the configuration is unchanged. Changing roots or cap retires the old Search rows and completions. Setting empty roots also clears the App Editor's indexed rows. A failed Settings read keeps the current index, and a failed replacement scan retains the last successful read-only App Editor rows. The checked launch worker revalidates the active index authority at the Windows launch boundary for executables, shortcuts and associations. Saved actions retain their own store and controls. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-g05-and-g06-live-application-index-reload)
 
 ## Action Sheet Execute for applications
 

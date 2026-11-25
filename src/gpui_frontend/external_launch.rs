@@ -531,7 +531,7 @@ pub(super) enum DiagnosticKind {
 #[derive(Clone)]
 pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
-    Indexed { command: ExternalCommand, roots: Vec<std::path::PathBuf> },
+    Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
     Copy(String),
     WindowSwitch(multi_launcher::window_activation::CheckedWindowSwitch),
     Calculator(super::calculator_search::ScalarResult),
@@ -654,22 +654,27 @@ impl ExternalCommandHost for Host {
 
 struct IndexedHost<'a> {
     host: &'a Host,
-    roots: &'a [std::path::PathBuf],
+    authority: &'a super::indexed_applications::LaunchAuthority,
 }
 impl ExternalCommandHost for IndexedHost<'_> {
     fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
         anyhow::ensure!(command.namespace.is_none() && command.args.is_none() && command.target == action.action, "Invalid indexed application command");
         super::indexed_applications::checked_launch_with(
             action,
-            self.roots,
-            |target| multi_launcher::actions::exec::launch(target, None),
+            &self.authority.roots,
+            || self.authority.is_current(),
+            |target| multi_launcher::actions::exec::launch_with_identity_if_current(
+                target, None, || self.authority.is_current(),
+            ).map(|_| ()),
             |path| {
                 #[cfg(windows)]
-                { multi_launcher::actions::exec::launch_shortcut(path) }
+                { multi_launcher::actions::exec::launch_shortcut_if_current(path, || self.authority.is_current()) }
                 #[cfg(not(windows))]
                 { let _ = path; anyhow::bail!("Indexed shortcuts require Windows") }
             },
-            |path| multi_launcher::actions::exec::launch_association(path),
+            |path| multi_launcher::actions::exec::launch_association_if_current(
+                path, || self.authority.is_current(),
+            ),
         )
     }
     fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
@@ -686,9 +691,9 @@ fn execute_request(
         RunCommand::External { command, .. } => CommandBus.dispatch_external(
             command, &request.action, request.source, None, host,
         ),
-        RunCommand::Indexed { command, roots } => {
+        RunCommand::Indexed { command, authority } => {
             CommandBus.dispatch_external(command, &request.action, request.source, None,
-                &mut IndexedHost { host, roots })
+                &mut IndexedHost { host, authority })
         }
         RunCommand::WindowSwitch(checked) => {
             let effect = multi_launcher::window_activation::activate_checked_window_switch(checked.clone())
@@ -848,11 +853,11 @@ impl RootWindow {
     }
 
     pub(super) fn start_indexed_launch(
-        &mut self, action: Action, command: ExternalCommand, roots: Vec<std::path::PathBuf>,
+        &mut self, action: Action, command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority,
         query: String, source: ActivationSource, history_label: Option<String>,
         window: &mut Window, cx: &mut Context<Self>,
     ) {
-        self.start_run(action, RunCommand::Indexed { command, roots }, query, source, history_label, window, cx);
+        self.start_run(action, RunCommand::Indexed { command, authority }, query, source, history_label, window, cx);
     }
 
     pub(super) fn start_date_launch(

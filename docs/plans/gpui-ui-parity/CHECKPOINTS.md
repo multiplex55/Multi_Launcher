@@ -1023,3 +1023,7 @@ GPUI admits the six document extensions supported by the checked saved-document 
 ## G06 read-only indexed App Editor catalog
 
 The existing acknowledged index now supplies the stock read-only App Editor tail alongside the checked Search projection. The GPUI catalog displays saved rows first and virtualizes the indexed rows. Thirteen focused tests passed. Matched 1516 × 937 Windows runs verified filtering, stock order and the same full indexed paths. GPUI also verified safe saved Edit and Remove, Refresh and reopen, and compact wheel travel with Search and the footer visible. The G06 Repair and recovery criteria remain open. Continue with live application index settings and rescan ownership. [Exact receipts](VALIDATION_LOG.md#g06-read-only-indexed-app-editor-catalog)
+
+## G02, G05 and G06 live application index reload
+
+The GPUI Settings action reads the committed roots and cap and rescans through the stock coordinator. Each accepted result updates the checked Search and read-only App Editor catalogs with current saved rows. Nineteen focused tests passed. Windows verified same-config discovery and one exact indexed document activation, replacement roots, retained data on read or scan failure, and empty-root clearing. Matched egui kept its committed Settings Save path and displayed the same replacement catalog at 1516 × 937. Continue the checked typed File Search entry point into the existing Hash handoff. Known-duration global invocation and mixed DPI remain open. [Exact receipts](VALIDATION_LOG.md#g02-g05-and-g06-live-application-index-reload)

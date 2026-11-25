@@ -47,6 +47,10 @@ Retain raw unowned JSON values in the patch transaction so opaque numbers and ne
 
 The owned `settings-g06-typed-opaque-exact-number-seed.json` (`F7999AD7…`) extends the verified Settings-enabled profile with two synthetic signed large integers in an unknown nested object. It can verify the one-leaf write without using a production settings file.
 
+## Reload application index
+
+The GPUI Settings action reads the committed `index_paths` and `max_indexed_items` through the shared Settings transaction and shows the scan result. It is available with a clean or dirty Query Autocomplete draft when no Settings read, save or index scan is active. Reload keeps the draft and Settings bytes intact. The egui Settings Save applies its acknowledged index configuration through the stock coordinator. [Launcher index behavior](launcher.md#live-application-index-reload)
+
 On the current terminal receipt, advance the editor baseline and apply the real GPUI completion preference. Reuse the live Search query to refresh suggestions and reset the cycle while keeping its existing text, caret, result selection and history. Hidden or unfocused root must still receive the worker receipt. Ordinary quit cancels eligible pending work and uses checked registry retirement. Test opaque values, conflicting owned data, malformed input, current acknowledgement and failure. Use the owned Unicode completion fixture for native Save, second Save, Cancel, write failure and same-profile reopen. This verifies one control within SETTINGS-04. The broader Settings controls and G06-D round trip are pending. The current egui close writer uses typed `Settings::update` and can drop unmodeled JSON fields, so G06-D must account for that writer.
 
 For the scoped Windows write-failure check, hold the owned Settings file open for shared reads without delete sharing. Verify that the real atomic replacement reports failure, the prior bytes and live completion preference remain effective, and the editor keeps the draft. Release the test handle before retrying Save.

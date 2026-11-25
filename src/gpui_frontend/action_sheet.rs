@@ -586,6 +586,7 @@ mod tests {
             generation: 8,
             roots: vec![std::path::PathBuf::from(r"C:\Apps")],
             raw_actions: std::sync::Arc::new(Vec::new()),
+            authority: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         #[cfg(windows)]
         assert!(super::super::indexed_applications::row_matches(&indexed_action, &identity.roots));
