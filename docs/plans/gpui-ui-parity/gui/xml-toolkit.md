@@ -24,4 +24,8 @@ Format and Minify use the exact current parsed source. The Output tab previews u
 
 The Tree tab uses the stock projection and one-shot inspection model. Virtual rows use typed document and node identities. The view preserves child order and omission markers, bounds the details preview, and copies the full value or fragment only on explicit request. The focused batch passed the real Windows Tree engine and the stock XPath consumers. Paired desktop replay still needs the namespaced, repeated-sibling and long-value fixture.
 
-XPath, local schema, owned file effects, and remembered native presentation and pin retain their assigned criteria.
+## GPUI XPath
+
+The XPath tab uses the stock expression and namespace request model. It distinguishes empty matches, scalar output and errors. Virtual nodes support wrap navigation and exact Tree reveal. Copy uses full scalars or the exact current node through the shared clipboard lane. Focused namespace, request, navigation and Windows engine tests passed. Paired desktop replay still needs prefixed nodes and attributes, scalar and empty results, invalid expressions, and exact copies after navigation.
+
+Local schema, owned file effects, and remembered native presentation and pin retain their assigned criteria.

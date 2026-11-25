@@ -366,6 +366,13 @@ impl XmlToolkitTreeViewState {
         }
     }
 
+    pub fn take_pending_scroll_row(&mut self) -> Option<usize> {
+        let target = self.pending_scroll_to.take()?;
+        self.visible_rows
+            .iter()
+            .position(|row| row.node == Some(target))
+    }
+
     pub fn visible_contains(&self, node: XmlNodeId) -> bool {
         self.visible_rows.iter().any(|row| row.node == Some(node))
     }

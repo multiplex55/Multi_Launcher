@@ -1,255 +1,15 @@
-//! XPath query controls and result navigation for the XML toolkit.
-//!
-//! The view only edits query state and returns bounded requests/intents. The
-//! session executes XPath on its existing XML worker; result navigation is
-//! routed through the stable node identities owned by the XML tree view.
-
+//! Egui renderer for the shared XPath model.
 use crate::gui::jump_mode::TargetKind;
 use crate::gui::xml_toolkit_dialog::XmlJumpTargets;
 use crate::gui::xml_toolkit_tree::{XmlToolkitTreeIntents, XmlToolkitTreeViewState};
-use crate::xml_toolkit_engine::{
-    MAX_XPATH_EXPRESSION_BYTES, MAX_XPATH_NAMESPACE_BYTES, XmlEngineError, XmlNodeDetailKind,
-    XmlNodeSnapshot, XmlTreeNodeKind, validate_xpath_namespaces,
-};
-use crate::xml_toolkit_session::{
-    XmlNamespaceContextRevision, XmlParseStatus, XmlSessionSnapshot, XmlSourceRevision,
-    XmlTreeStatus, XmlXPathQueryRequest, XmlXPathRequestId, XmlXPathStatus,
-};
+use crate::xml_toolkit_engine::{MAX_XPATH_EXPRESSION_BYTES, MAX_XPATH_NAMESPACE_BYTES, XmlEngineError, XmlNodeDetailKind, XmlNodeSnapshot, XmlTreeNodeKind, validate_xpath_namespaces};
+use crate::xml_toolkit_session::{XmlNamespaceContextRevision, XmlParseStatus, XmlSessionSnapshot, XmlSourceRevision, XmlTreeStatus, XmlXPathQueryRequest, XmlXPathRequestId, XmlXPathStatus};
+use crate::xml_xpath_model::{NamespaceBindingEditorRow, NamespaceRowAction, VisibleXPathStatus, NavigationDirection, MAX_NAMESPACE_ROWS, MAX_RESULT_LABEL_CHARS, MAX_RESULT_VALUE_CHARS, navigation_target, result_label, node_kind_label, bounded_chars, bounded_prefix, truncate_utf8, cap_namespace_editor, xml_escaped_display};
+pub(crate) use crate::xml_xpath_model::{XmlToolkitXPathIntents, XmlToolkitXPathViewState};
 use eframe::egui;
 use std::sync::Arc;
-
-const MAX_NAMESPACE_ROWS: usize = 64;
-const MAX_RESULT_LABEL_CHARS: usize = 192;
-const MAX_RESULT_VALUE_CHARS: usize = 240;
 const XPATH_RESULT_ROW_HEIGHT: f32 = 22.0;
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct NamespaceBindingEditorRow {
-    id: u64,
-    prefix: String,
-    uri: String,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum NamespaceRowAction {
-    Add,
-    Remove(usize),
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct XmlToolkitXPathIntents {
-    /// Apply this first when both invalidation and a new request are returned.
-    pub invalidate: Option<XmlSourceRevision>,
-    pub query: Option<XmlXPathQueryRequest>,
-    pub tree: XmlToolkitTreeIntents,
-    /// A scalar copy is separately authorized and completed through
-    /// `take_valid_scalar_copy_completion` by the caller.
-    pub scalar_copy: Option<XmlXPathQueryRequest>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct XmlToolkitXPathViewState {
-    expression: String,
-    namespaces: Vec<NamespaceBindingEditorRow>,
-    pending_namespace_action: Option<NamespaceRowAction>,
-    namespace_context_revision: u64,
-    next_namespace_row: u64,
-    query_view_generation: u64,
-    next_request: u64,
-    revision: Option<XmlSourceRevision>,
-    active_request: Option<XmlXPathQueryRequest>,
-    selected_result: Option<usize>,
-    pending_result_scroll_to: Option<usize>,
-    latest_scalar_copy_request: Option<XmlXPathQueryRequest>,
-    navigation_unavailable: bool,
-    expression_was_clipped: bool,
-    namespaces_were_clipped: bool,
-    #[cfg(test)]
-    visible_rows: usize,
-    #[cfg(test)]
-    rendered_rows: usize,
-    #[cfg(test)]
-    max_rendered_result_row_height: f32,
-    #[cfg(test)]
-    result_scroll_requests: usize,
-    #[cfg(test)]
-    namespace_action_commits: usize,
-}
-
 impl XmlToolkitXPathViewState {
-    /// Drop local navigation/copy authority as soon as the accepted source
-    /// revision changes, even before a new parse completes.
-    pub(crate) fn sync(&mut self, snapshot: &XmlSessionSnapshot) {
-        if self.revision != snapshot.revision {
-            self.revision = snapshot.revision;
-            self.query_view_generation = self.query_view_generation.wrapping_add(1);
-            self.active_request = None;
-            self.selected_result = None;
-            self.pending_result_scroll_to = None;
-            self.latest_scalar_copy_request = None;
-            self.navigation_unavailable = false;
-        }
-    }
-
-    /// Completes only the latest explicit scalar-copy intent while its query,
-    /// document, and source revision still match the displayed result.
-    pub(crate) fn take_valid_scalar_copy_completion(
-        &mut self,
-        snapshot: &XmlSessionSnapshot,
-    ) -> Option<Arc<str>> {
-        let request = self.latest_scalar_copy_request.clone()?;
-        if !self.is_current_request(snapshot, &request) {
-            self.latest_scalar_copy_request = None;
-            return None;
-        }
-        match &snapshot.xpath {
-            XmlXPathStatus::ScalarText {
-                request: completed,
-                text,
-            } if completed == &request => {
-                self.latest_scalar_copy_request = None;
-                Some(Arc::clone(text))
-            }
-            _ => None,
-        }
-    }
-
-    fn is_current_request(
-        &self,
-        snapshot: &XmlSessionSnapshot,
-        request: &XmlXPathQueryRequest,
-    ) -> bool {
-        self.active_request.as_ref() == Some(request)
-            && self.revision == Some(request.revision)
-            && snapshot.revision == Some(request.revision)
-            && request.expression == self.expression
-            && request.namespace_context_revision
-                == XmlNamespaceContextRevision::from_counter(self.namespace_context_revision)
-    }
-
-    fn visible_status<'a>(&self, snapshot: &'a XmlSessionSnapshot) -> VisibleXPathStatus<'a> {
-        if self.revision != snapshot.revision {
-            return VisibleXPathStatus::NotRun;
-        }
-        match &snapshot.xpath {
-            XmlXPathStatus::Empty => VisibleXPathStatus::Empty,
-            XmlXPathStatus::Pending(request) if self.is_current_request(snapshot, request) => {
-                VisibleXPathStatus::Pending
-            }
-            XmlXPathStatus::Nodes { request, nodes }
-                if self.is_current_request(snapshot, request) =>
-            {
-                VisibleXPathStatus::Nodes(nodes)
-            }
-            XmlXPathStatus::ScalarText { request, text }
-                if self.is_current_request(snapshot, request) =>
-            {
-                VisibleXPathStatus::ScalarText(text)
-            }
-            XmlXPathStatus::Failed { request, error }
-                if self.is_current_request(snapshot, request) =>
-            {
-                VisibleXPathStatus::Failed(error)
-            }
-            XmlXPathStatus::NotRun
-            | XmlXPathStatus::Pending(_)
-            | XmlXPathStatus::Nodes { .. }
-            | XmlXPathStatus::ScalarText { .. }
-            | XmlXPathStatus::Failed { .. } => VisibleXPathStatus::NotRun,
-        }
-    }
-
-    fn invalidate_local_query(&mut self, tree: &mut XmlToolkitTreeViewState) {
-        self.query_view_generation = self.query_view_generation.wrapping_add(1);
-        self.active_request = None;
-        self.selected_result = None;
-        self.pending_result_scroll_to = None;
-        self.latest_scalar_copy_request = None;
-        self.navigation_unavailable = false;
-        tree.revoke_copy_authority();
-    }
-
-    fn navigate_to_result(
-        &mut self,
-        index: usize,
-        nodes: &[XmlNodeSnapshot],
-        tree: &mut XmlToolkitTreeViewState,
-    ) -> Option<XmlToolkitTreeIntents> {
-        let node = nodes.get(index)?;
-        self.selected_result = Some(index);
-        self.pending_result_scroll_to = Some(index);
-        match tree.reveal_node(node.id) {
-            Some(intents) => {
-                self.navigation_unavailable = false;
-                Some(intents)
-            }
-            None => {
-                self.navigation_unavailable = true;
-                None
-            }
-        }
-    }
-
-    fn request_result_copy(
-        &self,
-        index: usize,
-        kind: XmlNodeDetailKind,
-        snapshot: &XmlSessionSnapshot,
-        tree: &mut XmlToolkitTreeViewState,
-    ) -> Option<XmlToolkitTreeIntents> {
-        let VisibleXPathStatus::Nodes(nodes) = self.visible_status(snapshot) else {
-            return None;
-        };
-        if self.selected_result != Some(index) {
-            return None;
-        }
-        let node = nodes.get(index)?;
-        if tree.projection()?.node(node.id).is_none() {
-            return None;
-        }
-        tree.request_node_copy(node.id, kind)
-    }
-
-    fn authorize_scalar_copy(
-        &mut self,
-        snapshot: &XmlSessionSnapshot,
-    ) -> Option<XmlXPathQueryRequest> {
-        let request = self.active_request.as_ref()?.clone();
-        if !self.is_current_request(snapshot, &request)
-            || !matches!(
-                self.visible_status(snapshot),
-                VisibleXPathStatus::ScalarText(_)
-            )
-        {
-            return None;
-        }
-        self.latest_scalar_copy_request = Some(request.clone());
-        Some(request)
-    }
-
-    fn next_query_request(
-        &mut self,
-        revision: XmlSourceRevision,
-        document: crate::xml_toolkit_engine::XmlDocumentId,
-    ) -> Option<XmlXPathQueryRequest> {
-        let request = self.next_request;
-        self.next_request = self.next_request.checked_add(1)?;
-        Some(XmlXPathQueryRequest {
-            revision,
-            document,
-            request: XmlXPathRequestId::from_counter(request),
-            expression: self.expression.clone(),
-            namespace_context_revision: XmlNamespaceContextRevision::from_counter(
-                self.namespace_context_revision,
-            ),
-            namespaces: self
-                .namespaces
-                .iter()
-                .map(|binding| (binding.prefix.clone(), binding.uri.clone()))
-                .collect(),
-        })
-    }
-
     /// Draw the XPath editor and bounded virtual result list. Query work,
     /// session invalidation, and explicit clipboard publication are returned
     /// to the caller as intents; no synchronous engine or clipboard operation
@@ -844,111 +604,6 @@ impl XmlToolkitXPathViewState {
     }
 }
 
-enum VisibleXPathStatus<'a> {
-    Empty,
-    NotRun,
-    Pending,
-    Nodes(&'a [XmlNodeSnapshot]),
-    ScalarText(&'a str),
-    Failed(&'a XmlEngineError),
-}
-
-#[derive(Clone, Copy)]
-enum NavigationDirection {
-    Previous,
-    Next,
-}
-
-fn navigation_target(
-    count: usize,
-    current: Option<usize>,
-    direction: NavigationDirection,
-) -> Option<usize> {
-    if count == 0 {
-        return None;
-    }
-    Some(match (current, direction) {
-        (None, NavigationDirection::Previous) => count - 1,
-        (None, NavigationDirection::Next) => 0,
-        (Some(index), NavigationDirection::Previous) => (index % count + count - 1) % count,
-        (Some(index), NavigationDirection::Next) => (index + 1) % count,
-    })
-}
-
-fn result_label(index: usize, node: &XmlNodeSnapshot) -> String {
-    let mut label = format!(
-        "{:>5}. {} {}",
-        index + 1,
-        node_kind_label(node.kind),
-        bounded_chars(&node.qualified_name, MAX_RESULT_LABEL_CHARS)
-    );
-    if !node.value.is_empty() {
-        label.push_str("  ");
-        label.push_str(&xml_escaped_display(bounded_chars(
-            &node.value,
-            MAX_RESULT_VALUE_CHARS,
-        )));
-    }
-    label
-}
-
-fn node_kind_label(kind: XmlTreeNodeKind) -> &'static str {
-    match kind {
-        XmlTreeNodeKind::Document => "Document",
-        XmlTreeNodeKind::Element => "Element",
-        XmlTreeNodeKind::Attribute => "Attribute",
-        XmlTreeNodeKind::Text => "Text",
-        XmlTreeNodeKind::CData => "CDATA",
-        XmlTreeNodeKind::Comment => "Comment",
-        XmlTreeNodeKind::ProcessingInstruction => "Processing instruction",
-        XmlTreeNodeKind::Other => "Other",
-    }
-}
-
-fn bounded_chars(value: &str, max_chars: usize) -> &str {
-    value
-        .char_indices()
-        .nth(max_chars)
-        .map_or(value, |(index, _)| &value[..index])
-}
-
-fn bounded_prefix(value: &str, max_chars: usize) -> (&str, bool) {
-    let mut chars = value.char_indices();
-    if let Some((index, _)) = chars.nth(max_chars) {
-        (&value[..index], true)
-    } else {
-        (value, false)
-    }
-}
-
-fn truncate_utf8(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
-}
-
-fn cap_namespace_editor(rows: &mut [NamespaceBindingEditorRow]) -> bool {
-    let mut remaining = MAX_XPATH_NAMESPACE_BYTES.saturating_sub(rows.len().saturating_mul(10));
-    let mut clipped = false;
-    for row in rows {
-        let prefix_len = row.prefix.len();
-        truncate_utf8(&mut row.prefix, remaining);
-        clipped |= row.prefix.len() != prefix_len;
-        remaining = remaining.saturating_sub(row.prefix.len());
-
-        let uri_len = row.uri.len();
-        truncate_utf8(&mut row.uri, remaining);
-        clipped |= row.uri.len() != uri_len;
-        remaining = remaining.saturating_sub(row.uri.len());
-    }
-    clipped
-}
-
 fn result_row_scroll_offset(
     row: usize,
     row_height: f32,
@@ -961,25 +616,6 @@ fn result_row_scroll_offset(
     let max_scroll = (content_height - viewport_height).max(0.0);
     let row_center = row as f32 * stride + row_height * 0.5;
     (row_center - viewport_height * 0.5).clamp(0.0, max_scroll)
-}
-
-fn xml_escaped_display(value: &str) -> String {
-    let mut display = String::new();
-    for ch in value.chars() {
-        match ch {
-            '&' => display.push_str("&amp;"),
-            '<' => display.push_str("&lt;"),
-            '>' => display.push_str("&gt;"),
-            '"' => display.push_str("&quot;"),
-            '\'' => display.push_str("&apos;"),
-            '\n' => display.push_str("\\n"),
-            '\r' => display.push_str("\\r"),
-            '\t' => display.push_str("\\t"),
-            ch if ch.is_control() => display.push('�'),
-            ch => display.push(ch),
-        }
-    }
-    display
 }
 
 #[cfg(test)]
@@ -1130,6 +766,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn xpath_model_namespaces_rerun_and_full_scalar_are_current() {
+        let revision = XmlSourceRevision::for_test(12);
+        let (projection, _, _, _, _, _) = fixture(12);
+        let seed = make_request(revision, projection.document, 99, "//p:item", Vec::new());
+        let base = scalar_snapshot(revision, Arc::clone(&projection), seed, "old");
+        let mut tree = XmlToolkitTreeViewState::default();
+        tree.sync(&base);
+        let mut view = XmlToolkitXPathViewState::default();
+        view.sync(&base);
+        assert!(view.edit_expression("//p:item".into(), &mut tree));
+        let id = view.add_namespace(&mut tree).unwrap();
+        assert!(view.edit_namespace(id, "p".into(), "urn:items".into(), &mut tree));
+        let duplicate = view.add_namespace(&mut tree).unwrap();
+        assert!(view.edit_namespace(duplicate, "p".into(), "urn:other".into(), &mut tree));
+        assert!(view.namespace_error().is_some());
+        assert!(view.remove_namespace(duplicate, &mut tree));
+        assert!(view.namespace_error().is_none());
+        let first = view.run(&base, &mut tree).unwrap();
+        let second = view.run(&base, &mut tree).unwrap();
+        assert_ne!(first.request, second.request);
+        let stale = scalar_snapshot(revision, Arc::clone(&projection), first, "stale");
+        assert!(matches!(view.visible_status(&stale), VisibleXPathStatus::NotRun));
+        let full = "é🦀".repeat(1_000);
+        let current = scalar_snapshot(revision, projection, second, &full);
+        assert!(view.authorize_scalar_copy(&current).is_some());
+        assert_eq!(view.take_valid_scalar_copy_completion(&current).as_deref(), Some(full.as_str()));
+        assert!(view.take_valid_scalar_copy_completion(&current).is_none());
+        assert!(view.remove_namespace(id, &mut tree));
+        assert!(matches!(view.visible_status(&current), VisibleXPathStatus::NotRun));
+    }
+
     fn run_view_frame(
         context: &egui::Context,
         view: &mut XmlToolkitXPathViewState,
@@ -1242,7 +910,7 @@ mod tests {
             expression: request.expression.clone(),
             namespace_context_revision: 0,
             revision: Some(revision),
-            active_request: Some(request),
+            active_request: Some(request.clone()),
             ..Default::default()
         };
         let mut tree = XmlToolkitTreeViewState::default();
@@ -1267,6 +935,15 @@ mod tests {
                     && request.kind == XmlNodeDetailKind::AttributeValue
                     && request.intent == crate::xml_toolkit_session::XmlDetailIntent::Inspect
         ));
+        assert!(view.current_selected_node(&snapshot, 0, attribute, &request));
+        assert!(!view.current_selected_node(&snapshot, 1, attribute, &request));
+        assert!(!view.current_selected_node(&snapshot, 0, first, &request));
+        let stale = make_request(revision, projection.document, 9, "//p:item/@id", vec![("p".into(), "urn:items".into())]);
+        assert!(!view.current_selected_node(&snapshot, 0, attribute, &stale));
+        tree.select_node(first).unwrap();
+        assert!(view.current_selected_node(&snapshot, 0, attribute, &request));
+        view.navigate(0, &snapshot, &mut tree).unwrap();
+        assert_eq!(tree.selected().unwrap().node, attribute);
     }
 
     #[test]

@@ -25,6 +25,7 @@ mod wake;
 mod json_utility;
 mod xml_utility;
 mod xml_tree;
+mod xml_xpath;
 mod json_tree;
 mod json_host;
 mod utility_mount;

@@ -3,10 +3,12 @@ use super::*;
 use multi_launcher::commands::{XmlToolkitCommand, XmlToolkitCommandHost};
 use multi_launcher::xml_toolkit_engine::{XmlFormatMode, XmlNodeDetailKind, XmlNodeId};
 use multi_launcher::xml_toolkit_session::{
-    XmlDetailIntent, XmlDetailStatus, XmlEngineSession, XmlNodeDetailOutput, XmlNodeSelection,
-    XmlOutputStatus, XmlParseStatus, XmlSessionSnapshot, XmlSourceRevision, XmlTreeStatus,
+    XmlDetailIntent, XmlDetailStatus, XmlEngineSession, XmlNodeDetailOutput, XmlNodeDetailRequest,
+    XmlNodeSelection, XmlOutputStatus, XmlParseStatus, XmlSessionSnapshot, XmlSourceRevision,
+    XmlTreeStatus, XmlXPathQueryRequest,
 };
 use multi_launcher::xml_tree_model::{default_detail_kind, XmlToolkitTreeViewState};
+use multi_launcher::xml_xpath_model::{VisibleXPathStatus, XmlToolkitXPathViewState};
 
 pub(super) fn provider_is_current(
     query: &str,
@@ -80,6 +82,7 @@ enum ClipboardIntent {
     Source,
     Output,
     Tree,
+    Scalar,
 }
 fn output_receipt_current(current: u64, expected: u64) -> bool {
     current == expected
@@ -92,12 +95,22 @@ fn snapshot_pending(snapshot: &XmlSessionSnapshot) -> bool {
         || matches!(snapshot.output, XmlOutputStatus::Pending(_))
         || matches!(snapshot.tree, XmlTreeStatus::Pending)
         || matches!(snapshot.detail, XmlDetailStatus::Pending(_))
+        || matches!(
+            snapshot.xpath,
+            multi_launcher::xml_toolkit_session::XmlXPathStatus::Pending(_)
+        )
 }
 enum Engine {
     Idle,
     Starting { cancel: bool },
     Active(XmlEngineSession),
     Closing(XmlEngineSession),
+}
+pub(super) struct XPathBinding {
+    pub(super) id: u64,
+    pub(super) prefix: Entity<InputState>,
+    pub(super) uri: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
 }
 pub(super) struct XmlWorkspace {
     pub(super) open: bool,
@@ -107,17 +120,26 @@ pub(super) struct XmlWorkspace {
     return_focus: Option<FocusHandle>,
     output_focus: FocusHandle,
     tree_focus: FocusHandle,
+    xpath_focus: FocusHandle,
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     epoch: Arc<AtomicU64>,
     output_epoch: Arc<AtomicU64>,
     output_tab: bool,
     pub(super) tree_tab: bool,
+    pub(super) xpath_tab: bool,
+    pub(super) xpath: XmlToolkitXPathViewState,
+    pub(super) xpath_expression: Entity<InputState>,
+    pub(super) xpath_bindings: Vec<XPathBinding>,
+    pub(super) xpath_namespaces_open: bool,
+    pub(super) xpath_scroll: gpui_kit::UniformListScrollHandle,
+    xpath_epoch: Arc<AtomicU64>,
     pub(super) tree: XmlToolkitTreeViewState,
     pub(super) tree_scroll: gpui_kit::UniformListScrollHandle,
     tree_epoch: Arc<AtomicU64>,
     tree_service_due: bool,
     tree_copy_visibility: Option<u64>,
+    tree_copy_request: Option<XmlNodeDetailRequest>,
     engine: Engine,
     accepted_revision: Option<XmlSourceRevision>,
     pumping: bool,
@@ -130,7 +152,8 @@ pub(super) struct XmlWorkspace {
     visibility: RootVisibility,
     admission: Arc<RestartAdmission>,
     activity: multi_launcher::activity::ActivityCenter,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
+    xpath_subscription: Option<Subscription>,
 }
 impl XmlWorkspace {
     fn new(
@@ -172,6 +195,26 @@ impl XmlWorkspace {
                 }
             },
         );
+        let xpath_expression =
+            cx.new(|cx| InputState::new(window, cx).placeholder("//item[@id='example']"));
+        let xpath_subscription = cx.subscribe(
+            &xpath_expression,
+            |view: &mut Self,
+             input: Entity<InputState>,
+             event: &InputEvent,
+             cx: &mut Context<Self>| {
+                if !view.xpath_live() || !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                let value = input.read(cx).value().to_string();
+                view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                view.tree_epoch.fetch_add(1, Ordering::AcqRel);
+                if view.xpath.edit_expression(value, &mut view.tree) {
+                    view.invalidate_xpath(cx);
+                    view.sync_xpath_editors(cx);
+                }
+            },
+        );
         Self {
             open: false,
             source: String::new(),
@@ -180,17 +223,26 @@ impl XmlWorkspace {
             return_focus: None,
             output_focus: cx.focus_handle(),
             tree_focus: cx.focus_handle(),
+            xpath_focus: cx.focus_handle(),
             owner,
             mount,
             epoch: Arc::new(AtomicU64::new(1)),
             output_epoch: Arc::new(AtomicU64::new(1)),
             output_tab: false,
             tree_tab: false,
+            xpath_tab: false,
+            xpath: XmlToolkitXPathViewState::default(),
+            xpath_expression,
+            xpath_bindings: Vec::new(),
+            xpath_namespaces_open: false,
+            xpath_scroll: gpui_kit::UniformListScrollHandle::default(),
+            xpath_epoch: Arc::new(AtomicU64::new(1)),
             tree: XmlToolkitTreeViewState::default(),
             tree_scroll: gpui_kit::UniformListScrollHandle::default(),
             tree_epoch: Arc::new(AtomicU64::new(1)),
             tree_service_due: false,
             tree_copy_visibility: None,
+            tree_copy_request: None,
             engine: Engine::Idle,
             accepted_revision: None,
             pumping: false,
@@ -203,7 +255,8 @@ impl XmlWorkspace {
             visibility,
             admission,
             activity,
-            _subscription: subscription,
+            _subscriptions: vec![subscription],
+            xpath_subscription: Some(xpath_subscription),
         }
     }
     fn start(&mut self, cx: &mut Context<Self>) {
@@ -261,8 +314,10 @@ impl XmlWorkspace {
     }
     fn submit(&mut self, cx: &mut Context<Self>) {
         self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.xpath_epoch.fetch_add(1, Ordering::AcqRel);
         self.tree.revoke_copy_authority();
         self.tree_copy_visibility = None;
+        self.tree_copy_request = None;
         self.tree_service_due = false;
         self.tree_scroll = gpui_kit::UniformListScrollHandle::default();
         self.output_epoch.fetch_add(1, Ordering::AcqRel);
@@ -348,7 +403,12 @@ impl XmlWorkspace {
         self.tree_epoch.fetch_add(1, Ordering::AcqRel);
         self.tree.revoke_copy_authority();
         self.tree.sync(&XmlSessionSnapshot::default());
+        self.xpath.sync(&XmlSessionSnapshot::default());
+        self.xpath_subscription.take();
+        self.xpath_bindings.clear();
+        self.xpath_epoch.fetch_add(1, Ordering::AcqRel);
         self.tree_copy_visibility = None;
+        self.tree_copy_request = None;
         self.tree_service_due = false;
         self.epoch.fetch_add(1, Ordering::AcqRel);
         let state = std::mem::replace(&mut self.engine, Engine::Idle);
@@ -374,13 +434,16 @@ impl XmlWorkspace {
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open {
             self.mount = self.owner.attach();
+            self.mount_xpath_editors(window, cx);
             self.open = true;
             self.start(cx);
         }
         if self.open && matches!(self.engine, Engine::Idle) {
             self.start(cx);
         }
-        if self.tree_tab {
+        if self.xpath_tab {
+            self.xpath_focus.focus(window, cx);
+        } else if self.tree_tab {
             self.tree_focus.focus(window, cx);
         } else if self.output_tab {
             self.output_focus.focus(window, cx);
@@ -431,6 +494,7 @@ impl XmlWorkspace {
         self.tree_epoch.fetch_add(1, Ordering::AcqRel);
         self.tree.revoke_copy_authority();
         self.tree_copy_visibility = None;
+        self.tree_copy_request = None;
         self.tree.toggle_expansion(node);
         cx.notify();
     }
@@ -449,6 +513,7 @@ impl XmlWorkspace {
         self.tree_epoch.fetch_add(1, Ordering::AcqRel);
         self.tree.revoke_copy_authority();
         self.tree_copy_visibility = None;
+        self.tree_copy_request = None;
         if let Some(selection) = self.tree.select_node(node) {
             let kind = self
                 .tree
@@ -485,11 +550,13 @@ impl XmlWorkspace {
         let Some(request) = self.tree.request_detail(kind, intent) else {
             return;
         };
+        self.tree_copy_request = (intent == XmlDetailIntent::Copy).then_some(request);
         self.tree_service_due = true;
         if let Engine::Active(session) = &self.engine {
             if let Err(error) = session.request_detail(request) {
                 self.tree_service_due = false;
                 self.tree_copy_visibility = None;
+                self.tree_copy_request = None;
                 self.tree.revoke_copy_authority();
                 self.feedback = Some(format!("Could not inspect XML node: {error:?}"));
             }
@@ -499,10 +566,11 @@ impl XmlWorkspace {
     }
     fn service_tree(&mut self, snapshot: &XmlSessionSnapshot, cx: &mut Context<Self>) {
         self.tree.sync(snapshot);
+        self.xpath.sync(snapshot);
         if !matches!(snapshot.detail, XmlDetailStatus::Pending(_)) {
             self.tree_service_due = false;
         }
-        if self.tree_live() && !self.clipboard_pending {
+        if (self.tree_live() || self.xpath_live()) && !self.clipboard_pending {
             if let Some(revision) = self.tree_copy_visibility {
                 if !json_utility::native_host_current(
                     &self.visibility,
@@ -511,10 +579,12 @@ impl XmlWorkspace {
                     false,
                 ) {
                     self.tree_copy_visibility = None;
+                    self.tree_copy_request = None;
                     self.tree.revoke_copy_authority();
                 } else if let Some(output) = self.tree.take_valid_copy_completion(snapshot) {
                     self.tree_copy_visibility = None;
-                    self.clipboard(ClipboardIntent::Tree, Some((output, revision)), cx);
+                    self.tree_copy_request = None;
+                    self.clipboard(ClipboardIntent::Tree, Some((output, revision)), None, cx);
                 }
             }
         }
@@ -523,6 +593,363 @@ impl XmlWorkspace {
         if let Some(snapshot) = self.current_snapshot() {
             self.service_tree(&snapshot, cx);
         }
+    }
+    pub(super) fn clipboard_available(&self) -> bool {
+        !self.clipboard_pending
+    }
+    pub(super) fn xpath_live(&self) -> bool {
+        self.open && self.xpath_tab && self.mount.is_current() && !self.admission.is_fenced()
+    }
+    fn invalidate_xpath(&mut self, cx: &mut Context<Self>) {
+        self.tree_copy_visibility = None;
+        self.tree_copy_request = None;
+        if let (Engine::Active(session), Some(revision)) = (&self.engine, self.accepted_revision) {
+            if let Err(error) = session.invalidate_xpath(revision) {
+                self.feedback = Some(format!("Could not invalidate XPath: {error:?}"));
+            }
+        }
+        self.xpath_scroll = gpui_kit::UniformListScrollHandle::default();
+        cx.notify();
+    }
+    fn mount_xpath_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receipt = self.mount.clone();
+        let expression =
+            cx.new(|cx| InputState::new(window, cx).placeholder("//item[@id='example']"));
+        expression.update(cx, |input, cx| {
+            input.set_value(self.xpath.expression().to_owned(), window, cx)
+        });
+        let subscription = cx.subscribe(
+            &expression,
+            move |view: &mut Self,
+                  input: Entity<InputState>,
+                  event: &InputEvent,
+                  cx: &mut Context<Self>| {
+                if !receipt.is_current()
+                    || !view.xpath_live()
+                    || !matches!(event, InputEvent::Change)
+                {
+                    return;
+                }
+                let value = input.read(cx).value().to_string();
+                view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                view.tree_epoch.fetch_add(1, Ordering::AcqRel);
+                if view.xpath.edit_expression(value, &mut view.tree) {
+                    view.invalidate_xpath(cx);
+                    view.sync_xpath_editors(cx);
+                }
+            },
+        );
+        self.xpath_expression = expression;
+        self.xpath_subscription = Some(subscription);
+        self.xpath_bindings.clear();
+        let rows: Vec<_> = self
+            .xpath
+            .namespace_rows()
+            .map(|(id, prefix, uri)| (id, prefix.to_owned(), uri.to_owned()))
+            .collect();
+        for (id, prefix, uri) in rows {
+            self.mount_xpath_binding(id, prefix, uri, window, cx);
+        }
+    }
+    fn mount_xpath_binding(
+        &mut self,
+        id: u64,
+        prefix_value: String,
+        uri_value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefix = cx.new(|cx| InputState::new(window, cx).placeholder("Prefix"));
+        let uri = cx.new(|cx| InputState::new(window, cx).placeholder("Namespace URI"));
+        prefix.update(cx, |input, cx| input.set_value(prefix_value, window, cx));
+        uri.update(cx, |input, cx| input.set_value(uri_value, window, cx));
+        let a_receipt = self.mount.clone();
+        let b_receipt = self.mount.clone();
+        let a = cx.subscribe(
+            &prefix,
+            move |view: &mut Self, _, event: &InputEvent, cx| {
+                if a_receipt.is_current() && matches!(event, InputEvent::Change) {
+                    view.xpath_namespace_changed(id, cx);
+                }
+            },
+        );
+        let b = cx.subscribe(&uri, move |view: &mut Self, _, event: &InputEvent, cx| {
+            if b_receipt.is_current() && matches!(event, InputEvent::Change) {
+                view.xpath_namespace_changed(id, cx);
+            }
+        });
+        self.xpath_bindings.push(XPathBinding {
+            id,
+            prefix,
+            uri,
+            _subscriptions: vec![a, b],
+        });
+    }
+    fn sync_xpath_editors(&mut self, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let root = self.root_window;
+        let receipt = self.mount.clone();
+        cx.spawn(async move |_, cx| {
+            let Some(entity) = weak.upgrade() else {
+                return;
+            };
+            let _ = update_kit_window_content(root, &entity, cx, |view, window, cx| {
+                if !view.open || !receipt.is_current() {
+                    return;
+                }
+                let expression = view.xpath.expression().to_owned();
+                if view.xpath_expression.read(cx).value() != expression {
+                    view.xpath_expression
+                        .update(cx, |input, cx| input.set_value(expression, window, cx));
+                }
+                let rows: Vec<_> = view
+                    .xpath
+                    .namespace_rows()
+                    .map(|(id, prefix, uri)| (id, prefix.to_owned(), uri.to_owned()))
+                    .collect();
+                for (id, prefix, uri) in rows {
+                    if let Some(row) = view.xpath_bindings.iter().find(|row| row.id == id) {
+                        if row.prefix.read(cx).value() != prefix {
+                            row.prefix
+                                .update(cx, |input, cx| input.set_value(prefix, window, cx));
+                        }
+                        if row.uri.read(cx).value() != uri {
+                            row.uri
+                                .update(cx, |input, cx| input.set_value(uri, window, cx));
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+    fn xpath_namespace_changed(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.xpath_live() {
+            return;
+        }
+        let Some(row) = self.xpath_bindings.iter().find(|row| row.id == id) else {
+            return;
+        };
+        let prefix = row.prefix.read(cx).value().to_string();
+        let uri = row.uri.read(cx).value().to_string();
+        self.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        if self.xpath.edit_namespace(id, prefix, uri, &mut self.tree) {
+            self.invalidate_xpath(cx);
+            self.sync_xpath_editors(cx);
+        }
+    }
+    pub(super) fn xpath_add_namespace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.xpath_live() {
+            return;
+        }
+        self.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        let Some(id) = self.xpath.add_namespace(&mut self.tree) else {
+            return;
+        };
+        self.mount_xpath_binding(id, String::new(), String::new(), window, cx);
+        self.invalidate_xpath(cx);
+        self.sync_xpath_editors(cx);
+    }
+    pub(super) fn xpath_remove_namespace(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.xpath_live() {
+            return;
+        }
+        self.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        if self.xpath.remove_namespace(id, &mut self.tree) {
+            self.xpath_bindings.retain(|row| row.id != id);
+            self.invalidate_xpath(cx);
+        }
+    }
+    pub(super) fn xpath_run(&mut self, cx: &mut Context<Self>) {
+        if !self.xpath_live() {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        self.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_copy_visibility = None;
+        self.tree_copy_request = None;
+        self.xpath.invalidate_local_query(&mut self.tree);
+        self.invalidate_xpath(cx);
+        match self.xpath.run(&snapshot, &mut self.tree) {
+            Ok(request) => {
+                self.feedback = None;
+                if let Engine::Active(session) = &self.engine {
+                    if let Err(error) = session.request_xpath(request) {
+                        self.feedback = Some(format!("Could not run XPath: {error:?}"));
+                    }
+                }
+            }
+            Err(error) => self.feedback = Some(error),
+        }
+        self.pump(cx);
+        cx.notify();
+    }
+    pub(super) fn xpath_navigate(&mut self, index: usize, generation: u64, cx: &mut Context<Self>) {
+        if !self.xpath_live() || self.xpath.generation() != generation {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_copy_visibility = None;
+        self.tree_copy_request = None;
+        if let Some(intents) = self.xpath.navigate(index, &snapshot, &mut self.tree) {
+            if let (Some(detail), Engine::Active(session)) = (intents.detail, &self.engine) {
+                self.tree_service_due = true;
+                if let Err(error) = session.request_detail(detail) {
+                    self.tree_service_due = false;
+                    self.feedback = Some(format!("Could not inspect XPath result: {error:?}"));
+                }
+            }
+        }
+        if self.xpath.selected_result() == Some(index) {
+            self.xpath_scroll
+                .scroll_to_item(index, gpui_kit::ScrollStrategy::Nearest);
+        }
+        self.pump(cx);
+        cx.notify();
+    }
+    pub(super) fn xpath_copy_node(
+        &mut self,
+        index: usize,
+        kind: XmlNodeDetailKind,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.xpath_live() || self.xpath.generation() != generation {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        let visibility = self.visibility.request_revision.load(Ordering::Acquire);
+        if !json_utility::native_host_current(&self.visibility, visibility, self.native, false) {
+            return;
+        }
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        let Some(intents) = self
+            .xpath
+            .request_result_copy(index, kind, &snapshot, &mut self.tree)
+        else {
+            return;
+        };
+        self.tree_copy_visibility = Some(visibility);
+        self.tree_service_due = true;
+        if let (Some(detail), Engine::Active(session)) = (intents.detail, &self.engine) {
+            self.tree_copy_request = Some(detail);
+            if let Err(error) = session.request_detail(detail) {
+                self.tree_service_due = false;
+                self.tree_copy_visibility = None;
+                self.tree_copy_request = None;
+                self.tree.revoke_copy_authority();
+                self.feedback = Some(format!("Could not copy XPath result: {error:?}"));
+            }
+        }
+        self.pump(cx);
+        cx.notify();
+    }
+    pub(super) fn xpath_copy_status(&self, snapshot: &XmlSessionSnapshot) -> Option<String> {
+        let request = self.tree_copy_request?;
+        let visibility = self.tree_copy_visibility?;
+        if !self.xpath_live()
+            || !json_utility::native_host_current(&self.visibility, visibility, self.native, false)
+        {
+            return None;
+        }
+        let VisibleXPathStatus::Nodes(nodes) = self.xpath.visible_status(snapshot) else {
+            return None;
+        };
+        let selected_node = self
+            .xpath
+            .selected_result()
+            .and_then(|index| nodes.get(index))?;
+        let selection = self.tree.selected()?;
+        if selected_node.id != request.node
+            || selection.node != request.node
+            || selection.request != request.selection_request
+        {
+            return None;
+        }
+        match &snapshot.detail {
+            XmlDetailStatus::Pending(current) if *current == request => {
+                Some("Preparing complete value for explicit copy…".into())
+            }
+            XmlDetailStatus::Failed {
+                request: current,
+                error,
+            } if *current == request => Some(format!(
+                "Could not copy XPath result: {}",
+                multi_launcher::xml_source::xml_error_message(error)
+            )),
+            _ => None,
+        }
+    }
+    pub(super) fn xpath_copy_scalar(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if !self.xpath_live() || self.xpath.generation() != generation || self.clipboard_pending {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        if self.xpath.authorize_scalar_copy(&snapshot).is_none() {
+            return;
+        }
+        if let Some(text) = self.xpath.take_valid_scalar_copy_completion(&snapshot) {
+            self.clipboard(ClipboardIntent::Scalar, None, Some(text), cx);
+        }
+    }
+    pub(super) fn xpath_reveal(
+        &mut self,
+        generation: u64,
+        index: usize,
+        node: XmlNodeId,
+        request: &XmlXPathQueryRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.xpath_live() || self.xpath.generation() != generation {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        if !self
+            .xpath
+            .current_selected_node(&snapshot, index, node, request)
+        {
+            return;
+        }
+        self.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_copy_visibility = None;
+        self.tree_copy_request = None;
+        let Some(intents) = self.xpath.navigate(index, &snapshot, &mut self.tree) else {
+            cx.notify();
+            return;
+        };
+        if let (Some(detail), Engine::Active(session)) = (intents.detail, &self.engine) {
+            self.tree_service_due = true;
+            if let Err(error) = session.request_detail(detail) {
+                self.tree_service_due = false;
+                self.feedback = Some(format!("Could not inspect XPath result: {error:?}"));
+            }
+        }
+        self.xpath_tab = false;
+        self.tree_tab = true;
+        if let Some(index) = self.tree.take_pending_scroll_row() {
+            self.tree_scroll
+                .scroll_to_item(index, gpui_kit::ScrollStrategy::Nearest);
+        }
+        self.tree_focus.focus(window, cx);
+        self.pump(cx);
+        cx.notify();
     }
     fn format(&mut self, mode: XmlFormatMode, cx: &mut Context<Self>) {
         if !self.open || !self.mount.is_current() || self.admission.is_fenced() {
@@ -574,6 +1001,7 @@ impl XmlWorkspace {
         &mut self,
         intent: ClipboardIntent,
         tree_output: Option<(Arc<XmlNodeDetailOutput>, u64)>,
+        scalar: Option<Arc<str>>,
         cx: &mut Context<Self>,
     ) {
         if !self.open || self.clipboard_pending {
@@ -609,6 +1037,9 @@ impl XmlWorkspace {
         let native = self.native;
         let admission = self.admission.clone();
         let source = self.source.clone();
+        let xpath_epoch = self.xpath_epoch.clone();
+        let expected_xpath = xpath_epoch.load(Ordering::Acquire);
+        let worker_xpath_epoch = xpath_epoch.clone();
         let tree_epoch = self.tree_epoch.clone();
         let expected_tree = tree_epoch.load(Ordering::Acquire);
         let worker_tree_epoch = tree_epoch.clone();
@@ -624,6 +1055,11 @@ impl XmlWorkspace {
                     expected,
                     !admission.is_fenced()
                         && json_utility::native_host_current(&visibility, revision, native, false)
+                        && (!matches!(intent, ClipboardIntent::Scalar)
+                            || output_receipt_current(
+                                worker_xpath_epoch.load(Ordering::Acquire),
+                                expected_xpath,
+                            ))
                         && (!matches!(intent, ClipboardIntent::Tree)
                             || output_receipt_current(
                                 worker_tree_epoch.load(Ordering::Acquire),
@@ -638,14 +1074,16 @@ impl XmlWorkspace {
                     return Err("Clipboard request was superseded.".to_owned());
                 }
                 ArboardClipboardBackend
-                    .write_text(tree_output.as_ref().map_or_else(
-                        || {
-                            output
-                                .as_ref()
-                                .map_or(source.as_str(), |output| output.text.as_str())
-                        },
-                        |(output, _)| output.value.as_str(),
-                    ))
+                    .write_text(scalar.as_deref().unwrap_or_else(|| {
+                        tree_output.as_ref().map_or_else(
+                            || {
+                                output
+                                    .as_ref()
+                                    .map_or(source.as_str(), |output| output.text.as_str())
+                            },
+                            |(output, _)| output.value.as_str(),
+                        )
+                    }))
                     .map(|_| None)
                     .map_err(|error| format!("Could not copy XML: {error}"))
             } else {
@@ -673,6 +1111,11 @@ impl XmlWorkspace {
                         view.epoch.load(Ordering::Acquire),
                         expected,
                         !view.admission.is_fenced()
+                            && (!matches!(intent, ClipboardIntent::Scalar)
+                                || output_receipt_current(
+                                    xpath_epoch.load(Ordering::Acquire),
+                                    expected_xpath,
+                                ))
                             && (!matches!(intent, ClipboardIntent::Tree)
                                 || output_receipt_current(
                                     tree_epoch.load(Ordering::Acquire),
@@ -708,6 +1151,8 @@ impl XmlWorkspace {
                         view.feedback = Some(
                             if matches!(intent, ClipboardIntent::Output) {
                                 "Copied current XML output."
+                            } else if matches!(intent, ClipboardIntent::Scalar) {
+                                "Copied current XPath scalar text."
                             } else if matches!(intent, ClipboardIntent::Tree) {
                                 "Copied the selected XML value."
                             } else {
@@ -740,6 +1185,7 @@ impl Render for XmlWorkspace {
         let source_tab_mount = self.mount.clone();
         let output_tab_mount = self.mount.clone();
         let tree_tab_mount = self.mount.clone();
+        let xpath_tab_mount = self.mount.clone();
         let source_epoch = self.epoch.load(Ordering::Acquire);
         let output_epoch = self.output_epoch.load(Ordering::Acquire);
         let snapshot = self.current_snapshot();
@@ -842,9 +1288,12 @@ impl Render for XmlWorkspace {
                                     && view.open
                                     && !view.admission.is_fenced()
                                 {
+                                    view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                                    view.xpath_tab = false;
                                     view.tree_epoch.fetch_add(1, Ordering::AcqRel);
                                     view.tree.revoke_copy_authority();
                                     view.tree_copy_visibility = None;
+                                    view.tree_copy_request = None;
                                     view.tree_tab = false;
                                     view.output_tab = false;
                                     view.input.focus_handle(cx).focus(window, cx);
@@ -861,9 +1310,12 @@ impl Render for XmlWorkspace {
                                     && view.open
                                     && !view.admission.is_fenced()
                                 {
+                                    view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                                    view.xpath_tab = false;
                                     view.tree_epoch.fetch_add(1, Ordering::AcqRel);
                                     view.tree.revoke_copy_authority();
                                     view.tree_copy_visibility = None;
+                                    view.tree_copy_request = None;
                                     view.tree_tab = false;
                                     view.output_tab = true;
                                     view.output_focus.focus(window, cx);
@@ -878,6 +1330,12 @@ impl Render for XmlWorkspace {
                     .track_focus(&self.tree_focus)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         if tree_tab_mount.is_current() && view.open && !view.admission.is_fenced() {
+                            view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                            view.tree_epoch.fetch_add(1, Ordering::AcqRel);
+                            view.tree.revoke_copy_authority();
+                            view.tree_copy_visibility = None;
+                            view.tree_copy_request = None;
+                            view.xpath_tab = false;
                             view.tree_tab = true;
                             view.output_tab = false;
                             view.tree_focus.focus(window, cx);
@@ -886,14 +1344,38 @@ impl Render for XmlWorkspace {
                         }
                     })),
             )
+            .child(
+                Button::new("xml-tab-xpath")
+                    .label("XPath")
+                    .track_focus(&self.xpath_focus)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if xpath_tab_mount.is_current() && view.open && !view.admission.is_fenced()
+                        {
+                            view.tree_epoch.fetch_add(1, Ordering::AcqRel);
+                            view.tree.revoke_copy_authority();
+                            view.tree_copy_visibility = None;
+                            view.tree_copy_request = None;
+                            view.xpath_tab = true;
+                            view.tree_tab = false;
+                            view.output_tab = false;
+                            view.xpath_expression.focus_handle(cx).focus(window, cx);
+                            view.service_current_tree(cx);
+                            cx.notify();
+                        }
+                    })),
+            )
+            .children(self.xpath_tab.then(|| super::xml_xpath::render(self, cx)))
             .children(self.tree_tab.then(|| super::xml_tree::render(self, cx)))
-            .when(!self.output_tab && !self.tree_tab, |div| {
-                div.child(
-                    Textarea::new(&self.input)
-                        .aria_label("XML Source")
-                        .tab_index(0),
-                )
-            })
+            .when(
+                !self.output_tab && !self.tree_tab && !self.xpath_tab,
+                |div| {
+                    div.child(
+                        Textarea::new(&self.input)
+                            .aria_label("XML Source")
+                            .tab_index(0),
+                    )
+                },
+            )
             .when(self.output_tab, |container| {
                 container.child(
                     div()
@@ -915,7 +1397,7 @@ impl Render for XmlWorkspace {
                             .disabled(self.clipboard_pending)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if paste_mount.is_current() {
-                                    view.clipboard(ClipboardIntent::Paste, None, cx);
+                                    view.clipboard(ClipboardIntent::Paste, None, None, cx);
                                 }
                             })),
                     )
@@ -925,7 +1407,7 @@ impl Render for XmlWorkspace {
                             .disabled(self.clipboard_pending)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if copy_mount.is_current() {
-                                    view.clipboard(ClipboardIntent::Source, None, cx);
+                                    view.clipboard(ClipboardIntent::Source, None, None, cx);
                                 }
                             })),
                     )
@@ -964,7 +1446,7 @@ impl Render for XmlWorkspace {
                                 if output_copy_mount.is_current()
                                     && view.output_epoch.load(Ordering::Acquire) == output_epoch
                                 {
-                                    view.clipboard(ClipboardIntent::Output, None, cx);
+                                    view.clipboard(ClipboardIntent::Output, None, None, cx);
                                 }
                             })),
                     )
@@ -997,7 +1479,9 @@ impl Render for XmlWorkspace {
                                 view.input
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                                 view.submit(cx);
-                                if view.tree_tab {
+                                if view.xpath_tab {
+                                    view.xpath_expression.focus_handle(cx).focus(window, cx);
+                                } else if view.tree_tab {
                                     view.tree_focus.focus(window, cx);
                                 } else if view.output_tab {
                                     view.output_focus.focus(window, cx);
@@ -1092,6 +1576,47 @@ mod tests {
     };
     use multi_launcher::plugin::Plugin;
     use multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin;
+    #[test]
+    fn adding_namespace_reapplies_aggregate_byte_limit() {
+        use multi_launcher::xml_toolkit_engine::MAX_XPATH_NAMESPACE_BYTES;
+        use multi_launcher::xml_tree_model::XmlToolkitTreeViewState;
+        use multi_launcher::xml_xpath_model::XmlToolkitXPathViewState;
+        let mut tree = XmlToolkitTreeViewState::default();
+        let mut xpath = XmlToolkitXPathViewState::default();
+        let first = xpath.add_namespace(&mut tree).unwrap();
+        assert!(xpath.edit_namespace(
+            first,
+            "p".into(),
+            "x".repeat(MAX_XPATH_NAMESPACE_BYTES),
+            &mut tree
+        ));
+        let before = xpath.namespace_rows().next().unwrap().2.len();
+        xpath.add_namespace(&mut tree).unwrap();
+        let rows: Vec<_> = xpath.namespace_rows().collect();
+        assert_eq!(rows[0].2.len(), before - 10);
+        assert!(
+            rows.iter()
+                .map(|(_, prefix, uri)| prefix.len() + uri.len() + 10)
+                .sum::<usize>()
+                <= MAX_XPATH_NAMESPACE_BYTES
+        );
+    }
+    #[test]
+    fn xpath_query_edits_revoke_the_production_generation() {
+        use multi_launcher::xml_tree_model::XmlToolkitTreeViewState;
+        use multi_launcher::xml_xpath_model::XmlToolkitXPathViewState;
+        let mut tree = XmlToolkitTreeViewState::default();
+        let mut xpath = XmlToolkitXPathViewState::default();
+        let original = xpath.generation();
+        assert!(xpath.edit_expression("//item".into(), &mut tree));
+        assert_ne!(xpath.generation(), original);
+        let expression_generation = xpath.generation();
+        let row = xpath.add_namespace(&mut tree).unwrap();
+        assert_ne!(xpath.generation(), expression_generation);
+        let namespace_generation = xpath.generation();
+        assert!(xpath.edit_namespace(row, "p".into(), "urn:items".into(), &mut tree));
+        assert_ne!(xpath.generation(), namespace_generation);
+    }
     #[test]
     fn pending_and_ready_parse_are_decided_from_the_same_snapshot() {
         use multi_launcher::xml_toolkit_session::{XmlParseStatus, XmlSessionSnapshot};
