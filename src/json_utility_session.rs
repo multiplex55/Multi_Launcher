@@ -1,4 +1,6 @@
 //! Renderer-neutral JSON editor, projection worker, and tree/search state.
+mod tree_api;
+pub use tree_api::{TreeCopyKind, TreeCopyRequest, TreeDetails, TreeMatch, TreeRow, TreeStamp};
 use crate::clipboard_modify::clipboard::{ClipboardBackend, ClipboardError};
 use crate::json_transform::{JsonDocument, JsonNodePath, JsonPathSegment, JsonSearchFields, JsonSearchMatch, JsonTransformError, JsonTreeNodeId, JsonTreeProjection, JsonValueRef};
 use std::collections::{HashMap, HashSet};
@@ -681,6 +683,11 @@ impl JsonEditorState {
         self.invalidate_source(false);
     }
 
+    /// Retire a stale initial clipboard projection without replacing Tree search controls.
+    pub fn cancel_initial_clipboard(&mut self) {
+        self.invalidate_source(false);
+    }
+
     pub fn finish_initialize(&mut self, result: Result<String, ClipboardError>) {
         match result {
             Ok(text) if !text.trim().is_empty() => {
@@ -1037,6 +1044,7 @@ impl JsonEditorState {
 #[cfg(test)]
 mod tests {
     use super::{JsonEditorState, JsonTreeWorker, JsonWorkerCompletion, JsonWorkerRequest, ProjectionRequest, ProjectionSource, TreeWorkerState};
+    use crate::json_transform::JsonSearchFields;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
@@ -1051,6 +1059,18 @@ mod tests {
         assert_eq!(editor.generation, generation);
         editor.set_source("[]".into());
         assert_eq!(editor.generation, generation.wrapping_add(1));
+    }
+
+    #[test]
+    fn cancelling_initial_clipboard_preserves_tree_search_controls() {
+        let mut editor = JsonEditorState::default();
+        editor.begin_initialize();
+        editor.finish_initialize(Ok("{}".into()));
+        editor.tree_set_search("needle".into(), JsonSearchFields::Keys);
+        editor.cancel_initial_clipboard();
+        assert_eq!(editor.tree_search_query(), "needle");
+        assert_eq!(editor.tree_search_fields(), JsonSearchFields::Keys);
+        assert!(!editor.loading_clipboard());
     }
 
     #[test]

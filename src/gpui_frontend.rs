@@ -23,6 +23,7 @@ mod hash_pin;
 mod hash_dock;
 mod wake;
 mod json_utility;
+mod json_tree;
 use wake::HashWakeSignal;
 mod indexed_applications;
 mod window_search;

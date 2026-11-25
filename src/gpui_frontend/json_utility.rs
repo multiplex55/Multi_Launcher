@@ -31,6 +31,9 @@ impl JsonUtilityCommandHost for OpenHost {
 fn receipt_current(open: bool, epoch: u64, expected: u64, active: bool) -> bool {
     open && epoch == expected && active
 }
+fn effect_epochs_current(source: u64, expected: u64, tree: Option<(u64, u64)>) -> bool {
+    source == expected && tree.is_none_or(|(current, expected)| current == expected)
+}
 
 fn apply_paste_result(
     session: &mut JsonEditorState,
@@ -40,7 +43,7 @@ fn apply_paste_result(
     result: Result<String, ClipboardError>,
 ) {
     if initial_projection.is_some() && !initial_current {
-        session.begin_initialize();
+        session.cancel_initial_clipboard();
         *initial_projection = None;
         *checking = None;
     }
@@ -68,8 +71,8 @@ fn native_root_current(
 }
 
 #[derive(Default)]
-struct ClipboardLane {
-    active: bool,
+pub(super) struct ClipboardLane {
+    pub(super) active: bool,
     latest_initial: Option<(u64, u64)>,
 }
 impl ClipboardLane {
@@ -95,13 +98,15 @@ struct GuardedClipboard {
     visibility_revision: u64,
     native: Option<NativeWindow>,
     admission: Arc<RestartAdmission>,
+    tree_guard: Option<(Arc<AtomicU64>, u64)>,
 }
 impl ClipboardBackend for GuardedClipboard {
     fn read_text(&self) -> Result<String, ClipboardError> {
         ArboardClipboardBackend.read_text()
     }
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
-        if self.epoch.load(Ordering::Acquire) != self.expected
+        if !effect_epochs_current(self.epoch.load(Ordering::Acquire), self.expected,
+                self.tree_guard.as_ref().map(|(epoch, expected)| (epoch.load(Ordering::Acquire), *expected)))
             || self.admission.is_fenced()
             || !native_root_current(&self.visibility, self.visibility_revision, self.native)
         {
@@ -117,18 +122,22 @@ pub(super) struct JsonView {
     pub(super) open: bool,
     root: WeakEntity<RootWindow>,
     root_window: AnyWindowHandle,
-    admission: Arc<RestartAdmission>,
-    visibility: RootVisibility,
-    native: Option<NativeWindow>,
+    pub(super) admission: Arc<RestartAdmission>,
+    pub(super) visibility: RootVisibility,
+    pub(super) native: Option<NativeWindow>,
     input: Entity<TextareaState>,
+    pub(super) tree_search: Entity<InputState>,
+    pub(super) tree_scroll: gpui_kit::UniformListScrollHandle,
+    pub(super) tree_mode: bool,
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
     return_scroll: Option<Point<Pixels>>,
-    session: JsonEditorState,
+    pub(super) session: JsonEditorState,
     intent: JsonUtilityIntent,
-    epoch: Arc<AtomicU64>,
+    pub(super) epoch: Arc<AtomicU64>,
+    pub(super) tree_epoch: Arc<AtomicU64>,
     wake: Arc<HashWakeSignal>,
-    lane: ClipboardLane,
+    pub(super) lane: ClipboardLane,
     initial_projection: Option<(u64, u64)>,
     checking: Option<u64>,
     escape_waiting: bool,
@@ -153,6 +162,14 @@ impl JsonView {
                 .placeholder("Enter JSON")
         });
         let focus = cx.focus_handle();
+        let tree_search = cx.new(|cx| InputState::new(window, cx).placeholder("Keys or values"));
+        let search_subscription = cx.subscribe(&tree_search, |this: &mut Self, input: Entity<InputState>, event: &InputEvent, cx: &mut Context<Self>| {
+            if !matches!(event, InputEvent::Change) || !this.open || !this.tree_mode || this.admission.is_fenced() { return; }
+            this.tree_epoch.fetch_add(1, Ordering::AcqRel);
+            let fields = this.session.tree_search_fields();
+            this.session.tree_set_search(input.read(cx).value().to_string(), fields);
+            this.service(cx);
+        });
         let subscription = cx.subscribe(
             &input,
             |this: &mut Self,
@@ -187,21 +204,26 @@ impl JsonView {
             visibility,
             native,
             input,
+            tree_search,
+            tree_scroll: gpui_kit::UniformListScrollHandle::default(),
+            tree_mode: false,
             focus,
             return_focus,
             return_scroll: Some(return_scroll),
             session,
             intent,
             epoch: Arc::new(AtomicU64::new(1)),
+            tree_epoch: Arc::new(AtomicU64::new(1)),
             wake: Arc::new(HashWakeSignal::default()),
             lane: ClipboardLane::default(),
             initial_projection: None,
             checking: None,
             escape_waiting: false,
-            _subscriptions: vec![subscription, focus_subscription],
+            _subscriptions: vec![subscription, focus_subscription, search_subscription],
         }
     }
-    fn service(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn service(&mut self, cx: &mut Context<Self>) {
+        let before_tree = self.session.tree_stamp();
         if self.initial_projection.is_some_and(|(epoch, revision)| {
             !receipt_current(
                 self.open,
@@ -211,17 +233,27 @@ impl JsonView {
                     && native_root_current(&self.visibility, revision, self.native),
             )
         }) {
+            self.tree_epoch.fetch_add(1, Ordering::AcqRel);
             self.initial_projection = None;
             self.checking = None;
-            self.session.begin_initialize();
+            self.session.cancel_initial_clipboard();
+        }
+        if self.session.tree_search_status().2 {
+            self.tree_epoch.fetch_add(1, Ordering::AcqRel);
         }
         let wake = self.wake.clone();
         self.session.service_projection(|| {
             let wake = wake.clone();
             Arc::new(move || wake.notify())
         });
+        if before_tree != self.session.tree_stamp() {
+            self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        }
         if !self.session.loading_clipboard() && self.initial_projection.take().is_some() {
             self.checking = None;
+        }
+        if let Some(index) = self.session.tree_take_reveal() {
+            self.tree_scroll.scroll_to_item(index, gpui_kit::ScrollStrategy::Nearest);
         }
         cx.notify();
     }
@@ -244,6 +276,8 @@ impl JsonView {
         self.session.begin_initialize();
         self.open = true;
         self.intent = intent;
+        self.tree_scroll = gpui_kit::UniformListScrollHandle::default();
+        self.tree_search.update(cx, |input, cx| input.set_value("", window, cx));
         self.return_focus = origin;
         self.return_scroll = Some(offset);
         self.initial_projection = None;
@@ -257,7 +291,8 @@ impl JsonView {
         self.checking = Some(epoch);
         self.lane.queue_initial(epoch, revision);
         self.drain_initial(cx);
-        self.input.focus_handle(cx).focus(window, cx);
+        if self.tree_mode { self.tree_search.focus_handle(cx).focus(window, cx); }
+        else { self.input.focus_handle(cx).focus(window, cx); }
         cx.notify();
     }
     fn drain_initial(&mut self, cx: &mut Context<Self>) {
@@ -409,6 +444,7 @@ impl JsonView {
                 visibility_revision,
                 native,
                 admission,
+                tree_guard: None,
             });
             session
         });
@@ -433,6 +469,32 @@ impl JsonView {
             });
         })
         .detach();
+        cx.notify();
+    }
+    pub(super) fn copy_tree(&mut self, stamp: multi_launcher::json_utility_session::TreeStamp, kind: multi_launcher::json_utility_session::TreeCopyKind, cx: &mut Context<Self>) {
+        if !self.open || !self.tree_mode || self.lane.active || self.checking.is_some() { return; }
+        let Some(request) = self.session.tree_copy_request(stamp, kind) else { return; };
+        let Some(permit) = self.admission.admit() else { return; };
+        self.lane.active = true;
+        let expected = self.epoch.load(Ordering::Acquire);
+        let expected_tree = self.tree_epoch.load(Ordering::Acquire);
+        let visibility_revision = self.visibility.request_revision.load(Ordering::Acquire);
+        let backend = GuardedClipboard { epoch: self.epoch.clone(), expected, visibility: self.visibility.clone(), visibility_revision, native: self.native, admission: self.admission.clone(), tree_guard: Some((self.tree_epoch.clone(), expected_tree)) };
+        let owner = cx.entity().downgrade(); let root_window = self.root_window;
+        let task = cx.background_executor().spawn(async move { let _permit = permit; let result = request.execute(&backend); (request, result) });
+        cx.spawn(async move |_, cx| {
+            let (request, result) = task.await;
+            let Some(view) = owner.upgrade() else { return; };
+            let _ = update_kit_window_content(root_window, &view, cx, |view, _, cx| {
+                view.lane.active = false;
+                if receipt_current(view.open && view.tree_mode, view.epoch.load(Ordering::Acquire), expected,
+                    effect_epochs_current(view.epoch.load(Ordering::Acquire), expected, Some((view.tree_epoch.load(Ordering::Acquire), expected_tree)))
+                    && !view.admission.is_fenced() && native_root_current(&view.visibility, visibility_revision, view.native)) {
+                    view.session.finish_tree_copy(&request, result);
+                }
+                view.drain_initial(cx); cx.notify();
+            });
+        }).detach();
         cx.notify();
     }
     fn transform(&mut self, transform: Transform, window: &mut Window, cx: &mut Context<Self>) {
@@ -461,7 +523,8 @@ impl JsonView {
         self.session.clear();
         self.sync_input(window, cx);
         self.service(cx);
-        self.input.focus_handle(cx).focus(window, cx);
+        if self.tree_mode { self.tree_search.focus_handle(cx).focus(window, cx); }
+        else { self.input.focus_handle(cx).focus(window, cx); }
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open {
@@ -554,6 +617,7 @@ impl Render for JsonView {
         let feedback = self.session.feedback().map(|result| match result {
             Ok(message) | Err(message) => message.clone(),
         });
+        let tree_panel = self.tree_mode.then(|| super::json_tree::render(self, cx));
         div()
             .id("json-utility-pane")
             .w_full()
@@ -616,11 +680,11 @@ impl Render for JsonView {
                             .on_click(cx.listener(|view, _, window, cx| view.close(window, cx))),
                     ),
             )
-            .child(
-                Textarea::new(&self.input)
-                    .aria_label("JSON text")
-                    .tab_index(0),
-            )
+            .child(div().flex().gap_2()
+                .child(Button::new("json-view-text").label("Text").tab_stop(true).on_click(cx.listener(|view, _, _, cx| { if view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = false; } cx.notify(); })))
+                .child(Button::new("json-view-tree").label("Tree").tab_stop(true).on_click(cx.listener(|view, _, _, cx| { if !view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = true; } cx.notify(); }))))
+            .when(!self.tree_mode, |this| this.child(Textarea::new(&self.input).aria_label("JSON text").tab_index(0)))
+            .children(tree_panel)
             .children(self.checking.is_some().then(|| {
                 div()
                     .id("json-checking-clipboard")
@@ -719,7 +783,7 @@ impl RootWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardLane, OpenHost, apply_paste_result, provider_is_current, receipt_current,
+        ClipboardLane, OpenHost, apply_paste_result, effect_epochs_current, provider_is_current, receipt_current,
     };
     use multi_launcher::{
         commands::{Command, JsonUtilityCommand, JsonUtilityIntent, parse_action},
@@ -795,6 +859,14 @@ mod tests {
     }
 
     #[test]
+    fn tree_changes_do_not_invalidate_text_clipboard_but_revoke_tree_copy() {
+        assert!(effect_epochs_current(4, 4, None));
+        assert!(!effect_epochs_current(4, 4, Some((8, 7))));
+        assert!(effect_epochs_current(4, 4, Some((8, 8))));
+        assert!(!effect_epochs_current(5, 4, None));
+    }
+
+    #[test]
     fn paste_result_retires_only_stale_or_successfully_replaced_initial_projection() {
         use multi_launcher::clipboard_modify::clipboard::ClipboardError;
         use multi_launcher::json_utility_session::JsonEditorState;
@@ -817,6 +889,7 @@ mod tests {
 
         session.begin_initialize();
         session.finish_initialize(Ok("{}".into()));
+        session.tree_set_search("needle".into(), multi_launcher::json_transform::JsonSearchFields::Keys);
         initial = Some((3, 4));
         checking = Some(3);
         apply_paste_result(
@@ -831,6 +904,8 @@ mod tests {
         );
         assert_eq!(initial, None);
         assert_eq!(checking, None);
+        assert_eq!(session.tree_search_query(), "needle");
+        assert_eq!(session.tree_search_fields(), multi_launcher::json_transform::JsonSearchFields::Keys);
 
         session.finish_initialize(Ok("{}".into()));
         initial = Some((5, 6));

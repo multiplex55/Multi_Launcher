@@ -16,3 +16,9 @@ Select `json_query_family_maps_to_general_format_alias_and_minify_intents`, `jso
 The docked Kit editor opens from the stock typed Search provider and remains below anchored Search. Format, Minify, Paste, Clear and Copy Result use the shared editor and protected clipboard backend. Explicit typed reopen resets source and intent. The view serializes clipboard work, coalesces rapid reopens to the newest request and checks editor generation and native visibility before effects and publication. Clear focuses the editor. True Close drops the source and projection worker, and restart review includes any active text draft.
 
 Verify typing and Unicode, exact Format and Minify, valid versus invalid or protected initial clipboard, explicit Paste and Copy, rapid reopen, hide/minimize, Clear focus, Escape, and close/restart in the paired Windows candidate at 1516 × 937. Add the Tree, saved mode and pin criteria in the current G14 batch.
+
+## GPUI Tree and retained host
+
+The docked Tree uses bounded virtual rows with source-generation and node identity, typed branch and selection actions, literal Keys, Values or Both search, match navigation and reveal, and bounded Details. Copy Value, Copy Subtree and Copy JSON Pointer bind the exact current selection, with a separate Tree revision so Text clipboard actions keep their source authority. The wide paired fixture exercises a long result range and an escaped pointer.
+
+The next host increment keeps the JSON editor session and clipboard lane in one retained owner. Window-bound mounts own their local editors, focus and subscriptions. Finish remembered Dock and Pop Out, native geometry, checked foreground on Dock, and passive pin startup with stock pinned-close behavior. Compare both frontends at 1516 × 937 after grouping the host and Tree checks.

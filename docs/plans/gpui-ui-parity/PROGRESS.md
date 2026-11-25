@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G14 docked JSON Tree adds virtualized rows, literal search and match reveal, bounded Details, and checked Value, Subtree and Pointer copies. Independent review and ten focused library and launcher tests passed. The retained mount, native Pop Out and pin follow. [Docked Tree checkpoint](CHECKPOINTS.md#docked-json-tree)
+
 G14 has a docked GPUI JSON Text workspace through stock Search. Typing, Format, Minify, protected Paste and Copy Result, Clear and Close use the shared session. Independent source review and seven focused launcher tests passed, following nine focused tests for the shared extraction. Matched Windows replay remains pending. [Structured-text batch](CHECKPOINTS.md#g14-structured-text-gui-batch)
 
 G05 Favorites Search now lists and filters ordinary local executable Favorites through the stock provider. Activation checks the current stored label, path and arguments before launching. Independent source review and five focused tests passed. Matched Windows replay remains pending. [Favorites checkpoint](CHECKPOINTS.md#g05-checked-executable-favorites-search)
@@ -73,7 +75,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue G14 with the shared JSON Tree API, selection, search, details and typed copies, followed by retained Dock, Pop Out and pin. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Separate the retained JSON workspace from window-bound mounts, then implement checked Dock, Pop Out and saved pin before XML. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
