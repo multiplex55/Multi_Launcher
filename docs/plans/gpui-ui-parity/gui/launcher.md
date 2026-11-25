@@ -276,9 +276,13 @@ The existing launch worker checks the selected row's local path again before pas
 
 Ordinary indexed `.lnk` rows use the same index provenance and checked worker. The worker derives a DOS path only for loading the link through the existing Windows shortcut engine. That engine checks the link, executable and explicit Start In directory, then forwards the embedded Windows arguments. History and Usage keep the stock verbatim link. Search Enter and Action Sheet Execute share this route. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-checked-indexed-windows-shortcuts)
 
+## Checked indexed local documents
+
+Indexed `.txt`, `.rtf`, `.pdf`, `.docx`, `.xlsx` and `.pptx` rows use the checked worker when their stock path and active index identity still match. The worker verifies the regular local file and gives its DOS path to the shared Windows association. Search and the Action Sheet preserve the stock indexed path for History and Usage. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-checked-indexed-local-documents)
+
 ## Action Sheet Execute for applications
 
-The shared registry supplies Execute for a current saved or indexed executable. GPUI retains the exact result, including its origin, while the sheet is open. It closes the sheet, restores Search focus, and rechecks the receipt before sending the selected row through the same worker as ordinary Search activation. History retains the original Enter or Click source, and Clear After Run follows the ordinary completion policy. Other file associations and secondary choices retain their existing scope. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-checked-application-execution-from-the-action-sheet)
+The shared registry supplies Execute for admitted saved and indexed application rows. GPUI retains the exact result, including its origin, while the sheet is open. It closes the sheet, restores Search focus, and rechecks the receipt before sending the selected row through the same worker as ordinary Search activation. History retains the original Enter or Click source, and Clear After Run follows the ordinary completion policy. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-checked-application-execution-from-the-action-sheet)
 
 ## Checked Window Search
 

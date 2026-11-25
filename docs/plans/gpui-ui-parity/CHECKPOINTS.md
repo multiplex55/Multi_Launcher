@@ -1015,3 +1015,7 @@ GPUI admits stock Switch results with current, exact native identity. The existi
 ## G02 and G05 checked indexed Windows shortcuts
 
 GPUI admits local indexed shortcuts and uses the existing checked Windows shortcut engine. The stock verbatim link remains the History and Usage identity. Nine focused tests passed. At 1516 × 937, both frontends launched the same target and Start In from Search and Action Sheet, preserving a quoted value, an empty argument and an embedded quote. GPUI refused missing Start In and a link replaced with a directory. Continue checked indexed documents. [Exact receipts](VALIDATION_LOG.md#g02-and-g05-checked-indexed-windows-shortcuts)
+
+## G02 and G05 checked indexed local documents
+
+GPUI admits the six document extensions supported by the checked saved-document route. It revalidates indexed provenance and the regular file before opening its DOS path through the shared Windows association. Nine focused tests passed. At 1516 × 937, both frontends opened the exact primary and sheet `.txt` fixtures in the registered editor. GPUI declined a third document replaced with a directory and recorded only the two successful launches. Continue the read-only indexed App Editor catalog. [Exact receipts](VALIDATION_LOG.md#g02-and-g05-checked-indexed-local-documents)

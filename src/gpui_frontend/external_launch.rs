@@ -119,6 +119,16 @@ fn parse_http_target(raw: &str, strict: bool) -> Option<url::Url> {
     Some(parsed)
 }
 
+/// Match the established saved-document final-leaf extension rule.
+pub(super) fn document_extension_supported(target: &str) -> bool {
+    target.rsplit(['\\', '/']).next()
+        .and_then(|leaf| leaf.rsplit_once('.').map(|(_, extension)| extension))
+        .is_some_and(|extension| {
+            ["txt", "rtf", "pdf", "docx", "xlsx", "pptx"]
+                .iter().any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
+}
+
 /// Admit only saved document paths whose external arguments are absent or blank.
 pub(super) fn saved_document(action: &Action) -> Option<ExternalCommand> {
     let command = multi_launcher::commands::parse_action(action).ok()?;
@@ -149,12 +159,7 @@ pub(super) fn document_external<'a>(
     {
         return None;
     }
-    let leaf = command.target.rsplit(['\\', '/']).next()?;
-    let extension = leaf.rsplit_once('.')?.1;
-    ["txt", "rtf", "pdf", "docx", "xlsx", "pptx"]
-        .iter()
-        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
-        .then_some(command)
+    document_extension_supported(&command.target).then_some(command)
 }
 
 pub(super) fn ordinary_external(
@@ -664,6 +669,7 @@ impl ExternalCommandHost for IndexedHost<'_> {
                 #[cfg(not(windows))]
                 { let _ = path; anyhow::bail!("Indexed shortcuts require Windows") }
             },
+            |path| multi_launcher::actions::exec::launch_association(path),
         )
     }
     fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
@@ -1497,6 +1503,16 @@ mod tests {
         }
         action.action = "http://127.0.0.1:8123/a%2Fb".into();
         assert!(saved_url(&action).is_some());
+    }
+
+    #[test]
+    fn document_extension_rule_preserves_final_leaf_and_leading_dot() {
+        for path in [r"C:\Docs\a.TXT", "C:/Docs/a.rtf", r"C:\Docs\a.pdf", r"C:\Docs\a.docx", r"C:\Docs\a.xlsx", r"C:\Docs\a.pptx", r"C:\Docs\.txt"] {
+            assert!(super::document_extension_supported(path), "{path}");
+        }
+        for path in [r"C:\Docs.txt\item", r"C:\Docs\a.txt.exe", r"C:\Docs\a", r"C:\Docs\a.", r"C:\Docs\a.lnk"] {
+            assert!(!super::document_extension_supported(path), "{path}");
+        }
     }
 
     #[test]
