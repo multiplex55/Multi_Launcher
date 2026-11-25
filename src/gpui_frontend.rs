@@ -385,7 +385,8 @@ impl LauncherSearchCatalog {
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
                 let unit_result = unit_convert_search::classify(&provider, &action).is_some();
-                let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some();
+                let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
+                    || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
                     .is_some() || date_result || base_result || unit_result || calculator_result
                 {
@@ -6859,7 +6860,8 @@ impl RootWindow {
             self.enabled_capabilities.as_ref(),
         );
         self.calculator_search.pending = None;
-        let calculator_enabled = calculator_search::scalar_expression(&query).is_some()
+        self.calculator_search.retire_history();
+        let calculator_enabled = calculator_search::eligible_query(&query)
             && self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("calculator"))
             && multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "calculator");
         if calculator_enabled {
@@ -6890,6 +6892,7 @@ impl RootWindow {
             .filter(|(provider, action)| {
                 if provider == "calculator" {
                     calculator_search::classify(provider, &query, action).is_some()
+                        || calculator_search::history_index(provider, &query, action).is_some()
                 } else if provider == "date_arithmetic" {
                     date_search::classify(provider, action).is_some()
                 } else if provider == "base_convert" {
@@ -7642,6 +7645,17 @@ impl RootWindow {
             return;
         }
         if let LauncherResultOrigin::Provider(name) = &result.origin {
+            if name == "calculator" {
+                if let Some(history) = self.calculator_search.history_result(
+                    self.launcher_results.generation, &query, &result.action,
+                ) {
+                    if self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains(name))
+                        || !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), name)
+                    { return; }
+                    self.start_calculator_history_launch(result.action, history, query, source, window, cx);
+                    return;
+                }
+            }
             if let Some(scalar) = calculator_search::classify(name, &query, &result.action) {
                 if self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains(name))
                     || !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), name)
@@ -14085,6 +14099,32 @@ mod tests {
             },
             enabled_plugins,
         )
+    }
+
+    #[test]
+    fn calculator_history_exact_composition_keeps_original_filtered_index() {
+        use multi_launcher::plugins::calc_history::CalcHistoryEntry;
+        let entries = [
+            CalcHistoryEntry { expr: "first".into(), result: "1".into() },
+            CalcHistoryEntry { expr: "second".into(), result: "2".into() },
+        ];
+        let action = multi_launcher::plugins_builtin::calculator_history_row(1, &entries[1]);
+        let catalog = completion_catalog(Vec::new(), true, None);
+        let rows = catalog.compose(
+            "id:calc:history:1 = history",
+            vec![("calculator".into(), action.clone())],
+            false,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, action);
+        assert_eq!(rows[0].action.action, "calc:history:1");
+        assert_eq!(rows[0].origin, super::LauncherResultOrigin::Provider("calculator".into()));
+        let filtered = catalog.compose(
+            "id:calc:history:1 = list",
+            vec![("calculator".into(), action)],
+            false,
+        );
+        assert!(filtered.is_empty());
     }
 
     #[test]

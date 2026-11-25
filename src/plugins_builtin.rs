@@ -55,6 +55,32 @@ struct CalculatorPluginSettings {
     save_on_enter: bool,
 }
 
+/// Match the stock Calculator history aliases after query filtering.
+pub fn calculator_history_query(query: &str) -> bool {
+    ["calc list", "= history", "= list"]
+        .iter()
+        .any(|alias| query.trim().eq_ignore_ascii_case(alias))
+}
+
+/// Project one canonical history entry with its original wire index.
+pub fn calculator_history_row(index: usize, entry: &CalcHistoryEntry) -> Action {
+    Action {
+        label: format!("{} = {}", entry.expr, entry.result),
+        desc: "Calculator".into(),
+        action: format!("calc:history:{index}"),
+        args: None,
+    }
+}
+
+/// Project the canonical history snapshot using the Calculator wire indexes.
+pub fn calculator_history_rows<'a>(
+    entries: impl IntoIterator<Item = &'a CalcHistoryEntry>,
+) -> Vec<Action> {
+    entries.into_iter().enumerate()
+        .map(|(index, entry)| calculator_history_row(index, entry))
+        .collect()
+}
+
 impl Plugin for CalculatorPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
@@ -66,21 +92,9 @@ impl Plugin for CalculatorPlugin {
                 args: None,
             }];
         }
-        if trimmed.eq_ignore_ascii_case("calc list")
-            || trimmed.eq_ignore_ascii_case("= history")
-            || trimmed.eq_ignore_ascii_case("= list")
-        {
-            return calc_history::load_history(CALC_HISTORY_FILE)
-                .unwrap_or_default()
-                .iter()
-                .enumerate()
-                .map(|(idx, entry)| Action {
-                    label: format!("{} = {}", entry.expr, entry.result),
-                    desc: "Calculator".into(),
-                    action: format!("calc:history:{idx}"),
-                    args: None,
-                })
-                .collect();
+        if calculator_history_query(trimmed) {
+            let history = calc_history::load_history(CALC_HISTORY_FILE).unwrap_or_default();
+            return calculator_history_rows(&history);
         }
 
         if let Some(rest) = trimmed.strip_prefix('=') {

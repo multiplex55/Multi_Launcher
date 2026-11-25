@@ -522,6 +522,7 @@ pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
     Copy(String),
     Calculator(super::calculator_search::ScalarResult),
+    CalculatorHistory(super::calculator_search::HistoryResult),
     Diagnostic { kind: DiagnosticKind, message: String },
 }
 
@@ -652,7 +653,29 @@ fn execute_request(
         RunCommand::Calculator(scalar) => {
             let effect = multi_launcher::actions::calc::copy_result(&scalar.result, scalar.expression.as_deref());
             CommandBus.complete_checked_calculator_result(
-                scalar.result.clone(), scalar.expression.clone(), &request.action, request.source, effect,
+                multi_launcher::commands::CalculatorCommand::CopyResult {
+                    result: scalar.result.clone(),
+                    expression: scalar.expression.clone(),
+                },
+                &request.action, request.source, effect,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run,
+                    refocus: true,
+                },
+            )
+        }
+        RunCommand::CalculatorHistory(history) => {
+            let effect = super::calculator_search::copy_checked_history_with(
+                history,
+                || multi_launcher::plugins::calc_history::load_history(
+                    multi_launcher::plugins::calc_history::CALC_HISTORY_FILE,
+                ),
+                copy,
+            );
+            CommandBus.complete_checked_calculator_result(
+                multi_launcher::commands::CalculatorCommand::CopyHistory { index: history.index },
+                &request.action, request.source, effect,
                 multi_launcher::commands::LauncherRunPreferences {
                     clear_query_after_run: request.settings.clear_query_after_run,
                     hide_after_run: request.settings.hide_after_run,
@@ -675,7 +698,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::Diagnostic { .. } => None,
+            RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -777,6 +800,18 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         self.start_run(action, RunCommand::Calculator(scalar), query, source, window, cx);
+    }
+
+    pub(super) fn start_calculator_history_launch(
+        &mut self,
+        action: Action,
+        history: super::calculator_search::HistoryResult,
+        query: String,
+        source: ActivationSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_run(action, RunCommand::CalculatorHistory(history), query, source, window, cx);
     }
 
     pub(super) fn start_unit_launch(
@@ -1001,7 +1036,7 @@ impl RootWindow {
             )
             .enumerate()
         {
-            let message = if matches!(&receipt.request.command, RunCommand::Copy(_) | RunCommand::Calculator(_)) {
+            let message = if matches!(&receipt.request.command, RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_)) {
                 format!("Copied, but bookkeeping failed: {error}")
             } else {
                 format!("Application launched, but bookkeeping failed: {error}")

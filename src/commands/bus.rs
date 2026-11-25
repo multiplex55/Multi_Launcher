@@ -44,18 +44,17 @@ impl CommandBus {
         handle_checked_headless_effect(preferences, &invocation, effect)
     }
 
-    /// Apply the normal Calculator outcome to a completed scalar effect.
+    /// Apply the normal Calculator outcome to a completed checked effect.
     pub fn complete_checked_calculator_result(
         &self,
-        result: String,
-        expression: Option<String>,
+        command: super::CalculatorCommand,
         original_action: &Action,
         source: ActivationSource,
         effect: anyhow::Result<()>,
         preferences: LauncherRunPreferences,
     ) -> Result<CommandOutcome, CommandError> {
         let invocation = CommandInvocation {
-            command: Command::Calculator(super::CalculatorCommand::CopyResult { result, expression }),
+            command: Command::Calculator(command),
             original_action: original_action.clone(),
             query_override: None,
             source,
@@ -209,13 +208,21 @@ mod tests {
         let action = Action { label: "6 * 7 = 42".into(), desc: "Calculator".into(), action: "calc:42".into(), args: Some("6 * 7".into()) };
         let preferences = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
         let outcome = CommandBus.complete_checked_calculator_result(
-            "42".into(), Some("6 * 7".into()), &action, ActivationSource::Enter, Ok(()), preferences,
+            crate::commands::CalculatorCommand::CopyResult { result: "42".into(), expression: Some("6 * 7".into()) },
+            &action, ActivationSource::Enter, Ok(()), preferences,
         ).unwrap();
         assert_eq!(outcome.history, HistoryPolicy::Record);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert!(matches!(&outcome.toasts[0], crate::commands::ToastPolicy::Launched(label) if label == "6 * 7 = 42"));
+        let history = CommandBus.complete_checked_calculator_result(
+            crate::commands::CalculatorCommand::CopyHistory { index: 2 },
+            &action, ActivationSource::Enter, Ok(()), preferences,
+        ).unwrap();
+        assert_eq!(history.history, HistoryPolicy::Record);
+        assert_eq!(history.visibility, VisibilityPolicy::Keep);
+        assert!(matches!(&history.toasts[0], crate::commands::ToastPolicy::Launched(label) if label == "6 * 7 = 42"));
         assert!(CommandBus.complete_checked_calculator_result(
-            "42".into(), None, &action, ActivationSource::Enter,
+            crate::commands::CalculatorCommand::CopyHistory { index: 2 }, &action, ActivationSource::Enter,
             Err(anyhow::anyhow!("clipboard unavailable")), preferences,
         ).is_err());
     }

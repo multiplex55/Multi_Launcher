@@ -6,11 +6,11 @@ struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
 
 impl multi_launcher::plugin::Plugin for CalculatorMetadata {
     fn name(&self) -> &str { "calculator" }
-    fn description(&self) -> &str { "Evaluate inline scalar expressions (prefix: `=`)" }
+    fn description(&self) -> &str { "Evaluate inline expressions and browse Calculator history" }
     fn capabilities(&self) -> &[&str] { self.0.capabilities() }
     fn search(&self, _: &str) -> Vec<Action> { Vec::new() }
     fn commands(&self) -> Vec<Action> {
-        self.0.commands().into_iter().filter(|action| action.action == "query:= ").collect()
+        self.0.commands().into_iter().filter(|action| matches!(action.action.as_str(), "query:= " | "query:= history" | "query:calc list")).collect()
     }
 }
 

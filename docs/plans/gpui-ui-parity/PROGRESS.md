@@ -4,6 +4,8 @@
 
 G05 inline Calculator now preserves both stock history timings and typed copy behavior. Matched Windows runs at 1516 × 937 verified the exact value, launcher accounting and visible root with Hide After Run enabled. [Calculator evidence](VALIDATION_LOG.md#g05-stock-inline-calculator-search)
 
+G05 Calculator history queries now publish indexed stock rows and copy only a current matching store entry. Both frontends copied the same selected history result at 1516 × 937. The GPUI replay refused a reordered entry even when its replacement had the same result text. [Calculator history evidence](VALIDATION_LOG.md#g05-checked-calculator-history-search)
+
 G05 Date Arithmetic, Base Convert and inline Unit Convert use shared Search and checked clipboard completion. Matched Windows replay verified their exact payloads, including Base Convert Unicode whitespace, Unit approximation and tied fallback order. [Date evidence](VALIDATION_LOG.md#g05-stock-date-arithmetic-search) · [Base Convert evidence](VALIDATION_LOG.md#g05-stock-base-convert-search) · [Unit Convert evidence](VALIDATION_LOG.md#g05-stock-inline-unit-convert-search)
 
 G04 Hash File mode now shows a visual and accessible Kit progress indicator. Matched Windows File-mode runs at 1516 × 937 streamed and canceled the same owned file in both frontends. [Hash progress evidence](VALIDATION_LOG.md#g04-visual-and-accessible-hash-progress)
@@ -27,7 +29,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue broader G05 provider admission and remaining launcher actions. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
+| Current next action | Continue G02 and G05 general execution with checked saved absolute local folders. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
