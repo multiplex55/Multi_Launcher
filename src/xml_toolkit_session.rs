@@ -310,6 +310,7 @@ struct Mailbox {
     snapshot: Arc<XmlSessionSnapshot>,
     pending_source: Option<SourceJob>,
     pending_format: Option<FormatJob>,
+    next_format_request: u64,
     pending_detail: Option<DetailJob>,
     pending_xpath: Option<XPathJob>,
     pending_schema: Option<SchemaJob>,
@@ -331,6 +332,7 @@ enum SourceInput {
 
 struct FormatJob {
     revision: XmlSourceRevision,
+    request: u64,
     mode: XmlFormatMode,
     activity: Option<ActivityTask>,
 }
@@ -505,6 +507,7 @@ impl XmlEngineSession {
                 snapshot: Arc::new(XmlSessionSnapshot::default()),
                 pending_source: None,
                 pending_format: None,
+                next_format_request: 0,
                 pending_detail: None,
                 pending_xpath: None,
                 pending_schema: None,
@@ -730,6 +733,11 @@ impl XmlEngineSession {
         if mailbox.snapshot.parse != XmlParseStatus::Ready {
             return Err(XmlSessionError::SourceNotReady);
         }
+        let request = mailbox
+            .next_format_request
+            .checked_add(1)
+            .ok_or(XmlSessionError::RevisionExhausted)?;
+        mailbox.next_format_request = request;
         let mut snapshot = (*mailbox.snapshot).clone();
         snapshot.output = XmlOutputStatus::Pending(mode);
         mailbox.snapshot = Arc::new(snapshot);
@@ -743,6 +751,7 @@ impl XmlEngineSession {
         }
         mailbox.pending_format = Some(FormatJob {
             revision,
+            request,
             mode,
             activity,
         });
@@ -1020,6 +1029,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 let mut mailbox = lock(&shared.mailbox);
                 if mailbox.stopped
                     || mailbox.snapshot.revision != Some(job.revision)
+                    || mailbox.next_format_request != job.request
                     || mailbox.snapshot.output != XmlOutputStatus::Pending(job.mode)
                 {
                     continue;
@@ -1282,6 +1292,10 @@ mod tests {
         blocked_schema_path: Option<PathBuf>,
         schema_started: Option<Sender<()>>,
         schema_release: Option<Receiver<()>>,
+        format_started: Option<Sender<usize>>,
+        format_release: Option<Receiver<()>>,
+        format_calls: usize,
+        format_fail_last: bool,
     }
 
     impl SessionEngine for FakeEngine {
@@ -1322,6 +1336,17 @@ mod tests {
             document: Self::Document,
             mode: XmlFormatMode,
         ) -> Result<String, XmlEngineError> {
+            if let Some(started) = &self.format_started {
+                self.format_calls += 1;
+                let _ = started.send(self.format_calls);
+                if let Some(release) = &self.format_release {
+                    let _ = release.recv();
+                }
+                if self.format_calls == 2 && self.format_fail_last {
+                    return Err(XmlEngineError::XPath("latest format failed".into()));
+                }
+                return Ok(format!("call-{}", self.format_calls));
+            }
             Ok(format!("{mode:?}:document-{document}"))
         }
 
@@ -1461,6 +1486,10 @@ mod tests {
             blocked_schema_path: None,
             schema_started: None,
             schema_release: None,
+            format_started: None,
+            format_release: None,
+            format_calls: 0,
+            format_fail_last: false,
         }
     }
 
@@ -1579,6 +1608,51 @@ mod tests {
             vec!["first".to_owned(), "latest".to_owned()]
         );
         session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn superseded_format_same_mode_cannot_publish_before_latest_result_or_failure() {
+        for fail_latest in [false, true] {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let mut engine = fake_engine(
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+                None,
+                None,
+                None,
+            );
+            engine.format_started = Some(started_tx);
+            engine.format_release = Some(release_rx);
+            engine.format_fail_last = fail_latest;
+            let session = XmlEngineSession::start_with_engine(engine).unwrap();
+            let revision = session.replace_source("source".into()).unwrap();
+            wait_for(&session, |snapshot| snapshot.parse == XmlParseStatus::Ready);
+            session.format(revision, XmlFormatMode::Pretty).unwrap();
+            assert_eq!(started_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+            session.format(revision, XmlFormatMode::Minify).unwrap();
+            session.format(revision, XmlFormatMode::Pretty).unwrap();
+            release_tx.send(()).unwrap();
+            assert_eq!(started_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 2);
+            assert_eq!(
+                session.snapshot().output,
+                XmlOutputStatus::Pending(XmlFormatMode::Pretty)
+            );
+            release_tx.send(()).unwrap();
+            let snapshot = wait_for(&session, |snapshot| {
+                matches!(&snapshot.output, XmlOutputStatus::Ready(_) | XmlOutputStatus::Failed(_))
+            });
+            match &snapshot.output {
+                XmlOutputStatus::Ready(output) if !fail_latest => {
+                    assert_eq!(output.text, "call-2");
+                }
+                XmlOutputStatus::Failed(XmlEngineError::XPath(message)) if fail_latest => {
+                    assert_eq!(message, "latest format failed");
+                }
+                other => panic!("unexpected latest format result: {other:?}"),
+            }
+            session.shutdown().unwrap();
+        }
     }
 
     #[test]

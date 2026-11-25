@@ -1,5 +1,6 @@
 //! Source admission shared by the XML editor and file loader.
 use crate::xml_toolkit_engine::MAX_XML_INPUT_BYTES;
+use crate::xml_toolkit_session::{XmlFormatOutput, XmlOutputStatus, XmlSessionSnapshot};
 
 /// Validate a protected Unicode clipboard read before replacing XML source.
 pub fn validate_clipboard_source(source: &str) -> Result<(), String> {
@@ -110,4 +111,35 @@ pub fn xml_error_message(error: &crate::xml_toolkit_engine::XmlEngineError) -> S
         }
         other => format!("{other:?}"),
     }
+}
+
+pub fn current_output(snapshot: &XmlSessionSnapshot) -> Option<&XmlFormatOutput> {
+    let XmlOutputStatus::Ready(output) = &snapshot.output else {
+        return None;
+    };
+    (snapshot.revision == Some(output.revision)).then_some(output.as_ref())
+}
+
+pub fn output_text_for_apply(snapshot: &XmlSessionSnapshot) -> Result<String, String> {
+    let output = current_output(snapshot)
+        .ok_or_else(|| "Formatted XML output is no longer current.".to_owned())?;
+    if output.text.len() > MAX_XML_INPUT_BYTES {
+        return Err(format!(
+            "Formatted XML output exceeds the {MAX_XML_INPUT_BYTES}-byte source limit; copy or save it instead."
+        ));
+    }
+    Ok(output.text.clone())
+}
+
+pub fn output_text_for_explicit_use(snapshot: &XmlSessionSnapshot) -> Result<String, String> {
+    current_output(snapshot)
+        .map(|output| output.text.clone())
+        .ok_or_else(|| "No current XML output is ready.".into())
+}
+
+pub fn output_preview(text: &str) -> &str {
+    const MAX_OUTPUT_PREVIEW_CHARS: usize = 8_000;
+    text.char_indices()
+        .nth(MAX_OUTPUT_PREVIEW_CHARS)
+        .map_or(text, |(index, _)| &text[..index])
 }

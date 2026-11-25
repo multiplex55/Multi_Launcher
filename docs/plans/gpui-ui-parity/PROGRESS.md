@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G14 XML Format and Minify produce a separate bounded Output preview. Copy keeps the full payload, Apply checks the source limit, and the shared session rejects superseded requests even when their format modes match. Seven focused tests passed, including real Windows formatting. Matched desktop evidence remains pending. [XML Output checkpoint](CHECKPOINTS.md#xml-format-and-output)
+
 G14 docked XML Source now edits multiline XML under the stock `xml` route. It uses the existing XML engine and Activity, current-revision diagnostics, and explicit protected clipboard. Ten focused tests passed, including the real Windows MSXML gate. Matched desktop verification remains pending. [XML Source checkpoint](CHECKPOINTS.md#xml-source-session-and-activity)
 
 G14 added JSON Pop Out and Dock through the retained workspace. Dock requires an accepted foreground receipt before the source popup retires. Mode persistence, native geometry capture and saved geometry restore use the shared settings owners. Independent review and the focused host and geometry tests passed. Native replay and saved pin remain pending. [Checked host checkpoint](CHECKPOINTS.md#json-checked-pop-out-and-dock) · [Geometry checkpoint](CHECKPOINTS.md#json-native-geometry-writeback)
@@ -79,7 +81,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add XML Format, Minify and the retained Output view, then Tree, XPath, schema and file effects. Continue saved JSON pin in the shared JSON/XML host follow-up. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Reuse the stock XML Tree model in a virtualized GPUI tab with current inspection and exact copies, then add XPath, schema and file effects. Continue saved JSON pin in the shared JSON/XML host follow-up. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

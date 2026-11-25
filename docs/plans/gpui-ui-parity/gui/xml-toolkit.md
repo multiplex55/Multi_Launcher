@@ -16,4 +16,8 @@ Select `xml_toolkit_plugin_command_routes_once_through_the_typed_bus`, `m7f_xml_
 
 Stock typed Search opens the docked XML Source editor and focuses the retained draft. Source revisions publish only current diagnostics from the real Activity-backed engine. Paste explicitly reads protected Unicode text and uses the stock size and UTF-8 declaration policy. Copy Source preserves exact authored text, including invalid XML. Closing retires the current worker and effects, while reopening preserves the draft. Accepted launcher Quit and restart wait for worker retirement. The focused batch passed the real Windows engine gate. Matched desktop checks remain pending.
 
-Continue Format and Minify, separate Output preview, explicit full Copy and bounded Apply. Tree, XPath, local schema, owned file effects, and remembered native presentation and pin retain their assigned criteria.
+## GPUI Format and Output
+
+Format and Minify use the exact current parsed source. The Output tab previews up to 8,000 Unicode characters. Copy writes the full current output explicitly, and Apply uses the 4 MiB source limit. The shared session rejects older completions even when successive requests use the same format mode. Engine and receipt tests passed. Compare mixed content, exact full Copy, and explicit Apply in the matched desktop run.
+
+Tree, XPath, local schema, owned file effects, and remembered native presentation and pin retain their assigned criteria.

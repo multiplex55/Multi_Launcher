@@ -1,7 +1,10 @@
 //! Retained XML Source workspace and its single engine owner.
 use super::*;
 use multi_launcher::commands::{XmlToolkitCommand, XmlToolkitCommandHost};
-use multi_launcher::xml_toolkit_session::{XmlEngineSession, XmlParseStatus, XmlSourceRevision};
+use multi_launcher::xml_toolkit_engine::XmlFormatMode;
+use multi_launcher::xml_toolkit_session::{
+    XmlEngineSession, XmlOutputStatus, XmlParseStatus, XmlSessionSnapshot, XmlSourceRevision,
+};
 
 pub(super) fn provider_is_current(
     query: &str,
@@ -69,6 +72,19 @@ impl XmlToolkitCommandHost for OpenHost {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ClipboardIntent {
+    Paste,
+    Source,
+    Output,
+}
+fn output_receipt_current(current: u64, expected: u64) -> bool {
+    current == expected
+}
+fn snapshot_pending(snapshot: &XmlSessionSnapshot) -> bool {
+    matches!(snapshot.parse, XmlParseStatus::Pending)
+        || matches!(snapshot.output, XmlOutputStatus::Pending(_))
+}
 enum Engine {
     Idle,
     Starting { cancel: bool },
@@ -81,9 +97,12 @@ pub(super) struct XmlWorkspace {
     input: Entity<TextareaState>,
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
+    output_focus: FocusHandle,
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     epoch: Arc<AtomicU64>,
+    output_epoch: Arc<AtomicU64>,
+    output_tab: bool,
     engine: Engine,
     accepted_revision: Option<XmlSourceRevision>,
     pumping: bool,
@@ -144,9 +163,12 @@ impl XmlWorkspace {
             input,
             focus: cx.focus_handle(),
             return_focus: None,
+            output_focus: cx.focus_handle(),
             owner,
             mount,
             epoch: Arc::new(AtomicU64::new(1)),
+            output_epoch: Arc::new(AtomicU64::new(1)),
+            output_tab: false,
             engine: Engine::Idle,
             accepted_revision: None,
             pumping: false,
@@ -216,6 +238,7 @@ impl XmlWorkspace {
         .detach();
     }
     fn submit(&mut self, cx: &mut Context<Self>) {
+        self.output_epoch.fetch_add(1, Ordering::AcqRel);
         self.accepted_revision = None;
         if let Engine::Active(session) = &self.engine {
             match session.replace_source(self.source.clone()) {
@@ -231,7 +254,7 @@ impl XmlWorkspace {
     fn pump(&mut self, cx: &mut Context<Self>) {
         let pending = match &self.engine {
             Engine::Starting { .. } | Engine::Closing(_) => true,
-            Engine::Active(session) => matches!(session.snapshot().parse, XmlParseStatus::Pending),
+            Engine::Active(session) => snapshot_pending(&session.snapshot()),
             Engine::Idle => false,
         };
         if !pending || self.pumping {
@@ -266,9 +289,7 @@ impl XmlWorkspace {
                     }
                     let pending = match &view.engine {
                         Engine::Starting { .. } | Engine::Closing(_) => true,
-                        Engine::Active(session) => {
-                            matches!(session.snapshot().parse, XmlParseStatus::Pending)
-                        }
+                        Engine::Active(session) => snapshot_pending(&session.snapshot()),
                         Engine::Idle => false,
                     };
                     if !pending {
@@ -317,7 +338,11 @@ impl XmlWorkspace {
         if self.open && matches!(self.engine, Engine::Idle) {
             self.start(cx);
         }
-        self.input.focus_handle(cx).focus(window, cx);
+        if self.output_tab {
+            self.output_focus.focus(window, cx);
+        } else {
+            self.input.focus_handle(cx).focus(window, cx);
+        }
         cx.notify();
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -334,10 +359,77 @@ impl XmlWorkspace {
         }
         cx.notify();
     }
-    fn clipboard(&mut self, copy: bool, cx: &mut Context<Self>) {
+    fn current_snapshot(&self) -> Option<Arc<XmlSessionSnapshot>> {
+        let Engine::Active(session) = &self.engine else {
+            return None;
+        };
+        let snapshot = session.snapshot();
+        current_source_revision(self.accepted_revision, snapshot.revision).then_some(snapshot)
+    }
+    fn format(&mut self, mode: XmlFormatMode, cx: &mut Context<Self>) {
+        if !self.open || !self.mount.is_current() || self.admission.is_fenced() {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        if snapshot.parse != XmlParseStatus::Ready {
+            return;
+        }
+        let Some(revision) = snapshot.revision else {
+            return;
+        };
+        self.output_epoch.fetch_add(1, Ordering::AcqRel);
+        if let Engine::Active(session) = &self.engine {
+            if let Err(error) = session.format(revision, mode) {
+                self.feedback = Some(format!("Could not format XML: {error:?}"));
+            } else {
+                self.feedback = None;
+            }
+        }
+        self.pump(cx);
+        cx.notify();
+    }
+    fn apply_output(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open || !self.mount.is_current() || self.admission.is_fenced() {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        match multi_launcher::xml_source::output_text_for_apply(&snapshot) {
+            Ok(text) => {
+                self.epoch.fetch_add(1, Ordering::AcqRel);
+                self.source = text.clone();
+                self.feedback = None;
+                self.input
+                    .update(cx, |input, cx| input.set_value(&text, window, cx));
+                self.submit(cx);
+            }
+            Err(error) => {
+                self.feedback = Some(error);
+                cx.notify();
+            }
+        }
+    }
+    fn clipboard(&mut self, intent: ClipboardIntent, cx: &mut Context<Self>) {
         if !self.open || self.clipboard_pending {
             return;
         }
+        let output = if matches!(intent, ClipboardIntent::Output) {
+            let Some(snapshot) = self.current_snapshot() else {
+                return;
+            };
+            let XmlOutputStatus::Ready(output) = &snapshot.output else {
+                return;
+            };
+            if multi_launcher::xml_source::current_output(&snapshot).is_none() {
+                return;
+            }
+            Some(output.clone())
+        } else {
+            None
+        };
         let Some(permit) = self.admission.admit() else {
             return;
         };
@@ -351,20 +443,32 @@ impl XmlWorkspace {
         let native = self.native;
         let admission = self.admission.clone();
         let source = self.source.clone();
+        let output_epoch = self.output_epoch.clone();
+        let expected_output = output_epoch.load(Ordering::Acquire);
+        let worker_output_epoch = output_epoch.clone();
         let task = cx.background_executor().spawn(async move {
             let _permit = permit;
-            if copy {
+            if !matches!(intent, ClipboardIntent::Paste) {
                 if !clipboard_receipt_current(
                     &work_mount,
                     epoch.load(Ordering::Acquire),
                     expected,
                     !admission.is_fenced()
-                        && json_utility::native_host_current(&visibility, revision, native, false),
+                        && json_utility::native_host_current(&visibility, revision, native, false)
+                        && (!matches!(intent, ClipboardIntent::Output)
+                            || output_receipt_current(
+                                worker_output_epoch.load(Ordering::Acquire),
+                                expected_output,
+                            )),
                 ) {
                     return Err("Clipboard request was superseded.".to_owned());
                 }
                 ArboardClipboardBackend
-                    .write_text(&source)
+                    .write_text(
+                        output
+                            .as_ref()
+                            .map_or(source.as_str(), |output| output.text.as_str()),
+                    )
                     .map(|_| None)
                     .map_err(|error| format!("Could not copy XML: {error}"))
             } else {
@@ -392,6 +496,11 @@ impl XmlWorkspace {
                         view.epoch.load(Ordering::Acquire),
                         expected,
                         !view.admission.is_fenced()
+                            && (!matches!(intent, ClipboardIntent::Output)
+                                || output_receipt_current(
+                                    output_epoch.load(Ordering::Acquire),
+                                    expected_output,
+                                ))
                             && json_utility::native_host_current(
                                 &view.visibility,
                                 revision,
@@ -412,7 +521,16 @@ impl XmlWorkspace {
                             .update(cx, |input, cx| input.set_value(&text, window, cx));
                         view.submit(cx);
                     }
-                    Ok(None) => view.feedback = Some("XML source copied".into()),
+                    Ok(None) => {
+                        view.feedback = Some(
+                            if matches!(intent, ClipboardIntent::Output) {
+                                "Copied current XML output."
+                            } else {
+                                "XML source copied"
+                            }
+                            .into(),
+                        )
+                    }
                     Err(error) => view.feedback = Some(error),
                 }
                 cx.notify();
@@ -429,6 +547,55 @@ impl Render for XmlWorkspace {
         let copy_mount = self.mount.clone();
         let clear_mount = self.mount.clone();
         let close_mount = self.mount.clone();
+        let format_mount = self.mount.clone();
+        let minify_mount = self.mount.clone();
+        let apply_mount = self.mount.clone();
+        let output_copy_mount = self.mount.clone();
+        let source_tab_mount = self.mount.clone();
+        let output_tab_mount = self.mount.clone();
+        let source_epoch = self.epoch.load(Ordering::Acquire);
+        let output_epoch = self.output_epoch.load(Ordering::Acquire);
+        let snapshot = self.current_snapshot();
+        let can_format = snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.parse == XmlParseStatus::Ready);
+        let output = snapshot
+            .as_ref()
+            .and_then(|snapshot| multi_launcher::xml_source::current_output(snapshot));
+        let can_copy = output.is_some() && !self.clipboard_pending;
+        let can_apply = output.is_some_and(|output| {
+            output.text.len() <= multi_launcher::xml_toolkit_engine::MAX_XML_INPUT_BYTES
+        });
+        let output_text = match snapshot.as_ref().map(|snapshot| &snapshot.output) {
+            Some(XmlOutputStatus::Pending(XmlFormatMode::Pretty)) => {
+                "Formatting the current XML…".to_owned()
+            }
+            Some(XmlOutputStatus::Pending(XmlFormatMode::Minify)) => {
+                "Minifying the current XML…".to_owned()
+            }
+            Some(XmlOutputStatus::Failed(error)) => format!(
+                "XML output failed: {}",
+                multi_launcher::xml_source::xml_error_message(error)
+            ),
+            Some(XmlOutputStatus::Ready(output))
+                if snapshot.as_ref().is_some_and(|snapshot| {
+                    multi_launcher::xml_source::current_output(snapshot).is_some()
+                }) =>
+            {
+                let preview = multi_launcher::xml_source::output_preview(&output.text);
+                format!(
+                    "{} UTF-8 bytes\n{}{}",
+                    output.text.len(),
+                    preview,
+                    if preview.len() < output.text.len() {
+                        "\nOutput preview is clipped. Copy the full output explicitly."
+                    } else {
+                        ""
+                    }
+                )
+            }
+            _ => "Format or minify the current parsed source to create output.".to_owned(),
+        };
         let status = match &self.engine {
             Engine::Starting { .. } => "Starting XML session…".to_owned(),
             Engine::Closing(_) => "Stopping XML session…".to_owned(),
@@ -477,13 +644,60 @@ impl Render for XmlWorkspace {
             .gap_2()
             .child(Label::new("XML Toolkit"))
             .child(
-                Textarea::new(&self.input)
-                    .aria_label("XML Source")
-                    .tab_index(0),
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("xml-tab-source")
+                            .label("Source")
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if source_tab_mount.is_current()
+                                    && view.open
+                                    && !view.admission.is_fenced()
+                                {
+                                    view.output_tab = false;
+                                    view.input.focus_handle(cx).focus(window, cx);
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("xml-tab-output")
+                            .label("Output")
+                            .track_focus(&self.output_focus)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if output_tab_mount.is_current()
+                                    && view.open
+                                    && !view.admission.is_fenced()
+                                {
+                                    view.output_tab = true;
+                                    view.output_focus.focus(window, cx);
+                                    cx.notify();
+                                }
+                            })),
+                    ),
             )
+            .when(!self.output_tab, |div| {
+                div.child(
+                    Textarea::new(&self.input)
+                        .aria_label("XML Source")
+                        .tab_index(0),
+                )
+            })
+            .when(self.output_tab, |container| {
+                container.child(
+                    div()
+                        .id("xml-output-preview")
+                        .max_h(px(240.0))
+                        .overflow_y_scroll()
+                        .font_family("Consolas")
+                        .child(output_text),
+                )
+            })
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(
                         Button::new("xml-paste")
@@ -491,7 +705,7 @@ impl Render for XmlWorkspace {
                             .disabled(self.clipboard_pending)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if paste_mount.is_current() {
-                                    view.clipboard(false, cx);
+                                    view.clipboard(ClipboardIntent::Paste, cx);
                                 }
                             })),
                     )
@@ -501,7 +715,59 @@ impl Render for XmlWorkspace {
                             .disabled(self.clipboard_pending)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if copy_mount.is_current() {
-                                    view.clipboard(true, cx);
+                                    view.clipboard(ClipboardIntent::Source, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("xml-format")
+                            .label("Format")
+                            .disabled(!can_format)
+                            .tab_stop(can_format)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if format_mount.is_current()
+                                    && view.epoch.load(Ordering::Acquire) == source_epoch
+                                {
+                                    view.format(XmlFormatMode::Pretty, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("xml-minify")
+                            .label("Minify")
+                            .disabled(!can_format)
+                            .tab_stop(can_format)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if minify_mount.is_current()
+                                    && view.epoch.load(Ordering::Acquire) == source_epoch
+                                {
+                                    view.format(XmlFormatMode::Minify, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("xml-copy-output")
+                            .label("Copy Output")
+                            .disabled(!can_copy)
+                            .tab_stop(can_copy)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if output_copy_mount.is_current()
+                                    && view.output_epoch.load(Ordering::Acquire) == output_epoch
+                                {
+                                    view.clipboard(ClipboardIntent::Output, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("xml-apply-output")
+                            .label("Apply Output to Source")
+                            .disabled(!can_apply)
+                            .tab_stop(can_apply)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if apply_mount.is_current()
+                                    && view.output_epoch.load(Ordering::Acquire) == output_epoch
+                                {
+                                    view.apply_output(window, cx);
                                 }
                             })),
                     )
@@ -521,7 +787,11 @@ impl Render for XmlWorkspace {
                                 view.input
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                                 view.submit(cx);
-                                view.input.focus_handle(cx).focus(window, cx);
+                                if view.output_tab {
+                                    view.output_focus.focus(window, cx);
+                                } else {
+                                    view.input.focus_handle(cx).focus(window, cx);
+                                }
                             })),
                     )
                     .child(
@@ -605,10 +875,24 @@ impl RootWindow {
 mod tests {
     use super::super::utility_mount::MountOwner;
     use super::{
-        clipboard_receipt_current, provider_is_current, startup_disposition, StartupDisposition,
+        clipboard_receipt_current, output_receipt_current, provider_is_current,
+        startup_disposition, StartupDisposition,
     };
     use multi_launcher::plugin::Plugin;
     use multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin;
+    #[test]
+    fn output_generation_supersession_revokes_old_copy() {
+        assert!(output_receipt_current(12, 12));
+        assert!(!output_receipt_current(13, 12));
+    }
+    #[test]
+    fn output_preview_is_unicode_bounded_without_mutating_full_payload() {
+        let full = "é🦀".repeat(4_001);
+        let preview = multi_launcher::xml_source::output_preview(&full);
+        assert_eq!(preview.chars().count(), 8_000);
+        assert_eq!(full.chars().count(), 8_002);
+        assert_eq!(preview, &full[..preview.len()]);
+    }
     #[test]
     fn cancelled_startup_reaps_success_retries_failure_and_terminal_never_reopens() {
         assert_eq!(

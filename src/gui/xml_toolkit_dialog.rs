@@ -11,9 +11,14 @@ use crate::gui::jump_mode::ui::{
 };
 use crate::gui::jump_mode::{SurfaceId, TargetGeneration, TargetId, TargetKind};
 use crate::xml_toolkit_engine::{MAX_XML_INPUT_BYTES, XmlFormatMode};
-use crate::xml_source::xml_error_message;
+use crate::xml_source::{
+    current_output, output_preview, output_text_for_apply, output_text_for_explicit_use,
+    xml_error_message,
+};
+#[cfg(test)]
+use crate::xml_toolkit_session::XmlFormatOutput;
 use crate::xml_toolkit_session::{
-    XmlDetailIntent, XmlDetailStatus, XmlEngineSession, XmlFormatOutput, XmlOutputStatus,
+    XmlDetailIntent, XmlDetailStatus, XmlEngineSession, XmlOutputStatus,
     XmlParseStatus, XmlSchemaStatus, XmlSessionError, XmlSessionSnapshot as SessionSnapshot,
     XmlTreeStatus, XmlXPathStatus,
 };
@@ -27,7 +32,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const VIEWPORT_ID: &str = "xml_toolkit_viewport";
-const MAX_OUTPUT_PREVIEW_CHARS: usize = 8_000;
 
 /// Small response adapter shared by the XML form and its virtualized child
 /// views. Identities are static control paths or typed, non-payload entity
@@ -1800,7 +1804,7 @@ impl XmlToolkitDialogState {
             }
             XmlOutputStatus::Ready(output) => {
                 ui.label(format!("{} UTF-8 bytes", output.text.len()));
-                let preview = bounded_prefix(&output.text, MAX_OUTPUT_PREVIEW_CHARS);
+                let preview = output_preview(&output.text);
                 let mut preview = preview.to_owned();
                 egui::ScrollArea::both()
                     .id_salt("xml_toolkit_output_preview")
@@ -2718,42 +2722,12 @@ fn source_editor(ui: &mut egui::Ui, source: &mut String, size: egui::Vec2) -> eg
     )
 }
 
-fn current_output(snapshot: &SessionSnapshot) -> Option<&XmlFormatOutput> {
-    let XmlOutputStatus::Ready(output) = &snapshot.output else {
-        return None;
-    };
-    (snapshot.revision == Some(output.revision)).then_some(output.as_ref())
-}
-
-fn output_text_for_apply(snapshot: &SessionSnapshot) -> Result<String, String> {
-    let output = current_output(snapshot)
-        .ok_or_else(|| "Formatted XML output is no longer current.".to_owned())?;
-    if output.text.len() > MAX_XML_INPUT_BYTES {
-        return Err(format!(
-            "Formatted XML output exceeds the {MAX_XML_INPUT_BYTES}-byte source limit; copy or save it instead."
-        ));
-    }
-    Ok(output.text.clone())
-}
-
-fn output_text_for_explicit_use(snapshot: &SessionSnapshot) -> Result<String, String> {
-    current_output(snapshot)
-        .map(|output| output.text.clone())
-        .ok_or_else(|| "No current XML output is ready.".into())
-}
-
 fn session_pending(snapshot: &SessionSnapshot) -> bool {
     matches!(snapshot.parse, XmlParseStatus::Pending)
         || matches!(snapshot.output, XmlOutputStatus::Pending(_))
         || matches!(snapshot.detail, XmlDetailStatus::Pending(_))
         || matches!(snapshot.xpath, XmlXPathStatus::Pending(_))
         || matches!(snapshot.schema.status, XmlSchemaStatus::Pending(_))
-}
-
-fn bounded_prefix(text: &str, maximum_chars: usize) -> &str {
-    text.char_indices()
-        .nth(maximum_chars)
-        .map_or(text, |(index, _)| &text[..index])
 }
 
 fn viewport_id() -> egui::ViewportId {
