@@ -14,6 +14,23 @@ pub(super) struct Reveal {
     pub acknowledgement: Acknowledgement,
 }
 
+pub(super) struct JsonReveal {
+    pub gesture: Gesture,
+    pub mount: super::utility_mount::MountReceipt,
+    pub acknowledgement: JsonAcknowledgement,
+}
+
+pub(super) struct JsonAcknowledgement {
+    pub signal: Arc<HashWakeSignal>,
+    pub accepted_revision: Arc<AtomicU64>,
+}
+impl JsonAcknowledgement {
+    pub(super) fn accept(&self, revision: u64) { self.accepted_revision.store(revision, Ordering::Release); }
+}
+impl Drop for JsonAcknowledgement {
+    fn drop(&mut self) { self.signal.close(); }
+}
+
 pub(super) struct Acknowledgement(pub Arc<HashWakeSignal>);
 
 impl Drop for Acknowledgement {

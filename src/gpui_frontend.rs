@@ -24,6 +24,7 @@ mod hash_dock;
 mod wake;
 mod json_utility;
 mod json_tree;
+mod json_host;
 mod utility_mount;
 use wake::HashWakeSignal;
 mod indexed_applications;
@@ -2630,6 +2631,8 @@ struct RootWindow {
     activity_center: multi_launcher::activity::ActivityCenter,
     activity_view: Option<Entity<activity::ActivityView>>,
     json_view: Option<Entity<json_utility::JsonWorkspace>>,
+    json_popup: Option<json_utility::JsonPopup>,
+    json_retiring: Vec<RetiringHashWindow>,
     hash_wake_signal: Arc<HashWakeSignal>,
     hash_file_picker_pending: Arc<AtomicBool>,
     hash_clipboard_pending: Arc<HashClipboardPendingState>,
@@ -5634,6 +5637,16 @@ impl RootWindow {
 
         let mut child_windows = Vec::new();
         let mut native_windows = self.native_window.into_iter().collect::<Vec<_>>();
+        if self.json_view.as_ref().is_some_and(|view| view.read(cx).rehosting) {
+            return Err("JSON Utility is changing presentation. Wait for it to finish before restarting.".to_owned());
+        }
+        self.json_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
+        if !self.json_retiring.is_empty() { return Err("A previous JSON window has not retired.".to_owned()); }
+        if let Some(popup) = &self.json_popup {
+            child_windows.push(popup.window);
+            if let Some(native) = popup.native { native_windows.push(native); }
+            else if cfg!(windows) { return Err("The JSON window has no checked native handle.".to_owned()); }
+        }
         let utility = match &self.secondary {
             SecondaryWindowState::Closed => None,
             SecondaryWindowState::OpenPending => {
@@ -8825,13 +8838,8 @@ impl RootWindow {
                             Some("Saving Hash Generator presentation preference…".to_owned());
                     }
                     UtilityPresentationUpdate::ImmediateFailure => {
-                        for (_, error) in root.utility_presentations.poll() {
-                            root.hash_presentation_error = Some(error.clone());
-                            *root.hash_presentation_feedback
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(error);
-                        }
+                        let failures = root.utility_presentations.poll();
+                        root.report_presentation_failures(failures, cx);
                     }
                 }
                 let show_root = target == HashPresentationMode::Docked
@@ -9034,13 +9042,7 @@ impl RootWindow {
                     let failures = utility_presentations.poll();
                     if !failures.is_empty() {
                         let _ = root.update(cx, |root, cx| {
-                            for (_, error) in failures {
-                                root.hash_presentation_error = Some(error.clone());
-                                *root.hash_presentation_feedback
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                    Some(error);
-                            }
+                            root.report_presentation_failures(failures, cx);
                         root.notify_hash_mount(cx);
                         });
                     }
@@ -10664,7 +10666,7 @@ impl Render for RootWindow {
         if let Some(view) = self.activity_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
-        if let Some(view) = self.json_view.as_ref().filter(|view| view.read(cx).open) {
+        if let Some(view) = self.json_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -11687,6 +11689,7 @@ struct RootVisibility {
 
 enum RootVisibilityRequest {
     DockHash(hash_dock::Reveal),
+    DockJson(hash_dock::JsonReveal),
     HideAfterExternalLaunch(u64),
     HideAfterWindowSwitch(u64, ForegroundIdentity, Arc<str>),
     HideAfterWindowClose(u64, ForegroundIdentity, ForegroundIdentity, Arc<str>),
@@ -11713,6 +11716,7 @@ impl RootVisibilityRequest {
     fn is_current(&self, revision: u64, visible: bool, newer_pending: bool) -> bool {
         match self {
             Self::DockHash(reveal) => reveal.gesture.visibility_revision == revision && !newer_pending,
+            Self::DockJson(reveal) => reveal.gesture.visibility_revision == revision && reveal.mount.is_current() && !newer_pending,
             Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _)
                 | Self::HideAfterWindowClose(expected, _, _, _) => {
                 *expected == revision && visible && !newer_pending
@@ -11830,7 +11834,7 @@ impl RootVisibility {
             let Ok(mut pending) = self.requested_visible.lock() else {
                 return false;
             };
-            let supersedes_dock = matches!(pending.as_ref(), Some(RootVisibilityRequest::DockHash(_)))
+            let supersedes_dock = matches!(pending.as_ref(), Some(RootVisibilityRequest::DockHash(_) | RootVisibilityRequest::DockJson(_)))
                 && matches!(&request, RootVisibilityRequest::HideAfterExternalLaunch(_)
                     | RootVisibilityRequest::HideAfterWindowSwitch(_, _, _)
                     | RootVisibilityRequest::HideAfterWindowClose(_, _, _, _));
@@ -11860,6 +11864,12 @@ impl RootVisibility {
         let acknowledgement = hash_dock::Acknowledgement(Arc::clone(&receiver));
         self.queue_visible(RootVisibilityRequest::DockHash(hash_dock::Reveal { gesture, mount_generation, acknowledgement })).then_some(receiver)
     }
+    fn request_json_visible(&self, gesture: hash_dock::Gesture, mount: utility_mount::MountReceipt) -> Option<(Arc<HashWakeSignal>, Arc<AtomicU64>)> {
+        let receiver = Arc::new(HashWakeSignal::default());
+        let accepted = Arc::new(AtomicU64::new(0));
+        let acknowledgement = hash_dock::JsonAcknowledgement { signal: receiver.clone(), accepted_revision: accepted.clone() };
+        self.queue_visible(RootVisibilityRequest::DockJson(hash_dock::JsonReveal { gesture, mount, acknowledgement })).then_some((receiver, accepted))
+    }
 
     #[cfg(windows)]
     fn take_requested_visible(&self) -> Option<RootVisibilityRequest> {
@@ -11883,6 +11893,7 @@ impl RootVisibility {
         }
         let visible = match request {
             RootVisibilityRequest::DockHash(_) => true,
+            RootVisibilityRequest::DockJson(_) => true,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
             RootVisibilityRequest::HideAfterWindowClose(_, _, _, _) => false,
             RootVisibilityRequest::HideAfterWindowSwitch(_, target, _) => {
@@ -12393,6 +12404,8 @@ pub(crate) fn run_foundation_window(
                 activity_center,
                 activity_view: None,
                 json_view: None,
+                json_popup: None,
+                json_retiring: Vec::new(),
                 hash_wake_signal: wake_signal_for_root,
                 hash_file_picker_pending: hash_file_picker_pending_for_root,
                 hash_clipboard_pending: hash_clipboard_pending_for_root,
@@ -13089,7 +13102,9 @@ pub(crate) fn run_foundation_window(
                         );
                     }
 
-                    let was_visible = visibility.visible.load(Ordering::Acquire);
+                    let was_visible = if matches!(requested_visible.as_ref(), Some(RootVisibilityRequest::DockJson(_))) {
+                        visibility.current_visible_revision(native_window).is_some()
+                    } else { visibility.visible.load(Ordering::Acquire) };
                     let hotkey_for_conditional = requested_visible.as_ref()
                         .is_some_and(|request| request.superseded_by_hotkey(|| trigger.take()));
                     let switch_hide = requested_visible.as_ref().and_then(|request| match request {
@@ -13110,11 +13125,14 @@ pub(crate) fn run_foundation_window(
                             && window_close_hide_is_current(*root, current_foreground_identity(), expected, current_query.as_deref())
                     });
                     let dock_reveal = requested_visible.as_ref().and_then(|request| match request {
-                        RootVisibilityRequest::DockHash(reveal) => Some((reveal.gesture, reveal.mount_generation)),
+                        RootVisibilityRequest::DockHash(reveal) => Some((reveal.gesture, Some(reveal.mount_generation), None)),
+                        RootVisibilityRequest::DockJson(reveal) => Some((reveal.gesture, None, Some(reveal.mount.clone()))),
                         _ => None,
                     });
-                    let dock_current = dock_reveal.is_none_or(|(gesture, generation)| {
-                        dock_mount_generation.load(Ordering::Acquire) == generation
+                    let dock_current = dock_reveal.as_ref().is_none_or(|(gesture, generation, json_mount)| {
+                        generation.is_none_or(|generation| dock_mount_generation.load(Ordering::Acquire) == generation)
+                            && json_mount.as_ref().is_none_or(|mount| mount.is_current())
+                            && (json_mount.is_none() || (gesture.foreground_authorized && current_foreground_identity() == Some(gesture.source.identity)))
                             && native_window_is_valid(gesture.source)
                             && !restart_admission_for_hotkey.is_fenced()
                     });
@@ -13133,7 +13151,7 @@ pub(crate) fn run_foundation_window(
                     } else { None };
                     let (revision, desired_visible, hash_focus_generation, hotkey_toggle) =
                         if let Some((revision, visible)) = accepted_visible {
-                            let hash_focus_generation = dock_reveal.map(|(_, generation)| generation);
+                            let hash_focus_generation = dock_reveal.as_ref().and_then(|(_, generation, _)| *generation);
                             (revision, visible, hash_focus_generation, false)
                         } else if hotkey_for_conditional || trigger.take() {
                             let (revision, visible) = visibility.next_toggle();
@@ -13141,7 +13159,7 @@ pub(crate) fn run_foundation_window(
                         } else {
                             continue;
                         };
-                    let foreground = if let Some((gesture, _)) = dock_reveal {
+                    let foreground = if let Some((gesture, _, _)) = &dock_reveal {
                         gesture.foreground_authorized.then_some(gesture.source.identity)
                     } else if desired_visible {
                         cx.background_executor()
@@ -13213,8 +13231,13 @@ pub(crate) fn run_foundation_window(
                                 } else {
                                     None
                                 };
-                                search_focus_selected = hash_view.is_none();
-                                if let Some(view) = hash_view {
+                                let json_view = dock_reveal.as_ref().and_then(|(_, _, mount)| mount.as_ref()).filter(|mount| mount.is_current())
+                                    .and_then(|_| root.json_view.as_ref()).cloned();
+                                search_focus_selected = hash_view.is_none() && json_view.is_none();
+                                if let Some(view) = json_view {
+                                    root.scroll_to_json(cx);
+                                    view.update(cx, |tool, cx| tool.focus_editor(window, cx));
+                                } else if let Some(view) = hash_view {
                                     view.update(cx, |tool, cx| {
                                         tool.focus_editable(window, cx);
                                     });
@@ -13271,12 +13294,12 @@ pub(crate) fn run_foundation_window(
                             continue;
                         }
                     }
-                    if desired_visible {
+                    if desired_visible && !(was_visible && dock_reveal.as_ref().is_some_and(|(_, _, mount)| mount.is_some())) {
                         return_target = foreground
                             .filter(|captured| Some(*captured) == foreground_before_transition)
                             .filter(|captured| captured.hwnd != native_window.identity.hwnd)
-                            .filter(|captured| dock_reveal.is_none_or(|(gesture, _)| *captured != gesture.source.identity));
-                    } else if !should_restore && switch_hide.is_none() {
+                            .filter(|captured| dock_reveal.as_ref().is_none_or(|(gesture, _, _)| *captured != gesture.source.identity));
+                    } else if !desired_visible && !should_restore && switch_hide.is_none() {
                         return_target = None;
                     }
                     if let Err(error) = set_native_window_visible(native_window, desired_visible) {
@@ -13322,19 +13345,33 @@ pub(crate) fn run_foundation_window(
                     } else {
                         None
                     };
-                    if let Some((gesture, generation)) = dock_reveal {
+                    if let Some((gesture, generation, json_mount)) = dock_reveal {
                         let current = visibility.is_current(revision, true)
-                            && dock_mount_generation.load(Ordering::Acquire) == generation
+                            && generation.is_none_or(|generation| dock_mount_generation.load(Ordering::Acquire) == generation)
+                            && json_mount.as_ref().is_none_or(|mount| mount.is_current())
                             && !restart_admission_for_hotkey.is_fenced()
                             && native_window_is_valid(native_window)
                             && native_window_is_valid(gesture.source);
+                        let mut activated = false;
                         if hash_dock::may_activate(gesture.foreground_authorized, gesture.source.identity, current_foreground_identity(), current) {
                             if let Err(error) = activate_native_window(native_window) {
                                 tracing::debug!(%error, "GPUI dock foreground activation was refused");
+                            } else {
+                                activated = true;
                             }
                         }
-                        if let Some(RootVisibilityRequest::DockHash(reveal)) = requested_visible.take() {
-                            drop(reveal.acknowledgement);
+                        match requested_visible.take() {
+                            Some(RootVisibilityRequest::DockHash(reveal)) => drop(reveal.acknowledgement),
+                            Some(RootVisibilityRequest::DockJson(reveal)) => {
+                                if activated && reveal.mount.is_current() && visibility.is_current(revision, true)
+                                    && native_window_is_valid(gesture.source)
+                                    && current_foreground_identity() == Some(native_window.identity)
+                                    && !restart_admission_for_hotkey.is_fenced() {
+                                    reveal.acknowledgement.accept(revision);
+                                }
+                                drop(reveal.acknowledgement);
+                            }
+                            _ => {}
                         }
                     } else if let Some(target) = target {
                         let expected_foreground = foreground_after_transition;

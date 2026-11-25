@@ -57,18 +57,26 @@ fn apply_paste_result(
     session.finish_reload(result);
 }
 
-fn native_root_current(
+pub(super) fn native_host_current(
     visibility: &RootVisibility,
     revision: u64,
     native: Option<NativeWindow>,
+    popout: bool,
 ) -> bool {
     #[cfg(windows)]
     {
-        native.is_some_and(|window| visibility.is_current_visible_revision(revision, window))
+        native.is_some_and(|window| {
+            if popout {
+                use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsIconic};
+                native_window_is_valid(window) && native_window_is_visible(window).unwrap_or(false)
+                    && !unsafe { IsIconic(HWND(window.identity.hwnd as *mut _)) }.as_bool()
+                    && current_foreground_identity() == Some(window.identity)
+            } else { visibility.is_current_visible_revision(revision, window) }
+        })
     }
     #[cfg(not(windows))]
     {
-        let _ = native;
+        let _ = (native, popout);
         visibility.is_current(revision, true)
     }
 }
@@ -103,6 +111,7 @@ struct GuardedClipboard {
     admission: Arc<RestartAdmission>,
     tree_guard: Option<(Arc<AtomicU64>, u64)>,
     mount: super::utility_mount::MountReceipt,
+    popout: bool,
 }
 impl ClipboardBackend for GuardedClipboard {
     fn read_text(&self) -> Result<String, ClipboardError> {
@@ -112,7 +121,7 @@ impl ClipboardBackend for GuardedClipboard {
         if !mounted_effect_current(&self.mount, self.epoch.load(Ordering::Acquire), self.expected,
                 self.tree_guard.as_ref().map(|(epoch, expected)| (epoch.load(Ordering::Acquire), *expected)))
             || self.admission.is_fenced()
-            || !native_root_current(&self.visibility, self.visibility_revision, self.native)
+            || !native_host_current(&self.visibility, self.visibility_revision, self.native, self.popout)
         {
             return Err(ClipboardError::Permanent(
                 "JSON editor changed before copy".into(),
@@ -135,9 +144,19 @@ pub(super) struct JsonMount {
     escape_waiting: bool,
     _subscriptions: Vec<Subscription>,
 }
+pub(super) struct JsonPopup {
+    pub window: AnyWindowHandle,
+    pub native: Option<NativeWindow>,
+    pub _subscription: Subscription,
+}
 
 pub(super) struct JsonWorkspace {
     pub(super) open: bool,
+    pub(super) popout: bool,
+    pub(super) rehosting: bool,
+    pub(super) presentation_error: Option<String>,
+    open_popout_after_load: bool,
+    activation_revision: Arc<AtomicU64>,
     root: WeakEntity<RootWindow>,
     pub(super) admission: Arc<RestartAdmission>,
     pub(super) visibility: RootVisibility,
@@ -173,7 +192,7 @@ impl JsonMount {
         let tree_search = cx.new(|cx| InputState::new(window, cx).placeholder("Keys or values"));
         let search_receipt = receipt.clone();
         let search_subscription = cx.subscribe(&tree_search, move |this: &mut JsonWorkspace, input: Entity<InputState>, event: &InputEvent, cx: &mut Context<JsonWorkspace>| {
-            if !search_receipt.is_current() || !matches!(event, InputEvent::Change) || !this.open || !this.tree_mode || this.admission.is_fenced() { return; }
+            if !search_receipt.is_current() || !matches!(event, InputEvent::Change) || !this.open || this.rehosting || !this.tree_mode || this.admission.is_fenced() { return; }
             this.tree_epoch.fetch_add(1, Ordering::AcqRel);
             let fields = this.session.tree_search_fields();
             this.session.tree_set_search(input.read(cx).value().to_string(), fields);
@@ -186,7 +205,7 @@ impl JsonMount {
              input: Entity<TextareaState>,
              event: &InputEvent,
              cx: &mut Context<JsonWorkspace>| {
-                if !input_receipt.is_current() || !matches!(event, InputEvent::Change) || !this.open || this.admission.is_fenced()
+                if !input_receipt.is_current() || !matches!(event, InputEvent::Change) || !this.open || this.rehosting || this.admission.is_fenced()
                 {
                     return;
                 }
@@ -211,13 +230,37 @@ impl JsonMount {
 }
 impl JsonWorkspace {
     pub(super) fn mount_receipt(&self) -> super::utility_mount::MountReceipt { self.mount.receipt.clone() }
-    fn replace_mount(&mut self, root_window: AnyWindowHandle, native: Option<NativeWindow>, origin: Option<FocusHandle>, offset: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool {
+        self.open && self.popout == popout && self.mount.receipt.is_current() && self.root_window.window_id() == id
+    }
+    pub(super) fn replace_mount(&mut self, root_window: AnyWindowHandle, native: Option<NativeWindow>, origin: Option<FocusHandle>, offset: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let mount = JsonMount::new(window, cx, &self.mount_owner, root_window, native, origin, offset);
         let text = self.session.source().to_owned();
         let query = self.session.tree_search_query().to_owned();
         mount.input.update(cx, |input, cx| input.set_value(text, window, cx));
         mount.tree_search.update(cx, |input, cx| input.set_value(query, window, cx));
         self.mount = mount;
+    }
+    pub(super) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tree_mode { self.tree_search.focus_handle(cx).focus(window, cx); }
+        else { self.input.focus_handle(cx).focus(window, cx); }
+    }
+    pub(super) fn can_rehost(&self) -> bool {
+        self.open && !self.rehosting && !self.lane.active && self.checking.is_none() && !self.admission.is_fenced()
+    }
+    fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
+        if !self.can_rehost() || self.popout == popout { return; }
+        let source = self.mount_receipt();
+        let gesture = self.native.map(|source| hash_dock::Gesture {
+                source,
+                foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity),
+                visibility_revision: self.visibility.request_revision.load(Ordering::Acquire),
+            });
+        self.rehosting = true;
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        let root = self.root.clone();
+        cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.start_json_rehost(popout, gesture, source, cx)); }).detach();
+        cx.notify();
     }
     fn new(
         window: &mut Window,
@@ -235,7 +278,7 @@ impl JsonWorkspace {
         let mount = JsonMount::new(window, cx, &mount_owner, root_window, native, return_focus, return_scroll);
         let mut session = JsonEditorState::default();
         session.begin_initialize();
-        Self { open: false, root, admission, visibility, mount_owner, mount, tree_mode: false, session, intent,
+        Self { open: false, popout: false, rehosting: false, presentation_error: None, open_popout_after_load: false, activation_revision: Arc::new(AtomicU64::new(0)), root, admission, visibility, mount_owner, mount, tree_mode: false, session, intent,
             epoch: Arc::new(AtomicU64::new(1)), tree_epoch: Arc::new(AtomicU64::new(1)),
             wake: Arc::new(HashWakeSignal::default()), lane: ClipboardLane::default(),
             initial_projection: None, checking: None }
@@ -248,7 +291,7 @@ impl JsonWorkspace {
                 self.epoch.load(Ordering::Acquire),
                 epoch,
                 !self.admission.is_fenced()
-                    && native_root_current(&self.visibility, revision, self.native),
+                    && native_host_current(&self.visibility, revision, self.native, self.popout),
             )
         }) {
             self.tree_epoch.fetch_add(1, Ordering::AcqRel);
@@ -269,6 +312,10 @@ impl JsonWorkspace {
         }
         if !self.session.loading_clipboard() && self.initial_projection.take().is_some() {
             self.checking = None;
+        }
+        if self.open_popout_after_load && self.checking.is_none() && !self.lane.active {
+            self.open_popout_after_load = false;
+            self.request_rehost(true, cx);
         }
         if let Some(index) = self.session.tree_take_reveal() {
             if self.mount.receipt.is_current() {
@@ -329,7 +376,7 @@ impl JsonWorkspace {
             self.epoch.load(Ordering::Acquire),
             epoch,
             !self.admission.is_fenced()
-                && native_root_current(&self.visibility, revision, self.native),
+                && native_host_current(&self.visibility, revision, self.native, self.popout),
         ) {
             self.read_clipboard(true, cx);
         } else {
@@ -372,7 +419,7 @@ impl JsonWorkspace {
         .detach();
     }
     fn read_clipboard(&mut self, initial: bool, cx: &mut Context<Self>) {
-        if !self.open || self.lane.active {
+        if !self.open || self.rehosting || self.lane.active {
             return;
         }
         let Some(permit) = self.admission.admit() else {
@@ -403,7 +450,7 @@ impl JsonWorkspace {
                     view.epoch.load(Ordering::Acquire),
                     expected,
                     mount.is_current() && !view.admission.is_fenced()
-                        && native_root_current(&view.visibility, visibility_revision, view.native),
+                        && native_host_current(&view.visibility, visibility_revision, view.native, view.popout),
                 ) {
                     if view.checking == Some(expected) {
                         view.checking = None;
@@ -423,7 +470,7 @@ impl JsonWorkspace {
                                 view.epoch.load(Ordering::Acquire),
                                 epoch,
                                 !view.admission.is_fenced()
-                                    && native_root_current(&view.visibility, revision, view.native),
+                                    && native_host_current(&view.visibility, revision, view.native, view.popout),
                             )
                         });
                     apply_paste_result(
@@ -443,7 +490,7 @@ impl JsonWorkspace {
         cx.notify();
     }
     fn copy(&mut self, cx: &mut Context<Self>) {
-        if !self.open || self.lane.active || self.checking.is_some() {
+        if !self.open || self.rehosting || self.lane.active || self.checking.is_some() {
             return;
         }
         let Some(permit) = self.admission.admit() else {
@@ -455,6 +502,7 @@ impl JsonWorkspace {
         let epoch = self.epoch.clone();
         let visibility = self.visibility.clone();
         let native = self.native;
+        let popout = self.popout;
         let admission = self.admission.clone();
         let mount = self.mount.receipt.clone();
         let worker_mount = mount.clone();
@@ -473,6 +521,7 @@ impl JsonWorkspace {
                 admission,
                 tree_guard: None,
                 mount: worker_mount,
+                popout,
             });
             session
         });
@@ -489,7 +538,7 @@ impl JsonWorkspace {
                     view.epoch.load(Ordering::Acquire),
                     expected,
                     mount.is_current() && !view.admission.is_fenced()
-                        && native_root_current(&view.visibility, visibility_revision, view.native),
+                        && native_host_current(&view.visibility, visibility_revision, view.native, view.popout),
                 ) {
                     view.session.accept_copy_feedback(&result);
                 }
@@ -501,7 +550,7 @@ impl JsonWorkspace {
         cx.notify();
     }
     pub(super) fn copy_tree(&mut self, stamp: multi_launcher::json_utility_session::TreeStamp, kind: multi_launcher::json_utility_session::TreeCopyKind, cx: &mut Context<Self>) {
-        if !self.open || !self.tree_mode || self.lane.active || self.checking.is_some() { return; }
+        if !self.open || self.rehosting || !self.tree_mode || self.lane.active || self.checking.is_some() { return; }
         let Some(request) = self.session.tree_copy_request(stamp, kind) else { return; };
         let Some(permit) = self.admission.admit() else { return; };
         self.lane.active = true;
@@ -509,7 +558,7 @@ impl JsonWorkspace {
         let expected_tree = self.tree_epoch.load(Ordering::Acquire);
         let visibility_revision = self.visibility.request_revision.load(Ordering::Acquire);
         let mount = self.mount.receipt.clone();
-        let backend = GuardedClipboard { epoch: self.epoch.clone(), expected, visibility: self.visibility.clone(), visibility_revision, native: self.native, admission: self.admission.clone(), tree_guard: Some((self.tree_epoch.clone(), expected_tree)), mount: mount.clone() };
+        let backend = GuardedClipboard { epoch: self.epoch.clone(), expected, visibility: self.visibility.clone(), visibility_revision, native: self.native, admission: self.admission.clone(), tree_guard: Some((self.tree_epoch.clone(), expected_tree)), mount: mount.clone(), popout: self.popout };
         let owner = cx.entity().downgrade();
         let task = cx.background_executor().spawn(async move { let _permit = permit; let result = request.execute(&backend); (request, result) });
         cx.spawn(async move |_, cx| {
@@ -520,7 +569,7 @@ impl JsonWorkspace {
                 view.lane.active = false;
                 if receipt_current(view.open && view.tree_mode, view.epoch.load(Ordering::Acquire), expected,
                     effect_epochs_current(view.epoch.load(Ordering::Acquire), expected, Some((view.tree_epoch.load(Ordering::Acquire), expected_tree)))
-                    && mount.is_current() && !view.admission.is_fenced() && native_root_current(&view.visibility, visibility_revision, view.native)) {
+                    && mount.is_current() && !view.admission.is_fenced() && native_host_current(&view.visibility, visibility_revision, view.native, view.popout)) {
                     view.session.finish_tree_copy(&request, result);
                 }
                 view.drain_initial(cx); cx.notify();
@@ -529,7 +578,7 @@ impl JsonWorkspace {
         cx.notify();
     }
     fn transform(&mut self, transform: Transform, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.checking.is_some() {
+        if !self.open || self.rehosting || self.checking.is_some() {
             return;
         }
         let Some(_permit) = self.admission.admit() else {
@@ -544,6 +593,7 @@ impl JsonWorkspace {
         self.service(cx);
     }
     fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting { return; }
         let Some(_permit) = self.admission.admit() else {
             return;
         };
@@ -558,10 +608,11 @@ impl JsonWorkspace {
         else { self.input.focus_handle(cx).focus(window, cx); }
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open {
+        if !self.open || self.rehosting {
             return;
         }
         let owned = window.is_window_active() && self.focus.contains_focused(window, cx);
+        let popout = self.popout;
         let origin = self.return_focus.take();
         let offset = self.return_scroll.take();
         self.shutdown();
@@ -570,7 +621,17 @@ impl JsonWorkspace {
         self.tree_scroll = gpui_kit::UniformListScrollHandle::default();
         let _ = self.root.update(cx, |root, cx| {
             panel_stack::retire(&mut root.panel_stack, Panel::JsonUtilityDialog);
-            if owned && !root.restart_admission.is_fenced() {
+            if popout {
+                if let Some(popup) = root.json_popup.take() {
+                    let retiring = RetiringHashWindow { window: popup.window, native_window: popup.native };
+                    root.json_retiring.push(retiring);
+                    let root_weak = cx.entity().downgrade();
+                    cx.spawn(async move |_, cx| {
+                        let retired = remove_and_wait_for_hash_window(cx, retiring).await;
+                        if retired { let _ = root_weak.update(cx, |root, _| root.json_retiring.retain(|item| item.window.window_id() != retiring.window.window_id())); }
+                    }).detach();
+                }
+            } else if owned && !root.restart_admission.is_fenced() {
                 if let Some(focus) =
                     origin.filter(|focus| root.focus_handle.contains(focus, window))
                 {
@@ -588,6 +649,7 @@ impl JsonWorkspace {
     }
     pub(super) fn shutdown(&mut self) {
         self.open = false;
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
         self.mount_owner.retire();
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.lane.invalidate();
@@ -640,6 +702,7 @@ impl Render for JsonWorkspace {
         let close_mount = mount.clone();
         let text_mount = mount.clone();
         let tree_mount = mount.clone();
+        let rehost_mount = mount.clone();
         let first = self.intent == JsonUtilityIntent::Minify;
         let checking = self.checking.is_some();
         let actions = if first {
@@ -704,6 +767,9 @@ impl Render for JsonWorkspace {
                     .flex_wrap()
                     .gap_2()
                     .children(buttons)
+                    .child(Button::new("json-rehost").label(if self.popout { "Dock" } else { "Pop Out" })
+                        .tab_stop(self.can_rehost()).disabled(!self.can_rehost())
+                        .on_click(cx.listener(move |view, _, _, cx| { if rehost_mount.is_current() { view.request_rehost(!view.popout, cx); } })))
                     .child(
                         Button::new("json-paste")
                             .label("Paste")
@@ -734,7 +800,7 @@ impl Render for JsonWorkspace {
             .child(div().flex().gap_2()
                 .child(Button::new("json-view-text").label("Text").tab_stop(true).on_click(cx.listener(move |view, _, _, cx| { if !text_mount.is_current() { return; } if view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = false; } cx.notify(); })))
                 .child(Button::new("json-view-tree").label("Tree").tab_stop(true).on_click(cx.listener(move |view, _, _, cx| { if !tree_mount.is_current() { return; } if !view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = true; } cx.notify(); }))))
-            .when(!self.tree_mode, |this| this.child(Textarea::new(&self.input).aria_label("JSON text").tab_index(0)))
+            .when(!self.tree_mode, |this| this.child(Textarea::new(&self.input).aria_label("JSON text").tab_index(0).readonly(self.rehosting)))
             .children(tree_panel)
             .children(self.checking.is_some().then(|| {
                 div()
@@ -757,9 +823,18 @@ impl Render for JsonWorkspace {
                     .aria_label(message.clone())
                     .child(message)
             }))
+            .children(self.presentation_error.as_ref().map(|message| Label::new(message.clone())))
     }
 }
 impl RootWindow {
+    pub(super) fn scroll_to_json(&self, cx: &App) {
+        let index = self.file_search_scroll_item()
+            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.downloads_triage_open(cx))
+            + usize::from(self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.activity_view.as_ref().is_some_and(|view| view.read(cx).open));
+        self.root_scroll.scroll_to_top_of_item(index);
+    }
     pub(super) fn retire_json_workspace(&mut self, cx: &mut Context<Self>) {
         if let Some(view) = self.json_view.take() { view.update(cx, |view, _| view.shutdown()); }
     }
@@ -779,6 +854,32 @@ impl RootWindow {
             return;
         };
         if self.restart_admission.is_fenced() {
+            return;
+        }
+        if self.json_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return; }
+        if let (Some(popup), Some(view), Some(root_native)) = (&self.json_popup, &self.json_view, self.native_window) {
+            let Some(native) = popup.native else { return; };
+            if current_foreground_identity() != Some(root_native.identity) || view.read(cx).rehosting { return; }
+            let Some(permit) = self.restart_admission.admit() else { return; };
+            let popup_window = popup.window;
+            let view = view.clone();
+            let receipt = view.read(cx).mount_receipt();
+            let revision_guard = view.read(cx).activation_revision.clone();
+            let revision = revision_guard.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+            let worker_guard = revision_guard.clone();
+            cx.spawn(async move |_, cx| {
+                let _permit = permit;
+                cx.background_executor().spawn(async move {
+                    activate_for_secondary_window(&worker_guard, revision, native, Some(root_native.identity));
+                }).await;
+                if !receipt.is_current() || revision_guard.load(Ordering::Acquire) != revision
+                    || current_foreground_identity() != Some(native.identity) { return; }
+                let _ = update_kit_window_content(popup_window, &view, cx, |view, window, cx| {
+                    if receipt.is_current() && view.popout && !view.rehosting {
+                        view.reopen(intent, None, point(px(0.0), px(0.0)), window, cx);
+                    }
+                });
+            }).detach();
             return;
         }
         let Some(root_window) = self.root_window else {
@@ -808,29 +909,15 @@ impl RootWindow {
                 )
             })
         };
+        let should_popout = multi_launcher::settings::UtilityToolKey::parse("json-utility").ok()
+            .is_some_and(|key| self.utility_presentations.preference(key) == Some(RememberedPresentation::Popout));
         view.update(cx, |view, cx| {
-            view.reopen(intent, origin, offset, window, cx)
+            view.reopen(intent, origin, offset, window, cx);
+            view.open_popout_after_load = should_popout;
         });
         self.json_view = Some(view);
         panel_stack::promote(&mut self.panel_stack, Panel::JsonUtilityDialog);
-        let index = self.file_search_scroll_item()
-            + usize::from(
-                self.file_search
-                    .as_ref()
-                    .is_some_and(|view| view.read(cx).open),
-            )
-            + usize::from(self.downloads_triage_open(cx))
-            + usize::from(
-                self.plugin_editor
-                    .as_ref()
-                    .is_some_and(|view| view.read(cx).open),
-            )
-            + usize::from(
-                self.activity_view
-                    .as_ref()
-                    .is_some_and(|view| view.read(cx).open),
-            );
-        self.root_scroll.scroll_to_top_of_item(index);
+        self.scroll_to_json(cx);
         cx.notify();
     }
 }

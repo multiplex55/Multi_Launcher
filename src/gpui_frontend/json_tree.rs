@@ -14,7 +14,7 @@ fn apply_row(
     toggle: bool,
     cx: &mut Context<JsonWorkspace>,
 ) {
-    if !view.open || !view.tree_mode || view.admission.is_fenced() {
+    if !view.open || view.rehosting || !view.tree_mode || view.admission.is_fenced() {
         return;
     }
     if view.session.tree_stamp() != Some(stamp) { return; }
@@ -105,7 +105,7 @@ pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) 
             .tab_stop(true)
             .on_click(cx.listener(move |view, _, window, cx| {
                 if !clear_mount.is_current() { return; }
-                if !view.open || !view.tree_mode || view.admission.is_fenced() {
+                if !view.open || view.rehosting || !view.tree_mode || view.admission.is_fenced() {
                     return;
                 }
                 view.tree_epoch.fetch_add(1, Ordering::AcqRel);
@@ -133,7 +133,7 @@ pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) 
                 .tab_stop(true)
                 .on_click(cx.listener(move |view, _, _, cx| {
                     if !field_mount.is_current() { return; }
-                    if !view.open || !view.tree_mode || view.admission.is_fenced() {
+                    if !view.open || view.rehosting || !view.tree_mode || view.admission.is_fenced() {
                         return;
                     }
                     view.tree_epoch.fetch_add(1, Ordering::AcqRel);
@@ -162,7 +162,7 @@ pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) 
                 .disabled(!enabled)
                 .on_click(cx.listener(move |view, _, _, cx| {
                     if !navigation_mount.is_current() { return; }
-                    if !view.open || !view.tree_mode || view.admission.is_fenced() {
+                    if !view.open || view.rehosting || !view.tree_mode || view.admission.is_fenced() {
                         return;
                     }
                     let Some(stamp) = stamp else { return; };
@@ -185,7 +185,7 @@ pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) 
                     .tab_stop(true)
                     .on_click(cx.listener(move |view, _, _, cx| {
                         if !branch_mount.is_current() { return; }
-                        if view.open && view.tree_mode && !view.admission.is_fenced()
+                        if view.open && !view.rehosting && view.tree_mode && !view.admission.is_fenced()
                             && view.session.tree_stamp() == Some(stamp) {
                             view.tree_epoch.fetch_add(1, Ordering::AcqRel);
                             view.session.tree_expand_selected(stamp, expanded);
