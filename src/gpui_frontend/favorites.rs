@@ -974,7 +974,7 @@ impl RootWindow {
         cx.notify();
     }
 
-    fn favorites_toolbar_visibility_revision(&self, window: &Window) -> Option<u64> {
+    pub(super) fn favorites_toolbar_visibility_revision(&self, window: &Window) -> Option<u64> {
         if !window.is_window_active()
             || !self
                 .root_window

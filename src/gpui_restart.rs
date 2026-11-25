@@ -180,6 +180,10 @@ impl RestartAdmission {
         self.lock().phase == Phase::Fenced
     }
 
+    pub(crate) fn is_ready(&self) -> bool {
+        self.lock().phase == Phase::Ready
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, AdmissionState> {
         self.state
             .lock()

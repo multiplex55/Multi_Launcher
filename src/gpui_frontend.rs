@@ -17,6 +17,7 @@ mod favorites;
 mod hash_jump;
 mod hash_progress;
 mod hash_layout;
+mod hash_pin;
 mod indexed_applications;
 mod window_search;
 mod hash_jump_select;
@@ -951,6 +952,10 @@ struct LauncherMenuBar {
     favorites_pinned: bool,
     favorites_toolbar_disabled: bool,
     favorites_unpin_status: Option<String>,
+    saved_pin_order: Vec<Panel>,
+    hash_pin_focus_handle: FocusHandle,
+    hash_pinned: bool,
+    hash_toolbar_disabled: bool,
 }
 
 impl RenderOnce for LauncherMenuBar {
@@ -1036,7 +1041,7 @@ impl RenderOnce for LauncherMenuBar {
 
         let favorites_root = self.root.clone();
         let help_action_context = self.action_context;
-        let help_root = self.root;
+        let help_root = self.root.clone();
         let toast_log_open_pending = self.toast_log_open_pending;
         let help_menu = Button::new("launcher-help-menu")
             .max_w_full()
@@ -1107,6 +1112,29 @@ impl RenderOnce for LauncherMenuBar {
                 root_menu_open_change(&help_root, RootMenuKind::Help, *open, window, app);
             });
 
+        let saved_buttons = self.saved_pin_order.iter().filter_map(|panel| match panel {
+            Panel::FavDialog if self.favorites_pinned => {
+                let root = favorites_root.clone();
+                Some(Button::new("pinned-favorites-toolbar")
+                    .max_w_full().min_w(px(0.0)).label(Panel::FavDialog.display_label())
+                    .track_focus(&self.favorites_pin_focus_handle).tab_stop(true)
+                    .disabled(self.favorites_toolbar_disabled)
+                    .on_click(move |_, window, app| {
+                        let _ = root.update(app, |root, cx| root.pinned_favorites_click(window, cx));
+                    }).into_any_element())
+            }
+            Panel::HashGeneratorDialog if self.hash_pinned => {
+                let root = self.root.clone();
+                Some(Button::new("pinned-hash-toolbar")
+                    .max_w_full().min_w(px(0.0)).label(Panel::HashGeneratorDialog.display_label())
+                    .track_focus(&self.hash_pin_focus_handle).tab_stop(true)
+                    .disabled(self.hash_toolbar_disabled)
+                    .on_click(move |_, window, app| {
+                        let _ = root.update(app, |root, cx| root.pinned_hash_click(window, cx));
+                    }).into_any_element())
+            }
+            _ => None,
+        }).collect::<Vec<_>>();
         let menus = div()
             .min_h(px(self.row_height))
             .flex()
@@ -1120,20 +1148,7 @@ impl RenderOnce for LauncherMenuBar {
             .child(file_menu)
             .child(settings_menu)
             .child(help_menu)
-            .children(self.favorites_pinned.then(|| {
-                Button::new("pinned-favorites-toolbar")
-                    .max_w_full()
-                    .min_w(px(0.0))
-                    .label(Panel::FavDialog.display_label())
-                    .track_focus(&self.favorites_pin_focus_handle)
-                    .tab_stop(true)
-                    .disabled(self.favorites_toolbar_disabled)
-                    .on_click(move |_, window, app| {
-                        let _ = favorites_root.update(app, |root, cx| {
-                            root.pinned_favorites_click(window, cx);
-                        });
-                    })
-            }));
+            .children(saved_buttons);
         div()
             .flex()
             .flex_col()
@@ -2516,6 +2531,7 @@ struct RootWindow {
     context_favorite_serial: u64,
     result_favorites: ResultFavorites,
     panel_stack: Vec<Panel>,
+    hash_pin: hash_pin::HashPinState,
     launcher_results_scroll: ScrollHandle,
     query_history: QueryHistoryNavigator,
     fresh_search_enter: Option<FreshSearchEnter>,
@@ -2567,6 +2583,7 @@ struct RootWindow {
     settings_owner_focus_handle: FocusHandle,
     settings_menu_focus_handle: FocusHandle,
     favorites_pin_focus_handle: FocusHandle,
+    hash_pin_focus_handle: FocusHandle,
     command_help_owner_focus_handle: FocusHandle,
     command_help_close_focus_handle: FocusHandle,
     command_help_scroll: ScrollHandle,
@@ -3680,6 +3697,7 @@ enum RootCloseBlocker {
     HashFilePicker,
     ToastLogOpen,
     FavoritesWrite,
+    HashPinWrite,
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -3777,6 +3795,7 @@ struct RetiringHashWindow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum HashOpenIntent {
     Default,
+    Reactivate,
     File(PathBuf),
 }
 
@@ -3793,6 +3812,7 @@ struct HashMountConfig {
     wake_signal: Arc<HashWakeSignal>,
     file_picker_pending: Arc<AtomicBool>,
     clipboard_pending: Arc<HashClipboardPendingState>,
+    pinned: Arc<AtomicBool>,
     restart_admission: Arc<RestartAdmission>,
     mount_generation: u64,
     session_epoch: u64,
@@ -4125,6 +4145,7 @@ fn create_hash_generator_view(
         wake_signal,
         file_picker_pending,
         clipboard_pending,
+        pinned,
         restart_admission,
         mount_generation,
         session_epoch,
@@ -4140,8 +4161,12 @@ fn create_hash_generator_view(
     } = config;
     if mode == HashPresentationMode::Popout {
         let pending = Arc::clone(&clipboard_pending);
+        let pinned_for_close = Arc::clone(&pinned);
         let root_for_close = root.clone();
         window.on_window_should_close(cx, move |_, app| {
+            if !hash_pin::allows_close(pinned_for_close.load(Ordering::Acquire), hash_pin::CloseOrigin::Native) {
+                return false;
+            }
             let Some(message) = hash_clipboard_close_message(pending.kind()) else {
                 return true;
             };
@@ -4423,8 +4448,22 @@ fn create_hash_generator_view(
         );
         let activation =
             cx.observe_window_activation(window, |this: &mut HashGeneratorWindow, window, cx| {
-                if !window.is_window_active() && this.jump.retire() {
-                    cx.notify();
+                if window.is_window_active() && this.mode == HashPresentationMode::Popout {
+                    let root = this.root.clone();
+                    let mount = this.mount_generation;
+                    let epoch = this.session_epoch;
+                    let native = this.native_window;
+                    let window_id = window.window_handle().window_id();
+                    let view_id = cx.entity_id();
+                    let _ = root.update(cx, |root, cx| {
+                        root.observe_hash_pin_activation(mount, epoch, window_id, view_id, native, cx);
+                    });
+                } else if !window.is_window_active() {
+                    let root = this.root.clone();
+                    let mount = this.mount_generation;
+                    let view_id = cx.entity_id();
+                    let _ = root.update(cx, |root, _| root.retire_hash_pin_activation_on_blur(mount, view_id));
+                    if this.jump.retire() { cx.notify(); }
                 }
             });
         HashGeneratorWindow {
@@ -4440,6 +4479,7 @@ fn create_hash_generator_view(
             wake_signal,
             file_picker_pending,
             clipboard_pending,
+            pinned,
             native_window,
             native_geometry_slot,
             native_geometry_stamp,
@@ -5003,7 +5043,7 @@ impl RootWindow {
                 DockedHashAction::Calculate => tool.calculate_hash(cx),
                 DockedHashAction::Dock => tool.request_rehost(HashPresentationMode::Docked, cx),
                 DockedHashAction::Popout => tool.request_rehost(HashPresentationMode::Popout, cx),
-                DockedHashAction::Close => tool.request_close(cx),
+                DockedHashAction::Close => tool.request_close(hash_pin::CloseOrigin::Keyboard, cx),
             }
             true
         })
@@ -8163,11 +8203,30 @@ impl RootWindow {
         root_window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        self.open_hash_generator_with_mount_intent(intent, operation, root_window, hash_pin::HashMountIntent::User, cx)
+    }
+
+    fn open_hash_generator_with_mount_intent(
+        &mut self,
+        intent: HashOpenIntent,
+        operation: EffectPermit,
+        root_window: &mut Window,
+        mount_intent: hash_pin::HashMountIntent,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.hash_pin.pending.is_some() {
+            return Err(hash_pin::UNPIN_PENDING.to_owned());
+        }
+        if mount_intent == hash_pin::HashMountIntent::User {
+            self.hash_pin.remount_revision = None;
+        }
+        let reactivation = matches!(&intent, HashOpenIntent::Reactivate);
         let file = match intent {
             HashOpenIntent::Default => {
                 self.hash_return = None;
                 None
             }
+            HashOpenIntent::Reactivate => None,
             HashOpenIntent::File(path) => {
                 if self.hash_rehost_pending.load(Ordering::Acquire)
                     || self.hash_file_picker_pending.load(Ordering::Acquire)
@@ -8180,6 +8239,7 @@ impl RootWindow {
         };
         match &self.hash_window {
             HashWindowState::Docked { view, .. } => {
+                if !mount_intent.is_user_activation() { return Ok(()); }
                 let view = view.clone();
                 view.update(cx, |tool, cx| {
                     if let Some(path) = file {
@@ -8192,10 +8252,17 @@ impl RootWindow {
                 self.root_scroll.scroll_to_top_of_item(self.docked_hash_scroll_item());
                 return Ok(());
             }
-            HashWindowState::Popout { window, view, .. } => {
+            HashWindowState::Popout { window, view, mount_generation } => {
+                if !mount_intent.is_user_activation() { return Ok(()); }
                 let window = *window;
                 let view = view.clone();
-                let expected_foreground = current_foreground_identity();
+                let mount_generation = *mount_generation;
+                let session_epoch = self.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch();
+                let expected_foreground = if reactivation {
+                    self.native_window.map(|native| native.identity)
+                } else {
+                    current_foreground_identity()
+                };
                 let revision = self
                     .hash_window_revision
                     .fetch_add(1, Ordering::AcqRel)
@@ -8213,20 +8280,43 @@ impl RootWindow {
                 }).map_err(|error| format!("Could not focus the existing Hash window: {error}"))??;
                 match native_window {
                     Some(native_window) => {
-                        panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
+                        if !reactivation {
+                            panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
+                        }
                         let revision_guard = Arc::clone(&self.hash_window_revision);
+                        let root = cx.entity().downgrade();
+                        let view_id = view.entity_id();
+                        if reactivation {
+                            self.hash_pin.activation = Some(hash_pin::ActivationReceipt {
+                                mount: mount_generation, epoch: session_epoch, revision,
+                                window: window.window_id(), view: view_id, native: native_window,
+                                stack: self.panel_stack.clone(), accepted: false, observed: false,
+                            });
+                        }
                         cx.spawn(async move |_, cx| {
                             let _operation = operation;
-                            cx.background_executor()
+                            let accepted = cx.background_executor()
                                 .spawn(async move {
-                                    activate_for_secondary_window(
-                                        &revision_guard,
-                                        revision,
-                                        native_window,
-                                        expected_foreground,
-                                    );
+                                    if reactivation {
+                                        activate_for_hash_pin(&revision_guard, revision, native_window, expected_foreground)
+                                    } else {
+                                        activate_for_secondary_window(&revision_guard, revision, native_window, expected_foreground);
+                                        false
+                                    }
                                 })
                                 .await;
+                            if reactivation {
+                                let _ = root.update(cx, |root, cx| {
+                                    if root.hash_pin.activation.as_ref().is_some_and(|receipt| receipt.revision == revision) {
+                                        if accepted {
+                                            if let Some(receipt) = root.hash_pin.activation.as_mut() { receipt.accept(revision); }
+                                            root.confirm_hash_pin_activation(cx);
+                                        } else {
+                                            root.hash_pin.activation = None;
+                                        }
+                                    }
+                                });
+                            }
                         })
                         .detach();
                         return Ok(());
@@ -8274,6 +8364,7 @@ impl RootWindow {
             wake_signal: Arc::clone(&self.hash_wake_signal),
             file_picker_pending: Arc::clone(&self.hash_file_picker_pending),
             clipboard_pending: Arc::clone(&self.hash_clipboard_pending),
+            pinned: Arc::clone(&self.hash_pin.saved),
             restart_admission: Arc::clone(&self.restart_admission),
             mount_generation,
             session_epoch,
@@ -8294,22 +8385,30 @@ impl RootWindow {
                     .store(mount_generation, Ordering::Release);
                 let view =
                     create_hash_generator_view(root_window, cx, initial_draft, None, mount_config);
+                if mount_intent == hash_pin::HashMountIntent::Passive {
+                    view.update(cx, |tool, cx| tool.focus_editable(root_window, cx));
+                }
                 self.hash_window = HashWindowState::Docked {
                     mount_generation,
                     view,
                 };
             }
             HashPresentationMode::Popout => {
-                let options = hash_popout_window_options(cx);
+                let mut options = hash_popout_window_options(cx);
+                options.focus = mount_intent.is_user_activation();
                 let (window, view) = match gpui_kit::open_window(options, cx, move |window, cx| {
                     let native_window = checked_native_window(window).ok().flatten();
-                    create_hash_generator_view(
+                    let view = create_hash_generator_view(
                         window,
                         cx,
                         initial_draft,
                         native_window,
                         mount_config,
-                    )
+                    );
+                    if mount_intent == hash_pin::HashMountIntent::Passive {
+                        view.update(cx, |tool, cx| tool.focus_editable(window, cx));
+                    }
+                    view
                 }) {
                     Ok(opened) => opened,
                     Err(error) => {
@@ -8360,8 +8459,8 @@ impl RootWindow {
                 popout_setup = native_window.map(|native_window| (native_window, view_for_setup));
             }
         }
-        panel_stack::promote(&mut self.panel_stack, Panel::HashGeneratorDialog);
-        if mode == HashPresentationMode::Docked {
+        mount_intent.record_stack(&mut self.panel_stack);
+        if mode == HashPresentationMode::Docked && mount_intent.is_user_activation() {
             self.root_scroll.scroll_to_top_of_item(self.docked_hash_scroll_item());
         }
         self.hash_wake_signal.notify();
@@ -8495,6 +8594,7 @@ impl RootWindow {
         let wake_signal = Arc::clone(&self.hash_wake_signal);
         let file_picker_pending = Arc::clone(&self.hash_file_picker_pending);
         let clipboard_pending = Arc::clone(&self.hash_clipboard_pending);
+        let pinned = Arc::clone(&self.hash_pin.saved);
         let restart_admission = Arc::clone(&self.restart_admission);
         let active_mount_generation = Arc::clone(&self.hash_mount_generation);
         let rehost_pending = Arc::clone(&self.hash_rehost_pending);
@@ -8520,6 +8620,7 @@ impl RootWindow {
                 wake_signal,
                 file_picker_pending,
                 clipboard_pending,
+                pinned,
                 restart_admission,
                 mount_generation: destination_mount_generation,
                 session_epoch: destination_session_epoch,
@@ -8975,9 +9076,14 @@ impl RootWindow {
         mount_generation: u64,
         session_epoch: u64,
         revision: u64,
+        origin: hash_pin::CloseOrigin,
         operation: EffectPermit,
         cx: &mut Context<Self>,
     ) {
+        if !hash_pin::allows_close(self.hash_pin.is_saved(), origin) {
+            self.restore_hash_transition(mount_generation, session_epoch, revision, "Hash Generator is pinned.".to_owned(), cx);
+            return;
+        }
         if self.hash_rehost_revision.load(Ordering::Acquire) != revision
             || !self.hash_rehost_pending.load(Ordering::Acquire)
             || self.hash_mount_generation.load(Ordering::Acquire) != mount_generation
@@ -9035,6 +9141,8 @@ impl RootWindow {
         let close_revision = self.hash_window_revision
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
+        let remount = self.hash_pin.is_saved() && origin == hash_pin::CloseOrigin::Button;
+        self.hash_pin.remount_revision = remount.then_some(close_revision);
         let return_receipt = self.hash_return.take();
         self.hash_open_error = None;
         cx.notify();
@@ -9066,12 +9174,43 @@ impl RootWindow {
                 true
             };
             if retired {
-                restore_root_search_focus_after_hash_close(
-                    root.clone(), close_revision, return_receipt, retired_docked_focus, cx,
-                ).await;
+                if remount {
+                    let target = root.update(cx, |root, _| root.root_window).ok().flatten();
+                    if let (Some(target), Some(view)) = (target, root.upgrade()) {
+                        let _ = update_kit_window_content(target, &view, cx, |root, window, cx| {
+                            root.remount_pinned_hash_if_ready(window, cx);
+                        });
+                    }
+                } else if origin != hash_pin::CloseOrigin::Unpin {
+                    restore_root_search_focus_after_hash_close(
+                        root.clone(), close_revision, return_receipt, retired_docked_focus, cx,
+                    ).await;
+                }
             }
         })
         .detach();
+    }
+
+    fn remount_pinned_hash_if_ready(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let revision = self.hash_window_revision.load(Ordering::Acquire);
+        if !hash_pin::remount_is_current(
+            self.hash_pin.is_saved(), self.hash_pin.remount_revision, revision,
+            matches!(self.hash_window, HashWindowState::Closed), self.hash_retiring_windows.is_empty(),
+            self.restart_admission.is_fenced(),
+        ) || !self.root_visibility.active.load(Ordering::Acquire)
+            || !hash_pin::remount_visibility_allows(self.root_visibility.visible.load(Ordering::Acquire))
+            || !self.root_window.is_some_and(|root| root.window_id() == window.window_handle().window_id())
+            || (cfg!(windows) && !self.native_window.is_some_and(native_window_is_valid))
+            || self.hash_file_picker_pending.load(Ordering::Acquire)
+            || self.hash_rehost_pending.load(Ordering::Acquire) { return; }
+        let Some(operation) = self.restart_admission.admit() else { return; };
+        self.hash_pin.remount_revision = None;
+        if let Err(error) = self.open_hash_generator_with_mount_intent(
+            HashOpenIntent::Default, operation, window, hash_pin::HashMountIntent::Passive, cx,
+        ) {
+            self.hash_open_error = Some(error);
+        }
+        cx.notify();
     }
 
     fn toggle_coordinate_hud_probe(&mut self, cx: &mut Context<Self>) {
@@ -9636,6 +9775,9 @@ impl RootWindow {
             Some(RootCloseBlocker::FavoritesWrite) => {
                 self.restart_status = Some(FAVORITES_WRITE_PENDING.to_owned());
             }
+            Some(RootCloseBlocker::HashPinWrite) => {
+                self.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
+            }
             Some(RootCloseBlocker::AppWrite) => {
                 self.restart_status = Some(add_action::APP_WRITE_CLOSE_STATUS.to_owned());
             }
@@ -9680,6 +9822,7 @@ impl RootWindow {
         if self.calculator_search.active {
             return Some(RootCloseBlocker::CalculatorSearch);
         }
+        if self.hash_pin.pending.is_some() { return Some(RootCloseBlocker::HashPinWrite); }
         if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
             return Some(RootCloseBlocker::PluginPreferenceSave);
         }
@@ -10122,6 +10265,10 @@ impl Render for RootWindow {
             favorites_pinned: self.result_favorites.is_pinned(),
             favorites_toolbar_disabled: self.result_favorites.toolbar_disabled(&self.panel_stack),
             favorites_unpin_status: self.result_favorites.unpin_status().map(str::to_owned),
+            saved_pin_order: self.hash_pin.order.clone(),
+            hash_pin_focus_handle: self.hash_pin_focus_handle.clone(),
+            hash_pinned: self.hash_pin.is_saved(),
+            hash_toolbar_disabled: self.hash_pin.pending.is_some(),
         };
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
             root: cx.entity().downgrade(),
@@ -10205,7 +10352,10 @@ impl Render for RootWindow {
                 .children(launcher_header::identity(self.search_catalog.branding, metrics))
                 .child(div().flex().items_center().gap_2().w_full()
                     .child(gpui_kit::component::Icon::new(gpui_kit::component::IconName::Search))
-                    .child(div().flex_1().min_w(px(0.0)).child(search_field))));
+                    .child(div().flex_1().min_w(px(0.0)).child(search_field)))
+                .children((if self.hash_pin.pending.is_some() { Some("Unpinning Hash Generator…".to_owned()) } else { self.hash_pin.error.clone() }).map(|status| {
+                    Label::new(status).id("pinned-hash-toolbar-status").w_full().min_w(px(0.0))
+                })));
         let search_body = div()
             .flex()
             .flex_col()
@@ -10588,6 +10738,7 @@ struct HashGeneratorWindow {
     wake_signal: Arc<HashWakeSignal>,
     file_picker_pending: Arc<AtomicBool>,
     clipboard_pending: Arc<HashClipboardPendingState>,
+    pinned: Arc<AtomicBool>,
     native_window: Option<NativeWindow>,
     native_geometry_slot: NativeGeometrySlot,
     native_geometry_stamp: NativeGeometryStamp,
@@ -11097,8 +11248,10 @@ impl HashGeneratorWindow {
         cx.notify();
     }
 
-    fn request_close(&mut self, cx: &mut Context<Self>) {
-        if !self.is_current_mount() || self.clipboard_pending.is_pending() {
+    fn request_close(&mut self, origin: hash_pin::CloseOrigin, cx: &mut Context<Self>) {
+        if !hash_pin::allows_close(self.pinned.load(Ordering::Acquire), origin)
+            || !self.is_current_mount() || self.clipboard_pending.is_pending()
+            || self.file_picker_pending.load(Ordering::Acquire) {
             return;
         }
         if self
@@ -11123,7 +11276,7 @@ impl HashGeneratorWindow {
         let session_epoch = self.session_epoch;
         cx.spawn(async move |_, cx| {
             let _ = root.update(cx, |root, cx| {
-                root.start_hash_close(mount_generation, session_epoch, revision, operation, cx);
+                root.start_hash_close(mount_generation, session_epoch, revision, origin, operation, cx);
             });
         })
         .detach();
@@ -11233,7 +11386,7 @@ impl HashGeneratorWindow {
         if self.jump.controller.owns_key(0x1b) {
             return true;
         }
-        self.request_close(cx);
+        self.request_close(hash_pin::CloseOrigin::Keyboard, cx);
         true
     }
 }
@@ -11823,6 +11976,28 @@ fn activate_for_root_request(
 }
 
 #[cfg(windows)]
+fn activate_for_hash_pin(
+    revision_guard: &AtomicU64,
+    revision: u64,
+    window: NativeWindow,
+    expected_foreground: Option<ForegroundIdentity>,
+) -> bool {
+    if revision_guard.load(Ordering::Acquire) != revision || !native_window_is_valid(window) {
+        return false;
+    }
+    let foreground = current_foreground_identity();
+    if foreground == Some(window.identity) { return true; }
+    if expected_foreground.is_none() || foreground != expected_foreground
+        || revision_guard.load(Ordering::Acquire) != revision { return false; }
+    activate_native_window(window).is_ok()
+}
+
+#[cfg(not(windows))]
+fn activate_for_hash_pin(_: &AtomicU64, _: u64, _: NativeWindow, _: Option<ForegroundIdentity>) -> bool {
+    false
+}
+
+#[cfg(windows)]
 fn activate_for_secondary_window(
     secondary_revision: &AtomicU64,
     revision: u64,
@@ -11862,7 +12037,7 @@ pub(crate) fn run_foundation_window(
     hotkey: Hotkey,
     launcher_hotkey_display: String,
     configured_help_hotkey: Option<String>,
-    favorites_pinned: bool,
+    saved_pinned_panels: Vec<Panel>,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_startup: LauncherSearchStartup,
@@ -11990,6 +12165,7 @@ pub(crate) fn run_foundation_window(
     let closing_for_app = Arc::clone(&coordinate_hud_probe_closing);
     let utility_presentations_after_run = utility_presentations.clone();
 
+    let startup_pin_order = hash_pin::startup_order(&saved_pinned_panels);
     let appearance_settings_for_run = theme_settings.clone();
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
@@ -12097,6 +12273,7 @@ pub(crate) fn run_foundation_window(
             let settings_owner_focus_handle = cx.focus_handle();
             let settings_menu_focus_handle = cx.focus_handle();
             let favorites_pin_focus_handle = cx.focus_handle();
+            let hash_pin_focus_handle = cx.focus_handle();
             let command_help_owner_focus_handle = cx.focus_handle();
             let command_help_close_focus_handle = cx.focus_handle();
             let quick_help_owner_focus_handle = cx.focus_handle();
@@ -12124,8 +12301,9 @@ pub(crate) fn run_foundation_window(
                 action_sheet_serial: 0,
                 context_favorite_popup: None,
                 context_favorite_serial: 0,
-                result_favorites: ResultFavorites::new(favorites_pinned),
+                result_favorites: ResultFavorites::new(saved_pinned_panels.contains(&Panel::FavDialog)),
                 panel_stack: Vec::new(),
+                hash_pin: hash_pin::HashPinState::new(&saved_pinned_panels),
                 launcher_results_scroll: ScrollHandle::new(),
                 query_history:
                     QueryHistoryNavigator::default(),
@@ -12179,6 +12357,7 @@ pub(crate) fn run_foundation_window(
                 settings_owner_focus_handle,
                 settings_menu_focus_handle,
                 favorites_pin_focus_handle,
+                hash_pin_focus_handle,
                 command_help_owner_focus_handle,
                 command_help_close_focus_handle,
                 command_help_scroll: ScrollHandle::new(),
@@ -12621,6 +12800,13 @@ pub(crate) fn run_foundation_window(
                         });
                         false
                     }
+                    Some(RootCloseBlocker::HashPinWrite) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
+                            cx.notify();
+                        });
+                        false
+                    }
                 }
             });
             root
@@ -12641,7 +12827,22 @@ pub(crate) fn run_foundation_window(
                 root.root_window = Some(root_window);
                 root.query.focus_handle(cx).focus(window, cx);
                 if !cfg!(windows) || native_window.is_some() {
-                    root.mount_pinned_favorites(window, cx);
+                    for panel in startup_pin_order {
+                        match panel {
+                            Panel::FavDialog => root.mount_pinned_favorites(window, cx),
+                            Panel::HashGeneratorDialog if root.hash_pin.is_saved() => {
+                                if let Some(operation) = root.restart_admission.admit() {
+                                    if let Err(error) = root.open_hash_generator_with_mount_intent(
+                                        HashOpenIntent::Default, operation, window,
+                                        hash_pin::HashMountIntent::Passive, cx,
+                                    ) {
+                                        root.hash_open_error = Some(error);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 Ok::<_, String>(native_window)
             }) {
@@ -12917,6 +13118,7 @@ pub(crate) fn run_foundation_window(
                             }
                             let mut search_focus_selected = false;
                             if desired_visible {
+                                root.remount_pinned_hash_if_ready(window, cx);
                                 let query = root.query.read(cx).value().to_string();
                                 if (window_search::query_is_windows(&query)
                                     && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))

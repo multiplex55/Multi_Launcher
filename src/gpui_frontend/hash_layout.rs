@@ -196,7 +196,7 @@ impl HashGeneratorWindow {
                 .label("Close Hash Generator")
                 .tab_stop(true)
                 .disabled(!eligibility.allows(hash_jump::HashControl::Close))
-                .on_click(cx.listener(|this, _, _, cx| this.request_close(cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.request_close(super::hash_pin::CloseOrigin::Button, cx))),
             hash_jump::HashControl::Close,
         );
         div()
@@ -387,7 +387,7 @@ impl Render for HashGeneratorWindow {
                 this.request_rehost(HashPresentationMode::Popout, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseHashGenerator, _, cx| {
-                this.request_close(cx);
+                this.request_close(super::hash_pin::CloseOrigin::Keyboard, cx);
             }))
             .child(
                 div()
