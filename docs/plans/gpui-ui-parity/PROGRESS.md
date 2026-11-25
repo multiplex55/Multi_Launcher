@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G14 extracted the shared JSON editor and projection worker while preserving egui behavior. Independent review and nine focused tests passed. The GPUI Text workspace is the next source increment. [Structured-text batch](CHECKPOINTS.md#g14-structured-text-gui-batch)
+
 G05 Favorites Search now lists and filters ordinary local executable Favorites through the stock provider. Activation checks the current stored label, path and arguments before launching. Independent source review and five focused tests passed. Matched Windows replay remains pending. [Favorites checkpoint](CHECKPOINTS.md#g05-checked-executable-favorites-search)
 
 G05 Action Sheet Execute now admits checked saved shortcuts, supported documents, literal HTTP(S) and verified local folders through the ordinary launcher activation path. Review and seven focused tests passed. G01 Follow Mouse placement passed review and five focused tests, and its executable is staged. Both native replays remain pending. See the [checkpoint ledger](CHECKPOINTS.md).
@@ -61,7 +63,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Goals with active or completed work | G00–G07, G11 Downloads Triage and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11 and G23 have open criteria. |
+| Goals with active or completed work | G00–G07, G11 Downloads Triage, G14 structured text and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11, G14 and G23 have open criteria. |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |

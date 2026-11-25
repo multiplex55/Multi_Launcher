@@ -20,7 +20,7 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | G11 | [File Operations Center, Downloads Triage, and Explorer Tabs](goals/G11-file-workflows.md) | G00–G05; relevant G07–G10 handoffs | In implementation for Downloads Triage |
 | G12 | [Notes, Markdown Studio, links, export, and printing](goals/G12-notes-and-markdown.md) | G00–G05 | Not started |
 | G13 | [Clipboard history, Clipboard Modify, snippets, and prompts](goals/G13-clipboard-and-snippets.md) | G00–G05 | Not started |
-| G14 | [JSON, XML, Regex, and structured text tooling](goals/G14-structured-text.md) | G00–G05; G13 where clipboard handoffs apply | Not started |
+| G14 | [JSON, XML, Regex, and structured text tooling](goals/G14-structured-text.md) | G00–G05; G13 where clipboard handoffs apply | In implementation |
 | G15 | [Calculation Pad, editors, reference, and companion windows](goals/G15-calculation-pad.md) | G00–G05 | Not started |
 | G16 | [Table Utility, date/time, and conversion interfaces](goals/G16-tables-and-conversion.md) | G00–G05; G15 only for shared chart/data handoffs | Not started |
 | G17 | [Diagram Studio, visual/Mermaid editing, and child tools](goals/G17-diagram-studio.md) | G00–G05 | Not started |

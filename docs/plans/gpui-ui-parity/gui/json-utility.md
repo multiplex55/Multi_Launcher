@@ -1,6 +1,6 @@
 # JSON Utility
 
-G14 owns `json-utility`. The `json_utility` plugin sends `json_utility:open` for bare `json`, `json_utility:format` for `json format` or `json pretty`, and `json_utility:minify` for `json minify`. Typed Open initializes from valid protected clipboard JSON. Pinned reopen reuses the existing utility without initialization. `JsonUtilityDialogState` owns the retained editor and projection workers.
+G14 owns `json-utility`. The `json_utility` plugin sends `json_utility:open` for bare `json`, `json_utility:format` for `json format` or `json pretty`, and `json_utility:minify` for `json minify`. Typed Open initializes from valid protected clipboard JSON. Pinned reopen reuses the existing utility without initialization. The shared `JsonEditorState` owns the editor, projection worker and tree and search revisions. The egui `JsonUtilityDialogState` supplies the retained host, controls and repaint notification.
 
 | Criterion | Source-backed behavior |
 | --- | --- |

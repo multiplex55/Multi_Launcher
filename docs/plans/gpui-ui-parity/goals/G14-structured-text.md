@@ -1,6 +1,6 @@
 # G14 — JSON Utility, XML Toolkit, and Regex Tester
 
-**Status:** Pending. **Owner:** G14 implementer with existing transform/session owners. No tests or migration changes have occurred. Use the single program branch.
+**Status:** In implementation. **Owner:** G14 implementer with existing transform/session owners. The shared JSON Text session extraction is underway on the program branch.
 
 ## Objective and dependencies
 
@@ -29,6 +29,18 @@ XML includes Source, Tree, XPath, Validation, and Output tabs; file load/save/ov
 Regex includes raw pattern/flags and subject editors, matches/captures, navigation/highlights, substitution, saved presets/history, test cases, reference/examples, explanation/visualization/profiling, collapsed information sections, explicit copy, and all native/docked modes. Inventory every mode's controls, menus, keyboard bindings, loading/invalid/oversized/truncated states, and specialized settings.
 
 ## Bounded checkpoint packets
+
+The first functional batch delivers JSON Utility, XML Toolkit and its XML Save Overwrite child. Carry the complete source-backed criteria through five increments, sharing the utility host, editor and completion handling where both tools need them.
+
+| Increment | Deliverable and criteria |
+| --- | --- |
+| 1 | Shared JSON session and docked Text workspace through stock typed Search. Cover multiline editing, Format, Minify, protected Paste and Copy, Clear, diagnostics, close and fresh open for `JSON-UTIL-01` and the affected parts of `JSON-UTIL-04`. |
+| 2 | JSON Tree, literal search, current details and typed copies. Finish saved Dock, Pop Out, pin and exact focus for `JSON-UTIL-02`–`04`. |
+| 3 | XML Source using the real engine session. Cover protected Paste, Activity, startup failure, close while starting, reaping and reopen for `XML-TOOL-01` and `05`. |
+| 4 | XML Tree, XPath, Validation and Output using current engine receipts. Cover Choose XSD, explicit copies and bounded preview versus full payload for `XML-TOOL-02`–`04`. |
+| 5 | XML file Open, Save and Overwrite using the existing file-effect authority. Freeze review payloads and preserve no-clobber creation and explicit atomic replacement for `XML-TOOL-01`, `04`, `05` and `XML-OVERWRITE-01`–`02`. |
+
+Use focused checks as worker ownership and file effects change. Group the remaining Nextest selectors per target and use one paired 1516 × 937 Windows candidate where practical. Packet C follows as the next functional batch and retains `REGEX-01`–`05`. Packet D applies across both batches.
 
 ### A — Complete JSON source/tree interactions
 

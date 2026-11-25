@@ -55,6 +55,7 @@ pub(crate) mod image_compare;
 pub mod image_crop;
 pub mod indexer;
 pub mod json_transform;
+pub mod json_utility_session;
 pub mod launcher;
 pub(crate) mod launcher_parking;
 pub mod linking;
