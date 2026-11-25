@@ -46,10 +46,21 @@ fn primary_allowed(
     result: &LauncherSearchResult,
     candidate: &Action,
     indexed_current: bool,
+    verified_folders: &[Action],
 ) -> bool {
+    #[cfg(windows)]
+    let saved_shortcut = result.saved_shortcut().is_some();
+    #[cfg(not(windows))]
+    let saved_shortcut = false;
     candidate == &result.action
         && (parse_installed_search_invocation(candidate.clone(), ActivationSource::Enter).is_ok()
             || result.saved_external().is_some()
+            || saved_shortcut
+            || result.saved_document().is_some()
+            || result.saved_url().is_some()
+            || (result.origin == LauncherResultOrigin::Saved
+                && verified_folders.contains(candidate)
+                && saved_folder::candidate(candidate).is_some())
             || indexed_current)
 }
 
@@ -209,7 +220,7 @@ impl RootWindow {
         let mut actions = UniversalActionRegistry.resolve(&target, &context);
         actions.retain(|choice| match &choice.operation {
             UniversalActionOperation::InvokePrimary(candidate) => {
-                primary_allowed(&result, candidate, indexed_current)
+                primary_allowed(&result, candidate, indexed_current, &self.search_catalog.verified_folders)
             }
             UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
                 action: candidate,
@@ -549,28 +560,51 @@ mod tests {
             display_label: Some("app App".into()),
             hide_description: false,
         };
-        assert!(primary_allowed(&result, &action, false));
+        assert!(primary_allowed(&result, &action, false, &[]));
         for target in [
-            r"C:\Apps\Link.lnk",
             r"C:\Apps\Notes.txt",
+            r"C:\Apps\Notes.rtf",
+            r"C:\Apps\Notes.pdf",
+            r"C:\Apps\Notes.docx",
+            r"C:\Apps\Notes.xlsx",
+            r"C:\Apps\Notes.pptx",
             "https://example.com",
-            r"C:\Apps\Folder",
+            "http://example.com/path",
         ] {
-            let excluded = Action {
+            let admitted = Action {
                 action: target.into(),
                 ..action.clone()
             };
-            result.action = excluded.clone();
-            assert!(
-                !primary_allowed(&result, &excluded, false),
-                "unexpected primary route: {target}"
-            );
+            result.action = admitted.clone();
+            assert!(primary_allowed(&result, &admitted, false, &[]), "saved target: {target}");
+            result.origin = LauncherResultOrigin::Provider("forged".into());
+            assert!(!primary_allowed(&result, &admitted, false, &[]));
+            result.origin = LauncherResultOrigin::Saved;
         }
+        let shortcut = Action { action: r"C:\Apps\Link.lnk".into(), ..action.clone() };
+        result.action = shortcut.clone();
+        assert_eq!(primary_allowed(&result, &shortcut, false, &[]), cfg!(windows));
+        let folder = Action { action: r"C:\Apps\Folder".into(), ..action.clone() };
+        result.action = folder.clone();
+        assert!(!primary_allowed(&result, &folder, false, &[]));
+        assert_eq!(primary_allowed(&result, &folder, false, std::slice::from_ref(&folder)), cfg!(windows));
+        result.origin = LauncherResultOrigin::Provider("forged".into());
+        assert!(!primary_allowed(&result, &folder, false, std::slice::from_ref(&folder)));
+        result.origin = LauncherResultOrigin::Saved;
+        for target in [r"C:\Apps\Script.bat", "https://example.com/a b", "mailto:person@example.com"] {
+            let unsupported = Action { action: target.into(), ..action.clone() };
+            result.action = unsupported.clone();
+            assert!(!primary_allowed(&result, &unsupported, false, &[]), "unsupported target: {target}");
+        }
+        let mut args = shortcut.clone();
+        args.args = Some("--arg".into());
+        result.action = args.clone();
+        assert!(!primary_allowed(&result, &args, false, &[]));
         result.action = action.clone();
         result.origin = LauncherResultOrigin::Provider("forged".into());
-        assert!(!primary_allowed(&result, &action, false));
+        assert!(!primary_allowed(&result, &action, false, &[]));
         result.origin = LauncherResultOrigin::CachedCommand;
-        assert!(!primary_allowed(&result, &action, false));
+        assert!(!primary_allowed(&result, &action, false, &[]));
         let indexed_action = Action {
             label: "Tool.exe".into(),
             desc: r"\\?\C:\Apps\Tool.exe".into(),
@@ -596,8 +630,8 @@ mod tests {
             std::slice::from_ref(&indexed_action),
         )
         .is_some();
-        assert!(primary_allowed(&result, &indexed_action, current));
-        assert!(!primary_allowed(&result, &indexed_action, false));
+        assert!(primary_allowed(&result, &indexed_action, current, &[]));
+        assert!(!primary_allowed(&result, &indexed_action, false, &[]));
         result.origin = LauncherResultOrigin::Indexed {
             generation: 9,
             index: 0,
@@ -612,7 +646,7 @@ mod tests {
         );
         let mut changed = indexed_action.clone();
         changed.args = Some("changed".into());
-        assert!(!primary_allowed(&result, &changed, true));
+        assert!(!primary_allowed(&result, &changed, true, &[]));
         let installed = Action {
             label: "Hash".into(),
             desc: "".into(),
@@ -621,7 +655,36 @@ mod tests {
         };
         result.action = installed.clone();
         result.origin = LauncherResultOrigin::CachedCommand;
-        assert!(primary_allowed(&result, &installed, false));
+        assert!(primary_allowed(&result, &installed, false, &[]));
+    }
+
+    #[test]
+    fn saved_associations_resolve_stock_execute_in_action_sheet() {
+        use multi_launcher::universal_actions::{ActionResolutionContext, ActionSurface, ActionTargetResolver, ActionTargetResolverContext, UniversalActionOperation, UniversalActionRegistry};
+        use std::collections::HashMap;
+
+        for target in [r"C:\Apps\Link.lnk", r"C:\Apps\Notes.txt", "https://example.com", r"C:\Apps\Folder"] {
+            let action = Action { label: "Saved".into(), desc: "fixture".into(), action: target.into(), args: None };
+            let saved = vec![action.clone()];
+            let folders = HashMap::new();
+            let bookmarks = HashMap::new();
+            let resolver = ActionTargetResolverContext::new(&folders, &bookmarks, &saved);
+            let resolved = ActionTargetResolver.resolve(&action, &resolver);
+            let context = ActionResolutionContext::new(ActionSurface::ActionSheet, "Saved");
+            let execute = UniversalActionRegistry.resolve(&resolved, &context).into_iter().find(|choice| {
+                matches!(&choice.operation, UniversalActionOperation::InvokePrimary(candidate) if candidate == &action)
+                    && choice.is_available()
+                    && choice.effective_presentation(ActionSurface::ActionSheet).visible
+            }).expect("stock registry must expose Execute");
+            let result = LauncherSearchResult { action: action.clone(), origin: LauncherResultOrigin::Saved, display_label: None, hide_description: false };
+            let verified = if target.ends_with("Folder") { saved.as_slice() } else { &[] };
+            let admitted = match &execute.operation {
+                UniversalActionOperation::InvokePrimary(candidate) => primary_allowed(&result, candidate, false, verified),
+                _ => false,
+            };
+            let expected = !target.ends_with(".lnk") && !target.ends_with("Folder") || cfg!(windows);
+            assert_eq!(admitted, expected, "{target}");
+        }
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G05 Action Sheet Execute now admits checked saved shortcuts, supported documents, literal HTTP(S) and verified local folders through the ordinary launcher activation path. Review and seven focused tests passed. G01 Follow Mouse placement passed review and five focused tests, and its executable is staged. Both native replays remain pending. See the [checkpoint ledger](CHECKPOINTS.md).
+
 G01 and G04 now complete the checked foreground handoff before a Hash popout retires on Dock. Windows observed the exact 1516 × 937 root foreground before any targeted input, with the retained digest and blank Search. All six focused tests passed. [Hash Dock evidence](VALIDATION_LOG.md#g01-and-g04-checked-hash-dock-foreground-handoff)
 
 G01 and G05 now honor saved GPUI launcher client size and explicit static placement. Matched Windows runs opened directly at 1516 × 937, held live geometry while visible, and returned the same root to its saved geometry after a real external launch. All six focused tests passed. [Saved launcher placement evidence](VALIDATION_LOG.md#g01-saved-launcher-client-size-and-static-reveal)
@@ -67,7 +69,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Restore configured Follow Mouse placement for GPUI startup and hidden reveal. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Replay the staged Follow Mouse artifact and verify checked saved associations through Action Sheet Execute on Windows. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
