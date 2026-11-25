@@ -18,6 +18,7 @@ mod hash_jump;
 mod hash_progress;
 mod hash_jump_select;
 mod launcher_controls;
+pub(crate) mod launcher_header;
 mod launcher_result;
 mod jump_mode;
 mod search_providers;
@@ -58,8 +59,8 @@ use gpui_kit::component::input::{
     IndentInline, InputEvent, MoveDown, MoveLeft, MovePageDown, MovePageUp, MoveRight, MoveUp,
 };
 use gpui_kit::component::{
-    WindowExt as _,
-    button::Button,
+    WindowExt as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
     input::{Input, InputState, Textarea, TextareaState},
     label::Label,
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
@@ -147,6 +148,7 @@ use fst::Map;
 
 pub(crate) struct LauncherSearchStartup {
     pub actions: Vec<Action>,
+    pub branding: launcher_header::Branding,
     pub calculator_settings: Option<serde_json::Value>,
     pub match_exact: bool,
     pub fuzzy_weight: f32,
@@ -208,6 +210,7 @@ impl LauncherSearchResult {
 
 struct LauncherSearchCatalog {
     providers: InstalledLauncherProviders,
+    branding: launcher_header::Branding,
     calculator_settings: Option<serde_json::Value>,
     command_help_providers: Arc<[CommandHelpProvider]>,
     quick_help_providers: Arc<[QuickHelpProvider]>,
@@ -269,6 +272,7 @@ impl LauncherSearchCatalog {
         let completion_index = multi_launcher::completion::build_index(&commands, &actions);
         Self {
             providers,
+            branding: startup.branding,
             calculator_settings: startup.calculator_settings,
             command_help_providers,
             quick_help_providers,
@@ -845,6 +849,7 @@ impl ToastLogViewerState {
 #[derive(IntoElement)]
 struct LauncherMenuBar {
     root: WeakEntity<RootWindow>,
+    row_height: f32,
     action_context: FocusHandle,
     settings_menu_focus_handle: FocusHandle,
     toast_log_open_pending: bool,
@@ -862,6 +867,8 @@ impl RenderOnce for LauncherMenuBar {
             .max_w_full()
             .min_w(px(0.0))
             .label("File")
+            .ghost()
+            .small()
             .dropdown_menu(move |menu, window, cx| {
                 let action_context = file_action_context.clone();
                 let editor_context = file_action_context.clone();
@@ -916,6 +923,8 @@ impl RenderOnce for LauncherMenuBar {
             .max_w_full()
             .min_w(px(0.0))
             .label("Settings")
+            .ghost()
+            .small()
             .track_focus(&self.settings_menu_focus_handle)
             .dropdown_menu(move |menu, _, _| {
                 let action_context = settings_action_context.clone();
@@ -939,6 +948,8 @@ impl RenderOnce for LauncherMenuBar {
             .max_w_full()
             .min_w(px(0.0))
             .label("Help")
+            .ghost()
+            .small()
             .dropdown_menu(move |menu, _, _| {
                 let command_list_context = help_action_context.clone();
                 let quick_help_context = help_action_context.clone();
@@ -1003,6 +1014,7 @@ impl RenderOnce for LauncherMenuBar {
             });
 
         let menus = div()
+            .min_h(px(self.row_height))
             .flex()
             .flex_row()
             .flex_wrap()
@@ -9901,6 +9913,7 @@ impl Render for RootWindow {
             search_field.into_any_element()
         };
         let root_menu_bar = LauncherMenuBar {
+            row_height: metrics.row_min_height,
             root: cx.entity().downgrade(),
             action_context: self.focus_handle.clone(),
             settings_menu_focus_handle: self.settings_menu_focus_handle.clone(),
@@ -9977,24 +9990,19 @@ impl Render for RootWindow {
             )
         });
         let header = div()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .gap_y(px(metrics.item_spacing_y))
-            .w(px(search_width))
-            .max_w_full()
-            .p(px(metrics.panel_padding))
-            .bg(appearance::to_hsla(palette.panel_surface))
-            .rounded(px(metrics.corner_radius))
+            .flex().flex_col().flex_shrink_0().w_full()
             .text_color(appearance::to_hsla(palette.primary_text))
             .text_size(px(metrics.body_text_size))
             .line_height(px(metrics.line_height))
             .child(root_menu_bar)
-            .child(
-                div().flex().items_center().gap_2().w_full()
+            .child(div().flex().flex_col().items_start().self_center()
+                .gap_y(px(metrics.item_spacing_y))
+                .w(px(search_width)).max_w_full().px(px(metrics.panel_padding))
+                .pt(px(metrics.window_padding))
+                .children(launcher_header::identity(self.search_catalog.branding, metrics))
+                .child(div().flex().items_center().gap_2().w_full()
                     .child(gpui_kit::component::Icon::new(gpui_kit::component::IconName::Search))
-                    .child(div().flex_1().min_w(px(0.0)).child(search_field)),
-            );
+                    .child(div().flex_1().min_w(px(0.0)).child(search_field))));
         let search_body = div()
             .flex()
             .flex_col()
@@ -10017,14 +10025,26 @@ impl Render for RootWindow {
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
             }))
-            .children(completion_preview.into_iter().enumerate().map(|(index, preview)| {
-                Label::new(preview)
+            .children((!completion_preview.is_empty()).then(|| {
+                div()
+                    .id("launcher-search-completion")
+                    .role(Role::Group)
+                    .flex()
+                    .flex_col()
+                    .gap_y(px(metrics.item_spacing_y))
                     .w_full()
                     .min_w(px(0.0))
                     .overflow_hidden()
-                    .id(format!("launcher-search-completion-{index}"))
-                    .text_size(px(metrics.small_text_size))
-                    .line_height(px(metrics.line_height))
+                    .opacity(0.7)
+                    .children(completion_preview.into_iter().enumerate().map(|(index, preview)| {
+                        Label::new(preview)
+                            .id(format!("launcher-search-completion-{index}"))
+                            .w_full()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.small_text_size * 1.2))
+                    }))
             }))
             .children((result_count > 0).then(|| {
                 div()
@@ -10065,7 +10085,9 @@ impl Render for RootWindow {
             .flex()
             .flex_col()
             .size_full()
-            .p(px(metrics.window_padding))
+            .px(px(metrics.window_padding))
+            .pt(px(2.0))
+            .pb(px(metrics.window_padding))
             .items_center()
             .justify_start()
             .track_focus(&self.focus_handle)
@@ -14044,6 +14066,7 @@ mod tests {
     ) -> LauncherSearchCatalog {
         LauncherSearchCatalog::new(
             LauncherSearchStartup {
+                branding: super::launcher_header::Branding::default(),
                 actions,
                 calculator_settings: None,
                 match_exact: true,
@@ -14580,6 +14603,7 @@ mod tests {
         let enabled = HashSet::from(["hash_generator".to_owned()]);
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
+                branding: super::launcher_header::Branding::default(),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -14619,6 +14643,7 @@ mod tests {
 
         let globally_gridded = LauncherSearchCatalog::new(
             LauncherSearchStartup {
+                branding: super::launcher_header::Branding::default(),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -14770,6 +14795,7 @@ mod tests {
 
         let settings_action = saved_action("Open Settings", "settings:dialog", None);
         let startup = || LauncherSearchStartup {
+            branding: super::launcher_header::Branding::default(),
             calculator_settings: None,
             actions: vec![settings_action.clone()],
             match_exact: true,
@@ -14977,6 +15003,7 @@ mod tests {
 
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
+                branding: super::launcher_header::Branding::default(),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -15026,6 +15053,7 @@ mod tests {
 
         let disabled_catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
+                branding: super::launcher_header::Branding::default(),
                 calculator_settings: None,
                 actions: vec![saved_action("Saved Help", "help:show", None)],
                 match_exact: true,
@@ -15773,6 +15801,7 @@ mod tests {
         };
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
+                branding: super::launcher_header::Branding::default(),
                 calculator_settings: None,
                 actions: vec![
                     alpha.clone(),
@@ -15844,6 +15873,7 @@ mod tests {
     fn gpui_cached_hash_command_fallback_respects_enablement_and_provider_precedence() {
         let enabled = HashSet::from(["hash_generator".to_owned()]);
         let startup = |match_exact| LauncherSearchStartup {
+            branding: super::launcher_header::Branding::default(),
             calculator_settings: None,
             actions: Vec::new(),
             match_exact,

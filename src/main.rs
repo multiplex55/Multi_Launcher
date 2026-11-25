@@ -4841,6 +4841,10 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or("F2")
             .to_owned();
         let search_startup = gpui_frontend::LauncherSearchStartup {
+            branding: gpui_frontend::launcher_header::Branding {
+                icon: settings.show_launcher_icon,
+                title: settings.show_launcher_title,
+            },
             actions: actions_vec,
             calculator_settings: settings.plugin_settings.get("calculator").cloned(),
             match_exact: settings.match_exact,

@@ -975,3 +975,7 @@ The existing Unit provider supplies exact and approximate GPUI Search results th
 ## G05 stock inline Calculator Search
 
 The stock scalar Calculator runs off the UI thread and publishes only the current query and generation. Ten focused cases passed. Both frontends copied exact `42` at 1516 × 937, honored both Save on Enter timings and kept the root visible with Hide After Run enabled. GPUI also verified disabled Search leaves its clipboard and calculator history alone. Mutable Calculator history rows, the Calculation Pad and its settings surface remain open. The next layout increment aligns the pinned Search header and completion spacing. [Exact receipts](VALIDATION_LOG.md#g05-stock-inline-calculator-search)
+
+## G05 pinned launcher header and completion spacing
+
+GPUI now honors the saved launcher icon and title and uses compact, individually accessible completion labels. Ten focused cases passed. Matched native 1516 × 937 captures showed the Search field and first result within about four physical pixels of egui and 22 complete List rows in each frontend with five suggestions. Wheel scrolling left Search fixed in both, and native Tab completed the same query in both. The supplemental compact replay preserved Search and reached the Hash dock footer. The unbranded fixture verified the identity row collapses. Exact styling, wheel travel and additional scale settings remain open. Continue broader provider admission and remaining launcher actions. [Exact receipts](VALIDATION_LOG.md#g05-pinned-launcher-header-and-completion-spacing)

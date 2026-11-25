@@ -36,6 +36,8 @@ Compare equivalent states in both frontends at 1516 × 937 pixels on matching di
 
 The anchored layout passed its focused Windows replay at 1516 × 937. The fixed header shares keyboard and focus ownership with the scrolling body. List and Grid rows scroll independently and hand wheel input to the body at their boundaries. Docked Hash fits the measured body and remains reachable from a dense query. [Matched captures and receipts](../VALIDATION_LOG.md#g05-top-centered-search-and-scroll-ownership)
 
+The pinned header reads the stored launcher icon and title flags independently and collapses the identity row when both are off. The completion list keeps a separate accessible label for each suggestion. Matched branded captures placed Search and the first result within about four pixels vertically between frontends, and both showed 22 complete rows with five suggestions. The primary comparison uses 1516 × 937 physical window pixels at matching display scaling. Compact windows supplement these captures. [Pinned header evidence](../VALIDATION_LOG.md#g05-pinned-launcher-header-and-completion-spacing)
+
 Ordinary List rows center the label and smaller inline description at the shared theme height and vertical spacing. The List uses a compact description and honors the Folder path setting. File provides Hash Generator, Restart in egui and Close Application. Help provides the two Foundation probes. Hash resize instructions live inside the dock. The matched dense List fits 22 complete rows at a 32-pixel pitch in both frontends. Header alignment, list-scale settings, row styling and wheel travel still differ. [List and menu replay](../VALIDATION_LOG.md#g05-ordinary-list-density-and-launcher-menu-controls)
 
 ## First GPUI result activation checkpoint
