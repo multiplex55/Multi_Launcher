@@ -326,6 +326,54 @@ pub fn parse_app_prefix(query: &str) -> Option<&str> {
     }
 }
 
+/// The source of an empty-query browse row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmptyBrowseKind {
+    Command,
+    Saved,
+}
+
+/// A canonical action and its presentation in the empty-query browse view.
+pub struct EmptyBrowseRow<'a> {
+    pub action: &'a Action,
+    pub kind: EmptyBrowseKind,
+}
+
+impl EmptyBrowseRow<'_> {
+    pub fn display_label(&self) -> Option<String> {
+        match self.kind {
+            EmptyBrowseKind::Command => None,
+            EmptyBrowseKind::Saved => Some(format!("{APP_PREFIX} {}", self.action.label)),
+        }
+    }
+
+    fn materialize(&self) -> Action {
+        Action {
+            label: self.display_label().unwrap_or_else(|| self.action.label.clone()),
+            desc: self.action.desc.clone(),
+            action: self.action.action.clone(),
+            args: self.action.args.clone(),
+        }
+    }
+}
+
+/// Traverse command rows first, followed by saved rows in catalog order.
+pub fn empty_browse_rows<'a>(
+    commands: &'a [Action],
+    saved: &'a [Action],
+) -> impl Iterator<Item = EmptyBrowseRow<'a>> {
+    commands
+        .iter()
+        .map(|action| EmptyBrowseRow {
+            action,
+            kind: EmptyBrowseKind::Command,
+        })
+        .chain(saved.iter().map(|action| EmptyBrowseRow {
+            action,
+            kind: EmptyBrowseKind::Saved,
+        }))
+}
+
 /// Inputs to the ordered, read-only launcher composition boundary.
 pub struct ReadOnlySearchInput<'a, M, P = (Action, f32)> {
     pub raw_query: &'a str,
@@ -439,23 +487,15 @@ where
 {
     let trimmed = input.raw_query.trim();
     if trimmed.is_empty() {
-        let mut actions: Vec<_> = input
-            .command_cache
-            .iter()
-            .cloned()
-            .map(|action| result_row(action, command_origin.clone()))
+        let actions = empty_browse_rows(input.command_cache, input.local_actions)
+            .map(|row| {
+                let origin = match row.kind {
+                    EmptyBrowseKind::Command => command_origin.clone(),
+                    EmptyBrowseKind::Saved => saved_origin.clone(),
+                };
+                result_row(row.materialize(), origin)
+            })
             .collect();
-        actions.extend(input.local_actions.iter().map(|action| {
-            result_row(
-                Action {
-                    label: format!("{APP_PREFIX} {}", action.label),
-                    desc: action.desc.clone(),
-                    action: action.action.clone(),
-                    args: action.args.clone(),
-                },
-                saved_origin.clone(),
-            )
-        }));
         return ReadOnlySearchResults {
             actions,
             stats: ReadOnlySearchStats {

@@ -261,3 +261,7 @@ GPUI evaluates stock scalar `=` expressions off the UI thread. The calculator wo
 ## Checked Calculator history Search
 
 `calc list`, `= list` and `= history` share the stock Calculator projection. GPUI attaches the full entry from the worker's snapshot to the current result generation and preserves the store index through filtering. The activation worker reads canonical history once and copies the entry only if it matches the displayed row, including its expression. Successful copy keeps the original typed command and launcher History and Usage while leaving Calculator history intact. Help and the command cache expose the two stock templates. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-checked-calculator-history-search)
+
+## Blank Search installed inventory
+
+The shared composer supplies the command rows followed by the saved rows in catalog order. GPUI publishes its admitted inventory at startup and for cleared or whitespace-only queries. Browse preserves duplicate rows and bypasses usage ranking. The shared label projection supplies the `app ` prefix for presentation, Jump and successful History. Checked dispatch retains the canonical saved action and raw query. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-blank-search-installed-inventory)

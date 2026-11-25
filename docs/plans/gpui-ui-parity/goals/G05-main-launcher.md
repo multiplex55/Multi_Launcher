@@ -81,6 +81,8 @@ Inspect egui’s current root layout and use it as the reference for anchoring G
 
 ## Focused validation
 
+The matched 1516 × 937 blank Search replay covers first paint, unselected Enter, paging with a fixed query field, History recall and exact folder activation. GPUI also verified that the field stayed fixed when Docked Hash opened beneath the whitespace results. [Blank Search evidence](../VALIDATION_LOG.md#g05-blank-search-installed-inventory)
+
 Existing integration sources include `tests/focus_visibility.rs`, `gui_visibility.rs`, `trigger_visibility.rs`, and `tests/pure_cases/query_autocomplete.rs`; the latter belongs to the aggregate `pure` binary. Discover the relevant inline query-navigation cases and list nonzero selections before execution. Select the affected visibility target and `cargo nextest run -p multi_launcher --test pure -E 'test(query_autocomplete)'` as justified by the actual change. Add GPUI interaction checks for physical NumPad versus text input and exactly-once command effects; don't treat preserved egui tests as proof of GPUI input handling. No full nextest run is requested by this goal.
 
 ## Exit and continuation

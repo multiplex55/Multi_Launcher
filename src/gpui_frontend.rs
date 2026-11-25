@@ -179,10 +179,15 @@ enum LauncherResultOrigin {
 struct LauncherSearchResult {
     action: Action,
     origin: LauncherResultOrigin,
+    display_label: Option<String>,
     hide_description: bool,
 }
 
 impl LauncherSearchResult {
+    fn label(&self) -> &str {
+        self.display_label.as_deref().unwrap_or(&self.action.label)
+    }
+
     #[cfg(windows)]
     fn saved_shortcut(&self) -> Option<multi_launcher::commands::ExternalCommand> {
         (self.origin == LauncherResultOrigin::Saved)
@@ -336,16 +341,36 @@ impl LauncherSearchCatalog {
         )
     }
 
+    fn initial_results(&self, enabled_plugins: Option<&HashSet<String>>) -> LauncherSearchResults {
+        let mut results = LauncherSearchResults::default();
+        results.replace(
+            String::new(),
+            self.compose("", Vec::new(), true),
+            self.resolve_result_layout("", enabled_plugins),
+            self.page_jump,
+        );
+        results
+    }
+
     fn compose(
         &self,
         raw_query: &str,
         provider_actions: Vec<(String, Action)>,
         raw_provider_results_empty: bool,
     ) -> Vec<LauncherSearchResult> {
-        // Clearing GPUI Search restores the blank result state.
-        // Cached commands become searchable once there is a query.
         if raw_query.trim().is_empty() {
-            return Vec::new();
+            use multi_launcher::actions::search::{EmptyBrowseKind, empty_browse_rows};
+            return empty_browse_rows(&self.commands, &self.actions)
+                .map(|row| LauncherSearchResult {
+                    action: row.action.clone(),
+                    origin: match row.kind {
+                        EmptyBrowseKind::Command => LauncherResultOrigin::CachedCommand,
+                        EmptyBrowseKind::Saved => LauncherResultOrigin::Saved,
+                    },
+                    display_label: row.display_label(),
+                    hide_description: false,
+                })
+                .collect();
         }
         let trimmed = raw_query.trim();
         let trimmed_lc = trimmed.to_lowercase();
@@ -449,6 +474,7 @@ impl LauncherSearchCatalog {
         .map(|(action, origin)| LauncherSearchResult {
             action,
             origin,
+            display_label: None,
             hide_description: false,
         })
         .collect()
@@ -2586,6 +2612,7 @@ impl LauncherSearchResults {
                 .map(|action| LauncherSearchResult {
                     action,
                     origin: LauncherResultOrigin::Saved,
+                    display_label: None,
                     hide_description: false,
                 })
                 .collect(),
@@ -2736,6 +2763,7 @@ fn launcher_result_grid_geometry(
 
 fn render_launcher_result_cell(
     action: &Action,
+    display_label: &str,
     hide_description: bool,
     compact_description: bool,
     list: bool,
@@ -2792,9 +2820,9 @@ fn render_launcher_result_cell(
         .text_color(appearance::to_hsla(palette.primary_text))
         .role(Role::Button)
         .aria_label(if hide_description || (list && description.is_empty()) {
-            action.label.clone()
+            display_label.to_owned()
         } else {
-            format!("{}: {}", action.label, description)
+            format!("{}: {}", display_label, description)
         })
         .tab_stop(false)
         .on_mouse_down(
@@ -2833,7 +2861,7 @@ fn render_launcher_result_cell(
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .child(
-                        Label::new(action.label.clone())
+                        Label::new(display_label.to_owned())
                             .min_w(px(0.0))
                             .flex_shrink(0.25)
                             .overflow_hidden()
@@ -2856,7 +2884,7 @@ fn render_launcher_result_cell(
         })
         .when(!list, |cell| {
             cell.child(
-                Label::new(action.label.clone())
+                Label::new(display_label.to_owned())
                     .w_full()
                     .min_w(px(0.0))
                     .overflow_hidden()
@@ -2878,7 +2906,7 @@ fn render_launcher_result_cell(
     if let Some(draft) = jump_geometry_draft {
         let metadata = TargetMetadata::new(
             target_id,
-            action.label.clone(),
+            display_label.to_owned(),
             TargetKind::Action,
             absolute_index.saturating_add(1) as u64,
         );
@@ -6859,14 +6887,18 @@ impl RootWindow {
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
         self.retire_context_favorite();
         self.retire_search_jump_mode();
+        self.calculator_search.pending = None;
+        self.calculator_search.retire_history();
+        if query.trim().is_empty() {
+            self.publish_launcher_provider_results(query, Vec::new(), scroll_to_search);
+            return;
+        }
         let raw_provider_actions = search_providers::search_routed(
             self.search_catalog.providers.plugins(),
             &query,
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
-        self.calculator_search.pending = None;
-        self.calculator_search.retire_history();
         let calculator_enabled = calculator_search::eligible_query(&query)
             && self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("calculator"))
             && multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "calculator");
@@ -7702,6 +7734,7 @@ impl RootWindow {
                 return;
             }
         }
+        let history_label = result.display_label.clone();
         #[cfg(windows)]
         if let Some(command) = result.saved_shortcut() {
             self.start_external_launch(
@@ -7710,6 +7743,7 @@ impl RootWindow {
                 query,
                 source,
                 Some(external_launch::AssociationKind::SavedShortcut),
+                history_label,
                 window,
                 cx,
             );
@@ -7717,7 +7751,7 @@ impl RootWindow {
         }
         if let Some(command) = result.saved_url() {
             self.start_external_launch(result.action, command, query, source,
-                Some(external_launch::AssociationKind::SavedUrl), window, cx);
+                Some(external_launch::AssociationKind::SavedUrl), history_label, window, cx);
             return;
         }
         if let Some(command) = result.saved_document() {
@@ -7727,6 +7761,7 @@ impl RootWindow {
                 query,
                 source,
                 Some(external_launch::AssociationKind::SavedDocument),
+                history_label,
                 window,
                 cx,
             );
@@ -7738,13 +7773,13 @@ impl RootWindow {
             if let Some(command) = saved_folder::candidate(&result.action) {
                 self.start_external_launch(
                     result.action, command, query, source,
-                    Some(external_launch::AssociationKind::SavedFolder), window, cx,
+                    Some(external_launch::AssociationKind::SavedFolder), history_label, window, cx,
                 );
                 return;
             }
         }
         if let Some(command) = result.saved_external() {
-            self.start_external_launch(result.action, command, query, source, None, window, cx);
+            self.start_external_launch(result.action, command, query, source, None, history_label, window, cx);
             return;
         }
         if let Some((kind, command)) =
@@ -7761,6 +7796,7 @@ impl RootWindow {
                 query,
                 source,
                 Some(kind),
+                None,
                 window,
                 cx,
             );
@@ -9648,6 +9684,7 @@ impl Render for RootWindow {
                                 .min_w(px(0.0))
                                 .child(render_launcher_result_cell(
                                     action,
+                                    self.launcher_results.actions[absolute_index].label(),
                                     self.launcher_results.actions[absolute_index].hide_description,
                                     matches!(&self.launcher_results.actions[absolute_index].origin, LauncherResultOrigin::Provider(name) if name == "folders"),
                                     false,
@@ -9683,6 +9720,7 @@ impl Render for RootWindow {
                     let hint = self.search_jump_mode.hint_for(&target_id);
                     render_launcher_result_cell(
                         action,
+                        self.launcher_results.actions[first_index].label(),
                         self.launcher_results.actions[first_index].hide_description,
                         false,
                         true,
@@ -11898,11 +11936,8 @@ pub(crate) fn run_foundation_window(
             let quick_help_close_focus_handle = cx.focus_handle();
             let toast_log_focus_handle = cx.focus_handle();
             let toast_log_owner_focus_handle = cx.focus_handle();
-            let initial_result_layout =
-                search_catalog_for_root.resolve_result_layout("", enabled_plugins.as_ref());
-            let mut initial_launcher_results = LauncherSearchResults::default();
-            initial_launcher_results.layout = initial_result_layout;
-            initial_launcher_results.page_jump = search_catalog_for_root.page_jump;
+            let initial_launcher_results =
+                search_catalog_for_root.initial_results(enabled_plugins.as_ref());
             let root = cx.new(move |cx| RootWindow {
                 root_window: None,
                 listener_slot: Arc::clone(&listener_slot_for_root),
@@ -13156,6 +13191,7 @@ mod tests {
                     .map(|action| super::LauncherSearchResult {
                         action,
                         origin: super::LauncherResultOrigin::Saved,
+                        display_label: None,
                         hide_description: false,
                     })
                     .collect(),
@@ -13724,6 +13760,41 @@ mod tests {
     }
 
     #[test]
+    fn blank_browse_preserves_command_order_canonical_rows_and_generation() {
+        let saved = saved_action("Folder", r"C:\Data\Project", None);
+        let unsupported = saved_action("Unsupported", "unsupported:bad", None);
+        let mut catalog = completion_catalog(Vec::new(), true, None);
+        catalog.commands = vec![
+            saved_action("a command", "query:a", None),
+            saved_action("b command", "query:b", None),
+        ];
+        catalog.command_cached_entries = catalog.commands.iter().map(multi_launcher::actions::search::CachedSearchEntry::from_action).collect();
+        assert!(catalog.replace_saved_actions(
+            vec![saved.clone(), unsupported, saved.clone()], vec![saved.clone()],
+        ));
+        let initial = catalog.initial_results(None);
+        assert_eq!(initial.query, "");
+        assert_ne!(initial.generation, 0);
+        assert_eq!(initial.actions.len(), 4);
+        assert_eq!(initial.actions[0].label(), "a command");
+        assert_eq!(initial.actions[1].label(), "b command");
+        assert_eq!(initial.actions[2].label(), "app Folder");
+        assert_eq!(initial.actions[2].action, saved);
+        assert_eq!(initial.actions[3].action, saved);
+        assert_eq!(initial.actions[2].origin, super::LauncherResultOrigin::Saved);
+        assert!(catalog.verified_folders.contains(&initial.actions[2].action));
+        assert!(initial.enter_target("").is_none());
+        let whitespace = catalog.compose(" \t", vec![("other".into(), saved.clone())], false);
+        assert_eq!(whitespace, initial.actions);
+        let mut current = initial;
+        let generation = current.generation;
+        current.replace("app Folder".into(), catalog.compose("app Folder", Vec::new(), true),
+            ResolvedQueryResultsLayout::default(), 2);
+        assert!(current.resolve_result(generation, 2, "").is_none());
+        assert!(current.actions.iter().all(|row| row.display_label.is_none()));
+    }
+
+    #[test]
     fn folder_bookmark_post_filter_preserves_origin_and_raw_provider_precedence() {
         use super::LauncherResultOrigin;
         let catalog = completion_catalog(Vec::new(), true, None);
@@ -14081,6 +14152,7 @@ mod tests {
             LauncherSearchResult {
                 action: action.clone(),
                 origin: LauncherResultOrigin::Saved,
+                display_label: None,
                 hide_description: false
             }
         );
@@ -14089,6 +14161,7 @@ mod tests {
             LauncherSearchResult {
                 action: action.clone(),
                 origin: LauncherResultOrigin::Provider("provider".into()),
+                display_label: None,
                 hide_description: false
             }
         );
@@ -14103,6 +14176,7 @@ mod tests {
             vec![LauncherSearchResult {
                 action,
                 origin: LauncherResultOrigin::Provider("provider".into()),
+                display_label: None,
                 hide_description: false,
             }],
             ResolvedQueryResultsLayout::default(),
@@ -15521,10 +15595,9 @@ mod tests {
         assert!(matches!(route, InstalledSearchRoute::HashOpen));
         assert_eq!(invocation.original_action, beta);
         assert_eq!(invocation.source, ActivationSource::Enter);
-        assert!(
-            catalog.compose_actions("", Vec::new()).is_empty(),
-            "clearing GPUI Search keeps the existing blank result scope"
-        );
+        assert!(catalog.compose("", Vec::new(), true).iter().any(|row|
+            row.origin == super::LauncherResultOrigin::Saved && row.action == alpha && row.label() == "app Alpha QMarker"
+        ));
         assert_eq!(
             supported_launcher_search_actions(vec![unsupported]),
             Vec::new()

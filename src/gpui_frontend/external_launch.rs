@@ -535,6 +535,7 @@ pub(super) enum RunCommand {
 #[derive(Clone)]
 pub(super) struct Request {
     pub action: Action,
+    pub history_label: Option<String>,
     pub command: RunCommand,
     pub query: String,
     pub source: ActivationSource,
@@ -771,10 +772,11 @@ impl RootWindow {
         query: String,
         source: ActivationSource,
         association: Option<AssociationKind>,
+        history_label: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_run(action, RunCommand::External { command, association }, query, source, window, cx);
+        self.start_run(action, RunCommand::External { command, association }, query, source, history_label, window, cx);
     }
 
     pub(super) fn start_date_launch(
@@ -793,7 +795,7 @@ impl RootWindow {
                 message,
             },
         };
-        self.start_run(action, command, query, source, window, cx);
+        self.start_run(action, command, query, source, None, window, cx);
     }
 
     pub(super) fn start_calculator_launch(
@@ -805,7 +807,7 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_run(action, RunCommand::Calculator(scalar), query, source, window, cx);
+        self.start_run(action, RunCommand::Calculator(scalar), query, source, None, window, cx);
     }
 
     pub(super) fn start_calculator_history_launch(
@@ -817,7 +819,7 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_run(action, RunCommand::CalculatorHistory(history), query, source, window, cx);
+        self.start_run(action, RunCommand::CalculatorHistory(history), query, source, None, window, cx);
     }
 
     pub(super) fn start_unit_launch(
@@ -836,7 +838,7 @@ impl RootWindow {
                 message,
             },
         };
-        self.start_run(action, command, query, source, window, cx);
+        self.start_run(action, command, query, source, None, window, cx);
     }
 
     pub(super) fn start_copy_launch(
@@ -848,7 +850,7 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_run(action, RunCommand::Copy(text), query, source, window, cx);
+        self.start_run(action, RunCommand::Copy(text), query, source, None, window, cx);
     }
 
     fn start_run(
@@ -857,6 +859,7 @@ impl RootWindow {
         command: RunCommand,
         query: String,
         source: ActivationSource,
+        history_label: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -875,6 +878,7 @@ impl RootWindow {
         };
         let request = Request {
             action,
+            history_label,
             command,
             query,
             source,
@@ -1154,7 +1158,13 @@ fn bookkeep(
             HistoryEntry {
                 query: request.query.clone(),
                 query_lc: String::new(),
-                action: request.action.clone(),
+                action: {
+                    let mut action = request.action.clone();
+                    if let Some(label) = &request.history_label {
+                        action.label = label.clone();
+                    }
+                    action
+                },
                 source: Some(request.source.label().to_owned()),
                 timestamp: 0,
             },
@@ -1192,6 +1202,7 @@ mod tests {
             toast_duration: 1.0,
         };
         let request = Request {
+            history_label: None,
             action: action.clone(),
             command: RunCommand::Copy(text),
             query: query.into(),
@@ -1246,6 +1257,7 @@ mod tests {
         assert_ne!(action.label, "2026-02-28");
         let route = classify("date_arithmetic", &action).unwrap();
         let mut request = Request {
+            history_label: None,
             action: action.clone(),
             command: match route {
                 DateRoute::Copy(text) => RunCommand::Copy(text),
@@ -1652,6 +1664,7 @@ mod tests {
         let admission = Arc::new(RestartAdmission::default());
         let mut state = ExternalLaunch::default();
         let request = Request {
+            history_label: None,
             action: Action {
                 label: "Tool".into(),
                 desc: String::new(),
@@ -1738,8 +1751,46 @@ mod tests {
     }
 
     #[test]
+    fn blank_saved_launch_history_uses_display_label_and_canonical_usage() {
+        let request = Request {
+            action: Action {
+                label: "Folder".into(), desc: "Saved".into(),
+                action: r"C:\Data\Project".into(), args: Some(" ".into()),
+            },
+            history_label: Some("app Folder".into()),
+            command: RunCommand::External {
+                command: ExternalCommand {
+                    target: r"C:\Data\Project".into(), args: Some(" ".into()), namespace: None,
+                },
+                association: Some(AssociationKind::SavedFolder),
+            },
+            query: " \t".into(),
+            source: ActivationSource::Click,
+            settings: Settings {
+                clear_query_after_run: false, hide_after_run: false, history_limit: 10,
+                enable_toasts: true, show_error_toasts: true, show_inline_errors: true,
+                toast_duration: 2.0,
+            },
+        };
+        let outcome = CommandOutcome { history: HistoryPolicy::Record, ..CommandOutcome::default() };
+        let result = bookkeep(Ok(outcome), &request, |entry, _| {
+            assert_eq!(entry.query, " \t");
+            assert_eq!(entry.action.label, "app Folder");
+            assert_eq!(entry.action.action, request.action.action);
+            assert_eq!(entry.action.args, request.action.args);
+            Ok(())
+        }, |key| {
+            assert_eq!(key, request.action.action);
+            Ok(1)
+        });
+        assert!(result.outcome.is_ok());
+        assert_eq!(request.action.label, "Folder");
+    }
+
+    #[test]
     fn bookkeeping_attempts_both_stores_after_success_without_relaunch() {
         let request = Request {
+            history_label: None,
             action: Action {
                 label: "Tool".into(),
                 desc: String::new(),
