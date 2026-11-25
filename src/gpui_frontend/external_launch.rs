@@ -1826,14 +1826,25 @@ mod tests {
     }
 
     #[test]
-    fn pending_hotkey_supersedes_only_conditional_hide() {
-        use super::super::RootVisibilityRequest::{HideAfterExternalLaunch, Set};
+    fn pending_hotkey_supersedes_conditional_hide_but_not_dock_reveal() {
+        use super::super::RootVisibilityRequest::{DockHash, HideAfterExternalLaunch};
+        use super::super::{ForegroundIdentity, HashWakeSignal, NativeWindow, hash_dock};
         let hide = HideAfterExternalLaunch(2);
         assert!(hide.superseded_by_hotkey(|| true));
         assert!(!hide.superseded_by_hotkey(|| false));
-        for explicit in [Set(false), Set(true)] {
-            assert!(!explicit.superseded_by_hotkey(|| panic!("explicit request is checked first")));
-        }
+        let reveal = DockHash(hash_dock::Reveal {
+            gesture: hash_dock::Gesture {
+                source: NativeWindow { identity: ForegroundIdentity { hwnd: 1, process_id: 2, thread_id: 3 } },
+                foreground_authorized: true,
+                visibility_revision: 2,
+            },
+            mount_generation: 5,
+            acknowledgement: hash_dock::Acknowledgement(Arc::new(HashWakeSignal::default())),
+        });
+        assert!(reveal.is_current(2, false, false));
+        assert!(!reveal.is_current(3, false, false));
+        assert!(!reveal.is_current(2, false, true));
+        assert!(!reveal.superseded_by_hotkey(|| panic!("explicit reveal precedes the hotkey")));
     }
 
     #[test]

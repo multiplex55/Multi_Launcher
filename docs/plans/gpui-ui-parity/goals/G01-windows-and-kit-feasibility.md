@@ -2,7 +2,7 @@
 
 **Status: Validation pending.** G01-A/B startup and focused input are verified, G01-C has native utility and controller evidence, and G01-D built and launched the ordinary release and observed explicit fallback. Configured launch hide kept an independent Hash window usable and Dock restored the same root. Global invocation, foreground restoration, passive HUD and display placement criteria still need native evidence. See the [saved application replay](../VALIDATION_LOG.md#g02-and-g05-ordinary-saved-application-execution).
 
-Both frontends now open with the saved client size and apply explicit static position and size at startup and hidden-root reveal. At 1516 × 937, Dock kept live geometry when the root was already visible and restored the saved geometry after a launch hid it. The same replay identified the GPUI foreground handoff gap after popout retirement. [Placement evidence](../VALIDATION_LOG.md#g01-saved-launcher-client-size-and-static-reveal)
+Both frontends now open with the saved client size and apply explicit static position and size at startup and hidden-root reveal. At 1516 × 937, Dock kept live geometry when the root was already visible and restored the saved geometry after a launch hid it. The checked follow-up also returned foreground to the exact GPUI root before the old popout retired. [Placement evidence](../VALIDATION_LOG.md#g01-saved-launcher-client-size-and-static-reveal) · [Foreground evidence](../VALIDATION_LOG.md#g01-and-g04-checked-hash-dock-foreground-handoff)
 
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 

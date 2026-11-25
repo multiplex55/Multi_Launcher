@@ -164,3 +164,7 @@ GPUI restores an existing Hash pin in the remembered Docked or Pop Out host and 
 ### Expected digest and Copy feedback
 
 Both Hash hosts keep **Expected digest (optional)** visible and retain the original digest while Expected edits report Match, Mismatch or the validation error. GPUI presents comparison and Copy success as named status nodes and exposes invalid input through an accessible alert role. Calculate, Cancel and Copy stay in one action group. Disabled Cancel and Copy remain visible and Tab and Jump skip them. Matched clipboard readback, Pop Out and Dock retention, and compact scrolling and focus return have scoped evidence. [Windows and focused evidence](../VALIDATION_LOG.md#g04-hash-expected-digest-comparison-and-copy-feedback)
+
+### Hidden-root Dock foreground
+
+Hash keeps its exact outgoing popout alive until the root presenter completes the current Dock reveal. Only the original popout's live foreground authority transfers to the root. Windows verified the same launcher foreground before additional input, the retained digest, blank Search and editor focus after one popout retirement. [Foreground evidence](../VALIDATION_LOG.md#g01-and-g04-checked-hash-dock-foreground-handoff)

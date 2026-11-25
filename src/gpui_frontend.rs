@@ -19,6 +19,7 @@ mod hash_jump;
 mod hash_progress;
 mod hash_layout;
 mod hash_pin;
+mod hash_dock;
 mod indexed_applications;
 mod window_search;
 mod hash_jump_select;
@@ -8555,6 +8556,7 @@ impl RootWindow {
         source_mount_generation: u64,
         session_epoch: u64,
         revision: u64,
+        dock_gesture: Option<hash_dock::Gesture>,
         operation: EffectPermit,
         cx: &mut Context<Self>,
     ) {
@@ -8892,6 +8894,7 @@ impl RootWindow {
                     }
                 }
                 let show_root = target == HashPresentationMode::Docked
+                    && source_mode == Some(HashPresentationMode::Popout)
                     && !root.root_visibility.visible.load(Ordering::Acquire);
                 root.notify_hash_mount(cx);
                 root.hash_wake_signal.notify();
@@ -9007,7 +9010,10 @@ impl RootWindow {
                 }
             }
 
-            if show_root && !root_visibility.request_hash_visible(destination_mount_generation) {
+            let reveal_ack = if show_root {
+                dock_gesture.and_then(|gesture| root_visibility.request_hash_visible(gesture, destination_mount_generation))
+            } else { None };
+            if show_root && reveal_ack.is_none() {
                 let _ = root.update(cx, |root, cx| {
                     let message = "Hash Generator is docked, but the root window could not be shown by its visibility owner.".to_owned();
                     root.hash_open_error = Some(message.clone());
@@ -9016,6 +9022,10 @@ impl RootWindow {
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
                     cx.notify();
                 });
+            }
+
+            if let Some(receiver) = reveal_ack {
+                receiver.wait().await;
             }
 
             if source_mode == Some(HashPresentationMode::Docked)
@@ -11269,6 +11279,15 @@ impl HashGeneratorWindow {
             self.rehost_pending.store(false, Ordering::Release);
             return;
         };
+        let dock_gesture = if target == HashPresentationMode::Docked && self.mode == HashPresentationMode::Popout {
+            self.native_window.and_then(|source| {
+                self.root.upgrade().map(|root| hash_dock::Gesture {
+                    source,
+                    foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity),
+                    visibility_revision: root.read(cx).root_visibility.request_revision.load(Ordering::Acquire),
+                })
+            })
+        } else { None };
         self.set_editors_readonly(true, cx);
         let revision = self
             .rehost_revision
@@ -11285,6 +11304,7 @@ impl HashGeneratorWindow {
                     mount_generation,
                     session_epoch,
                     revision,
+                    dock_gesture,
                     operation,
                     cx,
                 );
@@ -11718,13 +11738,10 @@ struct RootVisibility {
     request_sender: Arc<Mutex<Option<Sender<()>>>>,
     #[cfg(windows)]
     requested_visible: Arc<Mutex<Option<RootVisibilityRequest>>>,
-    #[cfg(windows)]
-    requested_hash_focus: Arc<AtomicU64>,
 }
 
-#[derive(Clone)]
 enum RootVisibilityRequest {
-    Set(bool),
+    DockHash(hash_dock::Reveal),
     HideAfterExternalLaunch(u64),
     HideAfterWindowSwitch(u64, ForegroundIdentity, Arc<str>),
     HideAfterWindowClose(u64, ForegroundIdentity, ForegroundIdentity, Arc<str>),
@@ -11750,7 +11767,7 @@ fn window_close_hide_is_current(expected_root: ForegroundIdentity, foreground: O
 impl RootVisibilityRequest {
     fn is_current(&self, revision: u64, visible: bool, newer_pending: bool) -> bool {
         match self {
-            Self::Set(_) => true,
+            Self::DockHash(reveal) => reveal.gesture.visibility_revision == revision && !newer_pending,
             Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _)
                 | Self::HideAfterWindowClose(expected, _, _, _) => {
                 *expected == revision && visible && !newer_pending
@@ -11775,8 +11792,6 @@ impl RootVisibility {
             request_sender: Arc::new(Mutex::new(None)),
             #[cfg(windows)]
             requested_visible: Arc::new(Mutex::new(None)),
-            #[cfg(windows)]
-            requested_hash_focus: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -11818,7 +11833,6 @@ impl RootVisibility {
                 .requested_visible
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-            self.requested_hash_focus.store(0, Ordering::Release);
             if let Some(sender) = sender.take() {
                 let _ = sender.send(());
             }
@@ -11844,18 +11858,18 @@ impl RootVisibility {
 
     fn request_window_switch_hide(&self, revision: u64, target: ForegroundIdentity, query: &str) -> bool {
         if current_foreground_identity() != Some(target) { return false; }
-        self.queue_visible(RootVisibilityRequest::HideAfterWindowSwitch(revision, target, Arc::from(query)), None)
+        self.queue_visible(RootVisibilityRequest::HideAfterWindowSwitch(revision, target, Arc::from(query)))
     }
 
     fn request_external_hide(&self, revision: u64) -> bool {
-        self.queue_visible(RootVisibilityRequest::HideAfterExternalLaunch(revision), None)
+        self.queue_visible(RootVisibilityRequest::HideAfterExternalLaunch(revision))
     }
 
     fn request_window_close_hide(&self, revision: u64, root: ForegroundIdentity, target: ForegroundIdentity, query: &str) -> bool {
-        self.queue_visible(RootVisibilityRequest::HideAfterWindowClose(revision, root, target, Arc::from(query)), None)
+        self.queue_visible(RootVisibilityRequest::HideAfterWindowClose(revision, root, target, Arc::from(query)))
     }
 
-    fn queue_visible(&self, request: RootVisibilityRequest, hash_focus: Option<u64>) -> bool {
+    fn queue_visible(&self, request: RootVisibilityRequest) -> bool {
         #[cfg(windows)]
         {
             // Serialize request publication with retirement, including Hash focus.
@@ -11871,40 +11885,35 @@ impl RootVisibility {
             let Ok(mut pending) = self.requested_visible.lock() else {
                 return false;
             };
+            let supersedes_dock = matches!(pending.as_ref(), Some(RootVisibilityRequest::DockHash(_)))
+                && matches!(&request, RootVisibilityRequest::HideAfterExternalLaunch(_)
+                    | RootVisibilityRequest::HideAfterWindowSwitch(_, _, _)
+                    | RootVisibilityRequest::HideAfterWindowClose(_, _, _, _));
             if !request.is_current(
                 self.request_revision.load(Ordering::Acquire),
                 self.visible.load(Ordering::Acquire),
-                pending.is_some(),
+                pending.is_some() && !supersedes_dock,
             ) {
                 return false;
-            }
-            if let Some(generation) = hash_focus {
-                self.requested_hash_focus.store(generation, Ordering::Release);
             }
             *pending = Some(request);
             if sender.send(()).is_ok() {
                 return true;
             }
             *pending = None;
-            if let Some(generation) = hash_focus {
-                let _ = self.requested_hash_focus.compare_exchange(
-                    generation,
-                    0,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
-            }
             false
         }
         #[cfg(not(windows))]
         {
-            let _ = (request, hash_focus);
+            let _ = request;
             false
         }
     }
 
-    fn request_hash_visible(&self, mount_generation: u64) -> bool {
-        self.queue_visible(RootVisibilityRequest::Set(true), Some(mount_generation))
+    fn request_hash_visible(&self, gesture: hash_dock::Gesture, mount_generation: u64) -> Option<Arc<HashWakeSignal>> {
+        let receiver = Arc::new(HashWakeSignal::default());
+        let acknowledgement = hash_dock::Acknowledgement(Arc::clone(&receiver));
+        self.queue_visible(RootVisibilityRequest::DockHash(hash_dock::Reveal { gesture, mount_generation, acknowledgement })).then_some(receiver)
     }
 
     #[cfg(windows)]
@@ -11928,7 +11937,7 @@ impl RootVisibility {
             return None;
         }
         let visible = match request {
-            RootVisibilityRequest::Set(visible) => *visible,
+            RootVisibilityRequest::DockHash(_) => true,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
             RootVisibilityRequest::HideAfterWindowClose(_, _, _, _) => false,
             RootVisibilityRequest::HideAfterWindowSwitch(_, target, _) => {
@@ -11937,14 +11946,6 @@ impl RootVisibility {
             }
         };
         Some(self.set_visible(visible))
-    }
-
-    #[cfg(windows)]
-    fn take_requested_hash_focus(&self) -> Option<u64> {
-        match self.requested_hash_focus.swap(0, Ordering::AcqRel) {
-            0 => None,
-            generation => Some(generation),
-        }
     }
 
     fn set_visible(&self, visible: bool) -> (u64, bool) {
@@ -12198,6 +12199,7 @@ pub(crate) fn run_foundation_window(
     let hash_mount_generation = Arc::new(AtomicU64::new(0));
     let hash_mount_generation_for_quit = Arc::clone(&hash_mount_generation);
     let hash_mount_generation_for_root = Arc::clone(&hash_mount_generation);
+    let hash_mount_generation_for_dock = Arc::clone(&hash_mount_generation);
     let hash_rehost_pending = Arc::new(AtomicBool::new(false));
     let hash_rehost_pending_for_quit = Arc::clone(&hash_rehost_pending);
     let hash_rehost_pending_for_root = Arc::clone(&hash_rehost_pending);
@@ -13053,6 +13055,7 @@ pub(crate) fn run_foundation_window(
             let root_window = root_window;
             let root_view = root_view;
             let visibility = visibility.clone();
+            let dock_mount_generation = Arc::clone(&hash_mount_generation_for_dock);
             let startup_revision = visibility.request_revision.load(Ordering::Acquire);
             cx.spawn(async move |cx| {
                 let mut event_rx: Receiver<()> = event_rx;
@@ -13102,7 +13105,7 @@ pub(crate) fn run_foundation_window(
                     let quick_help_stamp = quick_help_trigger
                         .as_ref()
                         .and_then(|trigger| trigger.take_scoped_stamp());
-                    let requested_visible = visibility.take_requested_visible();
+                    let mut requested_visible = visibility.take_requested_visible();
                     if let Some(Some(revision)) = quick_help_stamp
                         && visibility.is_current_visible_revision(revision, native_window)
                     {
@@ -13157,11 +13160,21 @@ pub(crate) fn run_foundation_window(
                         native_window.identity == *root
                             && window_close_hide_is_current(*root, current_foreground_identity(), expected, current_query.as_deref())
                     });
-                    let accepted_visible = if hotkey_for_conditional || !switch_query_current || !close_current {
+                    let dock_reveal = requested_visible.as_ref().and_then(|request| match request {
+                        RootVisibilityRequest::DockHash(reveal) => Some((reveal.gesture, reveal.mount_generation)),
+                        _ => None,
+                    });
+                    let dock_current = dock_reveal.is_none_or(|(gesture, generation)| {
+                        dock_mount_generation.load(Ordering::Acquire) == generation
+                            && native_window_is_valid(gesture.source)
+                            && !restart_admission_for_hotkey.is_fenced()
+                    });
+                    let accepted_visible = if hotkey_for_conditional || !switch_query_current || !close_current || !dock_current {
                         None
                     } else {
                         requested_visible.as_ref().and_then(|request| visibility.accept_requested_visible(request))
                     };
+                    let dock_reveal = accepted_visible.is_some().then_some(dock_reveal).flatten();
                     let switch_hide = accepted_visible.is_some().then_some(switch_hide).flatten();
                     let close_hide = if accepted_visible.is_some() {
                         requested_visible.as_ref().and_then(|request| match request {
@@ -13171,7 +13184,7 @@ pub(crate) fn run_foundation_window(
                     } else { None };
                     let (revision, desired_visible, hash_focus_generation, hotkey_toggle) =
                         if let Some((revision, visible)) = accepted_visible {
-                            let hash_focus_generation = visibility.take_requested_hash_focus();
+                            let hash_focus_generation = dock_reveal.map(|(_, generation)| generation);
                             (revision, visible, hash_focus_generation, false)
                         } else if hotkey_for_conditional || trigger.take() {
                             let (revision, visible) = visibility.next_toggle();
@@ -13179,7 +13192,9 @@ pub(crate) fn run_foundation_window(
                         } else {
                             continue;
                         };
-                    let foreground = if desired_visible {
+                    let foreground = if let Some((gesture, _)) = dock_reveal {
+                        gesture.foreground_authorized.then_some(gesture.source.identity)
+                    } else if desired_visible {
                         cx.background_executor()
                             .spawn(async { capture_foreground_identity() })
                             .await
@@ -13310,7 +13325,8 @@ pub(crate) fn run_foundation_window(
                     if desired_visible {
                         return_target = foreground
                             .filter(|captured| Some(*captured) == foreground_before_transition)
-                            .filter(|captured| captured.hwnd != native_window.identity.hwnd);
+                            .filter(|captured| captured.hwnd != native_window.identity.hwnd)
+                            .filter(|captured| dock_reveal.is_none_or(|(gesture, _)| *captured != gesture.source.identity));
                     } else if !should_restore && switch_hide.is_none() {
                         return_target = None;
                     }
@@ -13357,7 +13373,21 @@ pub(crate) fn run_foundation_window(
                     } else {
                         None
                     };
-                    if let Some(target) = target {
+                    if let Some((gesture, generation)) = dock_reveal {
+                        let current = visibility.is_current(revision, true)
+                            && dock_mount_generation.load(Ordering::Acquire) == generation
+                            && !restart_admission_for_hotkey.is_fenced()
+                            && native_window_is_valid(native_window)
+                            && native_window_is_valid(gesture.source);
+                        if hash_dock::may_activate(gesture.foreground_authorized, gesture.source.identity, current_foreground_identity(), current) {
+                            if let Err(error) = activate_native_window(native_window) {
+                                tracing::debug!(%error, "GPUI dock foreground activation was refused");
+                            }
+                        }
+                        if let Some(RootVisibilityRequest::DockHash(reveal)) = requested_visible.take() {
+                            drop(reveal.acknowledgement);
+                        }
+                    } else if let Some(target) = target {
                         let expected_foreground = foreground_after_transition;
                         let visibility = visibility.clone();
                         cx.background_executor()
@@ -14722,7 +14752,12 @@ mod tests {
         assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
         assert!(!idle.is_current(revision, true));
         assert!(!idle.request_external_hide(revision));
-        assert!(!idle.request_hash_visible(7));
+        let gesture = super::hash_dock::Gesture {
+            source: super::NativeWindow { identity: super::ForegroundIdentity { hwnd: 1, process_id: 2, thread_id: 3 } },
+            foreground_authorized: true,
+            visibility_revision: 0,
+        };
+        assert!(idle.request_hash_visible(gesture, 7).is_none());
         let (late_tx, late_rx) = channel();
         idle.bind_request_sender(late_tx);
         assert!(!idle.activate());
@@ -14732,13 +14767,40 @@ mod tests {
         let (tx, rx) = channel();
         pending.bind_request_sender(tx);
         assert!(pending.activate());
-        assert!(pending.request_hash_visible(9));
+        let acknowledgement = pending.request_hash_visible(gesture, 9).unwrap();
+        assert!(!acknowledgement.state.lock().unwrap().closed);
         assert_eq!(rx.try_recv(), Ok(()));
         pending.deactivate();
         assert_eq!(rx.try_recv(), Ok(()));
         assert!(pending.take_requested_visible().is_none());
-        assert!(pending.take_requested_hash_focus().is_none());
+        assert!(acknowledgement.state.lock().unwrap().closed);
         assert!(!pending.request_external_hide(0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dock_reveal_queue_acknowledges_handling_and_hide_supersession() {
+        let visibility = super::RootVisibility::new();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        visibility.bind_request_sender(tx);
+        assert!(visibility.activate());
+        let gesture = super::hash_dock::Gesture {
+            source: super::NativeWindow { identity: super::ForegroundIdentity { hwnd: 1, process_id: 2, thread_id: 3 } },
+            foreground_authorized: true,
+            visibility_revision: 0,
+        };
+        let acknowledged = visibility.request_hash_visible(gesture, 1).unwrap();
+        assert!(!acknowledged.state.lock().unwrap().closed);
+        let request = visibility.take_requested_visible().unwrap();
+        assert!(!acknowledged.state.lock().unwrap().closed);
+        drop(request);
+        assert!(acknowledged.state.lock().unwrap().closed);
+
+        let superseded = visibility.request_hash_visible(gesture, 2).unwrap();
+        assert!(!superseded.state.lock().unwrap().closed);
+        assert!(visibility.request_external_hide(0));
+        assert!(superseded.state.lock().unwrap().closed);
+        visibility.deactivate();
     }
 
     #[cfg(windows)]
