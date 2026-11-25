@@ -1057,3 +1057,9 @@ Independent review and all 15 focused tests passed. Both frontends passed exact 
 ## G04 Hash Expected digest, comparison and Copy feedback
 
 The Hash view shows a persistent Expected digest caption, matched comparison and Copy feedback, and stable action positions across idle and result states. Independent review and all seven focused tests passed. At 1516 × 937 both frontends calculated and copied the exact `abc` digest and retained the result through Dock and Pop Out. GPUI exposed comparison and Copy success as named statuses and invalid input as an alert. In its compact dock, disabled actions stayed out of Jump, the alert wrapped within the scroll area, and Close returned focus to anchored Search. The replay kept the saved Hash geometry and presentation. G01 known-duration invocation and mixed DPI remain open. [Verification receipts](VALIDATION_LOG.md#g04-hash-expected-digest-comparison-and-copy-feedback)
+
+## G01 saved launcher client size and static reveal
+
+GPUI startup uses the saved logical launcher client size and established launcher defaults. Native root presentation honors explicitly enabled static position and client size at startup and on current hidden-to-visible transitions. An already-visible Dock request preserves current root geometry. Dynamic Follow Mouse, physical F2 and mixed DPI retain their separate acceptance gates.
+
+Independent review and all six focused tests passed. Both frontends opened from saved client size and applied matching static startup and reveal coordinates. The already-visible Dock replay preserved live geometry, and hidden Dock retained the exact root and Hash digest. The native comparison found an existing GPUI foreground handoff gap after the popout retired. Continue the checked Hash Dock foreground handoff before broader placement work. [Verification receipts](VALIDATION_LOG.md#g01-saved-launcher-client-size-and-static-reveal)

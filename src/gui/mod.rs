@@ -372,18 +372,7 @@ fn push_toast(toasts: &mut Toasts, toast: Toast) {
     toasts.add(toast);
 }
 
-fn normalize_static_window_config(
-    follow_mouse: bool,
-    static_location_enabled: bool,
-    static_pos: Option<(i32, i32)>,
-    static_size: Option<(i32, i32)>,
-) -> (bool, Option<(i32, i32)>, Option<(i32, i32)>) {
-    if follow_mouse {
-        (false, None, None)
-    } else {
-        (static_location_enabled, static_pos, static_size)
-    }
-}
+use crate::settings::normalize_static_window_config;
 
 struct AppEventSink {
     id: u64,
@@ -12564,6 +12553,8 @@ mod tests {
     fn launcher_new_normalizes_conflicting_follow_mouse_static_config() {
         let ctx = egui::Context::default();
         let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.follow_mouse = true;
         settings.static_location_enabled = true;
         settings.static_pos = Some((10, 20));

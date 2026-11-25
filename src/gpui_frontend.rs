@@ -27,6 +27,7 @@ pub(crate) mod launcher_header;
 mod launcher_result;
 mod jump_mode;
 mod search_providers;
+pub(crate) mod root_placement;
 pub(crate) mod saved_folder;
 
 pub(crate) use external_launch::Settings as ExternalLaunchPreferences;
@@ -12101,6 +12102,7 @@ pub(crate) fn run_foundation_window(
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_startup: LauncherSearchStartup,
+    root_placement: root_placement::RootPlacement,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     #[cfg(windows)] app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     external_launch_preferences: ExternalLaunchPreferences,
@@ -12278,6 +12280,8 @@ pub(crate) fn run_foundation_window(
         subscription_sink.borrow_mut().push(quit_subscription);
 
         let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(root_placement.initial_client.0 as f32), px(root_placement.initial_client.1 as f32)), cx)),
+            window_min_size: Some(size(px(320.0), px(160.0))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Multi Launcher GPUI Foundation".into()),
                 ..Default::default()
@@ -13049,9 +13053,15 @@ pub(crate) fn run_foundation_window(
             let root_window = root_window;
             let root_view = root_view;
             let visibility = visibility.clone();
+            let startup_revision = visibility.request_revision.load(Ordering::Acquire);
             cx.spawn(async move |cx| {
                 let mut event_rx: Receiver<()> = event_rx;
                 let mut return_target = initial_return_target;
+                if let Err(error) = root_placement::apply_static(root_placement, native_window, || {
+                    visibility.is_current(startup_revision, true) && !restart_admission_for_hotkey.is_fenced()
+                }) {
+                    tracing::warn!(%error, "could not apply saved launcher placement");
+                }
                 loop {
                     let (receiver, event) = cx
                         .background_executor()
@@ -13127,6 +13137,7 @@ pub(crate) fn run_foundation_window(
                         );
                     }
 
+                    let was_visible = visibility.visible.load(Ordering::Acquire);
                     let hotkey_for_conditional = requested_visible.as_ref()
                         .is_some_and(|request| request.superseded_by_hotkey(|| trigger.take()));
                     let switch_hide = requested_visible.as_ref().and_then(|request| match request {
@@ -13178,6 +13189,16 @@ pub(crate) fn run_foundation_window(
                     if !visibility.is_current(revision, desired_visible) {
                         continue;
                     }
+                    if root_placement::should_place_reveal(was_visible, desired_visible, visibility.is_current(revision, desired_visible)) {
+                        if let Err(error) = root_placement::apply_static(root_placement, native_window, || {
+                            visibility.is_current(revision, true) && !restart_admission_for_hotkey.is_fenced()
+                        }) {
+                            tracing::warn!(%error, "could not apply saved launcher placement");
+                        }
+                        if !visibility.is_current(revision, true) || !native_window_is_valid(native_window) || restart_admission_for_hotkey.is_fenced() {
+                            continue;
+                        }
+                    }
                     let switch_hide_accepted = switch_hide.is_some();
                     let guarded_hide = switch_hide_accepted || close_hide.is_some();
                     let query_window = update_kit_window_content(
@@ -13208,7 +13229,11 @@ pub(crate) fn run_foundation_window(
                                     root.refresh_launcher_results_with_viewport(query, false, cx);
                                 }
                             }
-                            if desired_visible && root.action_sheet.is_none() {
+                            if desired_visible && root.action_sheet.is_none()
+                                && visibility.is_current(revision, true)
+                                && root.native_window == Some(native_window)
+                                && !root.restart_admission.is_fenced()
+                            {
                                 let docked_mount_generation = match &root.hash_window {
                                     HashWindowState::Docked {
                                         mount_generation, ..

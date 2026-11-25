@@ -4874,6 +4874,7 @@ fn main() -> anyhow::Result<()> {
             settings.enabled_plugins.clone(),
             settings.enabled_capabilities.clone(),
             search_startup,
+            gpui_frontend::root_placement::RootPlacement::from_settings(&settings),
             settings.plugin_settings.get("file_search")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default(),
