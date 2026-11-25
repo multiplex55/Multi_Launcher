@@ -233,3 +233,7 @@ GPUI admits ordinary absolute local `.lnk` rows saved with absent or blank launc
 Existing saved catalog rows with a literal absolute HTTP(S) value and absent or blank launcher Args can open the registered browser from GPUI Search. The checked external worker validates the stored URL and forwards the exact string. Bookmark and stock web results retain their own provider authority and capability checks. Existing App Editor authoring continues to require a filesystem path.
 
 The saved GPUI route treats a valid HTTP(S) URL that ends in `.exe` as a URL association. Egui's legacy generic external launch may classify that suffix as a process path. The matched Windows replay used a conventional HTTP URL. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-saved-http-actions)
+
+## Stock Date Arithmetic Search
+
+GPUI projects the existing Date Arithmetic results through shared filters and scoring, including calculations whose result text differs from the query. Activation rechecks the published provider origin and current Search capability. Successful calculations copy the exact text attached to the result and use the shared success, History, Usage and visibility policy. GPUI presents the engine's diagnostic in Search and preserves the query and clipboard. Date Studio remains a separate utility migration. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-stock-date-arithmetic-search)

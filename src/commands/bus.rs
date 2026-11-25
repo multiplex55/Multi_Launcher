@@ -6,7 +6,7 @@ use crate::actions::Action;
 use crate::commands::handlers::{
     handle_batch_rename, handle_calendar, handle_clipboard_modify_with_history_query,
     handle_color_pick, handle_coordinate_tool, handle_crop, handle_data, handle_diff,
-    handle_external, handle_file_search, handle_hash_generator,
+    handle_checked_clipboard_text, handle_external, handle_file_search, handle_hash_generator,
     handle_headless_gui_with_history_query, handle_hotfolder, handle_json_utility, handle_launcher,
     handle_link, handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr,
     handle_paste_sequence, handle_pinboard, handle_query, handle_radial, handle_recording,
@@ -15,10 +15,35 @@ use crate::commands::handlers::{
     handle_zip_extractor,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LauncherRunPreferences {
+    pub clear_query_after_run: bool,
+    pub hide_after_run: bool,
+    pub refocus: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct CommandBus;
 
 impl CommandBus {
+    /// Apply the normal launcher outcome to an already checked clipboard text effect.
+    pub fn complete_checked_clipboard_text(
+        &self,
+        text: String,
+        original_action: &Action,
+        source: ActivationSource,
+        effect: anyhow::Result<()>,
+        preferences: LauncherRunPreferences,
+    ) -> Result<CommandOutcome, CommandError> {
+        let invocation = CommandInvocation {
+            command: Command::Clipboard(super::ClipboardCommand::SetText { text }),
+            original_action: original_action.clone(),
+            query_override: None,
+            source,
+        };
+        handle_checked_clipboard_text(preferences, &invocation, effect)
+    }
+
     /// Execute an external command through the shared launcher outcome policy.
     pub fn dispatch_external<H: ExternalCommandHost + ?Sized>(
         &self,

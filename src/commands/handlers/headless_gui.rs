@@ -94,6 +94,16 @@ pub(crate) fn handle_external<H: ExternalCommandHost + ?Sized>(
     })
 }
 
+pub(crate) fn handle_checked_clipboard_text(
+    preferences: super::super::LauncherRunPreferences,
+    invocation: &CommandInvocation,
+    result: anyhow::Result<()>,
+) -> Result<CommandOutcome, CommandError> {
+    finish_execution(invocation, result, || {
+        finish_success_with_preferences(preferences, invocation, initial_success_outcome(invocation), false)
+    })
+}
+
 fn finish_execution(
     invocation: &CommandInvocation,
     result: anyhow::Result<()>,
@@ -270,23 +280,39 @@ fn initial_success_outcome(invocation: &CommandInvocation) -> CommandOutcome {
 fn finish_success_outcome<H: ExternalCommandHost + ?Sized>(
     host: &H,
     invocation: &CommandInvocation,
+    outcome: CommandOutcome,
+    command_changed_query: bool,
+) -> CommandOutcome {
+    finish_success_with_preferences(
+        super::super::LauncherRunPreferences {
+            clear_query_after_run: host.external_clear_query_after_run(),
+            hide_after_run: host.external_hide_after_run(),
+            refocus: host.external_launcher_should_refocus(),
+        },
+        invocation, outcome, command_changed_query,
+    )
+}
+
+fn finish_success_with_preferences(
+    preferences: super::super::LauncherRunPreferences,
+    invocation: &CommandInvocation,
     mut outcome: CommandOutcome,
     command_changed_query: bool,
 ) -> CommandOutcome {
-    if host.external_clear_query_after_run() && !command_changed_query {
+    if preferences.clear_query_after_run && !command_changed_query {
         outcome.query = QueryPolicy::Set(String::new());
         outcome.search = true;
         outcome.invalidate_results = true;
         outcome.focus = true;
     }
 
-    if host.external_hide_after_run() && !is_hide_exempt(&invocation.command) {
+    if preferences.hide_after_run && !is_hide_exempt(&invocation.command) {
         outcome.visibility = VisibilityPolicy::Hide;
     }
 
     if !outcome.focus
         && outcome.visibility != VisibilityPolicy::Hide
-        && host.external_launcher_should_refocus()
+        && preferences.refocus
     {
         outcome.focus = true;
     }

@@ -6,6 +6,7 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod file_search;
+mod date_search;
 mod plugin_editor;
 #[cfg(windows)]
 mod downloads_triage;
@@ -369,8 +370,9 @@ impl LauncherSearchCatalog {
         let mut scored_provider_actions = provider_actions
             .into_iter()
             .filter_map(|(provider, action)| {
+                let date_result = date_search::classify(&provider, &action).is_some();
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some()
+                    .is_some() || date_result
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -379,7 +381,7 @@ impl LauncherSearchCatalog {
                         raw_query,
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
-                        false,
+                        date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action),
                         &self.matcher,
                         self.fuzzy_weight,
                         folder_aliases,
@@ -6744,7 +6746,9 @@ impl RootWindow {
         let provider_actions = raw_provider_actions
             .into_iter()
             .filter(|(provider, action)| {
-                if external_launch::AssociationKind::from_provider_name(provider).is_some() {
+                if provider == "date_arithmetic" {
+                    date_search::classify(provider, action).is_some()
+                } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
                     external_launch::provider_association_by_name(provider, action).is_some()
                 } else if cfg!(windows) && provider == "downloads_triage" {
                     is_downloads_triage_opener(action)
@@ -7488,6 +7492,15 @@ impl RootWindow {
                 self.open_file_search(window, cx);
             }
             return;
+        }
+        if let LauncherResultOrigin::Provider(name) = &result.origin {
+            if let Some(route) = date_search::classify(name, &result.action) {
+                if !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), name)
+                    || self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains(name))
+                { return; }
+                self.start_date_launch(result.action, route, query, source, window, cx);
+                return;
+            }
         }
         #[cfg(windows)]
         if let Some(command) = result.saved_shortcut() {
@@ -13974,6 +13987,30 @@ mod tests {
         assert!(catalog.compose("G Café+Tea", Vec::new(), true).is_empty());
     }
 
+    #[test]
+    fn date_provider_search_projection_obeys_gate_and_exact_bypass() {
+        let enabled = HashSet::from(["date_arithmetic".to_owned()]);
+        let catalog = completion_catalog(Vec::new(), true, Some(&enabled));
+        let query = "date days between 2026-10-05 and 2026-12-25";
+        let rows = super::search_providers::search_routed(catalog.providers.plugins(), query, Some(&enabled), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.action, "clipboard:81 days");
+        let composed = catalog.compose(query, rows.clone(), false);
+        assert_eq!(composed.len(), 1);
+        assert_eq!(composed[0].action, rows[0].1);
+        let filtered_query = "kind:clipboard date days between 2026-10-05 and 2026-12-25";
+        let filtered = super::search_providers::search_routed(catalog.providers.plugins(), filtered_query, Some(&enabled), None);
+        assert_eq!(filtered.len(), 1);
+        assert!(super::date_search::classify(&filtered[0].0, &filtered[0].1).is_some());
+        assert!(!multi_launcher::actions::search::date_resolved_postfilter_bypass(filtered_query, &filtered[0].1.action));
+        let projected = catalog.compose(filtered_query, filtered.clone(), false);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].action, filtered[0].1);
+        let disabled = HashMap::from([("date_arithmetic".to_owned(), Vec::new())]);
+        assert!(super::search_providers::search_routed(catalog.providers.plugins(), query, Some(&enabled), Some(&disabled)).is_empty());
+        assert!(super::search_providers::search_routed(catalog.providers.plugins(), query, Some(&HashSet::new()), None).is_empty());
+    }
+
     #[cfg(windows)]
     #[test]
     fn visibility_deactivation_wakes_idle_and_retires_pending_requests() {
@@ -14708,9 +14745,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14739,7 +14776,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 12 } else { 11 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 13 } else { 12 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(

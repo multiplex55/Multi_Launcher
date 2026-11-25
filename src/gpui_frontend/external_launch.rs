@@ -512,13 +512,18 @@ fn checked_web_association_with(
 }
 
 #[derive(Clone)]
+pub(super) enum RunCommand {
+    External { command: ExternalCommand, association: Option<AssociationKind> },
+    Date(super::date_search::DateRoute),
+}
+
+#[derive(Clone)]
 pub(super) struct Request {
     pub action: Action,
-    pub command: ExternalCommand,
+    pub command: RunCommand,
     pub query: String,
     pub source: ActivationSource,
     pub settings: Settings,
-    pub association: Option<AssociationKind>,
 }
 
 pub(super) struct WorkerResult {
@@ -618,19 +623,37 @@ impl ExternalCommandHost for Host {
     }
 }
 
+fn execute_request(
+    request: &Request,
+    host: &mut Host,
+    copy: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> Result<CommandOutcome, CommandError> {
+    match &request.command {
+        RunCommand::External { command, .. } => CommandBus.dispatch_external(
+            command, &request.action, request.source, None, host,
+        ),
+        RunCommand::Date(super::date_search::DateRoute::Copy(text)) => {
+            let effect = copy(text);
+            CommandBus.complete_checked_clipboard_text(text.clone(), &request.action, request.source, effect,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run,
+                    refocus: true,
+                })
+        }
+        RunCommand::Date(super::date_search::DateRoute::Diagnostic(message)) => {
+            Err(CommandError::new("date_arithmetic", message.clone()).with_gui_failure_policy())
+        }
+    }
+}
+
 pub(super) fn run(request: &Request) -> WorkerResult {
     let mut host = Host {
         settings: request.settings.clone(),
-        association: request.association,
+        association: match &request.command { RunCommand::External { association, .. } => *association, RunCommand::Date(_) => None },
         query: request.query.clone(),
     };
-    let outcome = CommandBus.dispatch_external(
-        &request.command,
-        &request.action,
-        request.source,
-        None,
-        &mut host,
-    );
+    let outcome = execute_request(request, &mut host, multi_launcher::actions::clipboard::set_text);
     if let Ok(outcome) = &outcome {
         if let multi_launcher::commands::FavoriteLogPolicy::Ran { label, command } =
             &outcome.favorite_log
@@ -696,6 +719,30 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.start_run(action, RunCommand::External { command, association }, query, source, window, cx);
+    }
+
+    pub(super) fn start_date_launch(
+        &mut self,
+        action: Action,
+        route: super::date_search::DateRoute,
+        query: String,
+        source: ActivationSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_run(action, RunCommand::Date(route), query, source, window, cx);
+    }
+
+    fn start_run(
+        &mut self,
+        action: Action,
+        command: RunCommand,
+        query: String,
+        source: ActivationSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.root_window else {
             return;
         };
@@ -715,7 +762,6 @@ impl RootWindow {
             query,
             source,
             settings: self.external_launch_preferences.clone(),
-            association,
         };
         let Some(ticket) = self
             .external_launch
@@ -879,7 +925,11 @@ impl RootWindow {
             )
             .enumerate()
         {
-            let message = format!("Application launched, but bookkeeping failed: {error}");
+            let message = if matches!(&receipt.request.command, RunCommand::Date(super::date_search::DateRoute::Copy(_))) {
+                format!("Copied, but bookkeeping failed: {error}")
+            } else {
+                format!("Application launched, but bookkeeping failed: {error}")
+            };
             if settings.show_inline_errors {
                 if changed_query.is_some() {
                     deferred_inline = Some(message.clone());
@@ -1006,6 +1056,81 @@ fn bookkeep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_copy_uses_exact_published_text_and_diagnostics_never_copy() {
+        use crate::gpui_frontend::date_search::{DateRoute, classify};
+        let settings = Settings {
+            clear_query_after_run: false,
+            hide_after_run: false,
+            history_limit: 10,
+            enable_toasts: true,
+            show_error_toasts: true,
+            show_inline_errors: true,
+            toast_duration: 1.0,
+        };
+        let query = "date 1 month after 2026-01-31";
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 10, 5)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let action = multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin
+            .search_with_reference(query, now)
+            .remove(0);
+        assert_eq!(action.action, "clipboard:2026-02-28");
+        assert_ne!(action.label, "2026-02-28");
+        let route = classify("date_arithmetic", &action).unwrap();
+        let mut request = Request {
+            action: action.clone(),
+            command: RunCommand::Date(route),
+            query: query.into(),
+            source: ActivationSource::Enter,
+            settings: settings.clone(),
+        };
+        let mut host = Host {
+            settings,
+            association: None,
+            query: request.query.clone(),
+        };
+        let mut copied = Vec::new();
+        let outcome = execute_request(&request, &mut host, |text| {
+            copied.push(text.to_owned());
+            Ok(())
+        }).unwrap();
+        assert_eq!(copied, ["2026-02-28"]);
+        assert_eq!(outcome.history, HistoryPolicy::Record);
+        assert!(matches!(&outcome.toasts[0], multi_launcher::commands::ToastPolicy::Copied(_)));
+        let mut recorded = None;
+        let mut usage_key = None;
+        let result = bookkeep(Ok(outcome), &request, |entry, limit| {
+            assert_eq!(limit, 10);
+            recorded = Some(entry);
+            Ok(())
+        }, |key| {
+            usage_key = Some(key.to_owned());
+            Ok(1)
+        });
+        assert!(result.outcome.is_ok());
+        let recorded = recorded.unwrap();
+        assert_eq!(recorded.action, action);
+        assert_eq!(recorded.query, query);
+        assert_eq!(recorded.source.as_deref(), Some("enter"));
+        assert_eq!(usage_key.as_deref(), Some("clipboard:2026-02-28"));
+
+        let error = execute_request(&request, &mut host, |_| anyhow::bail!("clipboard unavailable"))
+            .unwrap_err();
+        assert!(error.message.contains("clipboard unavailable"));
+        request.command = RunCommand::Date(DateRoute::Diagnostic("bad date".into()));
+        let error = execute_request(&request, &mut host, |_| panic!("diagnostic copied")).unwrap_err();
+        assert_eq!(error.message, "bad date");
+        let result = bookkeep(
+            Err(error),
+            &request,
+            |_, _| panic!("diagnostic history"),
+            |_| panic!("diagnostic usage"),
+        );
+        assert!(result.outcome.is_err());
+    }
 
     #[test]
     fn provider_paths_allow_directory_roots_and_require_literal_url_authority() {
@@ -1351,12 +1476,11 @@ mod tests {
                 action: "tool.exe".into(),
                 args: None,
             },
-            command: ExternalCommand {
+            command: RunCommand::External { command: ExternalCommand {
                 target: "tool.exe".into(),
                 args: None,
                 namespace: None,
-            },
-            association: None,
+            }, association: None },
             query: "tool".into(),
             source: ActivationSource::Enter,
             settings: Settings {
@@ -1440,12 +1564,11 @@ mod tests {
                 action: "tool.exe".into(),
                 args: Some("--arg".into()),
             },
-            command: ExternalCommand {
+            command: RunCommand::External { command: ExternalCommand {
                 target: "tool.exe".into(),
                 args: Some("--arg".into()),
                 namespace: None,
-            },
-            association: None,
+            }, association: None },
             query: "tool".into(),
             source: ActivationSource::Click,
             settings: Settings {

@@ -82,6 +82,14 @@ pub fn provider_query_term(trimmed_lc: &str) -> String {
     term.to_lowercase()
 }
 
+/// Date calculation rows are already resolved and must survive exact post-filtering.
+pub fn date_resolved_postfilter_bypass(query: &str, action: &str) -> bool {
+    let mut words = query.split_whitespace();
+    words.next().is_some_and(|head| head.eq_ignore_ascii_case("date"))
+        && words.next().is_some()
+        && (action.starts_with("clipboard:") || action.starts_with("noop:"))
+}
+
 /// Score a routed provider row without discarding its caller-owned provenance.
 pub fn score_provider_candidate<M: FuzzyMatcher>(
     action: &Action,

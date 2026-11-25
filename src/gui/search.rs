@@ -587,8 +587,7 @@ impl LauncherApp {
 
         // Date expressions resolve to computed values or explanatory errors,
         // neither of which must contain the original expression's words.
-        let date_resolved =
-            head == "date" && (action.starts_with("clipboard:") || action.starts_with("noop:"));
+        let date_resolved = crate::actions::search::date_resolved_postfilter_bypass(query, action);
 
         note_resolved || clipboard_modify_resolved || date_resolved
     }

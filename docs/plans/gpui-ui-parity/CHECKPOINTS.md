@@ -951,3 +951,7 @@ The native App Editor saved the owned `.lnk` and GPUI Search opened it through t
 ## G05 saved HTTP(S) actions
 
 GPUI Search can open literal HTTP(S) values already in the saved catalog. The owned browser received the exact encoded loopback target from both frontends at 1516 × 937. Eight focused cases passed. Invalid escapes, nonblank launcher Args and disabled Bookmark and Google Search remained gated in GPUI. Continue broader installed provider admission. [Exact receipts](VALIDATION_LOG.md#g05-saved-http-actions)
+
+## G05 stock Date Arithmetic Search
+
+The existing Date engine now supplies GPUI Search calculations and diagnostics. Ten focused cases passed. Matched Windows captures at 1516 × 937 verified the display label and exact ISO clipboard payload through Enter in both frontends. GPUI also verified leading-filter results, diagnostic activation without success accounting, and the disabled Search path. Date Studio, additional providers, and ordinary List density remain open. [Exact receipts](VALIDATION_LOG.md#g05-stock-date-arithmetic-search)

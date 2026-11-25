@@ -39,6 +39,7 @@ pub(super) struct InstalledLauncherProviders {
     help: multi_launcher::plugins::help::HelpPlugin,
     favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
     file_search: FileSearchBarePlugin,
+    date_arithmetic: multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin,
     #[cfg(windows)]
     downloads_triage: multi_launcher::plugins::downloads_triage::DownloadsTriagePlugin,
     folders: Option<multi_launcher::plugins::folders::FoldersPlugin>,
@@ -70,6 +71,7 @@ impl InstalledLauncherProviders {
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
+            date_arithmetic: multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin,
             #[cfg(windows)]
             downloads_triage: multi_launcher::plugins::downloads_triage::DownloadsTriagePlugin,
             folders,
@@ -91,6 +93,7 @@ impl InstalledLauncherProviders {
             Some(&self.help as &dyn multi_launcher::plugin::Plugin),
             Some(&self.favorites as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.date_arithmetic as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
             Some(&self.downloads_triage as &dyn multi_launcher::plugin::Plugin),
             self.folders
