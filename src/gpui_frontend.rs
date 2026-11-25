@@ -14,6 +14,7 @@ mod favorites;
 mod hash_jump;
 mod hash_jump_select;
 mod launcher_controls;
+mod launcher_result;
 mod jump_mode;
 mod search_providers;
 
@@ -854,9 +855,12 @@ impl RenderOnce for LauncherMenuBar {
             .dropdown_menu(move |menu, window, cx| {
                 let action_context = file_action_context.clone();
                 let editor_context = file_action_context.clone();
+                let hash_context = file_action_context.clone();
+                let restart_context = file_action_context.clone();
                 menu.submenu("Apps", window, cx, move |menu, _, _| {
                     let editor_context = editor_context.clone();
                     let plugin_context = editor_context.clone();
+                    let hash_context = hash_context.clone();
                     menu.item(
                         PopupMenuItem::new("Edit Apps")
                             .action(Box::new(OpenAppEditor))
@@ -869,8 +873,21 @@ impl RenderOnce for LauncherMenuBar {
                             .on_click(move |_, window, app| {
                                 plugin_context.dispatch_action(&OpenPluginEditor, window, app);
                             }),
+                    ).item(
+                        PopupMenuItem::new("Hash Generator")
+                            .action(Box::new(OpenHashGenerator))
+                            .on_click(move |_, window, app| {
+                                hash_context.dispatch_action(&OpenHashGenerator, window, app);
+                            }),
                     )
                 })
+                .item(
+                    PopupMenuItem::new("Restart in egui")
+                        .action(Box::new(RestartWithEgui))
+                        .on_click(move |_, window, app| {
+                            restart_context.dispatch_action(&RestartWithEgui, window, app);
+                        }),
+                )
                 .item(
                     PopupMenuItem::new("Close Application")
                         .action(Box::new(CloseApplication))
@@ -918,6 +935,8 @@ impl RenderOnce for LauncherMenuBar {
                 let linking_guide_context = help_action_context.clone();
                 let open_action_context = help_action_context.clone();
                 let view_action_context = help_action_context.clone();
+                let retained_context = help_action_context.clone();
+                let coordinate_context = help_action_context.clone();
                 menu.item(
                     PopupMenuItem::new("Command List")
                         .action(Box::new(CommandList))
@@ -937,6 +956,20 @@ impl RenderOnce for LauncherMenuBar {
                         .action(Box::new(QuickHelp))
                         .on_click(move |_, window, app| {
                             quick_help_context.dispatch_action(&QuickHelp, window, app);
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Open or dismiss retained window")
+                        .action(Box::new(ToggleRetainedWindow))
+                        .on_click(move |_, window, app| {
+                            retained_context.dispatch_action(&ToggleRetainedWindow, window, app);
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Toggle Coordinate HUD (F6)")
+                        .action(Box::new(ToggleCoordinateHudProbe))
+                        .on_click(move |_, window, app| {
+                            coordinate_context.dispatch_action(&ToggleCoordinateHudProbe, window, app);
                         }),
                 )
                 .item(
@@ -2167,6 +2200,7 @@ gpui_kit::actions!([
     ToggleSettings,
     OpenAppEditor,
     OpenPluginEditor,
+    ToggleRetainedWindow,
     CloseApplication,
     CommandList,
     QuickHelp,
@@ -2674,6 +2708,8 @@ fn render_launcher_result_cell(
     action: &Action,
     hide_description: bool,
     compact_description: bool,
+    list: bool,
+    full_folder_path: bool,
     horizontal_padding: f32,
     generation: u64,
     absolute_index: usize,
@@ -2685,13 +2721,10 @@ fn render_launcher_result_cell(
     metrics: multi_launcher::gui::theme::ThemeMetrics,
     cx: &mut Context<RootWindow>,
 ) -> AnyElement {
-    let description = if compact_description {
-        action
-            .desc
-            .split_whitespace()
-            .take(7)
-            .collect::<Vec<_>>()
-            .join(" ")
+    let description = if list {
+        launcher_result::list_description(&action.desc, full_folder_path)
+    } else if compact_description {
+        launcher_result::list_description(&action.desc, false)
     } else {
         action.desc.clone()
     };
@@ -2714,9 +2747,12 @@ fn render_launcher_result_cell(
         .w_full()
         .min_w(px(0.0))
         .overflow_hidden()
-        .gap_y(px(metrics.item_spacing_y))
+        .when(!list, |cell| {
+            cell.gap_y(px(metrics.item_spacing_y))
+                .py(px(metrics.panel_padding))
+        })
+        .when(list, |cell| cell.h(px(metrics.row_min_height)))
         .px(px(horizontal_padding))
-        .py(px(metrics.panel_padding))
         .rounded(px(metrics.corner_radius))
         .bg(appearance::to_hsla(if selected {
             palette.selection_fill
@@ -2725,7 +2761,7 @@ fn render_launcher_result_cell(
         }))
         .text_color(appearance::to_hsla(palette.primary_text))
         .role(Role::Button)
-        .aria_label(if hide_description {
+        .aria_label(if hide_description || (list && description.is_empty()) {
             action.label.clone()
         } else {
             format!("{}: {}", action.label, description)
@@ -2755,24 +2791,59 @@ fn render_launcher_result_cell(
                 cx,
             );
         }))
-        .child(
-            Label::new(action.label.clone())
-                .w_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .id("launcher-search-result-label")
-                .text_size(px(metrics.body_text_size))
-                .line_height(px(metrics.line_height)),
-        )
-        .children((!hide_description).then(|| {
-            Label::new(description)
-                .w_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .id("launcher-search-result-description")
-                .text_size(px(metrics.small_text_size))
-                .line_height(px(metrics.line_height))
-        }))
+        .when(list, |cell| {
+            cell.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .w_full()
+                    .h_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .child(
+                        Label::new(action.label.clone())
+                            .min_w(px(0.0))
+                            .flex_shrink(0.25)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .id("launcher-search-result-label")
+                            .text_size(px(metrics.body_text_size))
+                            .line_height(px(metrics.line_height)),
+                    )
+                    .children((!hide_description && !description.is_empty()).then(|| {
+                        Label::new(format!(" : {description}"))
+                            .min_w(px(0.0))
+                            .flex_shrink_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .id("launcher-search-result-description")
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                    })),
+            )
+        })
+        .when(!list, |cell| {
+            cell.child(
+                Label::new(action.label.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .id("launcher-search-result-label")
+                    .text_size(px(metrics.body_text_size))
+                    .line_height(px(metrics.line_height)),
+            )
+            .children((!hide_description).then(|| {
+                Label::new(description.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .id("launcher-search-result-description")
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
+        })
         .children(hint);
     if let Some(draft) = jump_geometry_draft {
         let metadata = TargetMetadata::new(
@@ -3289,6 +3360,10 @@ fn intercept_root_pane_escape(
             view.handle_escape(window, cx, Some(receipt.held))
         })
     })
+}
+
+fn hash_menu_focus_is_owned(menu_open: bool, docked: bool, owns_focus: bool) -> bool {
+    menu_open && docked && owns_focus
 }
 
 fn root_tab_traversed_to_search(
@@ -5535,9 +5610,9 @@ impl RootWindow {
         })
     }
 
-    fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.retire_action_sheet_now(window, cx, true);
-        if self.action_sheet.is_some() { return; }
+        if self.action_sheet.is_some() { return false; }
         self.retire_context_favorite();
         let Some(context) = self.restart_context.clone() else {
             self.restart_status = Some(format!(
@@ -5545,14 +5620,14 @@ impl RootWindow {
                 Frontend::Egui.selector_argument()
             ));
             cx.notify();
-            return;
+            return false;
         };
         if !self.restart_admission.begin_confirmation() {
             self.restart_status = Some(
                 "An egui restart has already been accepted or is awaiting cancellation.".to_owned(),
             );
             cx.notify();
-            return;
+            return false;
         }
 
         let snapshot = match self.capture_restart_snapshot(cx) {
@@ -5561,7 +5636,7 @@ impl RootWindow {
                 self.restart_admission.cancel_confirmation();
                 self.restart_status = Some(error);
                 cx.notify();
-                return;
+                return false;
             }
         };
         if snapshot.hash_work != HashWork::Idle {
@@ -5570,7 +5645,7 @@ impl RootWindow {
                 snapshot.hash_work,
             )));
             cx.notify();
-            return;
+            return false;
         }
         let pending = self.restart_admission.pending_effects();
         if pending != 0 {
@@ -5579,7 +5654,7 @@ impl RootWindow {
                 pending,
             )));
             cx.notify();
-            return;
+            return false;
         }
 
         let description = describe_restart_drafts(&snapshot.drafts);
@@ -5641,6 +5716,7 @@ impl RootWindow {
                     true
                 })
         });
+        true
     }
 
     fn accept_restart(
@@ -5854,6 +5930,19 @@ impl RootWindow {
         let outcome = handle_hash_generator(&HashGeneratorCommand::Open, || {
             self.open_hash_generator_window(HashOpenIntent::Default, operation, window, cx)
         });
+        let docked_focus_owned = matches!(&self.hash_window, HashWindowState::Docked { view, .. }
+            if {
+                let tool = view.read(cx);
+                tool.focus_handle.contains_focused(window, cx)
+                    || tool.editable_focus_is_exact(window, cx)
+            });
+        if outcome.is_ok() && hash_menu_focus_is_owned(
+            self.file_menu_open || self.help_menu_open,
+            self.hash_window.mode() == Some(HashPresentationMode::Docked),
+            docked_focus_owned,
+        ) {
+            self.root_menu_action_routed_focus = true;
+        }
         self.hash_open_error = outcome
             .err()
             .map(|error| format!("Could not open Hash Generator: {error}"));
@@ -9395,6 +9484,9 @@ impl Render for RootWindow {
         let list_padding = metrics
             .panel_padding
             .min((result_width * scale / 2.0).floor() / scale);
+        let show_full_folder_path = self.enabled_capabilities.as_ref()
+            .and_then(|caps| caps.get("folders"))
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "show_full_path"));
         let result_rows = (0..result_row_count)
             .map(|row_index| {
                 let first_index = if result_layout.grid {
@@ -9430,6 +9522,8 @@ impl Render for RootWindow {
                                     action,
                                     self.launcher_results.actions[absolute_index].hide_description,
                                     matches!(&self.launcher_results.actions[absolute_index].origin, LauncherResultOrigin::Provider(name) if name == "folders"),
+                                    false,
+                                    false,
                                     grid_padding,
                                     result_generation,
                                     absolute_index,
@@ -9463,6 +9557,8 @@ impl Render for RootWindow {
                         action,
                         self.launcher_results.actions[first_index].hide_description,
                         false,
+                        true,
+                        show_full_folder_path && matches!(&self.launcher_results.actions[first_index].origin, LauncherResultOrigin::Provider(name) if name == "folders"),
                         list_padding,
                         result_generation,
                         first_index,
@@ -9606,9 +9702,18 @@ impl Render for RootWindow {
                     div()
                         .id("hash-generator-docked-scroll-viewport")
                         .size_full()
+                        .flex()
+                        .flex_col()
                         .pr(px(handle_size))
                         .pb(px(handle_size))
-                        .child(view.clone()),
+                        .child(
+                            Label::new("Ctrl+Shift+R: focus resize grip · arrows preview · Enter saves · Escape discards")
+                                .id("docked-hash-resize-instructions")
+                                .w_full()
+                                .text_size(px(metrics.small_text_size))
+                                .line_height(px(metrics.line_height)),
+                        )
+                        .child(div().flex_1().min_h(px(0.0)).child(view.clone())),
                 )
                 .child(resize_handle)
         });
@@ -9866,13 +9971,9 @@ impl Render for RootWindow {
                     })
                     .children(result_rows)
             }))
-            .child(launcher_controls::LauncherUtilityControls::new(
-                self,
-                cx.entity().downgrade(),
-                metrics,
-                palette,
-                docked_hash.is_some(),
-            ));
+            .children(launcher_controls::LauncherUtilityControls::visible(self).then(|| {
+                launcher_controls::LauncherUtilityControls::new(self, metrics, palette)
+            }));
         let mut root_shell = div()
             .id("multi-launcher-root")
             .role(Role::Group)
@@ -9979,6 +10080,9 @@ impl Render for RootWindow {
                     cx.stop_propagation();
                 }
             }))
+            .on_action(cx.listener(|this, _: &ToggleRetainedWindow, _, cx| {
+                this.open_or_toggle_secondary(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleCoordinateHudProbe, _, cx| {
                 this.toggle_coordinate_hud_probe(cx);
             }))
@@ -10029,7 +10133,16 @@ impl Render for RootWindow {
                 this.open_toast_log_viewer(window, cx);
             }))
             .on_action(cx.listener(|this, _: &RestartWithEgui, window, cx| {
-                this.open_restart_confirmation(window, cx);
+                let menu_origin = this.file_menu_open;
+                if menu_origin {
+                    let focus = this.root_menu_previous_focus.clone()
+                        .filter(|focus| this.focus_handle.contains(focus, window))
+                        .unwrap_or_else(|| this.query.focus_handle(cx));
+                    focus.focus(window, cx);
+                }
+                if this.open_restart_confirmation(window, cx) && menu_origin {
+                    this.root_menu_action_routed_focus = true;
+                }
             }))
             .child(header);
         if docked_hash.is_some() {
@@ -10317,6 +10430,17 @@ impl HashGeneratorWindow {
             .update(cx, |state, cx| state.set_readonly(readonly, cx));
         self.expected
             .update(cx, |state, cx| state.set_readonly(readonly, cx));
+    }
+
+    fn editable_focus_is_exact(&self, window: &Window, cx: &App) -> bool {
+        let mode = self.session.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mode();
+        match mode {
+            HashInputMode::Text => self.text.focus_handle(cx).is_focused(window),
+            _ => self.source_popup.borrow().trigger.as_ref()
+                .is_some_and(|trigger| trigger.is_focused(window)),
+        }
     }
 
     fn focus_editable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -16593,6 +16717,14 @@ mod tests {
         assert!(!super::inner_results_consumed_scroll(-100.0, 100.0, -10.0));
         assert!(super::inner_results_consumed_scroll(-50.0, 100.0, 10.0));
         assert!(!super::inner_results_consumed_scroll(0.0, 100.0, 10.0));
+    }
+
+    #[test]
+    fn hash_menu_retains_focus_only_for_owned_docked_mount() {
+        assert!(super::hash_menu_focus_is_owned(true, true, true));
+        assert!(!super::hash_menu_focus_is_owned(false, true, true));
+        assert!(!super::hash_menu_focus_is_owned(true, false, true));
+        assert!(!super::hash_menu_focus_is_owned(true, true, false));
     }
 
     #[test]

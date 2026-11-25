@@ -954,4 +954,8 @@ GPUI Search can open literal HTTP(S) values already in the saved catalog. The ow
 
 ## G05 stock Date Arithmetic Search
 
-The existing Date engine now supplies GPUI Search calculations and diagnostics. Ten focused cases passed. Matched Windows captures at 1516 × 937 verified the display label and exact ISO clipboard payload through Enter in both frontends. GPUI also verified leading-filter results, diagnostic activation without success accounting, and the disabled Search path. Date Studio, additional providers, and ordinary List density remain open. [Exact receipts](VALIDATION_LOG.md#g05-stock-date-arithmetic-search)
+The existing Date engine now supplies GPUI Search calculations and diagnostics. Ten focused cases passed. Matched Windows captures at 1516 × 937 verified the display label and exact ISO clipboard payload through Enter in both frontends. GPUI also verified leading-filter results, diagnostic activation without success accounting, and the disabled Search path. Date Studio and additional providers remain open. [Exact receipts](VALIDATION_LOG.md#g05-stock-date-arithmetic-search)
+
+## G05 ordinary List density and launcher menu controls
+
+The ordinary List uses centered single-line rows at the theme height and spacing. Foundation controls moved into File and Help. Twelve focused cases and matched Windows captures verified the 32-pixel pitch and 22 complete rows at 1516 × 937, practical scrolling and Page Down, exact GPUI context and Jump targets, and focus after File Restart cancel and File Apps Hash. A 415 × 337 GPUI follow-up verified the compact List and resize guidance. Header alignment, list-scale settings, styling and wheel travel remain open. The next G04 pilot increment adds the existing Hash worker progress to the GPUI visual and accessible indicator. [Exact receipts](VALIDATION_LOG.md#g05-ordinary-list-density-and-launcher-menu-controls)

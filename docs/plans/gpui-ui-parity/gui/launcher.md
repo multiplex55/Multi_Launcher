@@ -34,7 +34,9 @@ Inspect the live egui root layout in `src/gui/render.rs` before changing the GPU
 
 Compare equivalent states in both frontends at 1516 × 937 pixels on matching display scaling. Capture the primary visual states at that size. Check placement and visibility through result changes, List and Grid scrolling, docked utility scrolling, and resizing. Replay the affected input paths. Use compact and minimum dimensions for supplemental checks and reuse past evidence for unaffected behaviors.
 
-The anchored layout passed its focused Windows replay at 1516 × 937. The fixed header shares keyboard and focus ownership with the scrolling body. List and Grid rows scroll independently and hand wheel input to the body at their boundaries. Docked Hash fits the measured body and remains reachable from a dense query. Result density, foundation controls and exact alignment still differ between the two frontends. [Matched captures and receipts](../VALIDATION_LOG.md#g05-top-centered-search-and-scroll-ownership)
+The anchored layout passed its focused Windows replay at 1516 × 937. The fixed header shares keyboard and focus ownership with the scrolling body. List and Grid rows scroll independently and hand wheel input to the body at their boundaries. Docked Hash fits the measured body and remains reachable from a dense query. [Matched captures and receipts](../VALIDATION_LOG.md#g05-top-centered-search-and-scroll-ownership)
+
+Ordinary List rows center the label and smaller inline description at the shared theme height and vertical spacing. The List uses a compact description and honors the Folder path setting. File provides Hash Generator, Restart in egui and Close Application. Help provides the two Foundation probes. Hash resize instructions live inside the dock. The matched dense List fits 22 complete rows at a 32-pixel pitch in both frontends. Header alignment, list-scale settings, row styling and wheel travel still differ. [List and menu replay](../VALIDATION_LOG.md#g05-ordinary-list-density-and-launcher-menu-controls)
 
 ## First GPUI result activation checkpoint
 
