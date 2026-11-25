@@ -22,6 +22,7 @@ pub(crate) mod launcher_header;
 mod launcher_result;
 mod jump_mode;
 mod search_providers;
+pub(crate) mod saved_folder;
 
 pub(crate) use external_launch::Settings as ExternalLaunchPreferences;
 
@@ -148,6 +149,7 @@ use fst::Map;
 
 pub(crate) struct LauncherSearchStartup {
     pub actions: Vec<Action>,
+    pub verified_folders: Vec<Action>,
     pub branding: launcher_header::Branding,
     pub calculator_settings: Option<serde_json::Value>,
     pub match_exact: bool,
@@ -215,6 +217,7 @@ struct LauncherSearchCatalog {
     command_help_providers: Arc<[CommandHelpProvider]>,
     quick_help_providers: Arc<[QuickHelpProvider]>,
     actions: Vec<Action>,
+    verified_folders: Vec<Action>,
     cached_entries: Vec<CachedSearchEntry>,
     filter_metadata: Vec<ActionFilterMetadata>,
     commands: Vec<Action>,
@@ -243,7 +246,7 @@ impl LauncherSearchCatalog {
         // Keep only persisted actions that the installed typed activation
         // boundary can execute without changing their Search payload. Saved
         // typed actions retain the shared local-action admission semantics.
-        let actions = supported_saved_search_actions(startup.actions);
+        let actions = supported_saved_search_actions(startup.actions, &startup.verified_folders);
         #[cfg(not(test))]
         let providers = InstalledLauncherProviders::new(enabled_plugins);
         #[cfg(test)]
@@ -277,6 +280,7 @@ impl LauncherSearchCatalog {
             command_help_providers,
             quick_help_providers,
             actions,
+            verified_folders: startup.verified_folders,
             cached_entries,
             filter_metadata,
             commands,
@@ -296,9 +300,9 @@ impl LauncherSearchCatalog {
         }
     }
 
-    fn replace_saved_actions(&mut self, rows: Vec<Action>) -> bool {
-        let actions = supported_saved_search_actions(rows);
-        if self.actions == actions {
+    fn replace_saved_actions(&mut self, rows: Vec<Action>, verified_folders: Vec<Action>) -> bool {
+        let actions = supported_saved_search_actions(rows, &verified_folders);
+        if self.actions == actions && self.verified_folders == verified_folders {
             return false;
         }
         self.cached_entries = actions.iter().map(CachedSearchEntry::from_action).collect();
@@ -308,6 +312,7 @@ impl LauncherSearchCatalog {
             .collect();
         self.completion_index = multi_launcher::completion::build_index(&self.commands, &actions);
         self.actions = actions;
+        self.verified_folders = verified_folders;
         true
     }
 
@@ -1838,11 +1843,11 @@ fn is_supported_launcher_search_action(action: &Action) -> bool {
     }
 }
 
-fn supported_saved_search_actions(actions: Vec<Action>) -> Vec<Action> {
+fn supported_saved_search_actions(actions: Vec<Action>, verified_folders: &[Action]) -> Vec<Action> {
     actions
         .into_iter()
         .filter(|action| {
-            parse_action(action).is_ok_and(|command| {
+            verified_folders.contains(action) || parse_action(action).is_ok_and(|command| {
                 #[cfg(windows)]
                 if external_launch::shortcut_external(action, &command).is_some() {
                     return true;
@@ -6943,8 +6948,8 @@ impl RootWindow {
         }
     }
 
-    fn publish_saved_search_actions(&mut self, rows: Vec<Action>, cx: &mut Context<Self>) -> bool {
-        if self.search_catalog.replace_saved_actions(rows) {
+    fn publish_saved_search_actions(&mut self, rows: Vec<Action>, verified_folders: Vec<Action>, cx: &mut Context<Self>) -> bool {
+        if self.search_catalog.replace_saved_actions(rows, verified_folders) {
             let query = self.query.read(cx).value().to_string();
             self.search_completion.reset_for_query(&self.search_catalog, &query);
             self.refresh_launcher_results_with_viewport(query, false, cx);
@@ -7725,6 +7730,17 @@ impl RootWindow {
                 cx,
             );
             return;
+        }
+        if result.origin == LauncherResultOrigin::Saved
+            && self.search_catalog.verified_folders.contains(&result.action)
+        {
+            if let Some(command) = saved_folder::candidate(&result.action) {
+                self.start_external_launch(
+                    result.action, command, query, source,
+                    Some(external_launch::AssociationKind::SavedFolder), window, cx,
+                );
+                return;
+            }
         }
         if let Some(command) = result.saved_external() {
             self.start_external_launch(result.action, command, query, source, None, window, cx);
@@ -14081,6 +14097,7 @@ mod tests {
         LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
+                verified_folders: Vec::new(),
                 actions,
                 calculator_settings: None,
                 match_exact: true,
@@ -14397,6 +14414,26 @@ mod tests {
         assert!(super::external_launch::saved_shortcut(&invalid).is_none());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn saved_folder_projection_receipt_tracks_exact_row_and_generation() {
+        let action = saved_action("Folder", r"C:\Data\Project", None);
+        let mut catalog = completion_catalog(Vec::new(), true, None);
+        assert!(catalog.replace_saved_actions(vec![action.clone()], vec![action.clone()]));
+        let rows = catalog.compose("app Folder", vec![("other".into(), action.clone())], false);
+        let saved_index = rows.iter().position(|row| row.origin == super::LauncherResultOrigin::Saved)
+            .expect("saved projection is present");
+        assert_eq!(rows[saved_index].action, action);
+        let mut results = LauncherSearchResults::default();
+        results.replace("app Folder".into(), rows, ResolvedQueryResultsLayout::default(), 2);
+        let generation = results.generation;
+        assert!(results.resolve_result(generation, saved_index, "app Folder").is_some());
+        assert!(results.resolve_result(generation, saved_index, "changed").is_none());
+        assert!(catalog.replace_saved_actions(vec![action], Vec::new()));
+        results.replace("app Folder".into(), Vec::new(), ResolvedQueryResultsLayout::default(), 2);
+        assert!(results.resolve_result(generation, saved_index, "app Folder").is_none());
+    }
+
     #[test]
     fn saved_url_projection_requires_saved_origin_and_current_result() {
         use super::LauncherResultOrigin;
@@ -14514,8 +14551,8 @@ mod tests {
         let query = "app saved";
         let mut completion = SearchCompletion::default();
         completion.reset_for_query(&catalog, query);
-        assert!(!catalog.replace_saved_actions(vec![unsupported.clone(), first.clone()]));
-        assert!(catalog.replace_saved_actions(vec![second.clone(), unsupported, first.clone()]));
+        assert!(!catalog.replace_saved_actions(vec![unsupported.clone(), first.clone()], Vec::new()));
+        assert!(catalog.replace_saved_actions(vec![second.clone(), unsupported, first.clone()], Vec::new()));
         assert_eq!(catalog.actions, vec![second.clone(), first.clone()]);
         let mut results = LauncherSearchResults::default();
         results.replace_test_actions(
@@ -14533,7 +14570,7 @@ mod tests {
                 .iter()
                 .any(|value| value.contains("saved beta"))
         );
-        assert!(!catalog.replace_saved_actions(vec![second, first]));
+        assert!(!catalog.replace_saved_actions(vec![second, first], Vec::new()));
     }
 
     #[cfg(windows)]
@@ -14644,6 +14681,7 @@ mod tests {
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
+                verified_folders: Vec::new(),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -14684,6 +14722,7 @@ mod tests {
         let globally_gridded = LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
+                verified_folders: Vec::new(),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -14836,6 +14875,7 @@ mod tests {
         let settings_action = saved_action("Open Settings", "settings:dialog", None);
         let startup = || LauncherSearchStartup {
             branding: super::launcher_header::Branding::default(),
+                verified_folders: Vec::new(),
             calculator_settings: None,
             actions: vec![settings_action.clone()],
             match_exact: true,
@@ -15044,6 +15084,7 @@ mod tests {
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
+                verified_folders: Vec::new(),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -15094,6 +15135,7 @@ mod tests {
         let disabled_catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
+                verified_folders: Vec::new(),
                 calculator_settings: None,
                 actions: vec![saved_action("Saved Help", "help:show", None)],
                 match_exact: true,
@@ -15842,6 +15884,7 @@ mod tests {
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
+                verified_folders: Vec::new(),
                 calculator_settings: None,
                 actions: vec![
                     alpha.clone(),
@@ -15914,6 +15957,7 @@ mod tests {
         let enabled = HashSet::from(["hash_generator".to_owned()]);
         let startup = |match_exact| LauncherSearchStartup {
             branding: super::launcher_header::Branding::default(),
+                verified_folders: Vec::new(),
             calculator_settings: None,
             actions: Vec::new(),
             match_exact,

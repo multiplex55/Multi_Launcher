@@ -14,6 +14,8 @@ Matched 1516 × 937 Windows replay verified the pinned Search layout, launcher i
 
 The Calculator history Search aliases and checked row copy also passed focused and matched Windows replay. GPUI refused a selected row when the stored entry at the original index changed to another expression with the same result. [Calculator history evidence](../VALIDATION_LOG.md#g05-checked-calculator-history-search)
 
+Saved absolute local folders passed focused and matched Windows replay through Search with Folder Search disabled. The actual App Editor published Add, Edit and Refresh receipts and the activation worker refused a folder replaced by a regular file. [Saved folder evidence](../VALIDATION_LOG.md#g02-and-g05-checked-saved-local-folder-activation)
+
 ## Objective and dependencies
 
 Recreate the complete launcher interaction in GPUI Kit: opening from the existing global trigger, editing a query, navigating the same results, invoking the same actions, and returning focus according to the existing policy. Preserve the application's compact working layout and command language while applying the agreed visual specification. A search box displaying plausible results is not this goal's acceptance result.

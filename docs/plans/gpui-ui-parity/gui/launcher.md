@@ -238,6 +238,10 @@ Existing saved catalog rows with a literal absolute HTTP(S) value and absent or 
 
 The saved GPUI route treats a valid HTTP(S) URL that ends in `.exe` as a URL association. Egui's legacy generic external launch may classify that suffix as a process path. The matched Windows replay used a conventional HTTP URL. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-saved-http-actions)
 
+## Checked saved local folders
+
+The GPUI startup and App Editor workers check saved drive-rooted local directories with absent or blank Args before publishing them to Search. The current saved row retains its literal path and full Action. Activation rechecks the local volume and every path component before passing the path to the shared Shell association. It rejects a missing path, a regular file and a reparse point. This saved catalog route works independently of Folder Search. Folders with suffixes already assigned to the executable, shortcut or supported document routes remain an open overlap case. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-checked-saved-local-folder-activation)
+
 ## Stock Date Arithmetic Search
 
 GPUI projects the existing Date Arithmetic results through shared filters and scoring, including calculations whose result text differs from the query. Activation rechecks the published provider origin and current Search capability. Successful calculations copy the exact text attached to the result and use the shared success, History, Usage and visibility policy. GPUI presents the engine's diagnostic in Search and preserves the query and clipboard. Date Studio remains a separate utility migration. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-stock-date-arithmetic-search)

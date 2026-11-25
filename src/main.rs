@@ -4845,6 +4845,7 @@ fn main() -> anyhow::Result<()> {
                 icon: settings.show_launcher_icon,
                 title: settings.show_launcher_title,
             },
+            verified_folders: gpui_frontend::saved_folder::verified_actions(&actions_vec),
             actions: actions_vec,
             calculator_settings: settings.plugin_settings.get("calculator").cloned(),
             match_exact: settings.match_exact,

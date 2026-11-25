@@ -318,6 +318,7 @@ pub(super) enum AssociationKind {
     Folder,
     Bookmark,
     SavedDocument,
+    SavedFolder,
     SavedUrl,
     #[cfg(windows)]
     SavedShortcut,
@@ -366,7 +367,7 @@ fn association_command(kind: AssociationKind, action: &Action) -> Option<Externa
     }
     let valid = match kind {
         AssociationKind::Folder => ordinary_path(&command.target, false),
-        AssociationKind::SavedDocument => false,
+        AssociationKind::SavedDocument | AssociationKind::SavedFolder => false,
         #[cfg(windows)]
         AssociationKind::SavedShortcut => false,
         AssociationKind::SavedUrl => false,
@@ -392,6 +393,11 @@ fn checked_association(
             "Invalid saved shortcut target"
         );
         return multi_launcher::actions::exec::launch_shortcut(&command.target);
+    }
+    if kind == AssociationKind::SavedFolder {
+        return super::saved_folder::checked_association_with(action, command, |target| {
+            multi_launcher::actions::exec::launch_association(target)
+        });
     }
     if kind == AssociationKind::SavedUrl {
         return checked_saved_url_with(action, command, |target| {
@@ -440,7 +446,7 @@ fn checked_association_with(
                 action,
             )?
         }
-        AssociationKind::Web(_) | AssociationKind::SavedDocument | AssociationKind::SavedUrl => false,
+        AssociationKind::Web(_) | AssociationKind::SavedDocument | AssociationKind::SavedFolder | AssociationKind::SavedUrl => false,
         #[cfg(windows)]
         AssociationKind::SavedShortcut => false,
     };

@@ -122,10 +122,34 @@ fn ordinary_local_path(path: &Path, extension: Option<&str>) -> bool {
     })
 }
 
+/// Check a drive-qualified local directory without traversing reparse points.
+pub fn checked_local_directory(path: &Path) -> anyhow::Result<()> {
+    check_local_object_for(path, true, ObjectSubject::Folder)
+}
+
+/// Apply the same ordinary local path grammar used by shortcut validation.
+pub fn ordinary_local_path_is_admissible(path: &Path) -> bool {
+    ordinary_local_path(path, None)
+}
+
+#[derive(Clone, Copy)]
+enum ObjectSubject {
+    Shortcut,
+    Folder,
+}
+
 fn check_local_object(path: &Path, directory: bool) -> anyhow::Result<()> {
+    check_local_object_for(path, directory, ObjectSubject::Shortcut)
+}
+
+fn check_local_object_for(path: &Path, directory: bool, subject: ObjectSubject) -> anyhow::Result<()> {
+    let label = match subject {
+        ObjectSubject::Shortcut => "Shortcut",
+        ObjectSubject::Folder => "Folder",
+    };
     anyhow::ensure!(
         ordinary_local_path(path, None),
-        "Shortcut path is not an ordinary absolute local path"
+        "{label} path is not an ordinary absolute local path"
     );
     let raw = path.as_os_str().encode_wide().collect::<Vec<_>>();
     let drive = [raw[0], b':' as u16, b'\\' as u16, 0];
@@ -133,7 +157,7 @@ fn check_local_object(path: &Path, directory: bool) -> anyhow::Result<()> {
     // GetDriveTypeW: removable=2, fixed=3, CD-ROM=5, RAM disk=6.
     anyhow::ensure!(
         matches!(kind, 2 | 3 | 5 | 6),
-        "Shortcut path is not on an available local volume"
+        "{label} path is not on an available local volume"
     );
     let mut prefix = PathBuf::new();
     for component in path.components() {
@@ -142,10 +166,13 @@ fn check_local_object(path: &Path, directory: bool) -> anyhow::Result<()> {
             continue;
         }
         let metadata = std::fs::symlink_metadata(&prefix)
-            .with_context(|| format!("Cannot inspect {}", prefix.display()))?;
+            .with_context(|| match subject {
+                ObjectSubject::Shortcut => format!("Cannot inspect {}", prefix.display()),
+                ObjectSubject::Folder => format!("Cannot inspect folder path {}", prefix.display()),
+            })?;
         anyhow::ensure!(
             metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
-            "Shortcut path contains a reparse point"
+            "{label} path contains a reparse point"
         );
         if prefix == path {
             anyhow::ensure!(
@@ -154,12 +181,12 @@ fn check_local_object(path: &Path, directory: bool) -> anyhow::Result<()> {
                 } else {
                     metadata.is_file()
                 },
-                "Shortcut object has the wrong type"
+                "{label} object has the wrong type"
             );
         } else {
             anyhow::ensure!(
                 metadata.is_dir(),
-                "Shortcut path ancestor is not a directory"
+                "{label} path ancestor is not a directory"
             );
         }
     }

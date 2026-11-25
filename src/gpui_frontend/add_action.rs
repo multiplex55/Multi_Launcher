@@ -3,6 +3,19 @@ use super::*;
 const ACTIONS_FILE: &str = "actions.json";
 type CatalogAction = multi_launcher::actions::Action;
 
+struct CatalogSnapshot {
+    rows: Vec<CatalogAction>,
+    verified_folders: Vec<CatalogAction>,
+}
+
+impl CatalogSnapshot {
+    fn from_rows(rows: Vec<CatalogAction>) -> Self {
+        let verified_folders = super::saved_folder::verified_actions(&rows);
+        Self { rows, verified_folders }
+    }
+}
+
+
 fn catalog_filter(filter: &str) -> String {
     if filter.trim().is_empty() {
         String::new()
@@ -295,15 +308,15 @@ impl AppEditorState {
     fn finish_write(
         &mut self,
         receipt: u64,
-        result: Result<Vec<CatalogAction>, AppWriteError>,
+        result: Result<CatalogSnapshot, AppWriteError>,
     ) -> bool {
         if !self.writes.finish(receipt) {
             return false;
         }
         match result {
-            Ok(rows) => {
+            Ok(snapshot) => {
                 self.reads.invalidate();
-                self.publish_catalog(rows);
+                self.publish_catalog(snapshot.rows);
                 self.draft = None;
                 self.status = None;
             }
@@ -379,11 +392,11 @@ impl RootWindow {
         cx.notify();
     }
 
-    fn publish_app_editor_search_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn publish_app_editor_search_actions(&mut self, verified_folders: Vec<CatalogAction>, window: &mut Window, cx: &mut Context<Self>) {
         let owns_focus = self.app_editor.open
             && window.is_window_active()
             && self.app_editor.owner_focus.contains_focused(window, cx);
-        if self.publish_saved_search_actions(self.app_editor.catalog.to_vec(), cx) && owns_focus {
+        if self.publish_saved_search_actions(self.app_editor.catalog.to_vec(), verified_folders, cx) && owns_focus {
             self.root_scroll
                 .scroll_to_top_of_item(self.app_editor_scroll_item());
         }
@@ -396,6 +409,7 @@ impl RootWindow {
         let receipt = self.app_editor.reads.begin();
         let task = cx.background_executor().spawn(async move {
             multi_launcher::actions::load_actions(ACTIONS_FILE)
+                .map(CatalogSnapshot::from_rows)
                 .map_err(|error| format!("Could not load app catalog: {error:#}"))
         });
         let root = cx.entity().downgrade();
@@ -406,9 +420,9 @@ impl RootWindow {
                 let _ = root.update(app, |root, cx| {
                     if root.app_editor.open && root.app_editor.reads.finish(receipt) {
                         match result {
-                            Ok(rows) => {
-                                root.app_editor.publish_catalog(rows);
-                                root.publish_app_editor_search_actions(window, cx);
+                            Ok(snapshot) => {
+                                root.app_editor.publish_catalog(snapshot.rows);
+                                root.publish_app_editor_search_actions(snapshot.verified_folders, window, cx);
                             }
                             Err(error) => root.app_editor.catalog_error = Some(error),
                         }
@@ -646,7 +660,9 @@ impl RootWindow {
             return;
         };
         cx.notify();
-        let task = cx.background_executor().spawn(async move { write() });
+        let task = cx.background_executor().spawn(async move {
+            write().map(CatalogSnapshot::from_rows)
+        });
         let root = cx.entity().downgrade();
         let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
@@ -659,9 +675,10 @@ impl RootWindow {
                         && root.app_editor.owner_focus.contains_focused(window, cx)
                         && !root.restart_admission.is_fenced();
                     let failed = result.is_err();
+                    let verified_folders = result.as_ref().ok().map(|snapshot| snapshot.verified_folders.clone());
                     if root.app_editor.finish_write(receipt, result) {
-                        if !failed {
-                            root.publish_app_editor_search_actions(window, cx);
+                        if let Some(verified_folders) = verified_folders {
+                            root.publish_app_editor_search_actions(verified_folders, window, cx);
                         }
                         if failed && root.app_editor.open {
                             if let Some(draft) = &root.app_editor.draft {
