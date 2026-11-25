@@ -31,6 +31,12 @@ fn catalog_matches(action: &CatalogAction, query: &str) -> bool {
         || action.action.to_lowercase().contains(query)
 }
 
+fn indexed_match_ordinals(actions: &[CatalogAction], filter: &str) -> Vec<usize> {
+    actions.iter().enumerate()
+        .filter_map(|(index, action)| catalog_matches(action, filter).then_some(index))
+        .collect()
+}
+
 #[derive(Default)]
 struct CatalogReads {
     revision: u64,
@@ -98,7 +104,12 @@ pub(super) struct AppEditorState {
     catalog_stale: bool,
     catalog_error: Option<String>,
     reads: CatalogReads,
-    catalog_scroll: ScrollHandle,
+    catalog_list: ListState,
+    saved_group_focus: FocusHandle,
+    indexed_actions: Arc<Vec<CatalogAction>>,
+    indexed_generation: u64,
+    indexed_matches: Arc<Vec<usize>>,
+    indexed_filter: String,
     status: Option<String>,
     writes: AddAppWrites,
     owner_focus: FocusHandle,
@@ -239,6 +250,9 @@ pub(super) struct AddAppSnapshot {
 
 impl AppEditorState {
     pub(super) fn new(cx: &mut Context<RootWindow>) -> Self {
+        let saved_group_focus = cx.focus_handle();
+        let catalog_list = ListState::new(1, ListAlignment::Top, px(800.0));
+        catalog_list.splice_focusable(0..1, [Some(saved_group_focus.clone())]);
         Self {
             open: false,
             draft: None,
@@ -249,7 +263,12 @@ impl AppEditorState {
             catalog_stale: false,
             catalog_error: None,
             reads: CatalogReads::default(),
-            catalog_scroll: ScrollHandle::new(),
+            catalog_list,
+            saved_group_focus,
+            indexed_actions: Arc::new(Vec::new()),
+            indexed_generation: 0,
+            indexed_matches: Arc::new(Vec::new()),
+            indexed_filter: String::new(),
             status: None,
             writes: AddAppWrites::default(),
             owner_focus: cx.focus_handle(),
@@ -268,12 +287,39 @@ impl AppEditorState {
         (self.snapshot(cx).as_ref() != Some(&draft.baseline)).then_some(APP_DRAFT_RESTART_STATUS)
     }
 
+    pub(super) fn set_index(&mut self, generation: u64, actions: Arc<Vec<CatalogAction>>) {
+        let old_count = self.catalog_list.item_count();
+        self.indexed_generation = generation;
+        self.indexed_actions = actions;
+        self.indexed_matches = Arc::new(indexed_match_ordinals(&self.indexed_actions, &self.indexed_filter));
+        self.catalog_list.splice(1..old_count, self.indexed_matches.len());
+    }
+
+    fn set_indexed_filter(&mut self, filter: &str) {
+        let filter = catalog_filter(filter);
+        if self.indexed_filter != filter {
+            self.indexed_filter = filter;
+            self.rebuild_indexed_matches();
+        }
+    }
+
+    fn reset_catalog_list(&self) {
+        self.catalog_list.reset(1 + self.indexed_matches.len());
+        self.catalog_list.splice_focusable(0..1, [Some(self.saved_group_focus.clone())]);
+    }
+
+    fn rebuild_indexed_matches(&mut self) {
+        self.indexed_matches = Arc::new(indexed_match_ordinals(&self.indexed_actions, &self.indexed_filter));
+        self.reset_catalog_list();
+    }
+
     fn publish_catalog(&mut self, rows: Vec<CatalogAction>) {
         if self.catalog_stale {
             self.status = None;
         }
         self.catalog_revision = self.catalog_revision.wrapping_add(1).max(1);
         self.catalog = rows.into();
+        self.catalog_list.remeasure_items(0..1);
         self.catalog_stale = false;
         self.catalog_error = None;
     }
@@ -374,6 +420,8 @@ impl RootWindow {
                             .as_ref()
                             .is_some_and(|filter| *filter == source)
                     {
+                        let value = source.read(cx).value().to_string();
+                        root.app_editor.set_indexed_filter(&value);
                         cx.notify();
                     }
                 });
@@ -781,6 +829,7 @@ impl RootWindow {
 pub(super) struct AppEditorPanel {
     root: WeakEntity<RootWindow>,
     width: f32,
+    viewport_height: f32,
     metrics: multi_launcher::gui::theme::ThemeMetrics,
     palette: multi_launcher::gui::theme::SemanticPalette,
     owner_focus: FocusHandle,
@@ -793,7 +842,11 @@ pub(super) struct AppEditorPanel {
     catalog_error: Option<String>,
     catalog_loading: bool,
     catalog_stale: bool,
-    catalog_scroll: ScrollHandle,
+    catalog_list: ListState,
+    saved_group_focus: FocusHandle,
+    indexed_actions: Arc<Vec<CatalogAction>>,
+    indexed_generation: u64,
+    indexed_matches: Arc<Vec<usize>>,
     status: Option<String>,
     pending: bool,
 }
@@ -813,12 +866,14 @@ impl AppEditorPanel {
         root: WeakEntity<RootWindow>,
         state: &AppEditorState,
         width: f32,
+        viewport_height: f32,
         metrics: multi_launcher::gui::theme::ThemeMetrics,
         palette: multi_launcher::gui::theme::SemanticPalette,
     ) -> Self {
         Self {
             root,
             width,
+            viewport_height,
             metrics,
             palette,
             owner_focus: state.owner_focus.clone(),
@@ -831,7 +886,11 @@ impl AppEditorPanel {
             catalog_error: state.catalog_error.clone(),
             catalog_loading: state.reads.pending.is_some(),
             catalog_stale: state.catalog_stale,
-            catalog_scroll: state.catalog_scroll.clone(),
+            catalog_list: state.catalog_list.clone(),
+            saved_group_focus: state.saved_group_focus.clone(),
+            indexed_actions: state.indexed_actions.clone(),
+            indexed_generation: state.indexed_generation,
+            indexed_matches: state.indexed_matches.clone(),
             pending: state.write_pending(),
             draft: state.draft.as_ref().map(|draft| AddAppPanelDraft {
                 label: draft.label.clone(),
@@ -844,6 +903,72 @@ impl AppEditorPanel {
             }),
         }
     }
+}
+
+fn render_saved_catalog_group(
+    catalog: &[CatalogAction],
+    filter: &str,
+    revision: u64,
+    root: &WeakEntity<RootWindow>,
+    focus: &FocusHandle,
+    pending: bool,
+    stale: bool,
+    loading: bool,
+    error: Option<&str>,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+) -> AnyElement {
+    let mut group = div().id("app-catalog-saved-group").track_focus(focus)
+        .role(Role::Group).aria_label("Saved apps")
+        .flex().flex_col().gap_y(px(metrics.item_spacing_y)).w_full().min_w(px(0.0)).min_h(px(1.0));
+    if loading { group = group.child(Label::new("Loading apps…")); }
+    if let Some(error) = error { group = group.child(Label::new(error.to_owned())); }
+    for (index, row) in catalog.iter().enumerate().filter(|(_, row)| catalog_matches(row, filter)) {
+        let selection = CatalogSelection { revision, index, original: row.clone() };
+        let edit_selection = selection.clone();
+        let edit_root = root.clone();
+        let remove_root = root.clone();
+        let mut item = div().id(("app-catalog-row", index)).flex().flex_col().w_full().min_w(px(0.0))
+            .child(Label::new(row.label.clone()))
+            .child(Label::new(row.desc.clone()))
+            .child(Label::new(row.action.clone()));
+        if let Some(args) = &row.args {
+            item = item.child(Label::new("Arguments")).child(Label::new(args.clone()));
+        }
+        group = group.child(item.child(
+            div().flex().flex_row().gap_x(px(metrics.item_spacing_x))
+                .child(Button::new(("app-catalog-edit", index)).label("Edit")
+                    .disabled(pending || stale)
+                    .on_click(move |_, window, app| {
+                        let selection = edit_selection.clone();
+                        let _ = edit_root.update(app, |root, cx| root.edit_app(selection, window, cx));
+                    }))
+                .child(Button::new(("app-catalog-remove", index)).label("Remove")
+                    .disabled(pending || stale)
+                    .on_click(move |_, window, app| {
+                        let selection = selection.clone();
+                        let _ = remove_root.update(app, |root, cx| root.remove_app(selection, window, cx));
+                    })),
+        ));
+    }
+    group.into_any_element()
+}
+
+fn render_indexed_catalog_row(
+    action: &CatalogAction,
+    generation: u64,
+    ordinal: usize,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+) -> AnyElement {
+    let id = format!("app-indexed-row-{generation}-{ordinal}");
+    let mut row = div().id(id).flex().flex_col().w_full().min_w(px(0.0))
+        .pb(px(metrics.item_spacing_y))
+        .child(Label::new(format!("Label: {}", action.label)).w_full().min_w(px(0.0)).whitespace_normal())
+        .child(Label::new(format!("Description: {}", action.desc)).w_full().min_w(px(0.0)).whitespace_normal())
+        .child(Label::new(format!("Path: {}", action.action)).w_full().min_w(px(0.0)).whitespace_normal());
+    if let Some(args) = &action.args {
+        row = row.child(Label::new(format!("Args: {args}")).w_full().min_w(px(0.0)).whitespace_normal());
+    }
+    row.into_any_element()
 }
 
 impl RenderOnce for AppEditorPanel {
@@ -1028,69 +1153,39 @@ impl RenderOnce for AppEditorPanel {
                 .as_ref()
                 .map(|filter| catalog_filter(filter.read(app).value().as_str()))
                 .unwrap_or_default();
-            let rows = self
-                .catalog
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| catalog_matches(row, &filter_text))
-                .map(|(index, row)| {
-                    let selection = CatalogSelection {
-                        revision: self.catalog_revision,
-                        index,
-                        original: row.clone(),
-                    };
-                    let edit_selection = selection.clone();
-                    let edit_root = self.root.clone();
-                    let remove_root = self.root.clone();
-                    let mut item = div()
-                        .id(("app-catalog-row", index))
-                        .flex()
-                        .flex_col()
-                        .flex_shrink_0()
-                        .child(Label::new(row.label.clone()))
-                        .child(Label::new(row.desc.clone()))
-                        .child(Label::new(row.action.clone()));
-                    if let Some(args) = &row.args {
-                        item = item
-                            .child(Label::new("Arguments"))
-                            .child(Label::new(args.clone()));
-                    }
-                    item.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_x(px(metrics.item_spacing_x))
-                            .child(
-                                Button::new(("app-catalog-edit", index))
-                                    .label("Edit")
-                                    .disabled(self.pending || self.catalog_stale)
-                                    .on_click(move |_, window, app| {
-                                        let selection = edit_selection.clone();
-                                        let _ = edit_root.update(app, |root, cx| {
-                                            root.edit_app(selection, window, cx)
-                                        });
-                                    }),
-                            )
-                            .child(
-                                Button::new(("app-catalog-remove", index))
-                                    .label("Remove")
-                                    .disabled(self.pending || self.catalog_stale)
-                                    .on_click(move |_, window, app| {
-                                        let selection = selection.clone();
-                                        let _ = remove_root.update(app, |root, cx| {
-                                            root.remove_app(selection, window, cx)
-                                        });
-                                    }),
-                            ),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let reserved_height = 2.0 * metrics.window_padding
-                + 2.0 * metrics.panel_padding
+            let catalog = self.catalog.clone();
+            let indexed_actions = self.indexed_actions.clone();
+            let indexed_matches = self.indexed_matches.clone();
+            let indexed_generation = self.indexed_generation;
+            let revision = self.catalog_revision;
+            let row_root = self.root.clone();
+            let saved_group_focus = self.saved_group_focus.clone();
+            let pending = self.pending;
+            let stale = self.catalog_stale;
+            let loading = self.catalog_loading;
+            let catalog_error = self.catalog_error.clone();
+            let catalog_list = list(self.catalog_list.clone(), move |slot, _, _| {
+                if slot == 0 {
+                    return render_saved_catalog_group(
+                        &catalog, &filter_text, revision, &row_root, &saved_group_focus, pending, stale,
+                        loading, catalog_error.as_deref(), metrics,
+                    );
+                }
+                let Some(&ordinal) = indexed_matches.get(slot - 1) else { return div().into_any_element(); };
+                let Some(action) = indexed_actions.get(ordinal) else { return div().into_any_element(); };
+                render_indexed_catalog_row(action, indexed_generation, ordinal, metrics)
+            });
+            let viewport_height = if self.viewport_height > 0.0 {
+                self.viewport_height
+            } else {
+                window.viewport_size().height.as_f32()
+            };
+            let reserved_height = 2.0 * metrics.panel_padding
                 + metrics.heading_text_size.max(metrics.line_height)
-                + 3.0 * metrics.row_min_height
-                + 6.0 * metrics.item_spacing_y;
-            let body_height = (window.viewport_size().height.as_f32() - reserved_height).max(40.0);
+                + 4.0 * metrics.row_min_height
+                + 7.0 * metrics.item_spacing_y
+                + if self.status.is_some() { metrics.line_height + metrics.item_spacing_y } else { 0.0 };
+            let body_height = (viewport_height - reserved_height).max(40.0);
             panel = panel
                 .children(
                     self.filter
@@ -1100,16 +1195,11 @@ impl RenderOnce for AppEditorPanel {
                 .child(
                     div()
                         .id("app-catalog-list")
-                        .flex()
-                        .flex_col()
-                        .gap_y(px(metrics.item_spacing_y))
-                        .max_h(px(body_height))
+                        .w_full()
+                        .h(px(body_height))
                         .flex_shrink_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.catalog_scroll)
-                        .children(self.catalog_loading.then(|| Label::new("Loading apps…")))
-                        .children(self.catalog_error.map(Label::new))
-                        .children(rows),
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
+                        .child(catalog_list.size_full()),
                 )
                 .children(self.status.map(Label::new))
                 .child(
@@ -1182,6 +1272,31 @@ mod tests {
         assert!(matches("TOOLS"));
         assert!(!matches(" app "));
         assert!(!matches("secret"));
+    }
+
+    #[test]
+    fn catalog_saved_remeasurement_and_index_splice_preserve_scroll_anchor() {
+        let list = gpui_kit::ListState::new(1, gpui_kit::ListAlignment::Top, gpui_kit::px(800.0));
+        let anchor = gpui_kit::ListOffset { item_ix: 0, offset_in_item: gpui_kit::px(35.0) };
+        list.scroll_to(anchor);
+        list.remeasure_items(0..1);
+        list.splice(1..1, 10);
+        assert_eq!(list.logical_scroll_top(), anchor);
+        assert_eq!(list.item_count(), 11);
+    }
+
+    #[test]
+    fn indexed_filter_preserves_original_ordinals_and_excludes_args() {
+        let rows = vec![
+            CatalogAction { label: "Notes".into(), desc: "first".into(), action: "C:/one.md".into(), args: Some("secret".into()) },
+            CatalogAction { label: "Notes".into(), desc: "second".into(), action: "C:/two.txt".into(), args: None },
+            CatalogAction { label: "Other".into(), desc: "notes".into(), action: "C:/three.txt".into(), args: None },
+        ];
+        assert_eq!(super::indexed_match_ordinals(&rows, &catalog_filter("  ")), [0, 1, 2]);
+        assert_eq!(super::indexed_match_ordinals(&rows, &catalog_filter("NOTES")), [0, 1, 2]);
+        assert_eq!(super::indexed_match_ordinals(&rows, &catalog_filter("TWO.TXT")), [1]);
+        assert!(super::indexed_match_ordinals(&rows, &catalog_filter(" notes ")).is_empty());
+        assert!(super::indexed_match_ordinals(&rows, &catalog_filter("secret")).is_empty());
     }
 
     #[test]

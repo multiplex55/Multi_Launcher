@@ -21,6 +21,7 @@ pub(super) struct Owner {
 pub(super) struct Identity {
     pub generation: u64,
     pub roots: Vec<std::path::PathBuf>,
+    pub raw_actions: Arc<Vec<Action>>,
 }
 
 impl Identity {
@@ -54,6 +55,7 @@ pub(super) struct Snapshot {
     pub generation: u64,
     pub roots: Vec<std::path::PathBuf>,
     pub actions: Vec<Action>,
+    pub raw_actions: Arc<Vec<Action>>,
     pub cached: Vec<CachedSearchEntry>,
     pub metadata: Vec<ActionFilterMetadata>,
     pub completion_index: fst::Map<Vec<u8>>,
@@ -225,12 +227,12 @@ fn scan(
         let mut actions = Vec::new();
         let mut cached = Vec::new();
         let mut metadata = Vec::new();
-        for action in receipt
+        let raw_actions = receipt
             .outcome()
             .as_ref()
             .map_err(|failure| anyhow::anyhow!("{}", failure.message()))?
-            .iter()
-        {
+            .clone();
+        for action in raw_actions.iter() {
             anyhow::ensure!(!cancelled.load(Ordering::Acquire), "Index retired");
             if !row_matches(action, &roots) {
                 continue;
@@ -258,6 +260,7 @@ fn scan(
             generation,
             roots,
             actions,
+            raw_actions,
             cached,
             metadata,
             completion_index,
@@ -291,8 +294,10 @@ impl RootWindow {
                 }
                 match result {
                     Ok(snapshot) if snapshot.config == root.search_catalog.index_config => {
-                        root.indexed_applications.snapshot =
-                            Some(root.search_catalog.install_index(snapshot));
+                        let identity = root.search_catalog.install_index(snapshot);
+                        root.app_editor
+                            .set_index(identity.generation, identity.raw_actions.clone());
+                        root.indexed_applications.snapshot = Some(identity);
                         let query = root.query.read(cx).value().to_string();
                         root.search_completion
                             .reset_for_query(&root.search_catalog, &query);
@@ -315,6 +320,7 @@ mod tests {
     use super::{checked_launch_with, ordinary_target, root_contains, row_matches};
     use multi_launcher::actions::Action;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     fn row(path: &str) -> Action {
         Action {
@@ -341,6 +347,7 @@ mod tests {
         let identity = super::Identity {
             generation: 4,
             roots: Vec::new(),
+            raw_actions: Arc::new(Vec::new()),
         };
         let first = row(r"C:\Apps\Tool.exe");
         let replacement = row(r"C:\Apps\Other.exe");

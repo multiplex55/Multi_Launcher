@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G06 App Editor now displays saved rows followed by the read-only stock index. Matched Windows runs at 1516 × 937 verified the same indexed fields and filtering. GPUI kept Search and the editor footer visible while the catalog scrolled through wrapped paths at 499 × 504. Refresh kept the viewport, and checked Edit and Remove changed only the intended saved rows. [Indexed App Editor evidence](VALIDATION_LOG.md#g06-read-only-indexed-app-editor-catalog)
+
 G02 and G05 now open supported indexed local documents through checked Search and Action Sheet Execute. At 1516 × 937, both frontends opened the same two `.txt` files in the registered editor and retained exact stock History and Usage identities. GPUI refused an indexed document replaced with a directory. [Indexed document evidence](VALIDATION_LOG.md#g02-and-g05-checked-indexed-local-documents)
 
 G02 and G05 now open ordinary indexed Windows shortcuts through checked Search and Action Sheet Execute. Both frontends preserved the authored Start In directory and exact arguments. GPUI refused a missing Start In and a shortcut replaced with a directory. [Indexed shortcut evidence](VALIDATION_LOG.md#g02-and-g05-checked-indexed-windows-shortcuts)
@@ -47,7 +49,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue G06 with the read-only indexed App Editor catalog. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
+| Current next action | Continue application index settings and rescan ownership. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

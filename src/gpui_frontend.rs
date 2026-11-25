@@ -350,7 +350,7 @@ impl LauncherSearchCatalog {
         self.filter_metadata.extend(snapshot.metadata);
         self.index_generation = Some(snapshot.generation);
         self.indexed_completion_index = Some(snapshot.completion_index);
-        indexed_applications::Identity { generation: snapshot.generation, roots: snapshot.roots }
+        indexed_applications::Identity { generation: snapshot.generation, roots: snapshot.roots, raw_actions: snapshot.raw_actions }
     }
 
     fn saved_actions(&self) -> &[Action] {
@@ -2556,7 +2556,7 @@ struct RootWindow {
     utility_size_store: Arc<Mutex<UtilitySizeStore>>,
     utility_size_polling: Arc<AtomicBool>,
     hash_docked_preferred_size: PreferredWindowSize,
-    hash_body_viewport: Option<AppliedWindowSize>,
+    root_body_viewport: Option<AppliedWindowSize>,
     hash_docked_resize: Arc<Mutex<Option<DockedHashResize>>>,
     hash_geometry_sequence: Arc<AtomicU64>,
     hash_tool_key: UtilityToolKey,
@@ -3129,7 +3129,7 @@ fn launcher_search_width(viewport_width: f32, window_padding: f32, scale: f32) -
     launcher_snapped_length(available, scale)
 }
 
-fn docked_hash_available_size(bounds: Bounds<Pixels>) -> AppliedWindowSize {
+fn root_scroll_viewport_size(bounds: Bounds<Pixels>) -> AppliedWindowSize {
     AppliedWindowSize {
         width: bounds.size.width.as_f32().max(1.0),
         height: bounds.size.height.as_f32().max(1.0),
@@ -5014,7 +5014,7 @@ impl RootWindow {
         if !self.docked_hash_resize_is_current(payload) {
             return;
         }
-        let available = docked_hash_available_size(self.root_scroll.bounds());
+        let available = root_scroll_viewport_size(self.root_scroll.bounds());
         let visible_size = docked_hash_fit(payload.start_size, available);
         let mut preview = payload
             .preview_extent
@@ -9847,7 +9847,7 @@ impl Render for RootWindow {
             };
             let resize_preview = self.docked_hash_resize_preview(*mount_generation, session_epoch);
             let requested_size = resize_preview.unwrap_or(self.hash_docked_preferred_size);
-            let available_size = docked_hash_available_size(self.root_scroll.bounds());
+            let available_size = root_scroll_viewport_size(self.root_scroll.bounds());
             let current_visible_size =
                 docked_hash_fit(self.hash_docked_preferred_size, available_size);
             let displayed_size = docked_hash_fit(requested_size, available_size);
@@ -10147,6 +10147,7 @@ impl Render for RootWindow {
                 cx.entity().downgrade(),
                 &self.app_editor,
                 root_controls_width,
+                self.root_scroll.bounds().size.height.as_f32(),
                 metrics,
                 palette,
             )
@@ -10475,17 +10476,19 @@ impl Render for RootWindow {
         if let Some(view) = self.plugin_editor.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
-        if docked_hash.is_some() {
+        // ScrollHandle bounds update during prepaint. Re-render either tool
+        // when that measured body viewport changes, including native resizes.
+        if docked_hash.is_some() || self.app_editor.open {
             let scroll = self.root_scroll.clone();
             let owner = cx.entity().downgrade();
             root_scroll = root_scroll.child(canvas(
                 move |_, window, app| {
-                    let measured = docked_hash_available_size(scroll.bounds());
+                    let measured = root_scroll_viewport_size(scroll.bounds());
                     let owner = owner.clone();
                     window.defer(app, move |_, app| {
                         let _ = owner.update(app, |root, cx| {
-                            if root.hash_body_viewport != Some(measured) {
-                                root.hash_body_viewport = Some(measured);
+                            if root.root_body_viewport != Some(measured) {
+                                root.root_body_viewport = Some(measured);
                                 cx.notify();
                             }
                         });
@@ -12150,7 +12153,7 @@ pub(crate) fn run_foundation_window(
                 utility_size_store: Arc::clone(&utility_sizes_for_root),
                 utility_size_polling: Arc::clone(&utility_size_polling_for_root),
                 hash_docked_preferred_size: hash_docked_preferred_size_for_root,
-                hash_body_viewport: None,
+                root_body_viewport: None,
                 hash_docked_resize: Arc::new(Mutex::new(None)),
                 hash_geometry_sequence: Arc::clone(&hash_geometry_sequence_for_root),
                 hash_tool_key,
@@ -13164,7 +13167,7 @@ mod tests {
         PhysicalKeydown, Poll, JumpGeometryDraft, JumpGeometryFrame,
         JumpModeController,
         PreferredWindowSize, SearchCompletion, classify_hash_picker_result, dispatch_hash_open,
-        docked_hash_available_size, docked_hash_fit, docked_hash_focus_is_current,
+        root_scroll_viewport_size, docked_hash_fit, docked_hash_focus_is_current,
         docked_hash_resize_accessibility_label, docked_hash_resize_identity_matches,
         docked_resize_commit_size, duplicate_instance_message, fresh_search_enter_marker,
         hash_clipboard_copy_admissible, hash_clipboard_request_is_current,
@@ -13991,13 +13994,18 @@ mod tests {
         let action = saved_action("Same", "hash:open", None);
         let mut catalog = completion_catalog(vec![action.clone()], true, None);
         let config = multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None);
+        let raw_actions = Arc::new(vec![action.clone(), saved_action("Raw only", "C:/data.md", None)]);
         let snapshot = super::indexed_applications::Snapshot {
             config, generation: 7, roots: Vec::new(), actions: vec![action.clone()],
+            raw_actions: raw_actions.clone(),
             cached: vec![multi_launcher::actions::search::CachedSearchEntry::from_action(&action)],
             metadata: vec![multi_launcher::common::query::ActionFilterMetadata::from_action(&action)],
             completion_index: multi_launcher::completion::build_index(&[], std::slice::from_ref(&action)),
         };
-        catalog.install_index(snapshot);
+        let identity = catalog.install_index(snapshot);
+        assert!(Arc::ptr_eq(&identity.raw_actions, &raw_actions));
+        assert_eq!(identity.raw_actions.len(), 2);
+        assert_eq!(catalog.actions.len(), 2);
         for query in ["", "app Same"] {
             let rows = catalog.compose(query, Vec::new(), true);
             let origins = rows.iter().filter(|row| row.action == action).map(|row| row.origin.clone()).collect::<Vec<_>>();
@@ -16933,7 +16941,7 @@ mod tests {
     #[test]
     fn docked_hash_fit_is_transient_and_handles_viewports_below_settings_limits() {
         let preferred = PreferredWindowSize::new(620.0, 440.0).unwrap();
-        let available = docked_hash_available_size(Bounds::new(point(px(0.0), px(0.0)), gpui_kit::size(px(16.0), px(6.0))));
+        let available = root_scroll_viewport_size(Bounds::new(point(px(0.0), px(0.0)), gpui_kit::size(px(16.0), px(6.0))));
         assert_eq!(
             available,
             AppliedWindowSize {

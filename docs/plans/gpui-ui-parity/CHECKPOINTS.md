@@ -1019,3 +1019,7 @@ GPUI admits local indexed shortcuts and uses the existing checked Windows shortc
 ## G02 and G05 checked indexed local documents
 
 GPUI admits the six document extensions supported by the checked saved-document route. It revalidates indexed provenance and the regular file before opening its DOS path through the shared Windows association. Nine focused tests passed. At 1516 × 937, both frontends opened the exact primary and sheet `.txt` fixtures in the registered editor. GPUI declined a third document replaced with a directory and recorded only the two successful launches. Continue the read-only indexed App Editor catalog. [Exact receipts](VALIDATION_LOG.md#g02-and-g05-checked-indexed-local-documents)
+
+## G06 read-only indexed App Editor catalog
+
+The existing acknowledged index now supplies the stock read-only App Editor tail alongside the checked Search projection. The GPUI catalog displays saved rows first and virtualizes the indexed rows. Thirteen focused tests passed. Matched 1516 × 937 Windows runs verified filtering, stock order and the same full indexed paths. GPUI also verified safe saved Edit and Remove, Refresh and reopen, and compact wheel travel with Search and the footer visible. The G06 Repair and recovery criteria remain open. Continue with live application index settings and rescan ownership. [Exact receipts](VALIDATION_LOG.md#g06-read-only-indexed-app-editor-catalog)
