@@ -1,5 +1,38 @@
 //! Hash Generator view composition; the entity owns state and handlers.
 use super::*;
+use gpui_kit::component::ActiveTheme as _;
+
+#[inline(never)]
+fn render_hash_digest(
+    digest: String,
+    mono_family: SharedString,
+    mono_size: Pixels,
+    palette: multi_launcher::gui::theme::SemanticPalette,
+    metrics: multi_launcher::gui::theme::ThemeMetrics,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w(px(0.0))
+        .child(
+            Label::new("Digest")
+                .text_size(px(metrics.small_text_size))
+                .line_height(px(metrics.line_height)),
+        )
+        .child(
+            Label::new(digest)
+                .id("hash-digest-result")
+                .w_full()
+                .min_w(px(0.0))
+                .whitespace_normal()
+                .font_family(mono_family)
+                .text_size(mono_size)
+                .line_height(px(metrics.line_height))
+                .text_color(appearance::to_hsla(palette.success)),
+        )
+        .into_any_element()
+}
 
 impl HashGeneratorWindow {
     #[inline(never)]
@@ -184,6 +217,8 @@ impl Render for HashGeneratorWindow {
         let resolved = appearance::current(cx);
         let metrics = resolved.metrics;
         let palette = resolved.palette;
+        let mono_family = cx.theme().mono_font_family.clone();
+        let mono_size = cx.theme().mono_font_size;
         let (
             has_job,
             is_running,
@@ -210,7 +245,7 @@ impl Render for HashGeneratorWindow {
                 session.progress(),
                 session
                     .result()
-                    .map(|result| (result.algorithm, result.digest.clone())),
+                    .map(|result| result.digest.clone()),
                 session.error().map(str::to_owned),
                 session.comparison(),
                 session.mode(),
@@ -259,12 +294,6 @@ impl Render for HashGeneratorWindow {
             }
             Err(error) => (format!("Expected digest: {error}"), palette.error),
         });
-        let source_name = match mode {
-            HashInputMode::Text => "Text",
-            HashInputMode::File => "File",
-            HashInputMode::Clipboard => "Clipboard",
-        };
-        let algorithm_name = algorithm.name();
         if let Some(scope) = self.jump.scope {
             let scope_current = match scope {
                 hash_jump::HashJumpScope::Main => self.hash_jump_owns_input(window, cx),
@@ -375,15 +404,12 @@ impl Render for HashGeneratorWindow {
                     .text_color(appearance::to_hsla(palette.primary_text))
                     .text_size(px(metrics.body_text_size))
                     .line_height(px(metrics.line_height))
-                    .child(
-                        Label::new(format!("{source_name} · {algorithm_name}"))
-                            .text_size(px(metrics.heading_text_size))
-                            .line_height(px(metrics.line_height)),
-                    )
                     .child(source_row)
                     .when(mode == HashInputMode::Text, |this| {
                         this.child(
                             jump_render.wrap(Textarea::new(&self.text)
+                                .font_family(mono_family.clone())
+                                .text_size(mono_size)
                                 .aria_label("Text to hash")
                                 .tab_index(0)
                                 .readonly(!eligibility.allows(hash_jump::HashControl::Text)), hash_jump::HashControl::Text),
@@ -407,7 +433,11 @@ impl Render for HashGeneratorWindow {
                             .unwrap_or_else(|| "No file selected".to_owned());
                         this.child(
                             Label::new(format!("File: {selected_path}"))
-                                .text_size(px(metrics.small_text_size))
+                                .w_full()
+                                .min_w(px(0.0))
+                                .whitespace_normal()
+                                .font_family(mono_family.clone())
+                                .text_size(mono_size)
                                 .line_height(px(metrics.line_height)),
                         )
                             .child(
@@ -422,6 +452,8 @@ impl Render for HashGeneratorWindow {
                     })
                     .child(
                         jump_render.wrap(Textarea::new(&self.expected)
+                            .font_family(mono_family.clone())
+                            .text_size(mono_size)
                             .aria_label("Expected digest")
                             .tab_index(0)
                             .readonly(!eligibility.allows(hash_jump::HashControl::Expected)), hash_jump::HashControl::Expected),
@@ -453,12 +485,8 @@ impl Render for HashGeneratorWindow {
                             .text_size(px(metrics.small_text_size))
                             .line_height(px(metrics.line_height))
                     }))
-                    .children(digest.clone().map(|(algorithm, digest)| {
-                        Label::new(format!("{}: {digest}", algorithm.name()))
-                            .id("hash-digest-result")
-                            .text_color(appearance::to_hsla(palette.success))
-                            .text_size(px(metrics.body_text_size))
-                            .line_height(px(metrics.line_height))
+                    .children(digest.map(|digest| {
+                        render_hash_digest(digest, mono_family.clone(), mono_size, palette, metrics)
                     }))
                     .children(error.map(|error| {
                         Label::new(error)

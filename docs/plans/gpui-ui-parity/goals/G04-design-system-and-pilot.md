@@ -4,6 +4,8 @@
 
 Matched native replay closed each popout during live File progress and reopened a fresh Text session. The shared GPUI view now keeps progress, digest and calculation actions together in both hosts. The initial standard popout shows those actions without scrolling, and a Comfortable 150% narrow dock wraps controls and retains visible Jump targets. [Native close evidence](../VALIDATION_LOG.md#g04-native-hash-close-and-reopen-during-file-calculation) · [Layout evidence](../VALIDATION_LOG.md#g04-compact-hash-viewport-actions)
 
+Matched Windows docks and popouts display the full SHA-512 digest. GPUI styles exact data with the resolved monospace font and exposes the raw result in one accessible label, including at Comfortable 150% in the narrow dock. [Exact-data evidence](../VALIDATION_LOG.md#g04-hash-exact-data-typography-and-digest)
+
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
 

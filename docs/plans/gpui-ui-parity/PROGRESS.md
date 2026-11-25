@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G04 Hash now uses the resolved monospace style for exact data. Both frontends displayed the full SHA-512 digest in matched docked and popout hosts. GPUI exposed one exact accessible digest and wrapped all 128 digits at Comfortable 150% without displacing Search. [Hash exact-data evidence](VALIDATION_LOG.md#g04-hash-exact-data-typography-and-digest)
+
 G05 Action Sheet Execute now launches checked saved and indexed executables. At 1516 × 937, both frontends preserved saved arguments, recorded the correct keyboard or pointer source, and applied Clear After Run. GPUI also rejected an indexed file replaced while its sheet was open. [Action Sheet evidence](VALIDATION_LOG.md#g05-checked-application-execution-from-the-action-sheet)
 
 G02 and G05 now launch stock-indexed local Windows executables through the checked process worker. At 1516 × 937, both frontends completed the same query with Tab and launched the same executable once with zero arguments. GPUI refused a second indexed path after it became a directory. [Indexed execution evidence](VALIDATION_LOG.md#g02-and-g05-indexed-local-windows-executable-execution)
@@ -39,7 +41,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue the G04 Hash pilot presentation and component evidence against matched egui captures. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
+| Current next action | Continue G05 broader provider admission with checked Window Search and foreground handoff. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
