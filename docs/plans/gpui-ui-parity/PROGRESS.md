@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G14 added JSON Pop Out and Dock through the retained workspace. Dock requires an accepted foreground receipt before the source popup retires. Mode persistence and saved geometry restore are wired. Independent review and seven focused tests passed. Native replay, geometry writeback and saved pin remain pending. [Checked host checkpoint](CHECKPOINTS.md#json-checked-pop-out-and-dock)
+G14 added JSON Pop Out and Dock through the retained workspace. Dock requires an accepted foreground receipt before the source popup retires. Mode persistence, native geometry capture and saved geometry restore use the shared settings owners. Independent review and the focused host and geometry tests passed. Native replay and saved pin remain pending. [Checked host checkpoint](CHECKPOINTS.md#json-checked-pop-out-and-dock) · [Geometry checkpoint](CHECKPOINTS.md#json-native-geometry-writeback)
 
 G14 docked JSON Tree adds virtualized rows, literal search and match reveal, bounded Details, and checked Value, Subtree and Pointer copies. Independent review and ten focused library and launcher tests passed. The retained mount, native Pop Out and pin follow. [Docked Tree checkpoint](CHECKPOINTS.md#docked-json-tree)
 
@@ -77,7 +77,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add event-driven JSON popout geometry writeback and saved pin, then begin XML Source on the shared host. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Begin the real XML Source workspace and its session lifecycle. Continue saved JSON pin in the shared JSON/XML host follow-up. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

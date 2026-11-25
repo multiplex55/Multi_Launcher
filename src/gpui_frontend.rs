@@ -5348,24 +5348,26 @@ impl RootWindow {
     }
 
     fn poll_utility_size_writer(&mut self, cx: &mut Context<Self>) -> bool {
-        let (pending, poll_error, write_failure, acknowledged) = {
+        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged) = {
             let mut store = self
                 .utility_size_store
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let poll = store.poll();
             let poll_error = poll.as_ref().err().cloned();
-            let acknowledged = poll.as_ref().is_ok_and(|poll| !poll.accepted.is_empty());
-            let write_failure = store
-                .take_new_write_failures()
-                .into_iter()
-                .find(|failure| failure.key == self.hash_tool_key)
-                .map(|failure| failure.message);
+            let acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| ack.acknowledgement.key == self.hash_tool_key));
+            let json_key = UtilityToolKey::parse("json-utility").ok();
+            let json_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == json_key));
+            let failures = store.take_new_write_failures();
+            let write_failure = failures.iter().find(|failure| failure.key == self.hash_tool_key).map(|failure| failure.message.clone());
+            let json_failure = failures.into_iter().find(|failure| Some(failure.key) == json_key).map(|failure| failure.message);
             (
                 store.has_pending_acknowledgement(),
                 poll_error,
                 write_failure,
                 acknowledged,
+                json_failure,
+                json_acknowledged,
             )
         };
         if let Some(error) = poll_error {
@@ -5385,6 +5387,8 @@ impl RootWindow {
         } else if acknowledged {
             self.set_hash_size_write_error(None, cx);
         }
+        if let Some(error) = json_failure { self.set_json_size_error(Some(format!("Could not save JSON Utility window geometry: {error}")), cx); }
+        else if json_acknowledged { self.set_json_size_error(None, cx); }
         if !pending {
             self.utility_size_polling.store(false, Ordering::Release);
         }
@@ -5581,6 +5585,7 @@ impl RootWindow {
             );
         }
         self.drain_hash_native_geometry(cx, false);
+        self.drain_json_native_geometry(cx, false);
         let _ = self.poll_utility_size_writer(cx);
         let size_status = self
             .utility_size_store
@@ -5598,6 +5603,16 @@ impl RootWindow {
             return Err(format!(
                 "The Hash Generator window geometry could not be saved: {error}. Move or resize the popout to retry the save before restarting."
             ));
+        }
+        if let Ok(key) = UtilityToolKey::parse("json-utility") {
+            let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
+            if status.pending_revision.is_some() {
+                self.start_utility_size_ack_poll(cx);
+                return Err("The JSON Utility window geometry is still being saved. Wait for the settings write to finish, then retry the egui restart.".to_owned());
+            }
+            if let Some((_, error)) = status.failure {
+                return Err(format!("The JSON Utility window geometry could not be saved: {error}. Move or resize the popout to retry before restarting."));
+            }
         }
         if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
             return Err(format!("{message} Then retry the egui restart."));
@@ -12929,6 +12944,7 @@ pub(crate) fn run_foundation_window(
                 let _ = cx.update(|cx| {
                     let live_window = hash_root_view.update(cx, |root, cx| {
                         root.drain_hash_native_geometry(cx, false);
+                        root.drain_json_native_geometry(cx, false);
                         root.hash_session
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -13498,7 +13514,7 @@ pub(crate) fn run_foundation_window(
             .status(hash_tool_key);
         if utility_size_pending || status.pending_revision.is_some() {
             return Err(
-                "The Hash Generator geometry save did not settle before restart. No egui process was started; reopen GPUI and retry after the save finishes."
+                "A utility geometry save did not settle before restart. Reopen GPUI and retry after the save finishes."
                     .to_owned(),
             );
         }

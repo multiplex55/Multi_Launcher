@@ -3,6 +3,87 @@ use super::json_utility::{JsonPopup, JsonWorkspace};
 use super::*;
 use multi_launcher::settings::{RememberedPresentation, UtilityToolKey};
 
+fn shell_geometry_mount_is_current(
+    mounted_in_popup: bool,
+    receipt: &utility_mount::MountReceipt,
+) -> bool {
+    mounted_in_popup && receipt.is_current()
+}
+
+/// A checked geometry observer owned by one utility shell mount.
+pub(super) struct ShellGeometry {
+    key: UtilityToolKey,
+    receipt: utility_mount::MountReceipt,
+    stamp: NativeGeometryStamp,
+    slot: NativeGeometrySlot,
+    binding: NativeGeometryBinding,
+    factory_size: Option<PreferredWindowSize>,
+}
+impl ShellGeometry {
+    fn attach(
+        native: NativeWindow,
+        key: UtilityToolKey,
+        receipt: utility_mount::MountReceipt,
+        sequence: Arc<AtomicU64>,
+        wake: Arc<HashWakeSignal>,
+    ) -> Result<Self, String> {
+        if !receipt.is_current() {
+            return Err("utility mount changed".into());
+        }
+        let target = checked_geometry_target(native)
+            .ok_or_else(|| "utility HWND could not be checked".to_owned())?;
+        let generation = sequence.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let stamp = NativeGeometryStamp {
+            session_epoch: generation,
+            mount_generation: generation,
+        };
+        let slot = new_native_geometry_slot();
+        let factory_size = native_window_metrics(target, 1.0)
+            .ok()
+            .flatten()
+            .and_then(outer_size_in_points);
+        let binding = NativeGeometryBinding::attach_checked(
+            target,
+            key,
+            stamp,
+            slot.clone(),
+            1.0,
+            sequence,
+            Arc::new(move |_| wake.notify()),
+        )?;
+        Ok(Self {
+            key,
+            receipt,
+            stamp,
+            slot,
+            binding,
+            factory_size,
+        })
+    }
+    fn take(&self) -> Option<(UtilityNativeGeometrySample, Option<PreferredWindowSize>)> {
+        if !self.receipt.is_current() {
+            return None;
+        }
+        let sample = take_native_geometry(&self.slot, self.key, self.stamp)?;
+        let convert = |rect: NativeWindowRect| PhysicalWindowRect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+        Some((
+            UtilityNativeGeometrySample {
+                position: convert(sample.position),
+                position_scale: sample.position_scale,
+                position_sequence: sample.position_sequence,
+                size: sample.size.map(convert),
+                size_sequence: sample.size_sequence,
+            },
+            self.factory_size,
+        ))
+    }
+}
+
 struct JsonShell {
     workspace: Entity<JsonWorkspace>,
 }
@@ -75,6 +156,105 @@ async fn retire_failed_json_candidate(
 }
 
 impl RootWindow {
+    fn reattach_json_geometry(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.json_view.as_ref() else {
+            return;
+        };
+        let Some(popup) = self.json_popup.as_ref() else {
+            return;
+        };
+        let Some(native) = popup.native else {
+            return;
+        };
+        let workspace = view.read(cx);
+        let receipt = workspace.mount_receipt();
+        if !shell_geometry_mount_is_current(
+            workspace.is_mounted_in(popup.window.window_id(), true),
+            &receipt,
+        ) {
+            return;
+        }
+        let Ok(key) = UtilityToolKey::parse("json-utility") else {
+            return;
+        };
+        match ShellGeometry::attach(
+            native,
+            key,
+            receipt,
+            self.hash_geometry_sequence.clone(),
+            self.hash_wake_signal.clone(),
+        ) {
+            Ok(binding) => {
+                if let Some(popup) = self.json_popup.as_mut() {
+                    popup.geometry = Some(binding);
+                }
+            }
+            Err(error) => self.set_json_size_error(
+                Some(format!(
+                    "Could not observe JSON Utility window geometry: {error}"
+                )),
+                cx,
+            ),
+        }
+    }
+    pub(super) fn drain_json_native_geometry(&mut self, cx: &mut Context<Self>, detach: bool) {
+        let Some(popup) = self.json_popup.as_mut() else {
+            return;
+        };
+        let receipt = popup
+            .geometry
+            .as_ref()
+            .map(|geometry| geometry.receipt.clone());
+        let sample = popup.geometry.as_ref().and_then(ShellGeometry::take);
+        if detach {
+            if let Some(geometry) = popup.geometry.take() {
+                drop(geometry.binding);
+            }
+        }
+        let Some((sample, factory)) = sample else {
+            return;
+        };
+        let key = UtilityToolKey::parse("json-utility").unwrap();
+        let mut store = self
+            .utility_size_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let factory = store
+            .effective_native_geometry(key)
+            .is_none()
+            .then_some(factory)
+            .flatten();
+        let result = store.observe_native_geometry(key, sample, factory);
+        drop(store);
+        match result {
+            Ok(Some(_)) => self.start_utility_size_ack_poll(cx),
+            Err(error) => {
+                let message = format!("Could not save JSON Utility window geometry: {error}");
+                tracing::warn!(%message);
+                if let (Some(view), Some(receipt)) = (self.json_view.as_ref(), receipt) {
+                    let view = view.downgrade();
+                    cx.spawn(async move |_, cx| {
+                        let _ = view.update(cx, |view, cx| {
+                            if receipt.is_current() && view.open {
+                                view.geometry_error = Some(message);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            _ => {}
+        }
+    }
+    pub(super) fn set_json_size_error(&mut self, message: Option<String>, cx: &mut Context<Self>) {
+        if let Some(view) = self.json_view.clone() {
+            view.update(cx, |view, cx| {
+                view.geometry_error = message;
+                cx.notify();
+            });
+        }
+    }
     pub(super) fn report_presentation_failures(
         &mut self,
         failures: Vec<(UtilityToolKey, String)>,
@@ -187,13 +367,16 @@ impl RootWindow {
                         let weak = shell_workspace.downgrade();
                         let local_id = window.window_handle().window_id();
                         window.on_window_should_close(app, move |_, app| {
-                            weak.update(app, |view, _| {
+                            weak.update(app, |view, cx| {
                                 if !view.is_mounted_in(local_id, true) {
                                     return true;
                                 }
                                 if view.rehosting {
                                     return false;
                                 }
+                                let _ = view.root.update(cx, |root, cx| {
+                                    root.drain_json_native_geometry(cx, true)
+                                });
                                 view.shutdown();
                                 true
                             })
@@ -305,6 +488,7 @@ impl RootWindow {
                                             .as_ref()
                                             .is_some_and(|view| !view.read(cx).open))
                                 {
+                                    root.drain_json_native_geometry(cx, true);
                                     root.json_popup = None;
                                     let retiring = RetiringHashWindow {
                                         window,
@@ -334,6 +518,7 @@ impl RootWindow {
                             window,
                             native,
                             _subscription: subscription,
+                            geometry: None,
                         });
                         cx.notify();
                         true
@@ -386,6 +571,27 @@ impl RootWindow {
                 }
                 if installed && displayed && mounted_receipt.is_current() {
                     let _ = root.update(cx, |root, cx| {
+                        if let (Some(native), Some(key)) = (native, key) {
+                            match ShellGeometry::attach(
+                                native,
+                                key,
+                                mounted_receipt.clone(),
+                                root.hash_geometry_sequence.clone(),
+                                root.hash_wake_signal.clone(),
+                            ) {
+                                Ok(binding) => {
+                                    if let Some(popup) = root.json_popup.as_mut() {
+                                        popup.geometry = Some(binding);
+                                    }
+                                }
+                                Err(error) => root.set_json_size_error(
+                                    Some(format!(
+                                        "Could not observe JSON Utility window geometry: {error}"
+                                    )),
+                                    cx,
+                                ),
+                            }
+                        }
                         root.remember_json_presentation(RememberedPresentation::Popout, cx);
                         workspace.update(cx, |view, cx| {
                             view.rehosting = false;
@@ -444,6 +650,7 @@ impl RootWindow {
                     let _ = workspace.update(cx, |view, _| view.rehosting = false);
                     return;
                 };
+                let _ = root.update(cx, |root, cx| root.drain_json_native_geometry(cx, true));
                 let mounted =
                     update_kit_window_content(root_window, &workspace, cx, |view, window, cx| {
                         if !source.is_current()
@@ -468,6 +675,16 @@ impl RootWindow {
                     .flatten();
                 let Some(mount) = mounted else {
                     let _ = workspace.update(cx, |view, _| view.rehosting = false);
+                    let _ = root.update(cx, |root, cx| {
+                        if root
+                            .json_popup
+                            .as_ref()
+                            .is_some_and(|old| old.window.window_id() == popup.window_id())
+                            && source.is_current()
+                        {
+                            root.reattach_json_geometry(cx);
+                        }
+                    });
                     return;
                 };
                 let committed = root
@@ -485,6 +702,29 @@ impl RootWindow {
                     })
                     .unwrap_or(false);
                 if !committed {
+                    let _ = update_kit_window_content(popup, &workspace, cx, |view, window, cx| {
+                        if mount.is_current() {
+                            view.replace_mount(
+                                popup,
+                                popup_native,
+                                None,
+                                point(px(0.0), px(0.0)),
+                                window,
+                                cx,
+                            );
+                            view.popout = true;
+                            view.rehosting = false;
+                        }
+                    });
+                    let _ = root.update(cx, |root, cx| {
+                        if root
+                            .json_popup
+                            .as_ref()
+                            .is_some_and(|old| old.window.window_id() == popup.window_id())
+                        {
+                            root.reattach_json_geometry(cx);
+                        }
+                    });
                     return;
                 }
                 {
@@ -516,6 +756,7 @@ impl RootWindow {
                                     cx.notify();
                                 }
                             });
+                        let _ = root.update(cx, |root, cx| root.reattach_json_geometry(cx));
                         return;
                     };
                     ack.wait().await;
@@ -555,6 +796,7 @@ impl RootWindow {
                                     cx.notify();
                                 }
                             });
+                        let _ = root.update(cx, |root, cx| root.reattach_json_geometry(cx));
                         return;
                     }
                 }
@@ -603,10 +845,20 @@ mod tests {
         hash_dock, utility_mount, ForegroundIdentity, HashWakeSignal, NativeWindow,
         RootVisibilityRequest,
     };
+    use super::shell_geometry_mount_is_current;
     use std::sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     };
+    #[test]
+    fn geometry_reattachment_requires_current_popup_mount() {
+        let owner = utility_mount::MountOwner::default();
+        let receipt = owner.attach();
+        assert!(shell_geometry_mount_is_current(true, &receipt));
+        assert!(!shell_geometry_mount_is_current(false, &receipt));
+        owner.attach();
+        assert!(!shell_geometry_mount_is_current(true, &receipt));
+    }
     #[test]
     fn json_dock_receipt_requires_current_mount_and_visibility_revision() {
         let owner = utility_mount::MountOwner::default();

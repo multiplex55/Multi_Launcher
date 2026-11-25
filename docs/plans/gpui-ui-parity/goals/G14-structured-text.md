@@ -42,6 +42,8 @@ The first functional batch delivers JSON Utility, XML Toolkit and its XML Save O
 
 Use focused checks as worker ownership and file effects change. Group the remaining Nextest selectors per target and use one paired 1516 × 937 Windows candidate where practical. Packet C follows as the next functional batch and retains `REGEX-01`–`05`. Packet D applies across both batches.
 
+After the checked JSON host and geometry writeback, begin the XML Source workspace. The G14 host implementer owns the remaining JSON saved pin and pinned-close behavior alongside XML's remembered presentation and pin controls. Verify passive startup, checked unpin, and exact native retirement with the paired profiles in the G14 Windows batch.
+
 ### A — Complete JSON source/tree interactions
 
 **Owner:** G14 frontend implementer with the JSON operation owner. Map source edits, parsing/projection, search revisions, transforms, copy, and host actions into neutral intent/state contracts; keep the existing domain implementation. Recreate text editing and tree/search/details using Kit and bounded custom rows where needed.

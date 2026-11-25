@@ -148,6 +148,7 @@ pub(super) struct JsonPopup {
     pub window: AnyWindowHandle,
     pub native: Option<NativeWindow>,
     pub _subscription: Subscription,
+    pub geometry: Option<super::json_host::ShellGeometry>,
 }
 
 pub(super) struct JsonWorkspace {
@@ -155,9 +156,10 @@ pub(super) struct JsonWorkspace {
     pub(super) popout: bool,
     pub(super) rehosting: bool,
     pub(super) presentation_error: Option<String>,
+    pub(super) geometry_error: Option<String>,
     open_popout_after_load: bool,
     activation_revision: Arc<AtomicU64>,
-    root: WeakEntity<RootWindow>,
+    pub(super) root: WeakEntity<RootWindow>,
     pub(super) admission: Arc<RestartAdmission>,
     pub(super) visibility: RootVisibility,
     mount_owner: super::utility_mount::MountOwner,
@@ -278,7 +280,7 @@ impl JsonWorkspace {
         let mount = JsonMount::new(window, cx, &mount_owner, root_window, native, return_focus, return_scroll);
         let mut session = JsonEditorState::default();
         session.begin_initialize();
-        Self { open: false, popout: false, rehosting: false, presentation_error: None, open_popout_after_load: false, activation_revision: Arc::new(AtomicU64::new(0)), root, admission, visibility, mount_owner, mount, tree_mode: false, session, intent,
+        Self { open: false, popout: false, rehosting: false, presentation_error: None, geometry_error: None, open_popout_after_load: false, activation_revision: Arc::new(AtomicU64::new(0)), root, admission, visibility, mount_owner, mount, tree_mode: false, session, intent,
             epoch: Arc::new(AtomicU64::new(1)), tree_epoch: Arc::new(AtomicU64::new(1)),
             wake: Arc::new(HashWakeSignal::default()), lane: ClipboardLane::default(),
             initial_projection: None, checking: None }
@@ -615,6 +617,7 @@ impl JsonWorkspace {
         let popout = self.popout;
         let origin = self.return_focus.take();
         let offset = self.return_scroll.take();
+        if popout { let _ = self.root.update(cx, |root, cx| root.drain_json_native_geometry(cx, true)); }
         self.shutdown();
         self.input.update(cx, |input, cx| input.set_value("", window, cx));
         self.tree_search.update(cx, |input, cx| input.set_value("", window, cx));
@@ -622,6 +625,7 @@ impl JsonWorkspace {
         let _ = self.root.update(cx, |root, cx| {
             panel_stack::retire(&mut root.panel_stack, Panel::JsonUtilityDialog);
             if popout {
+                root.drain_json_native_geometry(cx, true);
                 if let Some(popup) = root.json_popup.take() {
                     let retiring = RetiringHashWindow { window: popup.window, native_window: popup.native };
                     root.json_retiring.push(retiring);
@@ -824,6 +828,7 @@ impl Render for JsonWorkspace {
                     .child(message)
             }))
             .children(self.presentation_error.as_ref().map(|message| Label::new(message.clone())))
+            .children(self.geometry_error.as_ref().map(|message| Label::new(message.clone())))
     }
 }
 impl RootWindow {
@@ -836,6 +841,7 @@ impl RootWindow {
         self.root_scroll.scroll_to_top_of_item(index);
     }
     pub(super) fn retire_json_workspace(&mut self, cx: &mut Context<Self>) {
+        self.drain_json_native_geometry(cx, true);
         if let Some(view) = self.json_view.take() { view.update(cx, |view, _| view.shutdown()); }
     }
     pub(super) fn open_json_utility(
