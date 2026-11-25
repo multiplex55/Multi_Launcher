@@ -4846,6 +4846,9 @@ fn main() -> anyhow::Result<()> {
                 title: settings.show_launcher_title,
             },
             verified_folders: gpui_frontend::saved_folder::verified_actions(&actions_vec),
+            index_config: multi_launcher::indexer::coordinator::IndexConfig::new(
+                settings.index_paths.clone().unwrap_or_default(), settings.max_indexed_items,
+            ),
             actions: actions_vec,
             calculator_settings: settings.plugin_settings.get("calculator").cloned(),
             match_exact: settings.match_exact,

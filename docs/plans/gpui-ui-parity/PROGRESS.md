@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G02 and G05 now launch stock-indexed local Windows executables through the checked process worker. At 1516 × 937, both frontends completed the same query with Tab and launched the same executable once with zero arguments. GPUI refused a second indexed path after it became a directory. [Indexed execution evidence](VALIDATION_LOG.md#g02-and-g05-indexed-local-windows-executable-execution)
+
 G05 now populates blank Search on the first frame from admitted commands and saved actions. Matched Windows runs at 1516 × 937 verified the common row order, pinned Search during Paging and History recall, and an exact folder activation from a three-space query. GPUI also kept Search pinned with Docked Hash open. [Blank Search evidence](VALIDATION_LOG.md#g05-blank-search-installed-inventory)
 
 G05 inline Calculator now preserves both stock history timings and typed copy behavior. Matched Windows runs at 1516 × 937 verified the exact value, launcher accounting and visible root with Hide After Run enabled. [Calculator evidence](VALIDATION_LOG.md#g05-stock-inline-calculator-search)
@@ -35,7 +37,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue G02 and G05 general application execution with indexed local applications. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
+| Current next action | Extend G05 checked application execution to the launcher Action Sheet. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

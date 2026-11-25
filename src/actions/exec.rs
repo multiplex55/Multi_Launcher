@@ -1,7 +1,7 @@
 #[cfg(windows)]
 mod shortcut;
 #[cfg(windows)]
-pub use shortcut::{checked_local_directory, launch_shortcut, ordinary_local_path_is_admissible, shortcut_path_is_admissible};
+pub use shortcut::{checked_local_directory, checked_local_file, launch_shortcut, ordinary_local_path_is_admissible, shortcut_path_is_admissible};
 
 use std::{ffi::OsStr, path::Path};
 

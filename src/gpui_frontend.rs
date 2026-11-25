@@ -17,6 +17,7 @@ mod favorites;
 mod hash_jump;
 mod hash_progress;
 mod hash_layout;
+mod indexed_applications;
 mod hash_jump_select;
 mod launcher_controls;
 pub(crate) mod launcher_header;
@@ -91,7 +92,7 @@ use multi_launcher::universal_actions::{
     UniversalActionRegistry, UniversalUiIntent, action_ids,
 };
 use multi_launcher::actions::search::{
-    CachedSearchEntry, ReadOnlySearchInput, compose_read_only_results_with_origin,
+    CachedSearchEntry, ReadOnlySearchInput,
 };
 use multi_launcher::common::query::ActionFilterMetadata;
 use multi_launcher::clipboard_modify::clipboard::{
@@ -151,6 +152,7 @@ use fst::Map;
 pub(crate) struct LauncherSearchStartup {
     pub actions: Vec<Action>,
     pub verified_folders: Vec<Action>,
+    pub index_config: multi_launcher::indexer::coordinator::IndexConfig,
     pub branding: launcher_header::Branding,
     pub calculator_settings: Option<serde_json::Value>,
     pub match_exact: bool,
@@ -171,6 +173,7 @@ pub(crate) struct LauncherSearchStartup {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LauncherResultOrigin {
     Saved,
+    Indexed { generation: u64, index: usize },
     CachedCommand,
     Provider(String),
 }
@@ -223,6 +226,9 @@ struct LauncherSearchCatalog {
     command_help_providers: Arc<[CommandHelpProvider]>,
     quick_help_providers: Arc<[QuickHelpProvider]>,
     actions: Vec<Action>,
+    saved_count: usize,
+    index_config: multi_launcher::indexer::coordinator::IndexConfig,
+    index_generation: Option<u64>,
     verified_folders: Vec<Action>,
     cached_entries: Vec<CachedSearchEntry>,
     filter_metadata: Vec<ActionFilterMetadata>,
@@ -237,6 +243,7 @@ struct LauncherSearchCatalog {
     page_jump: usize,
     query_results_layout: QueryResultsLayoutSettings,
     completion_index: Map<Vec<u8>>,
+    indexed_completion_index: Option<Map<Vec<u8>>>,
     usage: HashMap<String, u32>,
     folder_aliases_lc: HashMap<String, Option<String>>,
     bookmark_aliases_lc: HashMap<String, Option<String>>,
@@ -253,6 +260,7 @@ impl LauncherSearchCatalog {
         // boundary can execute without changing their Search payload. Saved
         // typed actions retain the shared local-action admission semantics.
         let actions = supported_saved_search_actions(startup.actions, &startup.verified_folders);
+        let saved_count = actions.len();
         #[cfg(not(test))]
         let providers = InstalledLauncherProviders::new(enabled_plugins);
         #[cfg(test)]
@@ -286,6 +294,9 @@ impl LauncherSearchCatalog {
             command_help_providers,
             quick_help_providers,
             actions,
+            saved_count,
+            index_config: startup.index_config,
+            index_generation: None,
             verified_folders: startup.verified_folders,
             cached_entries,
             filter_metadata,
@@ -300,6 +311,7 @@ impl LauncherSearchCatalog {
             page_jump: startup.page_jump,
             query_results_layout: startup.query_results_layout,
             completion_index,
+            indexed_completion_index: None,
             usage: startup.usage,
             folder_aliases_lc: startup.folder_aliases_lc,
             bookmark_aliases_lc: startup.bookmark_aliases_lc,
@@ -307,19 +319,52 @@ impl LauncherSearchCatalog {
     }
 
     fn replace_saved_actions(&mut self, rows: Vec<Action>, verified_folders: Vec<Action>) -> bool {
-        let actions = supported_saved_search_actions(rows, &verified_folders);
-        if self.actions == actions && self.verified_folders == verified_folders {
+        let saved = supported_saved_search_actions(rows, &verified_folders);
+        if self.actions[..self.saved_count] == saved && self.verified_folders == verified_folders {
             return false;
         }
-        self.cached_entries = actions.iter().map(CachedSearchEntry::from_action).collect();
-        self.filter_metadata = actions
-            .iter()
-            .map(ActionFilterMetadata::from_action)
-            .collect();
-        self.completion_index = multi_launcher::completion::build_index(&self.commands, &actions);
-        self.actions = actions;
+        let indexed = self.actions.split_off(self.saved_count);
+        let indexed_cached = self.cached_entries.split_off(self.saved_count);
+        let indexed_metadata = self.filter_metadata.split_off(self.saved_count);
+        self.cached_entries = saved.iter().map(CachedSearchEntry::from_action).collect();
+        self.filter_metadata = saved.iter().map(ActionFilterMetadata::from_action).collect();
+        self.saved_count = saved.len();
+        self.actions = saved;
+        self.actions.extend(indexed);
+        self.cached_entries.extend(indexed_cached);
+        self.filter_metadata.extend(indexed_metadata);
+        self.completion_index = multi_launcher::completion::build_index(
+            &self.commands, &self.actions[..self.saved_count],
+        );
         self.verified_folders = verified_folders;
         true
+    }
+
+    fn install_index(&mut self, snapshot: indexed_applications::Snapshot) -> indexed_applications::Identity {
+        self.actions.truncate(self.saved_count);
+        self.cached_entries.truncate(self.saved_count);
+        self.filter_metadata.truncate(self.saved_count);
+        self.actions.extend(snapshot.actions);
+        self.cached_entries.extend(snapshot.cached);
+        self.filter_metadata.extend(snapshot.metadata);
+        self.index_generation = Some(snapshot.generation);
+        self.indexed_completion_index = Some(snapshot.completion_index);
+        indexed_applications::Identity { generation: snapshot.generation, roots: snapshot.roots }
+    }
+
+    fn saved_actions(&self) -> &[Action] {
+        &self.actions[..self.saved_count]
+    }
+
+    fn local_origin(&self, index: usize) -> LauncherResultOrigin {
+        if index < self.saved_count {
+            LauncherResultOrigin::Saved
+        } else {
+            LauncherResultOrigin::Indexed {
+                generation: self.index_generation.unwrap_or_default(),
+                index: index - self.saved_count,
+            }
+        }
     }
 
     fn resolve_result_layout(
@@ -360,12 +405,17 @@ impl LauncherSearchCatalog {
     ) -> Vec<LauncherSearchResult> {
         if raw_query.trim().is_empty() {
             use multi_launcher::actions::search::{EmptyBrowseKind, empty_browse_rows};
+            let mut local_index = 0;
             return empty_browse_rows(&self.commands, &self.actions)
                 .map(|row| LauncherSearchResult {
                     action: row.action.clone(),
                     origin: match row.kind {
                         EmptyBrowseKind::Command => LauncherResultOrigin::CachedCommand,
-                        EmptyBrowseKind::Saved => LauncherResultOrigin::Saved,
+                        EmptyBrowseKind::Saved => {
+                            let origin = self.local_origin(local_index);
+                            local_index += 1;
+                            origin
+                        },
                     },
                     display_label: row.display_label(),
                     hide_description: false,
@@ -446,7 +496,7 @@ impl LauncherSearchCatalog {
                 .into_iter()
                 .map(|(action, score)| (action, score, LauncherResultOrigin::CachedCommand)),
         );
-        compose_read_only_results_with_origin(
+        multi_launcher::actions::search::compose_read_only_results_with_local_origin(
             ReadOnlySearchInput {
                 raw_query,
                 command_cache: &[],
@@ -464,7 +514,7 @@ impl LauncherSearchCatalog {
                 usage_weight: self.usage_weight,
                 provider_results: scored_provider_actions,
             },
-            LauncherResultOrigin::Saved,
+            |index| self.local_origin(index),
             LauncherResultOrigin::CachedCommand,
             |_| {},
             None,
@@ -1802,11 +1852,16 @@ impl SearchCompletion {
         self.pending_change = None;
         self.next_index = 0;
         self.suggestions = if catalog.query_autocomplete {
-            multi_launcher::completion::single_line_suggestions(
-                &catalog.completion_index,
-                query,
-                5,
-            )
+            let mut suggestions = multi_launcher::completion::single_line_suggestions(
+                &catalog.completion_index, query, 5,
+            );
+            if let Some(index) = &catalog.indexed_completion_index {
+                suggestions.extend(multi_launcher::completion::single_line_suggestions(index, query, 5));
+                suggestions.sort();
+                suggestions.dedup();
+                suggestions.truncate(5);
+            }
+            suggestions
         } else {
             Vec::new()
         };
@@ -2423,6 +2478,7 @@ struct RootWindow {
     search_catalog: LauncherSearchCatalog,
     launcher_results: LauncherSearchResults,
     calculator_search: calculator_search::SearchOwner,
+    indexed_applications: indexed_applications::Owner,
     external_launch: external_launch::ExternalLaunch,
     external_launch_preferences: ExternalLaunchPreferences,
     action_sheet: Option<action_sheet::Sheet>,
@@ -5831,6 +5887,7 @@ impl RootWindow {
             session.set_algorithm(snapshot.drafts.hash.algorithm);
         }
         self.root_visibility.deactivate();
+        self.indexed_applications.retire();
         self.retire_search_jump_mode();
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
         #[cfg(windows)]
@@ -7367,6 +7424,7 @@ impl RootWindow {
         {
             return;
         }
+        let indexed = matches!(result.origin, LauncherResultOrigin::Indexed { .. });
         let action = result.action;
         if &action != rendered_action {
             return;
@@ -7397,7 +7455,7 @@ impl RootWindow {
         let resolver = ActionTargetResolverContext::new(
             &self.search_catalog.folder_aliases_lc,
             &self.search_catalog.bookmark_aliases_lc,
-            &self.search_catalog.actions,
+            if indexed { &[] } else { self.search_catalog.saved_actions() },
         );
         let target = ActionTargetResolver.resolve(&receipt.action, &resolver);
         let surface = receipt.invocation.surface;
@@ -7733,6 +7791,16 @@ impl RootWindow {
                 self.start_date_launch(result.action, route, query, source, window, cx);
                 return;
             }
+        }
+        if let LauncherResultOrigin::Indexed { generation, index } = &result.origin {
+            if let Some(snapshot) = self.indexed_applications.snapshot.as_ref() {
+                if snapshot.admits(*generation, *index, &self.search_catalog.actions[self.search_catalog.saved_count..], &result.action) {
+                    let roots = snapshot.roots.clone();
+                    let command = multi_launcher::commands::ExternalCommand { target: result.action.action.clone(), args: None, namespace: None };
+                    self.start_indexed_launch(result.action, command, roots, query, source, result.display_label, window, cx);
+                }
+            }
+            return;
         }
         let history_label = result.display_label.clone();
         #[cfg(windows)]
@@ -9532,6 +9600,7 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        self.indexed_applications.retire();
         self.hash_docked_resize
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -11948,6 +12017,7 @@ pub(crate) fn run_foundation_window(
                 search_catalog: search_catalog_for_root,
                 launcher_results: initial_launcher_results,
                 calculator_search: calculator_search::SearchOwner::default(),
+                indexed_applications: indexed_applications::Owner::default(),
                 external_launch: external_launch::ExternalLaunch::default(),
                 external_launch_preferences: external_launch_preferences_for_root.clone(),
                 action_sheet: None,
@@ -12082,6 +12152,7 @@ pub(crate) fn run_foundation_window(
                 })
             });
             appearance_subscription_sink.borrow_mut().push(sheet_subscription);
+            root.update(cx, |root, cx| root.start_application_index(cx));
             #[cfg(windows)]
             {
                 let keypad_subscription = root.update(cx, |_, cx| {
@@ -12367,7 +12438,10 @@ pub(crate) fn run_foundation_window(
                     return false;
                 };
                 match blocker {
-                    None => return true,
+                    None => {
+                        let _ = root_for_window_close.update(app, |root, _| root.indexed_applications.retire());
+                        return true;
+                    }
                     Some(RootCloseBlocker::CalculatorSearch) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
                             root.restart_status = Some(calculator_search::SEARCH_PENDING_STATUS.to_owned());
@@ -12388,6 +12462,9 @@ pub(crate) fn run_foundation_window(
                                 root.prepare_boolean_preference_close(cx)
                             })
                             .unwrap_or(false);
+                        if close_now {
+                            let _ = root_for_window_close.update(app, |root, _| root.indexed_applications.retire());
+                        }
                         return close_now;
                     }
                     Some(RootCloseBlocker::HashClipboard(message)) => {
@@ -13713,6 +13790,7 @@ mod tests {
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
                 verified_folders: Vec::new(),
+                index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 actions,
                 calculator_settings: None,
                 match_exact: true,
@@ -13757,6 +13835,58 @@ mod tests {
             false,
         );
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn indexed_completion_merges_sorted_unique_bounded_suggestions() {
+        let mut catalog = completion_catalog(
+            vec![saved_action("Alpha", "hash:open", None), saved_action("Echo", "hash:open", None)],
+            true, None,
+        );
+        catalog.commands.clear();
+        catalog.completion_index = multi_launcher::completion::build_index(&[], catalog.saved_actions());
+        let indexed = ["Alpha", "Bravo", "Charlie", "Delta", "Foxtrot", "Golf"]
+            .map(|label| saved_action(label, "hash:open", None));
+        catalog.indexed_completion_index = Some(multi_launcher::completion::build_index(&[], &indexed));
+        let mut completion = super::SearchCompletion::default();
+        completion.reset_for_query(&catalog, "app ");
+        assert_eq!(completion.suggestions, ["app alpha", "app bravo", "app charlie", "app delta", "app echo"]);
+        catalog.replace_saved_actions(vec![saved_action("Zulu", "hash:open", None)], Vec::new());
+        completion.reset_for_query(&catalog, "app ");
+        assert_eq!(completion.suggestions, ["app alpha", "app bravo", "app charlie", "app delta", "app foxtrot"]);
+    }
+
+    #[test]
+    fn indexed_and_saved_identical_rows_keep_origin_after_search_and_replacement() {
+        let action = saved_action("Same", "hash:open", None);
+        let mut catalog = completion_catalog(vec![action.clone()], true, None);
+        let config = multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None);
+        let snapshot = super::indexed_applications::Snapshot {
+            config, generation: 7, roots: Vec::new(), actions: vec![action.clone()],
+            cached: vec![multi_launcher::actions::search::CachedSearchEntry::from_action(&action)],
+            metadata: vec![multi_launcher::common::query::ActionFilterMetadata::from_action(&action)],
+            completion_index: multi_launcher::completion::build_index(&[], std::slice::from_ref(&action)),
+        };
+        catalog.install_index(snapshot);
+        for query in ["", "app Same"] {
+            let rows = catalog.compose(query, Vec::new(), true);
+            let origins = rows.iter().filter(|row| row.action == action).map(|row| row.origin.clone()).collect::<Vec<_>>();
+            assert_eq!(origins, vec![super::LauncherResultOrigin::Saved, super::LauncherResultOrigin::Indexed { generation: 7, index: 0 }]);
+        }
+        let resolver = multi_launcher::universal_actions::ActionTargetResolver;
+        let aliases = HashMap::new();
+        let saved_context = multi_launcher::universal_actions::ActionTargetResolverContext::new(
+            &aliases, &aliases, catalog.saved_actions(),
+        );
+        let indexed_context = multi_launcher::universal_actions::ActionTargetResolverContext::new(
+            &aliases, &aliases, &[],
+        );
+        assert_eq!(resolver.resolve(&action, &saved_context).custom_action_index, Some(0));
+        assert_eq!(resolver.resolve(&action, &indexed_context).custom_action_index, None);
+        assert!(catalog.replace_saved_actions(Vec::new(), Vec::new()));
+        let rows = catalog.compose("app Same", Vec::new(), true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].origin, super::LauncherResultOrigin::Indexed { generation: 7, index: 0 });
     }
 
     #[test]
@@ -14335,6 +14465,7 @@ mod tests {
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
                 verified_folders: Vec::new(),
+                index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -14376,6 +14507,7 @@ mod tests {
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
                 verified_folders: Vec::new(),
+                index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -14529,6 +14661,7 @@ mod tests {
         let startup = || LauncherSearchStartup {
             branding: super::launcher_header::Branding::default(),
                 verified_folders: Vec::new(),
+                index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
             calculator_settings: None,
             actions: vec![settings_action.clone()],
             match_exact: true,
@@ -14738,6 +14871,7 @@ mod tests {
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
                 verified_folders: Vec::new(),
+                index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 actions: Vec::new(),
                 calculator_settings: None,
                 match_exact: true,
@@ -14789,6 +14923,7 @@ mod tests {
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
                 verified_folders: Vec::new(),
+                index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 calculator_settings: None,
                 actions: vec![saved_action("Saved Help", "help:show", None)],
                 match_exact: true,
@@ -15538,6 +15673,7 @@ mod tests {
             LauncherSearchStartup {
                 branding: super::launcher_header::Branding::default(),
                 verified_folders: Vec::new(),
+                index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 calculator_settings: None,
                 actions: vec![
                     alpha.clone(),
@@ -15610,6 +15746,7 @@ mod tests {
         let startup = |match_exact| LauncherSearchStartup {
             branding: super::launcher_header::Branding::default(),
                 verified_folders: Vec::new(),
+                index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
             calculator_settings: None,
             actions: Vec::new(),
             match_exact,

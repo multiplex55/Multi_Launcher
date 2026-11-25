@@ -174,11 +174,12 @@ impl RootWindow {
         {
             return;
         }
+        let indexed = matches!(action.origin, LauncherResultOrigin::Indexed { .. });
         let action = action.action;
         let resolver = ActionTargetResolverContext::new(
             &self.search_catalog.folder_aliases_lc,
             &self.search_catalog.bookmark_aliases_lc,
-            &self.search_catalog.actions,
+            if indexed { &[] } else { self.search_catalog.saved_actions() },
         );
         let target = ActionTargetResolver.resolve(&action, &resolver);
         let mut context = ActionResolutionContext::new(ActionSurface::ActionSheet, &query);

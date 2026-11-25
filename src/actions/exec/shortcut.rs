@@ -127,6 +127,11 @@ pub fn checked_local_directory(path: &Path) -> anyhow::Result<()> {
     check_local_object_for(path, true, ObjectSubject::Folder)
 }
 
+/// Check a drive-qualified local regular file without traversing reparse points.
+pub fn checked_local_file(path: &Path) -> anyhow::Result<()> {
+    check_local_object_for(path, false, ObjectSubject::IndexedApplication)
+}
+
 /// Apply the same ordinary local path grammar used by shortcut validation.
 pub fn ordinary_local_path_is_admissible(path: &Path) -> bool {
     ordinary_local_path(path, None)
@@ -136,6 +141,7 @@ pub fn ordinary_local_path_is_admissible(path: &Path) -> bool {
 enum ObjectSubject {
     Shortcut,
     Folder,
+    IndexedApplication,
 }
 
 fn check_local_object(path: &Path, directory: bool) -> anyhow::Result<()> {
@@ -146,6 +152,7 @@ fn check_local_object_for(path: &Path, directory: bool, subject: ObjectSubject) 
     let label = match subject {
         ObjectSubject::Shortcut => "Shortcut",
         ObjectSubject::Folder => "Folder",
+        ObjectSubject::IndexedApplication => "Indexed application",
     };
     anyhow::ensure!(
         ordinary_local_path(path, None),
@@ -169,6 +176,7 @@ fn check_local_object_for(path: &Path, directory: bool, subject: ObjectSubject) 
             .with_context(|| match subject {
                 ObjectSubject::Shortcut => format!("Cannot inspect {}", prefix.display()),
                 ObjectSubject::Folder => format!("Cannot inspect folder path {}", prefix.display()),
+                ObjectSubject::IndexedApplication => format!("Cannot inspect indexed application path {}", prefix.display()),
             })?;
         anyhow::ensure!(
             metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,

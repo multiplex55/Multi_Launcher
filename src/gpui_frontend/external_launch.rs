@@ -526,6 +526,7 @@ pub(super) enum DiagnosticKind {
 #[derive(Clone)]
 pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
+    Indexed { command: ExternalCommand, roots: Vec<std::path::PathBuf> },
     Copy(String),
     Calculator(super::calculator_search::ScalarResult),
     CalculatorHistory(super::calculator_search::HistoryResult),
@@ -639,6 +640,22 @@ impl ExternalCommandHost for Host {
     }
 }
 
+struct IndexedHost<'a> {
+    host: &'a Host,
+    roots: &'a [std::path::PathBuf],
+}
+impl ExternalCommandHost for IndexedHost<'_> {
+    fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
+        anyhow::ensure!(command.namespace.is_none() && command.args.is_none() && command.target == action.action, "Invalid indexed application command");
+        super::indexed_applications::checked_launch_with(action, self.roots, |target| {
+            multi_launcher::actions::exec::launch(target, None)
+        })
+    }
+    fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
+    fn external_hide_after_run(&self) -> bool { self.host.external_hide_after_run() }
+    fn external_launcher_should_refocus(&self) -> bool { self.host.external_launcher_should_refocus() }
+}
+
 fn execute_request(
     request: &Request,
     host: &mut Host,
@@ -648,6 +665,10 @@ fn execute_request(
         RunCommand::External { command, .. } => CommandBus.dispatch_external(
             command, &request.action, request.source, None, host,
         ),
+        RunCommand::Indexed { command, roots } => {
+            CommandBus.dispatch_external(command, &request.action, request.source, None,
+                &mut IndexedHost { host, roots })
+        }
         RunCommand::Copy(text) => {
             let effect = copy(text);
             CommandBus.complete_checked_clipboard_text(text.clone(), &request.action, request.source, effect,
@@ -705,7 +726,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
+            RunCommand::Indexed { .. } | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -777,6 +798,14 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         self.start_run(action, RunCommand::External { command, association }, query, source, history_label, window, cx);
+    }
+
+    pub(super) fn start_indexed_launch(
+        &mut self, action: Action, command: ExternalCommand, roots: Vec<std::path::PathBuf>,
+        query: String, source: ActivationSource, history_label: Option<String>,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        self.start_run(action, RunCommand::Indexed { command, roots }, query, source, history_label, window, cx);
     }
 
     pub(super) fn start_date_launch(

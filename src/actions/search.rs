@@ -244,8 +244,24 @@ pub struct LocalActionSearchResults {
 pub fn collect_local_candidates<M, F>(
     input: LocalActionSearchInput<'_, M>,
     query: &str,
-    mut on_clone: F,
+    on_clone: F,
 ) -> LocalActionSearchResults
+where
+    M: FuzzyMatcher,
+    F: FnMut(&Action),
+{
+    let (scored_actions, stats) = collect_local_candidates_mapped(
+        input, query, on_clone, |_, action, score| (action, score),
+    );
+    LocalActionSearchResults { scored_actions, stats }
+}
+
+fn collect_local_candidates_mapped<M, F, R>(
+    input: LocalActionSearchInput<'_, M>,
+    query: &str,
+    mut on_clone: F,
+    mut map: impl FnMut(usize, Action, f32) -> R,
+) -> (Vec<R>, LocalActionSearchStats)
 where
     M: FuzzyMatcher,
     F: FnMut(&Action),
@@ -303,15 +319,12 @@ where
 
         if let Some(score) = score {
             on_clone(action);
-            scored_actions.push((action.clone(), score));
+            scored_actions.push(map(index, action.clone(), score));
         }
     }
 
     stats.hits = scored_actions.len();
-    LocalActionSearchResults {
-        scored_actions,
-        stats,
-    }
+    (scored_actions, stats)
 }
 
 /// Parse the launcher-local action prefix with the same trim, case folding,
@@ -437,7 +450,7 @@ where
 {
     compose_read_only_results_impl(
         input,
-        (),
+        |_| (),
         (),
         |(action, score)| (action, score, ()),
         |action, ()| action,
@@ -461,20 +474,32 @@ where
     M: FuzzyMatcher,
     F: FnMut(&Action),
 {
+    compose_read_only_results_with_local_origin(
+        input, |_| saved_origin.clone(), command_origin, on_local_clone, observer,
+    )
+}
+
+/// Compose while retaining the source index of every local action through scoring.
+pub fn compose_read_only_results_with_local_origin<M, F, T: Clone>(
+    input: ReadOnlySearchInput<'_, M, (Action, f32, T)>,
+    local_origin: impl FnMut(usize) -> T,
+    command_origin: T,
+    on_local_clone: F,
+    observer: Option<&mut dyn ReadOnlySearchObserver>,
+) -> ReadOnlySearchResultsWithOrigin<T>
+where
+    M: FuzzyMatcher,
+    F: FnMut(&Action),
+{
     compose_read_only_results_impl(
-        input,
-        saved_origin,
-        command_origin,
-        |row| row,
-        |action, origin| (action, origin),
-        on_local_clone,
-        observer,
+        input, local_origin, command_origin, |row| row, |action, origin| (action, origin),
+        on_local_clone, observer,
     )
 }
 
 fn compose_read_only_results_impl<M, F, T: Clone, P, R>(
     input: ReadOnlySearchInput<'_, M, P>,
-    saved_origin: T,
+    mut local_origin: impl FnMut(usize) -> T,
     command_origin: T,
     mut provider_row: impl FnMut(P) -> (Action, f32, T),
     mut result_row: impl FnMut(Action, T) -> R,
@@ -487,11 +512,16 @@ where
 {
     let trimmed = input.raw_query.trim();
     if trimmed.is_empty() {
+        let mut local_index = 0;
         let actions = empty_browse_rows(input.command_cache, input.local_actions)
             .map(|row| {
                 let origin = match row.kind {
                     EmptyBrowseKind::Command => command_origin.clone(),
-                    EmptyBrowseKind::Saved => saved_origin.clone(),
+                    EmptyBrowseKind::Saved => {
+                        let origin = local_origin(local_index);
+                        local_index += 1;
+                        origin
+                    }
                 };
                 result_row(row.materialize(), origin)
             })
@@ -513,7 +543,7 @@ where
         if let Some(observer) = observer.as_deref_mut() {
             observer.local_search_started();
         }
-        let local_search = collect_local_candidates(
+        let (scored_actions, stats) = collect_local_candidates_mapped(
             LocalActionSearchInput {
                 actions: input.local_actions,
                 cached_entries: input.local_cached_entries,
@@ -528,24 +558,18 @@ where
             },
             app_query.unwrap_or_default(),
             &mut on_local_clone,
+            |index, action, score| (action, score, local_origin(index)),
         );
         if let Some(observer) = observer.as_deref_mut() {
-            observer.local_search_completed(local_search.stats);
+            observer.local_search_completed(stats);
         }
-        local_search
+        (scored_actions, stats)
     } else {
-        LocalActionSearchResults {
-            scored_actions: Vec::new(),
-            stats: LocalActionSearchStats::default(),
-        }
+        (Vec::new(), LocalActionSearchStats::default())
     };
 
     let provider_actions_retained_moved = input.provider_results.len();
-    let mut scored: Vec<_> = local_search
-        .scored_actions
-        .into_iter()
-        .map(|(action, score)| (action, score, saved_origin.clone()))
-        .collect();
+    let (mut scored, local_stats) = local_search;
     scored.extend(input.provider_results.into_iter().map(&mut provider_row));
     let sort_input_len = scored.len();
     for (action, score, _) in &mut scored {
@@ -579,7 +603,7 @@ where
     ReadOnlySearchResults {
         actions,
         stats: ReadOnlySearchStats {
-            local: local_search.stats,
+            local: local_stats,
             local_search_ran,
             provider_actions_retained_moved,
             sort_input_len,
@@ -629,6 +653,35 @@ mod tests {
             desc: "Hash generator".into(),
             action: "hash:open".into(),
             args: Some(args.into()),
+        }
+    }
+
+    #[test]
+    fn identical_local_rows_keep_source_indices_through_sort_and_browse() {
+        use super::compose_read_only_results_with_local_origin;
+        let duplicate = action("QMarker", "same");
+        let actions = vec![duplicate.clone(), duplicate.clone()];
+        let cached: Vec<_> = actions.iter().map(CachedSearchEntry::from_action).collect();
+        let metadata: Vec<_> = actions.iter().map(ActionFilterMetadata::from_action).collect();
+        let aliases = HashMap::new();
+        let matcher = SkimMatcherV2::default();
+        let usage = HashMap::new();
+        for query in ["app QMarker", " "] {
+            let rows = compose_read_only_results_with_local_origin(
+                ReadOnlySearchInput {
+                    raw_query: query, command_cache: &[], local_actions: &actions,
+                    local_cached_entries: &cached, local_filter_metadata: &metadata,
+                    folder_aliases_lc: &aliases, bookmark_aliases_lc: &aliases,
+                    matcher: &matcher, match_exact: true, fuzzy_weight: 0.5,
+                    collect_search_stats: false, collect_candidate_count: false,
+                    usage: &usage, usage_weight: 0.0, provider_results: Vec::new(),
+                },
+                |index| index, usize::MAX, |_| {}, None,
+            );
+            assert_eq!(rows.actions.len(), 2);
+            assert_eq!(rows.actions[0].1, 0);
+            assert_eq!(rows.actions[1].1, 1);
+            assert_eq!(rows.actions[0].0, rows.actions[1].0);
         }
     }
 
