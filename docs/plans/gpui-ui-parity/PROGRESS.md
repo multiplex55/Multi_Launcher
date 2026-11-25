@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G14 docked XML Source now edits multiline XML under the stock `xml` route. It uses the existing XML engine and Activity, current-revision diagnostics, and explicit protected clipboard. Ten focused tests passed, including the real Windows MSXML gate. Matched desktop verification remains pending. [XML Source checkpoint](CHECKPOINTS.md#xml-source-session-and-activity)
+
 G14 added JSON Pop Out and Dock through the retained workspace. Dock requires an accepted foreground receipt before the source popup retires. Mode persistence, native geometry capture and saved geometry restore use the shared settings owners. Independent review and the focused host and geometry tests passed. Native replay and saved pin remain pending. [Checked host checkpoint](CHECKPOINTS.md#json-checked-pop-out-and-dock) · [Geometry checkpoint](CHECKPOINTS.md#json-native-geometry-writeback)
 
 G14 docked JSON Tree adds virtualized rows, literal search and match reveal, bounded Details, and checked Value, Subtree and Pointer copies. Independent review and ten focused library and launcher tests passed. The retained mount, native Pop Out and pin follow. [Docked Tree checkpoint](CHECKPOINTS.md#docked-json-tree)
@@ -71,13 +73,13 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 202 Specified, 16 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 201 Specified, 17 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Begin the real XML Source workspace and its session lifecycle. Continue saved JSON pin in the shared JSON/XML host follow-up. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Add XML Format, Minify and the retained Output view, then Tree, XPath, schema and file effects. Continue saved JSON pin in the shared JSON/XML host follow-up. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

@@ -11,6 +11,7 @@ use crate::gui::jump_mode::ui::{
 };
 use crate::gui::jump_mode::{SurfaceId, TargetGeneration, TargetId, TargetKind};
 use crate::xml_toolkit_engine::{MAX_XML_INPUT_BYTES, XmlFormatMode};
+use crate::xml_source::xml_error_message;
 use crate::xml_toolkit_session::{
     XmlDetailIntent, XmlDetailStatus, XmlEngineSession, XmlFormatOutput, XmlOutputStatus,
     XmlParseStatus, XmlSchemaStatus, XmlSessionError, XmlSessionSnapshot as SessionSnapshot,
@@ -18,7 +19,7 @@ use crate::xml_toolkit_session::{
 };
 use eframe::egui;
 use files::{
-    SaveOutcome, read_xml_file, save_xml_file, validate_local_path, validate_utf8_declaration,
+    SaveOutcome, read_xml_file, save_xml_file, validate_local_path,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -2020,12 +2021,7 @@ impl XmlToolkitDialogState {
             }
             error => format!("Could not read clipboard: {error}"),
         })?;
-        if source.len() > MAX_XML_INPUT_BYTES {
-            return Err(format!(
-                "Clipboard XML exceeds the {MAX_XML_INPUT_BYTES}-byte source limit."
-            ));
-        }
-        validate_utf8_declaration(&source)?;
+        crate::xml_source::validate_clipboard_source(&source)?;
         Ok(source)
     }
 
@@ -2758,28 +2754,6 @@ fn bounded_prefix(text: &str, maximum_chars: usize) -> &str {
     text.char_indices()
         .nth(maximum_chars)
         .map_or(text, |(index, _)| &text[..index])
-}
-
-fn xml_error_message(error: &crate::xml_toolkit_engine::XmlEngineError) -> String {
-    use crate::xml_toolkit_engine::XmlEngineError;
-    match error {
-        XmlEngineError::Parse(diagnostic) => {
-            let location = match (diagnostic.line, diagnostic.column) {
-                (Some(line), Some(column)) => format!("line {line}, column {column}: "),
-                (Some(line), None) => format!("line {line}: "),
-                (None, Some(column)) => format!("column {column}: "),
-                (None, None) => String::new(),
-            };
-            format!("{location}{}", diagnostic.message)
-        }
-        XmlEngineError::InputTooLarge { limit } => {
-            format!("source exceeds the {limit}-byte input limit")
-        }
-        XmlEngineError::UnsupportedPlatform => {
-            "the XML backend is supported on Windows only".into()
-        }
-        other => format!("{other:?}"),
-    }
 }
 
 fn viewport_id() -> egui::ViewportId {

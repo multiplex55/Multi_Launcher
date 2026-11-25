@@ -119,6 +119,7 @@ pub mod hotfolder;
 pub mod window_manager;
 pub mod windows_layout;
 pub mod workspace;
+pub mod xml_source;
 pub mod xml_toolkit_engine;
 pub mod xml_toolkit_session;
 pub mod utility_geometry_binding;

@@ -1,6 +1,6 @@
 use crate::commands::{CommandOutcome, XmlToolkitCommand, XmlToolkitCommandHost};
 
-pub(crate) fn handle_xml_toolkit<H>(host: &mut H, command: XmlToolkitCommand) -> CommandOutcome
+pub fn handle_xml_toolkit<H>(host: &mut H, command: XmlToolkitCommand) -> CommandOutcome
 where
     H: XmlToolkitCommandHost + ?Sized,
 {

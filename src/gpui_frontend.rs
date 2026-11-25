@@ -23,6 +23,7 @@ mod hash_pin;
 mod hash_dock;
 mod wake;
 mod json_utility;
+mod xml_utility;
 mod json_tree;
 mod json_host;
 mod utility_mount;
@@ -2011,6 +2012,7 @@ enum InstalledSearchRoute {
     Help,
     Activity,
     JsonUtility(multi_launcher::commands::JsonUtilityIntent),
+    XmlUtility,
     FavoritesBrowse,
     FavoritesNamed(String),
 }
@@ -2061,6 +2063,7 @@ fn classify_installed_search_command(
         Command::Dialog(DialogCommand::Help) => Ok(InstalledSearchRoute::Help),
         Command::Dialog(DialogCommand::Activity) => Ok(InstalledSearchRoute::Activity),
         Command::JsonUtility(multi_launcher::commands::JsonUtilityCommand::Open { intent }) => Ok(InstalledSearchRoute::JsonUtility(*intent)),
+        Command::XmlToolkit(multi_launcher::commands::XmlToolkitCommand::Open) => Ok(InstalledSearchRoute::XmlUtility),
         Command::Storage(StorageCommand::FavoriteDialog(label)) => {
             if label.is_empty() {
                 Ok(InstalledSearchRoute::FavoritesBrowse)
@@ -2631,6 +2634,8 @@ struct RootWindow {
     activity_center: multi_launcher::activity::ActivityCenter,
     activity_view: Option<Entity<activity::ActivityView>>,
     json_view: Option<Entity<json_utility::JsonWorkspace>>,
+    xml_view: Option<Entity<xml_utility::XmlWorkspace>>,
+    xml_terminal_quit: bool,
     json_popup: Option<json_utility::JsonPopup>,
     json_retiring: Vec<RetiringHashWindow>,
     hash_wake_signal: Arc<HashWakeSignal>,
@@ -4589,6 +4594,7 @@ struct RestartDrafts {
     search: String,
     utility: Option<String>,
     json: Option<String>,
+    xml: Option<String>,
     hash: HashDraft,
     hash_window_open: bool,
     settings: SettingsRestartDraft,
@@ -4773,6 +4779,7 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.json.as_ref().is_some_and(|text| !text.is_empty()) {
         names.push("JSON text");
     }
+    if drafts.xml.as_ref().is_some_and(|text| !text.is_empty()) { names.push("XML source"); }
     if !drafts.hash.text.is_empty() {
         names.push("Hash Generator text");
     }
@@ -5584,6 +5591,9 @@ impl RootWindow {
                     .to_owned(),
             );
         }
+        if let Some(error) = self.xml_view.as_ref().and_then(|view| view.read(cx).shutdown_failure()) {
+            return Err(format!("Cannot restart because {error}. Close and rerun Multi Launcher."));
+        }
         self.drain_hash_native_geometry(cx, false);
         self.drain_json_native_geometry(cx, false);
         let _ = self.poll_utility_size_writer(cx);
@@ -5757,6 +5767,7 @@ impl RootWindow {
                 search: self.query.read(cx).value().to_string(),
                 utility,
                 json: self.json_view.as_ref().and_then(|view| view.read(cx).draft()),
+                xml: self.xml_view.as_ref().and_then(|view| view.read(cx).draft()),
                 hash: hash_draft,
                 hash_window_open,
                 settings: self.settings_editor.restart_draft(),
@@ -5936,6 +5947,7 @@ impl RootWindow {
         self.retire_search_jump_mode();
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.retire_json_workspace(cx);
+        if let Some(view) = &self.xml_view { view.update(cx, |view, cx| view.shutdown(cx)); }
         #[cfg(windows)]
         if let Some(view) = self.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.coordinate_hud_probe_closing
@@ -5970,6 +5982,19 @@ impl RootWindow {
         accepted: AcceptedRestart,
         cx: &mut AsyncApp,
     ) {
+        loop {
+            let state = root.update(cx, |root, cx| root.xml_view.as_ref().map(|view| (view.read(cx).reaped(), view.read(cx).shutdown_failure())));
+            match state {
+                Ok(None) | Ok(Some((true, None))) => break,
+                Ok(Some((_, Some(error)))) => {
+                    let _ = root.update(cx, |root, cx| { root.restart_status = Some(format!("Egui restart stopped because GPUI teardown failed: {error}. No new process was started. Close and rerun with {}.", Frontend::Egui.selector_argument())); cx.notify(); });
+                    return;
+                },
+                Ok(Some((false, None))) => {},
+                Err(_) => return,
+            }
+            cx.background_executor().timer(Duration::from_millis(40)).await;
+        }
         let listener_slot = Arc::clone(&accepted.listener_slot);
         let coordinate_controller = Arc::clone(&accepted.coordinate_controller);
         let coordinate_shutdown_complete = Arc::clone(&accepted.coordinate_shutdown_complete);
@@ -7797,6 +7822,8 @@ impl RootWindow {
             && !activity::provider_is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             return;
         }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "xml_toolkit")
+            && !xml_utility::provider_is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) { return; }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "json_utility")
             && !json_utility::provider_is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) { return; }
         #[cfg(windows)]
@@ -8048,6 +8075,7 @@ impl RootWindow {
                 drop(operation);
                 self.open_json_utility(intent, Some(self.query.focus_handle(cx)), window, cx);
             }
+            InstalledSearchRoute::XmlUtility => { drop(operation); self.open_xml_toolkit(window, cx); }
             InstalledSearchRoute::FavoritesBrowse => {
                 drop(operation);
                 let focus = Some(self.query.focus_handle(cx));
@@ -9805,17 +9833,29 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        self.quit_after_xml_drain(cx);
+    }
+
+    fn quit_after_xml_drain(&mut self, cx: &mut Context<Self>) {
+        if self.xml_terminal_quit { return; }
+        self.xml_terminal_quit = true;
+        self.restart_admission.fence();
+        self.root_visibility.deactivate();
         if let Some(view) = &self.file_search { view.read(cx).retire_explorer(); }
         self.retire_json_workspace(cx);
         self.window_search.retire();
         self.file_search_probe.retire();
         self.indexed_applications.retire();
-        self.hash_docked_resize
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+        self.hash_docked_resize.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         self.drain_hash_native_geometry(cx, true);
-        cx.quit();
+        let Some(view) = self.xml_view.clone() else { cx.quit(); return; };
+        view.update(cx, |view, cx| view.shutdown(cx));
+        cx.spawn(async move |_, cx| {
+            loop {
+                if cx.update(|app| view.read(app).reaped()) { cx.update(|app| app.quit()); break; }
+                cx.background_executor().timer(Duration::from_millis(40)).await;
+            }
+        }).detach();
     }
 
     fn current_root_close_blocker(
@@ -10682,6 +10722,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.json_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.xml_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -12419,6 +12462,8 @@ pub(crate) fn run_foundation_window(
                 activity_center,
                 activity_view: None,
                 json_view: None,
+                xml_view: None,
+                xml_terminal_quit: false,
                 json_popup: None,
                 json_retiring: Vec::new(),
                 hash_wake_signal: wake_signal_for_root,
@@ -12761,6 +12806,10 @@ pub(crate) fn run_foundation_window(
                 };
                 match blocker {
                     None => {
+                        let deferred = root_for_window_close.update(app, |root, cx| {
+                            if root.xml_view.is_some() { root.quit_after_xml_drain(cx); true } else { false }
+                        }).unwrap_or(true);
+                        if deferred { return false; }
                         let _ = root_for_window_close.update(app, |root, cx| {
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.retire_json_workspace(cx);
@@ -12790,6 +12839,10 @@ pub(crate) fn run_foundation_window(
                             })
                             .unwrap_or(false);
                         if close_now {
+                            let deferred = root_for_window_close.update(app, |root, cx| {
+                                if root.xml_view.is_some() { root.quit_after_xml_drain(cx); true } else { false }
+                            }).unwrap_or(true);
+                            if deferred { return false; }
                             let _ = root_for_window_close.update(app, |root, cx| {
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.retire_json_workspace(cx);
@@ -15540,9 +15593,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()

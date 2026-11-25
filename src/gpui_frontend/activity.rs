@@ -106,7 +106,7 @@ impl ActivityView {
             return false;
         }
         self.rows = self.center.snapshot().rows.into_iter()
-            .filter(|row| row.key.owner() == ActivityOwner::Hash).collect();
+            .filter(|row| matches!(row.key.owner(), ActivityOwner::Hash | ActivityOwner::Xml)).collect();
         cx.notify();
         true
     }
