@@ -227,3 +227,9 @@ GPUI Search admits saved `.txt`, `.rtf`, `.pdf`, `.docx`, `.xlsx` and `.pptx` pa
 ## Saved Windows shortcut activation
 
 GPUI admits ordinary absolute local `.lnk` rows saved with absent or blank launcher Args. The Windows launch boundary reads the shortcut's stored executable, argument tail, and explicit Start In, checks the file and directory paths, and passes the native argument tail to the checked executable. Normal show mode is supported. Shortcuts with alternate launch modes, missing Start In, non-executable targets, remote paths or reparse components fail with the current launcher feedback. History and Usage use the literal stored shortcut action. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-saved-windows-shortcuts)
+
+## Saved HTTP(S) action activation
+
+Existing saved catalog rows with a literal absolute HTTP(S) value and absent or blank launcher Args can open the registered browser from GPUI Search. The checked external worker validates the stored URL and forwards the exact string. Bookmark and stock web results retain their own provider authority and capability checks. Existing App Editor authoring continues to require a filesystem path.
+
+The saved GPUI route treats a valid HTTP(S) URL that ends in `.exe` as a URL association. Egui's legacy generic external launch may classify that suffix as a process path. The matched Windows replay used a conventional HTTP URL. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-saved-http-actions)

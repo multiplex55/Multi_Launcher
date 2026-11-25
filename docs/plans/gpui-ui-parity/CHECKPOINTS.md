@@ -947,3 +947,7 @@ Both frontends loaded the owned three-byte snapshot, matched the known SHA-256, 
 ## G05 saved Windows shortcuts
 
 The native App Editor saved the owned `.lnk` and GPUI Search opened it through the existing launcher worker. Eight focused tests passed. The matched 1516 × 937 Windows replay in GPUI and egui recorded the same executable, explicit Start In, and exact quoted and empty arguments. Negative GPUI activations produced no child receipts or success accounting. Saved literal HTTP(S) rows are next. [Exact receipts](VALIDATION_LOG.md#g05-saved-windows-shortcuts) · [G01 owned external foreground retry](VALIDATION_LOG.md#g01-owned-external-foreground-wake-retry)
+
+## G05 saved HTTP(S) actions
+
+GPUI Search can open literal HTTP(S) values already in the saved catalog. The owned browser received the exact encoded loopback target from both frontends at 1516 × 937. Eight focused cases passed. Invalid escapes, nonblank launcher Args and disabled Bookmark and Google Search remained gated in GPUI. Continue broader installed provider admission. [Exact receipts](VALIDATION_LOG.md#g05-saved-http-actions)

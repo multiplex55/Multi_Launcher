@@ -178,6 +178,12 @@ impl LauncherSearchResult {
             .flatten()
     }
 
+    fn saved_url(&self) -> Option<multi_launcher::commands::ExternalCommand> {
+        (self.origin == LauncherResultOrigin::Saved)
+            .then(|| external_launch::saved_url(&self.action))
+            .flatten()
+    }
+
     fn saved_document(&self) -> Option<multi_launcher::commands::ExternalCommand> {
         (self.origin == LauncherResultOrigin::Saved)
             .then(|| external_launch::saved_document(&self.action))
@@ -1785,6 +1791,7 @@ fn supported_saved_search_actions(actions: Vec<Action>) -> Vec<Action> {
                 }
                 external_launch::ordinary_external(&command).is_some()
                     || external_launch::document_external(action, &command).is_some()
+                    || external_launch::url_external(action, &command).is_some()
                     || classify_installed_search_command(&command, ActivationSource::Click).is_ok()
             })
         })
@@ -7493,6 +7500,11 @@ impl RootWindow {
                 window,
                 cx,
             );
+            return;
+        }
+        if let Some(command) = result.saved_url() {
+            self.start_external_launch(result.action, command, query, source,
+                Some(external_launch::AssociationKind::SavedUrl), window, cx);
             return;
         }
         if let Some(command) = result.saved_document() {
@@ -14019,6 +14031,26 @@ mod tests {
         let mut invalid = action;
         invalid.args = Some("extra".into());
         assert!(super::external_launch::saved_shortcut(&invalid).is_none());
+    }
+
+    #[test]
+    fn saved_url_projection_requires_saved_origin_and_current_result() {
+        use super::LauncherResultOrigin;
+        let action = saved_action("Remote", "https://example.com/a.exe?X=%2f", Some(" "));
+        let catalog = completion_catalog(vec![action.clone()], true, None);
+        let rows = catalog.compose("app Remote", vec![("provider".into(), action.clone())], false);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].origin, LauncherResultOrigin::Saved);
+        assert!(rows[0].saved_url().is_some());
+        assert!(rows[0].saved_external().is_none());
+        assert!(rows[1].saved_url().is_none());
+        let mut results = LauncherSearchResults::default();
+        results.replace("app Remote".into(), rows, ResolvedQueryResultsLayout::default(), 2);
+        let generation = results.generation;
+        assert!(results.resolve_result(generation, 0, "app Remote").unwrap().saved_url().is_some());
+        assert!(results.resolve_result(generation, 0, "changed").is_none());
+        results.replace("other".into(), Vec::new(), ResolvedQueryResultsLayout::default(), 2);
+        assert!(results.resolve_result(generation, 0, "app Remote").is_none());
     }
 
     #[test]

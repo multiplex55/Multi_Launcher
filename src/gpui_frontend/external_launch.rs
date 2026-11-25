@@ -51,6 +51,74 @@ pub(super) fn shortcut_external<'a>(
     .then_some(command)
 }
 
+pub(super) fn saved_url(action: &Action) -> Option<ExternalCommand> {
+    let command = multi_launcher::commands::parse_action(action).ok()?;
+    url_external(action, &command).cloned()
+}
+
+pub(super) fn url_external<'a>(
+    action: &Action,
+    command: &'a multi_launcher::commands::Command,
+) -> Option<&'a ExternalCommand> {
+    let multi_launcher::commands::Command::External(command) = command else {
+        return None;
+    };
+    (action.args.as_deref().is_none_or(|args| args.trim().is_empty())
+        && command.namespace.is_none()
+        && command.target == action.action
+        && command.args.as_deref().is_none_or(|args| args.trim().is_empty())
+        && parse_http_target(&command.target, true).is_some())
+        .then_some(command)
+}
+
+fn parse_http_target(raw: &str, strict: bool) -> Option<url::Url> {
+    let authority = raw
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        .then(|| &raw[7..])
+        .or_else(|| {
+            raw.get(..8)
+                .filter(|prefix| prefix.eq_ignore_ascii_case("https://"))
+                .map(|_| &raw[8..])
+        });
+    if raw.trim() != raw
+        || raw.chars().any(char::is_control)
+        || !authority.is_some_and(|rest| {
+            !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\')
+        })
+    {
+        return None;
+    }
+    if strict {
+        if raw.chars().any(|ch| ch.is_whitespace() || ch == '\\') {
+            return None;
+        }
+        let bytes = raw.as_bytes();
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'%'
+                && !(index + 2 < bytes.len()
+                    && bytes[index + 1].is_ascii_hexdigit()
+                    && bytes[index + 2].is_ascii_hexdigit())
+            {
+                return None;
+            }
+        }
+    }
+    let violation = std::cell::Cell::new(false);
+    let mark_violation = |_| violation.set(true);
+    let parsed = url::Url::options()
+        .syntax_violation_callback(strict.then_some(&mark_violation as &dyn Fn(_)))
+        .parse(raw)
+        .ok()?;
+    if violation.get()
+        || !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+    {
+        return None;
+    }
+    Some(parsed)
+}
+
 /// Admit only saved document paths whose external arguments are absent or blank.
 pub(super) fn saved_document(action: &Action) -> Option<ExternalCommand> {
     let command = multi_launcher::commands::parse_action(action).ok()?;
@@ -250,6 +318,7 @@ pub(super) enum AssociationKind {
     Folder,
     Bookmark,
     SavedDocument,
+    SavedUrl,
     #[cfg(windows)]
     SavedShortcut,
     Web(super::search_providers::WebProvider),
@@ -300,26 +369,11 @@ fn association_command(kind: AssociationKind, action: &Action) -> Option<Externa
         AssociationKind::SavedDocument => false,
         #[cfg(windows)]
         AssociationKind::SavedShortcut => false,
+        AssociationKind::SavedUrl => false,
         AssociationKind::Bookmark | AssociationKind::Web(_) => {
-            let raw = command.target.as_str();
-            let authority = raw
-                .get(..7)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
-                .then(|| &raw[7..])
-                .or_else(|| {
-                    raw.get(..8)
-                        .filter(|prefix| prefix.eq_ignore_ascii_case("https://"))
-                        .map(|_| &raw[8..])
-                });
-            raw.trim() == raw
-                && !raw.chars().any(char::is_control)
-                && authority.is_some_and(|rest| {
-                    !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\')
-                })
-                && url::Url::parse(raw).is_ok_and(|url| {
-                    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
-                        && (!matches!(kind, AssociationKind::Web(_)) || url.scheme() == "https")
-                })
+            parse_http_target(&command.target, false).is_some_and(|url| {
+                !matches!(kind, AssociationKind::Web(_)) || url.scheme() == "https"
+            })
         }
     };
     valid.then_some(command)
@@ -338,6 +392,11 @@ fn checked_association(
             "Invalid saved shortcut target"
         );
         return multi_launcher::actions::exec::launch_shortcut(&command.target);
+    }
+    if kind == AssociationKind::SavedUrl {
+        return checked_saved_url_with(action, command, |target| {
+            multi_launcher::actions::exec::launch_association(target)
+        });
     }
     if kind == AssociationKind::SavedDocument {
         return checked_document_association_with(action, command, |target| {
@@ -381,7 +440,7 @@ fn checked_association_with(
                 action,
             )?
         }
-        AssociationKind::Web(_) | AssociationKind::SavedDocument => false,
+        AssociationKind::Web(_) | AssociationKind::SavedDocument | AssociationKind::SavedUrl => false,
         #[cfg(windows)]
         AssociationKind::SavedShortcut => false,
     };
@@ -422,6 +481,15 @@ fn checked_document_association_with(
             anyhow::ensure!(metadata.is_file(), "Document target is not a file");
         }
     }
+    launch(&command.target)
+}
+
+fn checked_saved_url_with(
+    action: &Action,
+    command: &ExternalCommand,
+    launch: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(saved_url(action).as_ref() == Some(command), "Invalid saved URL");
     launch(&command.target)
 }
 
@@ -969,6 +1037,30 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn saved_url_association_forwards_literal_and_rejects_invalid_shapes() {
+        use super::{checked_saved_url_with, saved_url};
+        let mut action = Action {
+            label: "URL".into(), desc: String::new(),
+            action: "HTTPS://Example.COM:443/a.exe?q=Mixed%2fValue#Part".into(),
+            args: Some(" \t".into()),
+        };
+        let command = saved_url(&action).expect("valid literal URL");
+        let mut calls = Vec::new();
+        checked_saved_url_with(&action, &command, |target| { calls.push(target.to_owned()); Ok(()) }).unwrap();
+        assert_eq!(calls, [action.action.clone()]);
+        action.args = Some("--extra".into());
+        assert!(saved_url(&action).is_none());
+        assert!(checked_saved_url_with(&action, &command, |_| panic!("invalid URL launched")).is_err());
+        action.args = None;
+        for invalid in ["https:example.com", "https:///example.com", "https://", "https://example.com/a b", "https://example.com/\\path", "https://example.com/%", "https://example.com/%2X", "https://example.com/a\"b", "https://user@@example.com/", "ftp://example.com", "https://example.com/\n"] {
+            action.action = invalid.into();
+            assert!(saved_url(&action).is_none(), "{invalid:?}");
+        }
+        action.action = "http://127.0.0.1:8123/a%2Fb".into();
+        assert!(saved_url(&action).is_some());
     }
 
     #[test]
