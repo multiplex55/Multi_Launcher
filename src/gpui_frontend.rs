@@ -9659,6 +9659,7 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        if let Some(view) = &self.file_search { view.read(cx).retire_explorer(); }
         self.window_search.retire();
         self.file_search_probe.retire();
         self.indexed_applications.retire();
@@ -12538,7 +12539,8 @@ pub(crate) fn run_foundation_window(
                 };
                 match blocker {
                     None => {
-                        let _ = root_for_window_close.update(app, |root, _| {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.window_search.retire(); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });
@@ -12565,7 +12567,8 @@ pub(crate) fn run_foundation_window(
                             })
                             .unwrap_or(false);
                         if close_now {
-                            let _ = root_for_window_close.update(app, |root, _| {
+                            let _ = root_for_window_close.update(app, |root, cx| {
+                            if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.window_search.retire(); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });

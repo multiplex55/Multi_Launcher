@@ -26,6 +26,16 @@ use egui_extras::{Column, TableBuilder};
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[derive(Debug, Clone)]
+struct ExplorerJob {
+    receiver: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Result<(), String>>>>,
+    current: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PartialEq for ExplorerJob {
+    fn eq(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.receiver, &other.receiver) }
+}
+
 const DEFAULT_WINDOW_SIZE: egui::Vec2 = egui::vec2(760.0, 560.0);
 const ACTIVE_SEARCH_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -383,6 +393,7 @@ pub enum FileSearchUiCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileSearchDialogState {
     host_actions: Option<Vec<FileSearchHostAction>>,
+    explorer_job: Option<ExplorerJob>,
     pub open: bool,
     pub selected_mode: FileSearchMode,
     pub selected_scope: FileSearchScopeMode,
@@ -554,6 +565,7 @@ impl Default for FileSearchDialogState {
     fn default() -> Self {
         Self {
             host_actions: None,
+            explorer_job: None,
             open: false,
             selected_mode: FileSearchMode::Filename,
             selected_scope: FileSearchScopeMode::Global,
@@ -829,6 +841,7 @@ impl FileSearchDialogState {
     }
 
     pub fn open(&mut self) {
+        if !self.open { self.retire_explorer_job(); }
         self.open = true;
         self.request_search_focus = true;
     }
@@ -899,7 +912,7 @@ impl FileSearchDialogState {
     }
 
     pub fn requires_repaint_polling(&self) -> bool {
-        self.current_status == SearchStatus::Running
+        self.current_status == SearchStatus::Running || self.explorer_job.is_some()
     }
 
     pub fn consume_immediate_repaint_request(&mut self) -> bool {
@@ -973,12 +986,13 @@ impl FileSearchDialogState {
         let action = handle_escape_action(self.current_status);
         match action {
             FileSearchEscapeAction::Cancel => self.cancel_search(coordinator),
-            FileSearchEscapeAction::Close => self.open = false,
+            FileSearchEscapeAction::Close => { self.retire_explorer_job(); self.open = false; }
         }
         action
     }
 
     pub fn drain_events(&mut self, coordinator: &mut SearchCoordinator) -> bool {
+        self.poll_explorer_job();
         let mut observed_terminal_event = false;
         for event in coordinator.drain_current_events() {
             observed_terminal_event |= self.apply_event(event);
@@ -1191,6 +1205,7 @@ impl FileSearchDialogState {
     }
 
     pub fn clear_results_and_selection(&mut self) {
+        self.retire_explorer_job();
         self.invalidate_jump_mode_results();
         self.results.clear();
         self.result_rows.clear();
@@ -1566,6 +1581,9 @@ impl FileSearchDialogState {
                 self.persisted_window_size = resp.response.rect.size();
             }
             commands = resp.inner.unwrap_or_default();
+        }
+        if committed_owner_pass && !ctx.will_discard() && open_before && !open {
+            self.retire_explorer_job();
         }
         self.open = if navigation_owner { open } else { open_before };
         commands
@@ -3015,7 +3033,7 @@ impl FileSearchDialogState {
         match &action {
             OpenSelectedFileSearchResultAction::Explorer(action) => {
                 let action = action.clone();
-                self.run_result_action("open", || execute_explorer_action(action));
+                self.execute_file_search_explorer(action, "open");
             }
             OpenSelectedFileSearchResultAction::PreviewContent { .. } => {}
         }
@@ -3411,9 +3429,10 @@ impl FileSearchDialogState {
                 } else {
                     "reveal"
                 };
-                self.run_result_action(label, || {
-                    execute_explorer_action(resolve_explorer_action(&path)?)
-                });
+                match resolve_explorer_action(&path) {
+                    Ok(action) => self.execute_file_search_explorer(action, label),
+                    Err(error) => self.warning_error_message = Some(format!("Failed to {label}: {error}")),
+                }
             }
             Action::InspectFileUsers => commands.push(FileSearchUiCommand::InspectFileUsers(path)),
             Action::AnalyzeFolderSize => commands.push(FileSearchUiCommand::OpenFolderSize(path)),
@@ -3470,6 +3489,58 @@ impl FileSearchDialogState {
         }
     }
 
+    fn execute_file_search_explorer(&mut self, action: ExplorerAction, label: &str) {
+        let ExplorerAction::RevealFile(path) = action else {
+            self.run_result_action(label, || execute_explorer_action(action));
+            return;
+        };
+        if self.explorer_job.is_some() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let current = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_current = current.clone();
+        let label = label.to_owned();
+        let spawned = std::thread::Builder::new().name("file-search-explorer".into()).spawn(move || {
+            let result = crate::file_search::actions::reveal_file_search_path_if_current(&path, || worker_current.load(std::sync::atomic::Ordering::Acquire))
+                .map_err(|error| format!("Failed to {label}: {error:#}"));
+            let _ = sender.send(result);
+        });
+        match spawned {
+            Ok(_) => {
+                self.explorer_job = Some(ExplorerJob { receiver: std::sync::Arc::new(std::sync::Mutex::new(receiver)), current });
+                self.request_immediate_repaint = true;
+            }
+            Err(error) => self.warning_error_message = Some(format!("Could not start Explorer request: {error}")),
+        }
+    }
+
+    pub(super) fn retire_explorer_job(&self) {
+        if let Some(job) = &self.explorer_job {
+            job.current.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn poll_explorer_job(&mut self) {
+        let Some(job) = &self.explorer_job else { return; };
+        let current = job.current.load(std::sync::atomic::Ordering::Acquire);
+        let result = match job.receiver.lock() {
+            Ok(receiver) => receiver.try_recv(),
+            Err(_) => Err(std::sync::mpsc::TryRecvError::Disconnected),
+        };
+        match result {
+            Ok(result) => {
+                self.explorer_job = None;
+                if current { if let Err(error) = result { self.warning_error_message = Some(error); } }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            _ => {
+                self.explorer_job = None;
+                if current { self.warning_error_message = Some("Explorer request stopped unexpectedly.".into()); }
+            }
+        }
+    }
+
     fn start_nested_search(
         &mut self,
         path: &std::path::Path,
@@ -3497,6 +3568,37 @@ impl FileSearchDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explorer_job_polls_once_and_reports_worker_error() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = FileSearchDialogState::default();
+        state.explorer_job = Some(ExplorerJob { receiver: std::sync::Arc::new(std::sync::Mutex::new(receiver)), current: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)) });
+        assert!(state.requires_repaint_polling());
+        state.poll_explorer_job();
+        assert!(state.explorer_job.is_some());
+        sender.send(Err("Failed to reveal: fixture".into())).unwrap();
+        state.poll_explorer_job();
+        assert!(state.explorer_job.is_none());
+        assert_eq!(state.warning_error_message.as_deref(), Some("Failed to reveal: fixture"));
+        assert!(!state.requires_repaint_polling());
+    }
+
+    #[test]
+    fn retired_explorer_job_keeps_slot_and_cannot_replace_warning() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let current = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = FileSearchDialogState::default();
+        state.explorer_job = Some(ExplorerJob { receiver: std::sync::Arc::new(std::sync::Mutex::new(receiver)), current: current.clone() });
+        state.warning_error_message = Some("new warning".into());
+        state.retire_explorer_job();
+        assert!(!current.load(std::sync::atomic::Ordering::Acquire));
+        assert!(state.explorer_job.is_some());
+        sender.send(Err("old error".into())).unwrap();
+        state.poll_explorer_job();
+        assert!(state.explorer_job.is_none());
+        assert_eq!(state.warning_error_message.as_deref(), Some("new warning"));
+    }
     use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
     use crate::file_search::model::{
         ContentFileResult, ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,

@@ -334,10 +334,100 @@ pub fn open_path(path: &Path) -> anyhow::Result<()> {
 }
 
 pub fn reveal_path(path: &Path) -> anyhow::Result<()> {
+    reveal_path_if_current(path, || true)
+}
+
+/// Preserve the selected path identity while preparing an ordinary, checked local target.
+#[cfg(windows)]
+fn ordinary_explorer_target(path: &Path) -> anyhow::Result<PathBuf> {
+    use std::path::{Component, Prefix};
+    let target = match path.components().next() {
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_)) => {
+            let raw = path.to_str().ok_or_else(|| anyhow!("Invalid local target"))?;
+            PathBuf::from(raw.strip_prefix(r"\\?\").ok_or_else(|| anyhow!("Invalid local target"))?)
+        }
+        _ => path.to_path_buf(),
+    };
+    anyhow::ensure!(crate::actions::exec::ordinary_local_path_is_admissible(&target), "Invalid local target");
+    Ok(target)
+}
+
+#[cfg(windows)]
+pub fn checked_explorer_target(path: &Path, directory: bool) -> anyhow::Result<PathBuf> {
+    let target = ordinary_explorer_target(path)?;
+    if directory {
+        crate::actions::exec::checked_local_directory(&target)?;
+    } else {
+        crate::actions::exec::checked_local_file(&target)?;
+    }
+    Ok(target)
+}
+
+#[cfg(windows)]
+fn checked_selection_effect(path: &Path, is_current: impl FnOnce() -> bool, effect: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    checked_explorer_target(path, false)?;
+    anyhow::ensure!(is_current(), "File Search selection is no longer current");
+    effect()
+}
+
+/// Select one checked ordinary local file using its absolute Shell PIDL.
+#[cfg(windows)]
+pub fn reveal_checked_file_if_current(path: &Path, is_current: impl FnOnce() -> bool) -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{core::PCWSTR, Win32::{Foundation::RPC_E_CHANGED_MODE, System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED}, UI::Shell::{Common::ITEMIDLIST, SHOpenFolderAndSelectItems, SHParseDisplayName}}};
+
+    struct Pidl(*mut ITEMIDLIST);
+    impl Drop for Pidl {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: the Shell allocated this PIDL and this guard owns it.
+                unsafe { CoTaskMemFree(Some(self.0.cast_const().cast())) };
+            }
+        }
+    }
+    struct Apartment;
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            // SAFETY: initialization succeeded on this thread and is balanced here.
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    let target = checked_explorer_target(path, false)?;
+    let mut wide: Vec<u16> = target.as_os_str().encode_wide().collect();
+    anyhow::ensure!(!wide.contains(&0), "Invalid local target");
+    wide.push(0);
+    // SAFETY: each successful initialization is balanced on this thread.
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if initialized == RPC_E_CHANGED_MODE {
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()
+            .context("initialize COM for Explorer selection")?;
+    } else {
+        initialized.ok().context("initialize COM for Explorer selection")?;
+    }
+    let _apartment = Apartment;
+    let mut pidl = Pidl(std::ptr::null_mut());
+    // SAFETY: the path is NUL-terminated and the guard owns any returned PIDL.
+    unsafe { SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl.0, 0, None) }
+        .with_context(|| format!("resolve {} in Explorer", path.display()))?;
+    anyhow::ensure!(!pidl.0.is_null(), "Explorer returned an empty item identifier");
+    checked_selection_effect(&target, is_current, || {
+        // SAFETY: this is the full absolute PIDL; no relative children are supplied.
+        unsafe { SHOpenFolderAndSelectItems(pidl.0.cast_const(), None, 0) }
+            .with_context(|| format!("reveal {} in Explorer", path.display()))
+    })
+}
+
+pub fn reveal_path_if_current(path: &Path, is_current: impl FnOnce() -> bool) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     {
+        use std::path::{Component, Prefix};
+        let target = if matches!(path.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))) {
+            checked_explorer_target(path, false).unwrap_or_else(|_| path.to_path_buf())
+        } else { path.to_path_buf() };
+        anyhow::ensure!(is_current(), "File Search selection is no longer current");
         let status = Command::new("explorer")
-            .args(windows_reveal_args(path))
+            .args(windows_reveal_args(&target))
             .spawn()
             .with_context(|| format!("reveal {} in Explorer", path.display()))?;
         let _ = status;
@@ -346,8 +436,21 @@ pub fn reveal_path(path: &Path) -> anyhow::Result<()> {
     #[cfg(not(target_os = "windows"))]
     {
         let target = path.parent().unwrap_or(path);
+        anyhow::ensure!(is_current(), "File Search selection is no longer current");
         open::that(target).with_context(|| format!("reveal {}", path.display()))
     }
+}
+
+/// File Search uses checked Shell selection for ordinary local files, while
+/// retaining the legacy opener for other supported filesystem targets.
+pub fn reveal_file_search_path_if_current(path: &Path, is_current: impl Fn() -> bool) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if checked_explorer_target(path, false).is_ok() {
+        return reveal_checked_file_if_current(path, is_current);
+    }
+    let metadata = std::fs::metadata(path).with_context(|| format!("{} is missing or inaccessible", path.display()))?;
+    anyhow::ensure!(metadata.is_file(), "{} is not a file", path.display());
+    reveal_path_if_current(path, || std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) && is_current())
 }
 
 pub fn open_terminal_in_directory(dir: &Path) -> anyhow::Result<()> {
@@ -379,6 +482,75 @@ pub fn legacy_open_terminal_in_directory(dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_search_reveal_rejects_missing_and_directory_before_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let invoked = std::cell::Cell::new(false);
+        assert!(reveal_file_search_path_if_current(&temp.path().join("missing"), || { invoked.set(true); true }).is_err());
+        assert!(reveal_file_search_path_if_current(temp.path(), || { invoked.set(true); true }).is_err());
+        assert!(!invoked.get());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_explorer_projects_verbatim_file_and_rejects_stale_or_wrong_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("Directory");
+        std::fs::create_dir(&folder).unwrap();
+        let file = folder.join("Café Marker.txt");
+        std::fs::write(&file, b"fixture").unwrap();
+        let raw = file.canonicalize().unwrap();
+        let projected = checked_explorer_target(&raw, false).unwrap();
+        assert_eq!(projected, file);
+        assert_ne!(raw, projected);
+        let args = windows_reveal_args(&projected);
+        let mut expected = std::ffi::OsString::from("/select,");
+        expected.push(file.as_os_str());
+        assert_eq!(args, vec![expected]);
+        assert!(checked_explorer_target(&raw, true).is_err());
+        assert!(checked_explorer_target(&folder, false).is_err());
+        assert!(reveal_path_if_current(&raw, || false).is_err());
+        std::fs::remove_file(&file).unwrap();
+        assert!(checked_explorer_target(&raw, false).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_explorer_rejects_reparse_points_when_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file.txt");
+        let link = temp.path().join("link.txt");
+        std::fs::write(&file, b"fixture").unwrap();
+        if std::os::windows::fs::symlink_file(&file, &link).is_ok() {
+            assert!(checked_explorer_target(&link, false).is_err());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_selection_checks_current_and_file_again_before_effect() {
+        use std::cell::Cell;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("Café selection.txt");
+        std::fs::write(&file, b"fixture").unwrap();
+        let called = Cell::new(false);
+        let checks = Cell::new(0);
+        let error = checked_selection_effect(&file, || { checks.set(checks.get() + 1); false }, || { called.set(true); Ok(()) }).unwrap_err();
+        assert_eq!(error.to_string(), "File Search selection is no longer current");
+        assert_eq!(checks.get(), 1);
+        checks.set(0);
+        let error = reveal_checked_file_if_current(&file, || { checks.set(checks.get() + 1); false }).unwrap_err();
+        assert_eq!(error.to_string(), "File Search selection is no longer current");
+        assert_eq!(checks.get(), 1);
+        assert!(!called.get());
+        checked_selection_effect(&file, || true, || { called.set(true); Ok(()) }).unwrap();
+        assert!(called.replace(false));
+        assert_eq!(checked_selection_effect(&file, || true, || Err(anyhow!("selection failed"))).unwrap_err().to_string(), "selection failed");
+        std::fs::remove_file(&file).unwrap();
+        assert!(checked_selection_effect(&file, || true, || { called.set(true); Ok(()) }).is_err());
+        assert!(!called.get());
+    }
 
     #[test]
     fn valid_request_payload_round_trips() {

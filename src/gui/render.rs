@@ -17583,6 +17583,9 @@ impl LauncherApp {
             let ready = overlay.unwrap_or(true)
                 && self.recording_controller.shutdown_ready()
                 && !self.recording_dialog.target_refresh_pending_for_shutdown();
+            if ready {
+                self.file_search_dialog.retire_explorer_job();
+            }
             if ready && requested {
                 if let Some(protocol) = self.reverse_restart_protocol.as_ref()
                     && matches!(
@@ -17803,6 +17806,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.file_search_dialog.retire_explorer_job();
         let restart_attempt = self.reverse_restart_protocol.as_ref().and_then(|protocol| {
             match protocol.state() {
                 super::reverse_restart::ReverseRestartState::RootCloseAccepted(attempt) => {

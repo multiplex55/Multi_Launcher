@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G07 checked Filename result Open in Explorer passed 12 focused tests and matched Windows replay at 1516 × 937. Both frontends selected the exact Unicode file despite a same-named decoy in another folder and opened the same directory. GPUI refused the selected file after it was replaced with a directory. [Explorer evidence](VALIDATION_LOG.md#g07-checked-filename-result-open-in-explorer)
+
 G07 now accepts quoted Directory Filename commands in launcher Search with Exact Match. At 1516 × 937, both frontends found the same two Unicode filenames and delivered the selected file to Hash for the same SHA-256. GPUI repeated the command after closing File Search and refused a directory replaced after publication. [Typed File Search evidence](VALIDATION_LOG.md#g07-and-g04-typed-directory-filename-search)
 
 GPUI Settings can reload the application index live. Windows verified same-config discovery, a successful launch from the refreshed index, replacement roots, malformed and invalid configurations, and clearing both indexed views while keeping the saved action editable. The same 1516 × 937 egui build showed the replacement stock catalog. [Live index evidence](VALIDATION_LOG.md#g02-g05-and-g06-live-application-index-reload)
@@ -53,7 +55,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue checked File Search result Open and Reveal. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
+| Current next action | Honor the saved Hash pin in GPUI Docked and Pop Out. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

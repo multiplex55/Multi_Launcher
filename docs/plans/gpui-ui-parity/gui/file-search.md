@@ -22,7 +22,7 @@ G07 owns `file-search`, also the canonical remembered presentation and geometry 
 
 Use `file_search::query::tests` and the typed handler coverage for command changes. For host and handoff, select `hosted_file_search_row_action_only_dispatches_for_its_current_search`, `file_search_native_children_inherit_and_keep_live_workers`, `hash_host_same_file_keeps_worker_and_stale_actions_cannot_mutate`, and the actual File Search keyboard test where applicable.
 
-On Windows, search a single disposable file through the quoted Directory route and inspect its result/refinement. Exercise a right-click on that exact filename and open Calculate hash. Verify the chosen path, fresh or retained session, and known digest for exact file bytes. The available desktop tool reached the result but reported unavailable coordinate geometry for the context menu. The actual native handoff still needs pointer access.
+On Windows, search disposable files through the quoted Directory route and inspect their result/refinement. Exercise a right-click on an exact filename and open Calculate hash. Verify the chosen path, fresh or retained session, and known digest for exact file bytes. The matched typed replay exercised the native egui context-menu handoff. [Matched typed replay](../VALIDATION_LOG.md#g07-and-g04-typed-directory-filename-search)
 
 ## First GPUI selected-file checkpoint
 
@@ -37,3 +37,7 @@ The focused batch and Windows replay verified the docked File Search handoff to 
 ## Typed Directory Filename Search
 
 `fs file "Café Marker" "C:\Owned Corpus"` and the existing Filename aliases can start a search in the retained GPUI pane. The provider checks an explicit local directory off the UI thread and retains only the current query and action. The visible pane uses the existing request builder and coordinator and checks the directory again before submitting. The shared Exact Match scorer retains the stock typed action when the decoded term and root match, including quoted terms. [Focused and Windows evidence](../VALIDATION_LOG.md#g07-and-g04-typed-directory-filename-search)
+
+## Checked Filename result Open in Explorer
+
+GPUI can open the selected ordinary local directory or reveal the exact selected ordinary local file. It rechecks the search identity, row and file type, launcher ownership, foreground and request authority. File reveals use shared Windows Shell selection from a worker. Egui File Search keeps its toolbar, row activation and context routes, and can still open legacy path forms through the existing adapter. Both File Search hosts revoke pending selections when their source retires. Calculate hash still admits only a file. The matched Windows replay at 1516 × 937 verified an exact Unicode filename with a same-name decoy, a directory and an object replaced after publication. [Windows evidence](../VALIDATION_LOG.md#g07-checked-filename-result-open-in-explorer)

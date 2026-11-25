@@ -1031,3 +1031,7 @@ The GPUI Settings action reads the committed roots and cap and rescans through t
 ## G07 and G04 typed Directory Filename Search
 
 The launcher admits a current stock Filename Start action for a quoted term and explicit local directory. GPUI populates and runs the retained File Search pane through its manual request path, after checking the directory again. Twelve focused tests passed. At 1516 × 937 both frontends accepted the same fully quoted Exact Match query, returned the same two filenames and handed the exact Alpha file to Hash. GPUI also verified repeat activation and refused a published directory replaced with a file. Continue checked File Search result Open and Reveal. Known-duration F2 delivery and mixed DPI remain open. [Exact receipts](VALIDATION_LOG.md#g07-and-g04-typed-directory-filename-search)
+
+## G07 checked Filename result Open in Explorer
+
+GPUI Open in Explorer and egui Reveal use shared Windows Shell selection for ordinary local files. Both frontends at 1516 × 937 selected the exact Unicode file in its parent and opened the exact directory. GPUI kept Hash file-only and refused a published file replaced with a directory. The fixture was restored and both processes retired. Independent review and all 12 focused tests passed. Continue G04 saved Hash pin behavior in the existing Docked and Pop Out hosts. [Exact receipts](VALIDATION_LOG.md#g07-checked-filename-result-open-in-explorer)

@@ -1,6 +1,6 @@
 # G07 — File Search, results, previews, and diagnostics
 
-**Status:** In implementation. **Owner:** G07 implementer with the shared search-service owner. The first selected-file checkpoint serves the G04 Hash pilot and begins the shared request boundary. [Current checkpoint](../gui/file-search.md#first-gpui-selected-file-checkpoint)
+**Status:** In implementation. **Owner:** G07 implementer with the shared search-service owner. The current scope covers quoted Directory Filename search, checked delivery to the G04 Hash pilot and checked file and directory Explorer actions. [File Search record](../gui/file-search.md)
 
 ## Objective and dependencies
 

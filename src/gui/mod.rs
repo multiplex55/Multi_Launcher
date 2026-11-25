@@ -6126,6 +6126,7 @@ impl LauncherApp {
                 if self.file_search_dialog.open {
                     self.file_search_host.remember_current(&self.egui_ctx);
                 }
+                self.file_search_dialog.retire_explorer_job();
                 self.file_search_dialog.open = false;
                 self.file_search_host.retire(&self.egui_ctx);
                 self.panel_states.file_search_dialog = false;

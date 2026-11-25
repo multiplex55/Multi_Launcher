@@ -529,6 +529,7 @@ impl FileSearchWindowHost {
         let mut show_root = false;
         let mut commands = Vec::new();
         if close {
+            dialog.retire_explorer_job();
             dialog.open = false;
         } else {
             if let Some(actions) = frame.actions.take() {
@@ -542,6 +543,7 @@ impl FileSearchWindowHost {
                     && let Some(popout) = request
                     && popout != self.is_popped_out()
                 {
+                    dialog.retire_explorer_job();
                     if !popout {
                         self.close_viewport(ctx);
                     }

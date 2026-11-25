@@ -40,6 +40,7 @@ pub(super) struct SelectionReceipt {
     pub generation: u64,
     pub index: usize,
     pub path: PathBuf,
+    pub kind: FileKind,
 }
 
 pub(super) struct FileSearchView {
@@ -52,6 +53,9 @@ pub(super) struct FileSearchView {
     directory: Entity<InputState>,
     focus: FocusHandle,
     calculate_focus: FocusHandle,
+    explorer_focus: FocusHandle,
+    explorer_authority: Arc<AtomicBool>,
+    explorer_pending: bool,
     escape_waiting_for_release: bool,
     generation: u64,
     active: Option<SearchId>,
@@ -77,6 +81,7 @@ impl FileSearchView {
         let term = cx.new(|cx| InputState::new(window, cx).placeholder("Filename to find"));
         let directory = cx.new(|cx| InputState::new(window, cx).placeholder("Directory to search"));
         let focus = cx.focus_handle();
+        let explorer_focus = cx.focus_handle();
         let mut subscriptions = vec![
             cx.on_focus_out(&focus, window, |this, _, _, _| {
                 this.escape_waiting_for_release = false;
@@ -84,7 +89,11 @@ impl FileSearchView {
             cx.observe_window_activation(window, |this, window, _| {
                 if !window.is_window_active() {
                     this.escape_waiting_for_release = false;
+                    this.explorer_authority.store(false, Ordering::Release);
                 }
+            }),
+            cx.on_blur(&explorer_focus, window, |this, _, _| {
+                this.explorer_authority.store(false, Ordering::Release);
             }),
         ];
         for input in [term.clone(), directory.clone()] {
@@ -115,6 +124,9 @@ impl FileSearchView {
             directory,
             focus,
             calculate_focus: cx.focus_handle(),
+            explorer_focus,
+            explorer_authority: Arc::new(AtomicBool::new(false)),
+            explorer_pending: false,
             escape_waiting_for_release: false,
             generation: 0,
             active: None,
@@ -131,6 +143,7 @@ impl FileSearchView {
     }
 
     fn invalidate(&mut self, message: &str) {
+        self.explorer_authority.store(false, Ordering::Release);
         self.generation = self.generation.wrapping_add(1).max(1);
         if self.active.take().is_some() {
             self.coordinator.cancel_and_retire();
@@ -160,6 +173,10 @@ impl FileSearchView {
 
     pub(super) fn hash_action_is_focused(&self, window: &Window) -> bool {
         self.calculate_focus.is_focused(window)
+    }
+
+    pub(super) fn retire_explorer(&self) {
+        self.explorer_authority.store(false, Ordering::Release);
     }
 
     pub fn shutdown(&mut self) {
@@ -194,12 +211,13 @@ impl FileSearchView {
             return None;
         }
         let row = self.results.get(index)?;
-        eligible_file_row(row, &row.path).then(|| SelectionReceipt {
+        matches!(row.kind, FileKind::File | FileKind::Directory).then(|| SelectionReceipt {
             owner,
             search,
             generation: self.generation,
             index,
             path: row.path.clone(),
+            kind: row.kind,
         })
     }
 
@@ -214,7 +232,7 @@ impl FileSearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.receipt_is_current(receipt, owner) {
+        if receipt.kind != FileKind::File || !self.receipt_is_current(receipt, owner) {
             return false;
         }
         self.calculate_focus.focus(window, cx);
@@ -234,7 +252,8 @@ impl FileSearchView {
     ) {
         if !window.is_window_active()
             || self.admission.is_fenced()
-            || !self.receipt_is_current(&receipt, cx.entity_id())
+            || receipt.kind != FileKind::File || !self.receipt_is_current(&receipt, cx.entity_id())
+            || !self.results.get(receipt.index).is_some_and(|row| eligible_file_row(row, &receipt.path))
         {
             return;
         }
@@ -246,6 +265,62 @@ impl FileSearchView {
                 root.open_hash_from_file_search(source, receipt, window, cx)
             });
         });
+    }
+
+    fn open_selected_in_explorer(&mut self, receipt: SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        if self.explorer_pending || !window.is_window_active() || self.admission.is_fenced()
+            || !self.receipt_is_current(&receipt, cx.entity_id()) { return; }
+        self.explorer_focus.focus(window, cx);
+        let root = self.root.clone();
+        let source = cx.entity().downgrade();
+        window.defer(cx, move |window, app| {
+            let _ = root.update(app, |root, cx| root.open_file_search_explorer(source, receipt, window, cx));
+        });
+    }
+
+    fn begin_explorer(&mut self, receipt: SelectionReceipt, visibility: RootVisibility, revision: u64,
+        native: Option<NativeWindow>, permit: EffectPermit, cx: &mut Context<Self>) {
+        if self.explorer_pending { return; }
+        self.explorer_pending = true;
+        let authority = Arc::new(AtomicBool::new(true));
+        self.explorer_authority = authority.clone();
+        let admission = self.admission.clone();
+        let worker_authority = authority.clone();
+        let task = cx.background_executor().spawn(async move {
+            let current = || {
+                worker_authority.load(Ordering::Acquire)
+                    && !admission.is_fenced() && visibility.is_current(revision, true)
+                    && native.is_some_and(|native| native_window_is_valid(native)
+                        && current_foreground_identity() == Some(native.identity))
+            };
+            #[cfg(windows)]
+            let result = (|| -> anyhow::Result<()> {
+                let directory = receipt.kind == FileKind::Directory;
+                anyhow::ensure!(directory || receipt.kind == FileKind::File, "Unsupported result type");
+                if directory {
+                    let target = multi_launcher::file_search::actions::checked_explorer_target(&receipt.path, true)?;
+                    multi_launcher::actions::exec::launch_association_if_current(target.as_os_str(), current)
+                } else {
+                    multi_launcher::file_search::actions::reveal_checked_file_if_current(&receipt.path, current)
+                }
+            })();
+            #[cfg(not(windows))]
+            let result: anyhow::Result<()> = { let _ = current; Err(anyhow::anyhow!("Explorer requires Windows")) };
+            drop(permit);
+            result
+        });
+        let owner = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = owner.update(cx, |this, cx| {
+                this.explorer_pending = false;
+                if authority.load(Ordering::Acquire) {
+                    this.status = match result { Ok(()) => "Opened in Explorer.".into(), Err(error) => format!("Could not open in Explorer: {error:#}") };
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
     }
 
     fn running(&self) -> bool {
@@ -281,6 +356,7 @@ impl FileSearchView {
     }
 
     fn set_page(&mut self, page: usize) {
+        self.explorer_authority.store(false, Ordering::Release);
         self.page = page;
         self.selected = None;
         self.results_scroll.set_offset(point(px(0.0), px(0.0)));
@@ -459,6 +535,7 @@ impl Render for FileSearchView {
         let generation = self.generation;
         let active = self.active;
         let selected_receipt = self.selected_receipt(cx.entity_id());
+        let hash_receipt = selected_receipt.clone().filter(|receipt| receipt.kind == FileKind::File);
         let selected_path = selected_receipt
             .as_ref()
             .map(|receipt| receipt.path.display().to_string());
@@ -487,6 +564,7 @@ impl Render for FileSearchView {
                         index,
                         this.visible_rows(),
                     ) {
+                        this.explorer_authority.store(false, Ordering::Release);
                         this.selected = Some(index);
                         cx.notify();
                     }
@@ -558,10 +636,21 @@ impl Render for FileSearchView {
                             .tab_stop(true)
                             .track_focus(&self.calculate_focus)
                             .label("Calculate hash")
-                            .disabled(selected_receipt.is_none())
+                            .disabled(hash_receipt.is_none())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(receipt) = hash_receipt.clone() {
+                                    this.calculate_selected(receipt, window, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("file-search-open-explorer")
+                            .tab_stop(true).track_focus(&self.explorer_focus)
+                            .label("Open in Explorer")
+                            .disabled(selected_receipt.is_none() || self.explorer_pending)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(receipt) = selected_receipt.clone() {
-                                    this.calculate_selected(receipt, window, cx);
+                                    this.open_selected_in_explorer(receipt, window, cx);
                                 }
                             })),
                     )
@@ -572,9 +661,9 @@ impl Render for FileSearchView {
                             .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
                     ),
             )
-            .child(Label::new(self.status.clone()).id("file-search-status"))
+            .child(Label::new(if self.explorer_pending { "Opening in Explorer…".to_owned() } else { self.status.clone() }).id("file-search-status"))
             .when_some(selected_path, |pane, path| {
-                pane.child(Label::new("Selected file"))
+                pane.child(Label::new("Selected result"))
                     .child(Label::new(path).id("file-search-selected-path"))
             })
             .when(self.results.len() > MOUNTED_ROWS, |pane| {
@@ -708,6 +797,30 @@ impl multi_launcher::plugin::Plugin for ScopedStockRow {
 }
 
 impl RootWindow {
+    fn open_file_search_explorer(&mut self, source: WeakEntity<FileSearchView>, receipt: SelectionReceipt,
+        window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = source.upgrade() else { return; };
+        let source = view.read(cx);
+        let contexts = window.context_stack();
+        let revision = self.root_visibility.request_revision.load(Ordering::Acquire);
+        if !self.file_search.as_ref().is_some_and(|mounted| mounted.entity_id() == receipt.owner)
+            || view.entity_id() != receipt.owner
+            || !self.root_window.is_some_and(|root| root.window_id() == window.window_handle().window_id())
+            || !self.root_visibility.is_current(revision, true) || !window.is_window_active()
+            || self.action_sheet.is_some() || self.context_favorite_popup.is_some()
+            || context_stack_has_primary(&contexts, "PopupMenu")
+            || context_stack_has_primary(&contexts, "AlertDialog")
+            || context_stack_has_primary(&contexts, "Dialog")
+            || !source.explorer_focus.is_focused(window) || source.explorer_pending
+            || !source.receipt_is_current(&receipt, view.entity_id()) { return; }
+        if !self.native_window.is_some_and(|native| native_window_is_valid(native)
+            && current_foreground_identity() == Some(native.identity)) { return; }
+        let Some(permit) = self.restart_admission.admit() else { return; };
+        let visibility = self.root_visibility.clone();
+        let native = self.native_window;
+        view.update(cx, |view, cx| view.begin_explorer(receipt, visibility, revision, native, permit, cx));
+    }
+
     pub(super) fn start_file_search_probe(&mut self, query: String, other: Vec<(String, Action)>, scroll: bool, cx: &mut Context<Self>) {
         self.publish_launcher_provider_results(query.clone(), other.clone(), scroll);
         self.file_search_probe.pending = Some(ProbeRequest {
