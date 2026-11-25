@@ -24,6 +24,7 @@ mod hash_dock;
 mod wake;
 mod json_utility;
 mod xml_utility;
+mod xml_tree;
 mod json_tree;
 mod json_host;
 mod utility_mount;

@@ -1,10 +1,12 @@
 //! Retained XML Source workspace and its single engine owner.
 use super::*;
 use multi_launcher::commands::{XmlToolkitCommand, XmlToolkitCommandHost};
-use multi_launcher::xml_toolkit_engine::XmlFormatMode;
+use multi_launcher::xml_toolkit_engine::{XmlFormatMode, XmlNodeDetailKind, XmlNodeId};
 use multi_launcher::xml_toolkit_session::{
-    XmlEngineSession, XmlOutputStatus, XmlParseStatus, XmlSessionSnapshot, XmlSourceRevision,
+    XmlDetailIntent, XmlDetailStatus, XmlEngineSession, XmlNodeDetailOutput, XmlNodeSelection,
+    XmlOutputStatus, XmlParseStatus, XmlSessionSnapshot, XmlSourceRevision, XmlTreeStatus,
 };
+use multi_launcher::xml_tree_model::{default_detail_kind, XmlToolkitTreeViewState};
 
 pub(super) fn provider_is_current(
     query: &str,
@@ -77,13 +79,19 @@ enum ClipboardIntent {
     Paste,
     Source,
     Output,
+    Tree,
 }
 fn output_receipt_current(current: u64, expected: u64) -> bool {
     current == expected
 }
+fn pump_needed(snapshot_pending: bool, tree_service_due: bool) -> bool {
+    snapshot_pending || tree_service_due
+}
 fn snapshot_pending(snapshot: &XmlSessionSnapshot) -> bool {
     matches!(snapshot.parse, XmlParseStatus::Pending)
         || matches!(snapshot.output, XmlOutputStatus::Pending(_))
+        || matches!(snapshot.tree, XmlTreeStatus::Pending)
+        || matches!(snapshot.detail, XmlDetailStatus::Pending(_))
 }
 enum Engine {
     Idle,
@@ -98,11 +106,18 @@ pub(super) struct XmlWorkspace {
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
     output_focus: FocusHandle,
+    tree_focus: FocusHandle,
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     epoch: Arc<AtomicU64>,
     output_epoch: Arc<AtomicU64>,
     output_tab: bool,
+    pub(super) tree_tab: bool,
+    pub(super) tree: XmlToolkitTreeViewState,
+    pub(super) tree_scroll: gpui_kit::UniformListScrollHandle,
+    tree_epoch: Arc<AtomicU64>,
+    tree_service_due: bool,
+    tree_copy_visibility: Option<u64>,
     engine: Engine,
     accepted_revision: Option<XmlSourceRevision>,
     pumping: bool,
@@ -164,11 +179,18 @@ impl XmlWorkspace {
             focus: cx.focus_handle(),
             return_focus: None,
             output_focus: cx.focus_handle(),
+            tree_focus: cx.focus_handle(),
             owner,
             mount,
             epoch: Arc::new(AtomicU64::new(1)),
             output_epoch: Arc::new(AtomicU64::new(1)),
             output_tab: false,
+            tree_tab: false,
+            tree: XmlToolkitTreeViewState::default(),
+            tree_scroll: gpui_kit::UniformListScrollHandle::default(),
+            tree_epoch: Arc::new(AtomicU64::new(1)),
+            tree_service_due: false,
+            tree_copy_visibility: None,
             engine: Engine::Idle,
             accepted_revision: None,
             pumping: false,
@@ -238,6 +260,11 @@ impl XmlWorkspace {
         .detach();
     }
     fn submit(&mut self, cx: &mut Context<Self>) {
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree.revoke_copy_authority();
+        self.tree_copy_visibility = None;
+        self.tree_service_due = false;
+        self.tree_scroll = gpui_kit::UniformListScrollHandle::default();
         self.output_epoch.fetch_add(1, Ordering::AcqRel);
         self.accepted_revision = None;
         if let Engine::Active(session) = &self.engine {
@@ -251,13 +278,27 @@ impl XmlWorkspace {
         self.pump(cx);
         cx.notify();
     }
-    fn pump(&mut self, cx: &mut Context<Self>) {
+    fn service_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let snapshot = match &self.engine {
+            Engine::Active(session) => Some(session.snapshot()),
+            _ => None,
+        };
+        if let Some(snapshot) = &snapshot {
+            if current_source_revision(self.accepted_revision, snapshot.revision) {
+                self.service_tree(snapshot, cx);
+            }
+        }
         let pending = match &self.engine {
             Engine::Starting { .. } | Engine::Closing(_) => true,
-            Engine::Active(session) => snapshot_pending(&session.snapshot()),
+            Engine::Active(_) => snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot_pending(snapshot)),
             Engine::Idle => false,
         };
-        if !pending || self.pumping {
+        pump_needed(pending, self.tree_service_due)
+    }
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        if !self.service_tick(cx) || self.pumping {
             return;
         }
         self.pumping = true;
@@ -287,11 +328,7 @@ impl XmlWorkspace {
                             view.start(cx);
                         }
                     }
-                    let pending = match &view.engine {
-                        Engine::Starting { .. } | Engine::Closing(_) => true,
-                        Engine::Active(session) => snapshot_pending(&session.snapshot()),
-                        Engine::Idle => false,
-                    };
+                    let pending = view.service_tick(cx);
                     if !pending {
                         view.pumping = false;
                     }
@@ -308,6 +345,11 @@ impl XmlWorkspace {
     pub(super) fn shutdown(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.owner.retire();
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree.revoke_copy_authority();
+        self.tree.sync(&XmlSessionSnapshot::default());
+        self.tree_copy_visibility = None;
+        self.tree_service_due = false;
         self.epoch.fetch_add(1, Ordering::AcqRel);
         let state = std::mem::replace(&mut self.engine, Engine::Idle);
         self.engine = match state {
@@ -338,7 +380,9 @@ impl XmlWorkspace {
         if self.open && matches!(self.engine, Engine::Idle) {
             self.start(cx);
         }
-        if self.output_tab {
+        if self.tree_tab {
+            self.tree_focus.focus(window, cx);
+        } else if self.output_tab {
             self.output_focus.focus(window, cx);
         } else {
             self.input.focus_handle(cx).focus(window, cx);
@@ -359,12 +403,126 @@ impl XmlWorkspace {
         }
         cx.notify();
     }
-    fn current_snapshot(&self) -> Option<Arc<XmlSessionSnapshot>> {
+    pub(super) fn current_snapshot(&self) -> Option<Arc<XmlSessionSnapshot>> {
         let Engine::Active(session) = &self.engine else {
             return None;
         };
         let snapshot = session.snapshot();
         current_source_revision(self.accepted_revision, snapshot.revision).then_some(snapshot)
+    }
+    pub(super) fn tree_mount(&self) -> utility_mount::MountReceipt {
+        self.mount.clone()
+    }
+    pub(super) fn tree_live(&self) -> bool {
+        self.open && self.tree_tab && self.mount.is_current() && !self.admission.is_fenced()
+    }
+    pub(super) fn tree_toggle(
+        &mut self,
+        node: XmlNodeId,
+        revision: XmlSourceRevision,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.tree_live()
+            || self.accepted_revision != Some(revision)
+            || !self.tree.visible_contains(node)
+        {
+            return;
+        }
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree.revoke_copy_authority();
+        self.tree_copy_visibility = None;
+        self.tree.toggle_expansion(node);
+        cx.notify();
+    }
+    pub(super) fn tree_select(
+        &mut self,
+        node: XmlNodeId,
+        revision: XmlSourceRevision,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.tree_live()
+            || self.accepted_revision != Some(revision)
+            || !self.tree.visible_contains(node)
+        {
+            return;
+        }
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree.revoke_copy_authority();
+        self.tree_copy_visibility = None;
+        if let Some(selection) = self.tree.select_node(node) {
+            let kind = self
+                .tree
+                .projection()
+                .and_then(|p| p.node(node))
+                .and_then(|node| default_detail_kind(Some(node.kind)));
+            if let Some(kind) = kind {
+                self.tree_detail(selection, kind, XmlDetailIntent::Inspect, cx);
+            } else {
+                cx.notify();
+            }
+        }
+    }
+    pub(super) fn tree_detail(
+        &mut self,
+        selection: XmlNodeSelection,
+        kind: XmlNodeDetailKind,
+        intent: XmlDetailIntent,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.tree_live() || self.tree.selected() != Some(selection) {
+            return;
+        }
+        self.tree_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tree_copy_visibility = if intent == XmlDetailIntent::Copy {
+            let revision = self.visibility.request_revision.load(Ordering::Acquire);
+            if !json_utility::native_host_current(&self.visibility, revision, self.native, false) {
+                return;
+            }
+            Some(revision)
+        } else {
+            None
+        };
+        let Some(request) = self.tree.request_detail(kind, intent) else {
+            return;
+        };
+        self.tree_service_due = true;
+        if let Engine::Active(session) = &self.engine {
+            if let Err(error) = session.request_detail(request) {
+                self.tree_service_due = false;
+                self.tree_copy_visibility = None;
+                self.tree.revoke_copy_authority();
+                self.feedback = Some(format!("Could not inspect XML node: {error:?}"));
+            }
+        }
+        self.pump(cx);
+        cx.notify();
+    }
+    fn service_tree(&mut self, snapshot: &XmlSessionSnapshot, cx: &mut Context<Self>) {
+        self.tree.sync(snapshot);
+        if !matches!(snapshot.detail, XmlDetailStatus::Pending(_)) {
+            self.tree_service_due = false;
+        }
+        if self.tree_live() && !self.clipboard_pending {
+            if let Some(revision) = self.tree_copy_visibility {
+                if !json_utility::native_host_current(
+                    &self.visibility,
+                    revision,
+                    self.native,
+                    false,
+                ) {
+                    self.tree_copy_visibility = None;
+                    self.tree.revoke_copy_authority();
+                } else if let Some(output) = self.tree.take_valid_copy_completion(snapshot) {
+                    self.tree_copy_visibility = None;
+                    self.clipboard(ClipboardIntent::Tree, Some((output, revision)), cx);
+                }
+            }
+        }
+    }
+    fn service_current_tree(&mut self, cx: &mut Context<Self>) {
+        if let Some(snapshot) = self.current_snapshot() {
+            self.service_tree(&snapshot, cx);
+        }
     }
     fn format(&mut self, mode: XmlFormatMode, cx: &mut Context<Self>) {
         if !self.open || !self.mount.is_current() || self.admission.is_fenced() {
@@ -412,7 +570,12 @@ impl XmlWorkspace {
             }
         }
     }
-    fn clipboard(&mut self, intent: ClipboardIntent, cx: &mut Context<Self>) {
+    fn clipboard(
+        &mut self,
+        intent: ClipboardIntent,
+        tree_output: Option<(Arc<XmlNodeDetailOutput>, u64)>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.open || self.clipboard_pending {
             return;
         }
@@ -439,10 +602,16 @@ impl XmlWorkspace {
         let mount = self.mount.clone();
         let work_mount = mount.clone();
         let visibility = self.visibility.clone();
-        let revision = visibility.request_revision.load(Ordering::Acquire);
+        let revision = tree_output.as_ref().map_or_else(
+            || visibility.request_revision.load(Ordering::Acquire),
+            |(_, revision)| *revision,
+        );
         let native = self.native;
         let admission = self.admission.clone();
         let source = self.source.clone();
+        let tree_epoch = self.tree_epoch.clone();
+        let expected_tree = tree_epoch.load(Ordering::Acquire);
+        let worker_tree_epoch = tree_epoch.clone();
         let output_epoch = self.output_epoch.clone();
         let expected_output = output_epoch.load(Ordering::Acquire);
         let worker_output_epoch = output_epoch.clone();
@@ -455,6 +624,11 @@ impl XmlWorkspace {
                     expected,
                     !admission.is_fenced()
                         && json_utility::native_host_current(&visibility, revision, native, false)
+                        && (!matches!(intent, ClipboardIntent::Tree)
+                            || output_receipt_current(
+                                worker_tree_epoch.load(Ordering::Acquire),
+                                expected_tree,
+                            ))
                         && (!matches!(intent, ClipboardIntent::Output)
                             || output_receipt_current(
                                 worker_output_epoch.load(Ordering::Acquire),
@@ -464,11 +638,14 @@ impl XmlWorkspace {
                     return Err("Clipboard request was superseded.".to_owned());
                 }
                 ArboardClipboardBackend
-                    .write_text(
-                        output
-                            .as_ref()
-                            .map_or(source.as_str(), |output| output.text.as_str()),
-                    )
+                    .write_text(tree_output.as_ref().map_or_else(
+                        || {
+                            output
+                                .as_ref()
+                                .map_or(source.as_str(), |output| output.text.as_str())
+                        },
+                        |(output, _)| output.value.as_str(),
+                    ))
                     .map(|_| None)
                     .map_err(|error| format!("Could not copy XML: {error}"))
             } else {
@@ -496,6 +673,11 @@ impl XmlWorkspace {
                         view.epoch.load(Ordering::Acquire),
                         expected,
                         !view.admission.is_fenced()
+                            && (!matches!(intent, ClipboardIntent::Tree)
+                                || output_receipt_current(
+                                    tree_epoch.load(Ordering::Acquire),
+                                    expected_tree,
+                                ))
                             && (!matches!(intent, ClipboardIntent::Output)
                                 || output_receipt_current(
                                     output_epoch.load(Ordering::Acquire),
@@ -509,6 +691,7 @@ impl XmlWorkspace {
                             ),
                     )
                 {
+                    view.service_current_tree(cx);
                     cx.notify();
                     return;
                 }
@@ -525,6 +708,8 @@ impl XmlWorkspace {
                         view.feedback = Some(
                             if matches!(intent, ClipboardIntent::Output) {
                                 "Copied current XML output."
+                            } else if matches!(intent, ClipboardIntent::Tree) {
+                                "Copied the selected XML value."
                             } else {
                                 "XML source copied"
                             }
@@ -533,6 +718,7 @@ impl XmlWorkspace {
                     }
                     Err(error) => view.feedback = Some(error),
                 }
+                view.service_current_tree(cx);
                 cx.notify();
             });
         })
@@ -553,6 +739,7 @@ impl Render for XmlWorkspace {
         let output_copy_mount = self.mount.clone();
         let source_tab_mount = self.mount.clone();
         let output_tab_mount = self.mount.clone();
+        let tree_tab_mount = self.mount.clone();
         let source_epoch = self.epoch.load(Ordering::Acquire);
         let output_epoch = self.output_epoch.load(Ordering::Acquire);
         let snapshot = self.current_snapshot();
@@ -655,6 +842,10 @@ impl Render for XmlWorkspace {
                                     && view.open
                                     && !view.admission.is_fenced()
                                 {
+                                    view.tree_epoch.fetch_add(1, Ordering::AcqRel);
+                                    view.tree.revoke_copy_authority();
+                                    view.tree_copy_visibility = None;
+                                    view.tree_tab = false;
                                     view.output_tab = false;
                                     view.input.focus_handle(cx).focus(window, cx);
                                     cx.notify();
@@ -670,6 +861,10 @@ impl Render for XmlWorkspace {
                                     && view.open
                                     && !view.admission.is_fenced()
                                 {
+                                    view.tree_epoch.fetch_add(1, Ordering::AcqRel);
+                                    view.tree.revoke_copy_authority();
+                                    view.tree_copy_visibility = None;
+                                    view.tree_tab = false;
                                     view.output_tab = true;
                                     view.output_focus.focus(window, cx);
                                     cx.notify();
@@ -677,7 +872,22 @@ impl Render for XmlWorkspace {
                             })),
                     ),
             )
-            .when(!self.output_tab, |div| {
+            .child(
+                Button::new("xml-tab-tree")
+                    .label("Tree")
+                    .track_focus(&self.tree_focus)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if tree_tab_mount.is_current() && view.open && !view.admission.is_fenced() {
+                            view.tree_tab = true;
+                            view.output_tab = false;
+                            view.tree_focus.focus(window, cx);
+                            view.service_current_tree(cx);
+                            cx.notify();
+                        }
+                    })),
+            )
+            .children(self.tree_tab.then(|| super::xml_tree::render(self, cx)))
+            .when(!self.output_tab && !self.tree_tab, |div| {
                 div.child(
                     Textarea::new(&self.input)
                         .aria_label("XML Source")
@@ -705,7 +915,7 @@ impl Render for XmlWorkspace {
                             .disabled(self.clipboard_pending)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if paste_mount.is_current() {
-                                    view.clipboard(ClipboardIntent::Paste, cx);
+                                    view.clipboard(ClipboardIntent::Paste, None, cx);
                                 }
                             })),
                     )
@@ -715,7 +925,7 @@ impl Render for XmlWorkspace {
                             .disabled(self.clipboard_pending)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if copy_mount.is_current() {
-                                    view.clipboard(ClipboardIntent::Source, cx);
+                                    view.clipboard(ClipboardIntent::Source, None, cx);
                                 }
                             })),
                     )
@@ -754,7 +964,7 @@ impl Render for XmlWorkspace {
                                 if output_copy_mount.is_current()
                                     && view.output_epoch.load(Ordering::Acquire) == output_epoch
                                 {
-                                    view.clipboard(ClipboardIntent::Output, cx);
+                                    view.clipboard(ClipboardIntent::Output, None, cx);
                                 }
                             })),
                     )
@@ -787,7 +997,9 @@ impl Render for XmlWorkspace {
                                 view.input
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                                 view.submit(cx);
-                                if view.output_tab {
+                                if view.tree_tab {
+                                    view.tree_focus.focus(window, cx);
+                                } else if view.output_tab {
                                     view.output_focus.focus(window, cx);
                                 } else {
                                     view.input.focus_handle(cx).focus(window, cx);
@@ -875,11 +1087,26 @@ impl RootWindow {
 mod tests {
     use super::super::utility_mount::MountOwner;
     use super::{
-        clipboard_receipt_current, output_receipt_current, provider_is_current,
-        startup_disposition, StartupDisposition,
+        clipboard_receipt_current, output_receipt_current, provider_is_current, pump_needed,
+        snapshot_pending, startup_disposition, StartupDisposition,
     };
     use multi_launcher::plugin::Plugin;
     use multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin;
+    #[test]
+    fn pending_and_ready_parse_are_decided_from_the_same_snapshot() {
+        use multi_launcher::xml_toolkit_session::{XmlParseStatus, XmlSessionSnapshot};
+        let mut snapshot = XmlSessionSnapshot::default();
+        snapshot.parse = XmlParseStatus::Pending;
+        assert!(snapshot_pending(&snapshot));
+        snapshot.parse = XmlParseStatus::Ready;
+        assert!(!snapshot_pending(&snapshot));
+    }
+    #[test]
+    fn terminal_detail_between_service_and_pending_check_still_wakes() {
+        assert!(pump_needed(false, true));
+        assert!(pump_needed(true, false));
+        assert!(!pump_needed(false, false));
+    }
     #[test]
     fn output_generation_supersession_revokes_old_copy() {
         assert!(output_receipt_current(12, 12));

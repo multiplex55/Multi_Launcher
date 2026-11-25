@@ -20,4 +20,8 @@ Stock typed Search opens the docked XML Source editor and focuses the retained d
 
 Format and Minify use the exact current parsed source. The Output tab previews up to 8,000 Unicode characters. Copy writes the full current output explicitly, and Apply uses the 4 MiB source limit. The shared session rejects older completions even when successive requests use the same format mode. Engine and receipt tests passed. Compare mixed content, exact full Copy, and explicit Apply in the matched desktop run.
 
-Tree, XPath, local schema, owned file effects, and remembered native presentation and pin retain their assigned criteria.
+## GPUI Tree
+
+The Tree tab uses the stock projection and one-shot inspection model. Virtual rows use typed document and node identities. The view preserves child order and omission markers, bounds the details preview, and copies the full value or fragment only on explicit request. The focused batch passed the real Windows Tree engine and the stock XPath consumers. Paired desktop replay still needs the namespaced, repeated-sibling and long-value fixture.
+
+XPath, local schema, owned file effects, and remembered native presentation and pin retain their assigned criteria.

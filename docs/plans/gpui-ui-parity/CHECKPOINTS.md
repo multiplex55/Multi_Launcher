@@ -1141,3 +1141,11 @@ GPUI Format and Minify submit the current parsed source to the existing XML sess
 The paired `mixed-and-long-output.xml` fixture contains mixed content and a long Unicode value. Each file is 31,615 bytes with SHA-256 `44A4BDDEFB179A6BFE93A94420F58DD7D7A888249AA2D4FFA2200391993E1622`. Use it to compare unchanged Source, bounded rendering, full Copy and Apply.
 
 The corrected locked `fast-dev` launcher check passed in 28.96 s. Independent review confirmed exact request identity and the blocked-worker regression. The combined library, launcher and Windows formatting targets linked in 6 min 44 s. Run `a4e13c6b-3e09-4eb1-9219-e8a3293bb487` passed seven tests in 1.395 s with 9103 skips. The real Windows formatting engine test passed. The matched desktop Output interaction and file Save remain pending. Next is a shared XML Tree model and real docked Tree tab.
+
+### XML Tree and exact inspection
+
+The renderer-neutral XML Tree model serves egui, egui XPath and GPUI. GPUI renders bounded virtual rows with typed document and node identities, separate expansion and selection, omission markers and bounded details. Explicit copies retain the full accepted detail. The completion and write use the exact inspected node, latest request, current mount and gesture-time visibility. The model consumes snapshot and detail state before the pump decides whether to sleep. Close clears the parsed Tree and preserves authored Source.
+
+Both profiles include `tree-namespaced.xml` with 1,300 repeated siblings, attributes and long Unicode text. Each file is 55,008 bytes with SHA-256 `C40D2465B064B0C9312B2263B39B1BCBEC2A0E778EA56905AF130883C140B64E`. Use it for scroll, exact selection, bounded display and the full Value and Fragment copy replay.
+
+The locked `fast-dev` launcher check passed in 1 min 17 s. Independent review cleared the single-snapshot pump, gesture visibility, and close reset. One combined library and launcher link passed in 11 min 15 s. Run `8a91cdd8-1ba4-4aee-a053-1c78739da908` passed ten tests in 2.155 s with 9100 skips. This includes the real Windows XML Tree engine, stock virtual rows and XPath consumers, and GPUI readiness and explicit copy receipt checks. Matched desktop evidence is pending. Continue the real XPath editor and results on the same model.

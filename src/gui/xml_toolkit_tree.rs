@@ -1,381 +1,16 @@
-//! Read-only, virtualized presentation state for the accepted XML document.
-//!
-//! This module never owns or walks an MSXML object. It consumes the immutable
-//! projection and routes explicit selection/detail intents back to the async
-//! XML session.
-
+//! Egui renderer for the shared XML tree model.
 use crate::gui::jump_mode::TargetKind;
 use crate::gui::xml_toolkit_dialog::XmlJumpTargets;
-use crate::xml_toolkit_engine::{
-    MAX_XML_TREE_PREVIEW_CHARS, XmlNodeDetailKind, XmlNodeId, XmlTreeNodeKind, XmlTreeNodeSnapshot,
-    XmlTreeProjection, XmlTreeProjectionLimit,
-};
-use crate::xml_toolkit_session::{
-    XmlDetailIntent, XmlDetailRequestId, XmlDetailStatus, XmlNodeDetailOutput,
-    XmlNodeDetailRequest, XmlNodeSelection, XmlSelectionRequestId, XmlSessionSnapshot,
-    XmlSourceRevision, XmlTreeStatus,
-};
+use crate::xml_toolkit_engine::{MAX_XML_TREE_PREVIEW_CHARS, XmlNodeDetailKind, XmlNodeId, XmlTreeNodeKind, XmlTreeProjection, XmlTreeProjectionLimit};
+use crate::xml_toolkit_session::{XmlDetailIntent, XmlDetailStatus, XmlNodeDetailRequest, XmlSessionSnapshot, XmlTreeStatus};
+use crate::xml_tree_model::{TreeRowIdentity, VisibleTreeRow, MAX_TREE_LABEL_CHARS, MAX_DETAIL_DISPLAY_CHARS, tree_node_label, node_kind_label, default_detail_kind, request_matches_selection, bounded_chars, bounded_prefix, xml_escaped_display};
+pub(crate) use crate::xml_tree_model::{XmlToolkitTreeIntents, XmlToolkitTreeViewState};
 use eframe::egui;
-use std::collections::HashSet;
 use std::sync::Arc;
-
-const MAX_TREE_LABEL_CHARS: usize = 256;
-const MAX_DETAIL_DISPLAY_CHARS: usize = 4096;
+#[cfg(test)]
+use crate::xml_toolkit_session::{XmlNodeDetailOutput, XmlSourceRevision};
 const TREE_ROW_HEIGHT: f32 = 20.0;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum TreeRowIdentity {
-    Node(XmlNodeId),
-    MoreAttributes(XmlNodeId),
-    MoreChildren(XmlNodeId),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct VisibleTreeRow {
-    identity: TreeRowIdentity,
-    node: Option<XmlNodeId>,
-    depth: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct XmlToolkitTreeIntents {
-    pub selection: Option<XmlNodeSelection>,
-    pub detail: Option<XmlNodeDetailRequest>,
-}
-
-/// Cached view-only state. A source revision or parsed document change drops
-/// selection, expansion, visible rows, and pending copy authority together.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct XmlToolkitTreeViewState {
-    revision: Option<XmlSourceRevision>,
-    projection: Option<Arc<XmlTreeProjection>>,
-    selected: Option<XmlNodeSelection>,
-    expanded: HashSet<XmlNodeId>,
-    visible_rows: Vec<VisibleTreeRow>,
-    next_selection_request: u64,
-    next_detail_request: u64,
-    latest_detail_request: Option<XmlNodeDetailRequest>,
-    latest_copy_request: Option<XmlNodeDetailRequest>,
-    pending_scroll_to: Option<XmlNodeId>,
-    #[cfg(test)]
-    visible_rows_rebuilds: usize,
-    #[cfg(test)]
-    rendered_rows: usize,
-}
-
 impl XmlToolkitTreeViewState {
-    /// Synchronize the cached tree to the session's accepted source. This is
-    /// cheap and idempotent during ordinary egui frames.
-    pub(crate) fn sync(&mut self, snapshot: &XmlSessionSnapshot) {
-        if self.revision != snapshot.revision {
-            self.clear_document_state();
-            self.revision = snapshot.revision;
-        }
-
-        let projection = match &snapshot.tree {
-            XmlTreeStatus::Ready(projection) => Some(Arc::clone(projection)),
-            XmlTreeStatus::Empty | XmlTreeStatus::Pending | XmlTreeStatus::Failed(_) => None,
-        };
-        let same_projection = self
-            .projection
-            .as_ref()
-            .zip(projection.as_ref())
-            .is_some_and(|(current, incoming)| {
-                current.document == incoming.document && Arc::ptr_eq(current, incoming)
-            });
-        if same_projection {
-            return;
-        }
-
-        let same_document = self
-            .projection
-            .as_ref()
-            .zip(projection.as_ref())
-            .is_some_and(|(current, incoming)| current.document == incoming.document);
-        if !same_document {
-            self.clear_document_state();
-        }
-        self.projection = projection;
-        if let Some(projection) = &self.projection {
-            self.expanded.insert(projection.root);
-            self.rebuild_visible_rows();
-        } else {
-            self.visible_rows.clear();
-            self.selected = None;
-            self.latest_detail_request = None;
-            self.latest_copy_request = None;
-        }
-    }
-
-    fn clear_document_state(&mut self) {
-        self.projection = None;
-        self.selected = None;
-        self.expanded.clear();
-        self.visible_rows.clear();
-        self.latest_detail_request = None;
-        self.latest_copy_request = None;
-        self.pending_scroll_to = None;
-    }
-
-    pub(crate) fn projection(&self) -> Option<&Arc<XmlTreeProjection>> {
-        self.projection.as_ref()
-    }
-
-    pub(crate) fn selected(&self) -> Option<XmlNodeSelection> {
-        self.selected
-    }
-
-    /// Revoke any pending or ready copy authorization while keeping the
-    /// current tree selection and expansion state intact.
-    pub(crate) fn revoke_copy_authority(&mut self) {
-        self.latest_copy_request = None;
-        if self
-            .latest_detail_request
-            .is_some_and(|request| request.intent == XmlDetailIntent::Copy)
-        {
-            self.latest_detail_request = None;
-        }
-    }
-
-    /// Select a projected node, open its ancestors, and request scrolling to
-    /// its stable identity. Returns `None` for nodes outside the bounded tree
-    /// projection so callers can present an honest navigation refusal.
-    pub(crate) fn reveal_node(&mut self, node: XmlNodeId) -> Option<XmlToolkitTreeIntents> {
-        self.prepare_reveal(node)?;
-        let selection = self.select_node(node)?;
-        let detail = default_detail_kind(
-            self.projection
-                .as_ref()?
-                .node(node)
-                .map(|snapshot| snapshot.kind),
-        )
-        .and_then(|kind| self.request_detail(kind, XmlDetailIntent::Inspect));
-        Some(XmlToolkitTreeIntents {
-            selection: Some(selection),
-            detail,
-        })
-    }
-
-    /// Route an explicit query-result copy through the same selection and
-    /// detail guard used by the tree's own copy buttons.
-    pub(crate) fn request_node_copy(
-        &mut self,
-        node: XmlNodeId,
-        kind: XmlNodeDetailKind,
-    ) -> Option<XmlToolkitTreeIntents> {
-        self.prepare_reveal(node)?;
-        let selection = self.select_node(node)?;
-        let detail = self.request_detail(kind, XmlDetailIntent::Copy)?;
-        Some(XmlToolkitTreeIntents {
-            selection: Some(selection),
-            detail: Some(detail),
-        })
-    }
-
-    fn prepare_reveal(&mut self, node: XmlNodeId) -> Option<()> {
-        self.revoke_copy_authority();
-        let projection = self.projection.as_ref()?;
-        projection.node(node)?;
-        let mut ancestor = Some(node);
-        let mut opened = false;
-        let mut traversed = 0usize;
-        while let Some(id) = ancestor {
-            traversed = traversed.saturating_add(1);
-            if traversed > projection.nodes.len() {
-                return None;
-            }
-            let snapshot = projection.node(id)?;
-            if id != node {
-                opened |= self.expanded.insert(id);
-            }
-            ancestor = snapshot.parent;
-        }
-        if opened {
-            self.rebuild_visible_rows();
-        }
-        self.pending_scroll_to = Some(node);
-        Some(())
-    }
-
-    pub(crate) fn select_node(&mut self, node: XmlNodeId) -> Option<XmlNodeSelection> {
-        let projection = self.projection.as_ref()?;
-        if projection.node(node).is_none() {
-            return None;
-        }
-        if self.selected.is_some_and(|selected| {
-            selected.document == projection.document && selected.node == node
-        }) {
-            return self.selected;
-        }
-        let request = self.next_selection_request;
-        let Some(next_request) = self.next_selection_request.checked_add(1) else {
-            self.selected = None;
-            self.latest_detail_request = None;
-            self.latest_copy_request = None;
-            return None;
-        };
-        self.next_selection_request = next_request;
-        let selection = XmlNodeSelection {
-            revision: self.revision?,
-            document: projection.document,
-            node,
-            request: XmlSelectionRequestId::from_counter(request),
-        };
-        self.selected = Some(selection);
-        self.latest_detail_request = None;
-        self.latest_copy_request = None;
-        Some(selection)
-    }
-
-    /// Create an async detail operation for the current selection. Copy
-    /// authority exists only for an explicit `Copy` request and is revoked by
-    /// every later selection, inspection, or document invalidation.
-    pub(crate) fn request_detail(
-        &mut self,
-        kind: XmlNodeDetailKind,
-        intent: XmlDetailIntent,
-    ) -> Option<XmlNodeDetailRequest> {
-        let selection = self.selected?;
-        if self.projection.as_ref()?.node(selection.node).is_none() {
-            return None;
-        }
-        let detail_request = self.next_detail_request;
-        let Some(next_request) = self.next_detail_request.checked_add(1) else {
-            self.latest_detail_request = None;
-            self.latest_copy_request = None;
-            return None;
-        };
-        self.next_detail_request = next_request;
-        let request = XmlNodeDetailRequest {
-            revision: selection.revision,
-            document: selection.document,
-            node: selection.node,
-            selection_request: selection.request,
-            detail_request: XmlDetailRequestId::from_counter(detail_request),
-            kind,
-            intent,
-        };
-        self.latest_detail_request = Some(request);
-        self.latest_copy_request = (intent == XmlDetailIntent::Copy).then_some(request);
-        Some(request)
-    }
-
-    /// Return a complete detail value only while it still belongs to the
-    /// current explicitly requested copy action. Callers must publish this
-    /// value to the clipboard explicitly; rendering never does so.
-    pub(crate) fn take_valid_copy_completion(
-        &mut self,
-        snapshot: &XmlSessionSnapshot,
-    ) -> Option<Arc<XmlNodeDetailOutput>> {
-        let request = self.latest_copy_request?;
-        let selected = self.selected?;
-        let projected_document = self
-            .projection
-            .as_ref()
-            .map(|projection| projection.document);
-        let snapshot_document = match &snapshot.tree {
-            XmlTreeStatus::Ready(projection) => Some(projection.document),
-            _ => None,
-        };
-        if request.intent != XmlDetailIntent::Copy
-            || self.latest_detail_request != Some(request)
-            || self.revision != Some(request.revision)
-            || snapshot.revision != Some(request.revision)
-            || projected_document != Some(request.document)
-            || snapshot_document != Some(request.document)
-            || selected.revision != request.revision
-            || selected.document != request.document
-            || selected.node != request.node
-            || selected.request != request.selection_request
-        {
-            return None;
-        }
-        match &snapshot.detail {
-            XmlDetailStatus::Ready(output) if output.request == request => {
-                self.latest_copy_request = None;
-                Some(Arc::clone(output))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn toggle_expansion(&mut self, node: XmlNodeId) -> bool {
-        let Some(projection) = self.projection.as_ref() else {
-            return false;
-        };
-        let Some(snapshot) = projection.node(node) else {
-            return false;
-        };
-        if snapshot.attributes.is_empty()
-            && snapshot.children.is_empty()
-            && !snapshot.has_more_attributes
-            && !snapshot.has_more_children
-        {
-            return false;
-        }
-        if !self.expanded.remove(&node) {
-            self.expanded.insert(node);
-        }
-        self.rebuild_visible_rows();
-        true
-    }
-
-    fn rebuild_visible_rows(&mut self) {
-        self.visible_rows.clear();
-        let Some(projection) = self.projection.as_ref() else {
-            return;
-        };
-        let mut pending = vec![(TreeRowIdentity::Node(projection.root), 0usize)];
-        while let Some((identity, depth)) = pending.pop() {
-            let TreeRowIdentity::Node(node_id) = identity else {
-                self.visible_rows.push(VisibleTreeRow {
-                    identity,
-                    node: None,
-                    depth,
-                });
-                continue;
-            };
-            let Some(node) = projection.node(node_id) else {
-                continue;
-            };
-            self.visible_rows.push(VisibleTreeRow {
-                identity,
-                node: Some(node_id),
-                depth,
-            });
-            if !self.expanded.contains(&node_id) {
-                continue;
-            }
-
-            // Push reverse display order so attributes, their omission marker,
-            // children, and the child omission marker appear in source order.
-            if node.has_more_children {
-                pending.push((TreeRowIdentity::MoreChildren(node_id), depth + 1));
-            }
-            pending.extend(
-                node.children
-                    .iter()
-                    .rev()
-                    .copied()
-                    .map(|id| (TreeRowIdentity::Node(id), depth + 1)),
-            );
-            if node.has_more_attributes {
-                pending.push((TreeRowIdentity::MoreAttributes(node_id), depth + 1));
-            }
-            pending.extend(
-                node.attributes
-                    .iter()
-                    .rev()
-                    .copied()
-                    .map(|id| (TreeRowIdentity::Node(id), depth + 1)),
-            );
-        }
-        #[cfg(test)]
-        {
-            self.visible_rows_rebuilds += 1;
-        }
-    }
-
     /// Render the cached projection using virtual rows. Returned intents are
     /// generated only on the first egui pass, avoiding duplicate operations
     /// from a discarded multipass layout.
@@ -734,89 +369,6 @@ impl XmlToolkitTreeViewState {
     }
 }
 
-fn tree_node_label(node: &XmlTreeNodeSnapshot) -> String {
-    let kind = node_kind_label(node.kind);
-    let name = if node.qualified_name.is_empty() {
-        "#unnamed"
-    } else {
-        node.qualified_name.as_str()
-    };
-    let name = xml_escaped_display(name, MAX_TREE_LABEL_CHARS);
-    if node.preview.is_empty() {
-        format!("{kind}  {name}")
-    } else {
-        let preview = xml_escaped_display(&node.preview, MAX_XML_TREE_PREVIEW_CHARS);
-        format!("{kind}  {name}  {preview}")
-    }
-}
-
-fn node_kind_label(kind: XmlTreeNodeKind) -> &'static str {
-    match kind {
-        XmlTreeNodeKind::Document => "Document",
-        XmlTreeNodeKind::Element => "Element",
-        XmlTreeNodeKind::Attribute => "Attribute",
-        XmlTreeNodeKind::Text => "Text",
-        XmlTreeNodeKind::CData => "CDATA",
-        XmlTreeNodeKind::Comment => "Comment",
-        XmlTreeNodeKind::ProcessingInstruction => "Processing instruction",
-        XmlTreeNodeKind::Other => "Other",
-    }
-}
-
-fn default_detail_kind(kind: Option<XmlTreeNodeKind>) -> Option<XmlNodeDetailKind> {
-    match kind? {
-        XmlTreeNodeKind::Element => Some(XmlNodeDetailKind::XmlFragment),
-        XmlTreeNodeKind::Attribute => Some(XmlNodeDetailKind::AttributeValue),
-        XmlTreeNodeKind::Text
-        | XmlTreeNodeKind::CData
-        | XmlTreeNodeKind::Comment
-        | XmlTreeNodeKind::ProcessingInstruction => Some(XmlNodeDetailKind::TextValue),
-        XmlTreeNodeKind::Document | XmlTreeNodeKind::Other => None,
-    }
-}
-
-fn request_matches_selection(request: XmlNodeDetailRequest, selection: XmlNodeSelection) -> bool {
-    request.revision == selection.revision
-        && request.document == selection.document
-        && request.node == selection.node
-        && request.selection_request == selection.request
-}
-
-fn bounded_chars(value: &str, max_chars: usize) -> &str {
-    value
-        .char_indices()
-        .nth(max_chars)
-        .map_or(value, |(index, _)| &value[..index])
-}
-
-fn bounded_prefix(value: &str, max_chars: usize) -> (&str, bool) {
-    let mut chars = value.char_indices();
-    if let Some((index, _)) = chars.nth(max_chars) {
-        (&value[..index], true)
-    } else {
-        (value, false)
-    }
-}
-
-fn xml_escaped_display(value: &str, max_chars: usize) -> String {
-    let mut display = String::new();
-    for ch in value.chars().take(max_chars) {
-        match ch {
-            '&' => display.push_str("&amp;"),
-            '<' => display.push_str("&lt;"),
-            '>' => display.push_str("&gt;"),
-            '"' => display.push_str("&quot;"),
-            '\'' => display.push_str("&apos;"),
-            '\n' => display.push_str("\\n"),
-            '\r' => display.push_str("\\r"),
-            '\t' => display.push_str("\\t"),
-            ch if ch.is_control() => display.push('�'),
-            ch => display.push(ch),
-        }
-    }
-    display
-}
-
 fn tree_row_scroll_offset(
     row: usize,
     row_height: f32,
@@ -936,6 +488,18 @@ mod tests {
     }
 
     #[test]
+    fn m7c_tree_sync_publishes_projection_on_ready_snapshot() {
+        let revision = XmlSourceRevision::for_test(11);
+        let (projection, _, _) = fixture(11);
+        let mut state = XmlToolkitTreeViewState::default();
+        state.sync(&snapshot(revision, XmlTreeStatus::Pending));
+        assert_eq!(state.row_count(), 0);
+        let ready = snapshot(revision, XmlTreeStatus::Ready(projection));
+        state.sync(&ready);
+        assert_eq!(state.row_count(), 3);
+    }
+
+    #[test]
     fn m7c_tree_state_clears_stale_copy_and_caches_virtual_rows() {
         let revision = XmlSourceRevision::for_test(1);
         let (projection, first, second) = fixture(1);
@@ -945,6 +509,8 @@ mod tests {
             XmlTreeStatus::Ready(Arc::clone(&projection)),
         ));
         assert_eq!(state.visible_rows().len(), 3);
+        let child = XmlNodeId::for_test(projection.document, 4);
+        assert!(!state.visible_contains(child));
         let initial_rebuilds = state.visible_rows_rebuilds;
 
         // Repeated frame synchronization does not rewalk the immutable tree.
@@ -956,6 +522,7 @@ mod tests {
         }
         assert_eq!(state.visible_rows_rebuilds, initial_rebuilds);
         assert!(state.toggle_expansion(first));
+        assert!(state.visible_contains(child));
         assert!(
             state
                 .visible_rows()
@@ -1004,8 +571,23 @@ mod tests {
 
         // A different repeated sibling has a distinct actual node identity and
         // selection token; the old request cannot authorize clipboard output.
+        let stale_copy = state
+            .request_detail(XmlNodeDetailKind::XmlFragment, XmlDetailIntent::Copy)
+            .unwrap();
         assert_eq!(state.select_node(second).unwrap().node, second);
+        copied_snapshot.detail = XmlDetailStatus::Ready(Arc::new(XmlNodeDetailOutput {
+            request: stale_copy,
+            value: "stale value".into(),
+        }));
         assert!(state.take_valid_copy_completion(&copied_snapshot).is_none());
+
+        // Closing clears the document but does not reuse a previous request ID.
+        let before_close = state.selected().unwrap();
+        state.sync(&XmlSessionSnapshot::default());
+        assert!(state.selected().is_none());
+        state.sync(&snapshot(revision, XmlTreeStatus::Ready(Arc::clone(&projection))));
+        let after_close = state.select_node(second).unwrap();
+        assert_ne!(before_close.request, after_close.request);
 
         let next_revision = XmlSourceRevision::for_test(2);
         state.sync(&snapshot(next_revision, XmlTreeStatus::Empty));
