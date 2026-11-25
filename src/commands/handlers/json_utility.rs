@@ -1,6 +1,6 @@
 use crate::commands::{CommandOutcome, JsonUtilityCommand, JsonUtilityCommandHost};
 
-pub(crate) fn handle_json_utility<H>(host: &mut H, command: &JsonUtilityCommand) -> CommandOutcome
+pub fn handle_json_utility<H>(host: &mut H, command: &JsonUtilityCommand) -> CommandOutcome
 where
     H: JsonUtilityCommandHost + ?Sized,
 {

@@ -44,7 +44,7 @@ pub(crate) use headless_gui::{
     handle_checked_headless_effect, handle_external, handle_headless_gui, handle_headless_gui_with_history_query, success_outcome,
 };
 pub(crate) use hotfolder::handle_hotfolder;
-pub(crate) use json_utility::handle_json_utility;
+pub use json_utility::handle_json_utility;
 pub(crate) use launcher_query::handle_launcher;
 pub use launcher_query::handle_query;
 pub(crate) use mouse_gesture::handle_mouse_gesture;

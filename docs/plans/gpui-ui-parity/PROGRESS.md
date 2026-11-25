@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-G14 extracted the shared JSON editor and projection worker while preserving egui behavior. Independent review and nine focused tests passed. The GPUI Text workspace is the next source increment. [Structured-text batch](CHECKPOINTS.md#g14-structured-text-gui-batch)
+G14 has a docked GPUI JSON Text workspace through stock Search. Typing, Format, Minify, protected Paste and Copy Result, Clear and Close use the shared session. Independent source review and seven focused launcher tests passed, following nine focused tests for the shared extraction. Matched Windows replay remains pending. [Structured-text batch](CHECKPOINTS.md#g14-structured-text-gui-batch)
 
 G05 Favorites Search now lists and filters ordinary local executable Favorites through the stock provider. Activation checks the current stored label, path and arguments before launching. Independent source review and five focused tests passed. Matched Windows replay remains pending. [Favorites checkpoint](CHECKPOINTS.md#g05-checked-executable-favorites-search)
 
@@ -67,13 +67,13 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 203 Specified, 15 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 202 Specified, 16 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Begin the G14 structured-text family with the shared JSON editor session and docked Text workspace. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Continue G14 with the shared JSON Tree API, selection, search, details and typed copies, followed by retained Dock, Pop Out and pin. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

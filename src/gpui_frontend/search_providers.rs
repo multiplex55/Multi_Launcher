@@ -65,6 +65,7 @@ pub(super) struct InstalledLauncherProviders {
     help: multi_launcher::plugins::help::HelpPlugin,
     favorites: super::favorite_search::Provider,
     activity: multi_launcher::plugins::activity::ActivityPlugin,
+    json_utility: multi_launcher::plugins::json_utility::JsonUtilityPlugin,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
     #[cfg(windows)]
@@ -103,6 +104,7 @@ impl InstalledLauncherProviders {
             help: multi_launcher::plugins::help::HelpPlugin,
             favorites: super::favorite_search::Provider::new(watch_favorites),
             activity: multi_launcher::plugins::activity::ActivityPlugin,
+            json_utility: multi_launcher::plugins::json_utility::JsonUtilityPlugin,
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
@@ -133,6 +135,7 @@ impl InstalledLauncherProviders {
             Some(&self.help as &dyn multi_launcher::plugin::Plugin),
             Some(&self.favorites as &dyn multi_launcher::plugin::Plugin),
             Some(&self.activity as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.json_utility as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]

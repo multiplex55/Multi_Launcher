@@ -21,6 +21,9 @@ mod hash_progress;
 mod hash_layout;
 mod hash_pin;
 mod hash_dock;
+mod wake;
+mod json_utility;
+use wake::HashWakeSignal;
 mod indexed_applications;
 mod window_search;
 mod hash_jump_select;
@@ -2004,6 +2007,7 @@ enum InstalledSearchRoute {
     Settings,
     Help,
     Activity,
+    JsonUtility(multi_launcher::commands::JsonUtilityIntent),
     FavoritesBrowse,
     FavoritesNamed(String),
 }
@@ -2053,6 +2057,7 @@ fn classify_installed_search_command(
         Command::Dialog(DialogCommand::Settings) => Ok(InstalledSearchRoute::Settings),
         Command::Dialog(DialogCommand::Help) => Ok(InstalledSearchRoute::Help),
         Command::Dialog(DialogCommand::Activity) => Ok(InstalledSearchRoute::Activity),
+        Command::JsonUtility(multi_launcher::commands::JsonUtilityCommand::Open { intent }) => Ok(InstalledSearchRoute::JsonUtility(*intent)),
         Command::Storage(StorageCommand::FavoriteDialog(label)) => {
             if label.is_empty() {
                 Ok(InstalledSearchRoute::FavoritesBrowse)
@@ -2622,6 +2627,7 @@ struct RootWindow {
     // The root owns the shared center independently of Hash presentation mounts.
     activity_center: multi_launcher::activity::ActivityCenter,
     activity_view: Option<Entity<activity::ActivityView>>,
+    json_view: Option<Entity<json_utility::JsonView>>,
     hash_wake_signal: Arc<HashWakeSignal>,
     hash_file_picker_pending: Arc<AtomicBool>,
     hash_clipboard_pending: Arc<HashClipboardPendingState>,
@@ -4550,98 +4556,6 @@ fn hash_popout_window_options(cx: &App) -> WindowOptions {
     }
 }
 
-/// Coalescing wake signal for the one retained HashSession job.
-///
-/// The receiver awaits this future instead of blocking a GPUI executor worker.
-/// The signal is closed from app/root teardown so the stored task waker cannot
-/// retain an abandoned receiver task.
-#[derive(Default)]
-struct HashWakeSignal {
-    state: Mutex<HashWakeState>,
-}
-
-#[derive(Default)]
-struct HashWakeState {
-    pending: bool,
-    closed: bool,
-    waker: Option<Waker>,
-}
-
-impl HashWakeSignal {
-    fn notify(&self) {
-        let waker = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.closed {
-                return;
-            }
-            state.pending = true;
-            state.waker.take()
-        };
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-
-    fn close(&self) {
-        let waker = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.closed = true;
-            state.waker.take()
-        };
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-
-    fn wait(self: &Arc<Self>) -> HashWakeFuture {
-        HashWakeFuture {
-            signal: Arc::clone(self),
-        }
-    }
-}
-
-struct HashWakeFuture {
-    signal: Arc<HashWakeSignal>,
-}
-
-impl Future for HashWakeFuture {
-    type Output = bool;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut FutureContext<'_>) -> Poll<Self::Output> {
-        let mut state = self
-            .get_mut()
-            .signal
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.closed {
-            Poll::Ready(false)
-        } else if state.pending {
-            state.pending = false;
-            Poll::Ready(true)
-        } else {
-            state.waker = Some(cx.waker().clone());
-            Poll::Pending
-        }
-    }
-}
-
-impl Drop for HashWakeFuture {
-    fn drop(&mut self) {
-        self.signal
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .waker
-            .take();
-    }
-}
 
 enum SecondaryWindowState {
     Closed,
@@ -4669,6 +4583,7 @@ fn update_kit_window_content<T: 'static, C: AppContext, R>(
 struct RestartDrafts {
     search: String,
     utility: Option<String>,
+    json: Option<String>,
     hash: HashDraft,
     hash_window_open: bool,
     settings: SettingsRestartDraft,
@@ -4849,6 +4764,9 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     }
     if drafts.utility.as_ref().is_some_and(|text| !text.is_empty()) {
         names.push("retained utility editor");
+    }
+    if drafts.json.as_ref().is_some_and(|text| !text.is_empty()) {
+        names.push("JSON text");
     }
     if !drafts.hash.text.is_empty() {
         names.push("Hash Generator text");
@@ -5808,6 +5726,7 @@ impl RootWindow {
             drafts: RestartDrafts {
                 search: self.query.read(cx).value().to_string(),
                 utility,
+                json: self.json_view.as_ref().and_then(|view| view.read(cx).draft()),
                 hash: hash_draft,
                 hash_window_open,
                 settings: self.settings_editor.restart_draft(),
@@ -7847,6 +7766,8 @@ impl RootWindow {
             && !activity::provider_is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             return;
         }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "json_utility")
+            && !json_utility::provider_is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) { return; }
         #[cfg(windows)]
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "downloads_triage") {
             if is_downloads_triage_opener(&result.action)
@@ -8091,6 +8012,10 @@ impl RootWindow {
                 drop(operation);
                 let focus = Some(self.query.focus_handle(cx));
                 self.open_activity(focus, window, cx);
+            }
+            InstalledSearchRoute::JsonUtility(intent) => {
+                drop(operation);
+                self.open_json_utility(intent, Some(self.query.focus_handle(cx)), window, cx);
             }
             InstalledSearchRoute::FavoritesBrowse => {
                 drop(operation);
@@ -10735,6 +10660,9 @@ impl Render for RootWindow {
         if let Some(view) = self.activity_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
+        if let Some(view) = self.json_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
         // ScrollHandle bounds update during prepaint. Re-render either tool
         // when that measured body viewport changes, including native resizes.
         if docked_hash.is_some() || self.app_editor.open {
@@ -12459,6 +12387,7 @@ pub(crate) fn run_foundation_window(
                 hash_session: session_for_root,
                 activity_center,
                 activity_view: None,
+                json_view: None,
                 hash_wake_signal: wake_signal_for_root,
                 hash_file_picker_pending: hash_file_picker_pending_for_root,
                 hash_clipboard_pending: hash_clipboard_pending_for_root,
@@ -15551,9 +15480,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -15586,7 +15515,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 17 } else { 15 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 19 } else { 17 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(

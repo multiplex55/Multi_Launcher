@@ -1,5 +1,5 @@
 //! Renderer-neutral JSON editor, projection worker, and tree/search state.
-use crate::clipboard_modify::clipboard::ClipboardBackend;
+use crate::clipboard_modify::clipboard::{ClipboardBackend, ClipboardError};
 use crate::json_transform::{JsonDocument, JsonNodePath, JsonPathSegment, JsonSearchFields, JsonSearchMatch, JsonTransformError, JsonTreeNodeId, JsonTreeProjection, JsonValueRef};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
@@ -670,11 +670,19 @@ impl JsonEditorState {
     pub fn loading_clipboard(&self) -> bool { self.is_loading_clipboard() }
 
     pub fn initialize(&mut self, clipboard: &impl ClipboardBackend) {
+        self.begin_initialize();
+        self.finish_initialize(clipboard.read_text());
+    }
+
+    pub fn begin_initialize(&mut self) {
         self.reset_feedback();
         self.text.clear();
         self.tree.search.reset();
         self.invalidate_source(false);
-        match clipboard.read_text() {
+    }
+
+    pub fn finish_initialize(&mut self, result: Result<String, ClipboardError>) {
+        match result {
             Ok(text) if !text.trim().is_empty() => {
                 self.clipboard_load_generation = Some(self.generation);
                 self.queued_projection = Some(ProjectionSource::InitialClipboard(text));
@@ -719,8 +727,12 @@ impl JsonEditorState {
     }
 
     pub fn reload(&mut self, clipboard: &impl ClipboardBackend) {
+        self.finish_reload(clipboard.read_text());
+    }
+
+    pub fn finish_reload(&mut self, result: Result<String, ClipboardError>) {
         self.reset_feedback();
-        match clipboard.read_text() {
+        match result {
             Ok(text) => {
                 self.text = text.clone();
                 self.invalidate_source(false);
@@ -772,6 +784,11 @@ impl JsonEditorState {
                 .map(|()| "Copied JSON to clipboard".to_owned())
                 .map_err(|error| format!("Could not copy JSON: {error}")),
         );
+    }
+
+    pub fn accept_copy_feedback(&mut self, completed: &Self) {
+        self.parse_error = completed.parse_error.clone();
+        self.feedback = completed.feedback.clone();
     }
 
     pub(crate) fn copy_tree_value(&mut self, clipboard: &impl ClipboardBackend, subtree: bool) {
