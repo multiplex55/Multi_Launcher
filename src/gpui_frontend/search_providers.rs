@@ -41,6 +41,7 @@ pub(super) struct InstalledLauncherProviders {
     file_search: FileSearchBarePlugin,
     date_arithmetic: multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin,
     base_convert: multi_launcher::plugins::base_convert::BaseConvertPlugin,
+    unit_convert: multi_launcher::plugins::unit_convert::UnitConvertPlugin,
     #[cfg(windows)]
     downloads_triage: multi_launcher::plugins::downloads_triage::DownloadsTriagePlugin,
     folders: Option<multi_launcher::plugins::folders::FoldersPlugin>,
@@ -74,6 +75,7 @@ impl InstalledLauncherProviders {
             ),
             date_arithmetic: multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin,
             base_convert: multi_launcher::plugins::base_convert::BaseConvertPlugin,
+            unit_convert: multi_launcher::plugins::unit_convert::UnitConvertPlugin,
             #[cfg(windows)]
             downloads_triage: multi_launcher::plugins::downloads_triage::DownloadsTriagePlugin,
             folders,
@@ -96,6 +98,7 @@ impl InstalledLauncherProviders {
             Some(&self.favorites as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.date_arithmetic as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.unit_convert as &dyn multi_launcher::plugin::Plugin),
             Some(&self.base_convert as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
             Some(&self.downloads_triage as &dyn multi_launcher::plugin::Plugin),
@@ -140,13 +143,15 @@ impl InstalledLauncherProviders {
     }
 
     pub(super) fn cached_commands(&self, enabled_plugins: Option<&HashSet<String>>) -> Vec<Action> {
-        self.plugins()
+        let mut commands: Vec<_> = self.plugins()
             .into_iter()
             .filter(|provider| {
                 enabled_plugins.is_none_or(|enabled| enabled.contains(provider.name()))
             })
             .flat_map(admitted_commands)
-            .collect()
+            .collect();
+        commands.sort_by_cached_key(|action| action.label.to_lowercase());
+        commands
     }
 
     pub(super) fn command_help_providers(&self) -> Arc<[CommandHelpProvider]> {
@@ -276,6 +281,21 @@ mod tests {
             assert!(!super::WebProvider::from_name(name).unwrap().is_current(query, &rows[0].1, Some(&enabled), Some(&disabled)));
         }
         assert_eq!(super::WebProvider::from_name("web_search"), Some(super::WebProvider::Google));
+    }
+
+    #[test]
+    fn convert_cached_commands_follow_stable_egui_order() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        let enabled = HashSet::from(["base_convert".to_owned(), "unit_convert".to_owned()]);
+        let commands = providers.cached_commands(Some(&enabled));
+        let rows = commands.iter().map(|action| (action.label.as_str(), action.desc.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, [
+            ("conv", "Unit convert"),
+            ("conv", "Base Convert"),
+            ("convert", "Unit convert"),
+            ("convert", "Base Convert"),
+        ]);
     }
 
     struct Fixture {

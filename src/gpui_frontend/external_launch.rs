@@ -511,11 +511,17 @@ fn checked_web_association_with(
     launch(&command.target)
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum DiagnosticKind {
+    Date,
+    Unit,
+}
+
 #[derive(Clone)]
 pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
     Copy(String),
-    DateDiagnostic(String),
+    Diagnostic { kind: DiagnosticKind, message: String },
 }
 
 #[derive(Clone)]
@@ -642,8 +648,12 @@ fn execute_request(
                     refocus: true,
                 })
         }
-        RunCommand::DateDiagnostic(message) => {
-            Err(CommandError::new("date_arithmetic", message.clone()).with_gui_failure_policy())
+        RunCommand::Diagnostic { kind, message } => {
+            let domain = match kind {
+                DiagnosticKind::Date => "date_arithmetic",
+                DiagnosticKind::Unit => "unit_convert",
+            };
+            Err(CommandError::new(domain, message.clone()).with_gui_failure_policy())
         }
     }
 }
@@ -651,7 +661,10 @@ fn execute_request(
 pub(super) fn run(request: &Request) -> WorkerResult {
     let mut host = Host {
         settings: request.settings.clone(),
-        association: match &request.command { RunCommand::External { association, .. } => *association, RunCommand::Copy(_) | RunCommand::DateDiagnostic(_) => None },
+        association: match &request.command {
+            RunCommand::External { association, .. } => *association,
+            RunCommand::Copy(_) | RunCommand::Diagnostic { .. } => None,
+        },
         query: request.query.clone(),
     };
     let outcome = execute_request(request, &mut host, multi_launcher::actions::clipboard::set_text);
@@ -734,7 +747,29 @@ impl RootWindow {
     ) {
         let command = match route {
             super::date_search::DateRoute::Copy(text) => RunCommand::Copy(text),
-            super::date_search::DateRoute::Diagnostic(message) => RunCommand::DateDiagnostic(message),
+            super::date_search::DateRoute::Diagnostic(message) => RunCommand::Diagnostic {
+                kind: DiagnosticKind::Date,
+                message,
+            },
+        };
+        self.start_run(action, command, query, source, window, cx);
+    }
+
+    pub(super) fn start_unit_launch(
+        &mut self,
+        action: Action,
+        route: super::unit_convert_search::UnitRoute,
+        query: String,
+        source: ActivationSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = match route {
+            super::unit_convert_search::UnitRoute::Copy(text) => RunCommand::Copy(text),
+            super::unit_convert_search::UnitRoute::Diagnostic(message) => RunCommand::Diagnostic {
+                kind: DiagnosticKind::Unit,
+                message,
+            },
         };
         self.start_run(action, command, query, source, window, cx);
     }
@@ -1149,7 +1184,7 @@ mod tests {
             action: action.clone(),
             command: match route {
                 DateRoute::Copy(text) => RunCommand::Copy(text),
-                DateRoute::Diagnostic(message) => RunCommand::DateDiagnostic(message),
+                DateRoute::Diagnostic(message) => RunCommand::Diagnostic { kind: DiagnosticKind::Date, message },
             },
             query: query.into(),
             source: ActivationSource::Enter,
@@ -1188,7 +1223,7 @@ mod tests {
         let error = execute_request(&request, &mut host, |_| anyhow::bail!("clipboard unavailable"))
             .unwrap_err();
         assert!(error.message.contains("clipboard unavailable"));
-        request.command = RunCommand::DateDiagnostic("bad date".into());
+        request.command = RunCommand::Diagnostic { kind: DiagnosticKind::Date, message: "bad date".into() };
         let error = execute_request(&request, &mut host, |_| panic!("diagnostic copied")).unwrap_err();
         assert_eq!(error.message, "bad date");
         let result = bookkeep(
@@ -1196,6 +1231,20 @@ mod tests {
             &request,
             |_, _| panic!("diagnostic history"),
             |_| panic!("diagnostic usage"),
+        );
+        assert!(result.outcome.is_err());
+        request.command = RunCommand::Diagnostic {
+            kind: DiagnosticKind::Unit,
+            message: "Cannot convert length to mass".into(),
+        };
+        let error = execute_request(&request, &mut host, |_| panic!("unit diagnostic copied"))
+            .unwrap_err();
+        assert_eq!(error.domain, "unit_convert");
+        assert_eq!(error.message, "Cannot convert length to mass");
+        let result = bookkeep(
+            Err(error), &request,
+            |_, _| panic!("unit diagnostic history"),
+            |_| panic!("unit diagnostic usage"),
         );
         assert!(result.outcome.is_err());
     }

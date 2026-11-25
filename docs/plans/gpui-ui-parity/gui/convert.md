@@ -2,6 +2,8 @@
 
 G16 owns `convert`. `conv` and `convert` emit `convert:panel` and open `DialogCommand::Convert`. `ConvertPanel` owns the resizable root surface and current draft. The existing unit catalog owns the physical conversion domain.
 
+The stock inline Unit Convert Search replay covers the shared domain, exact destination spelling and approximation. G16 still owns the interactive panel and its launch route. [Inline Unit Convert evidence](../VALIDATION_LOG.md#g05-stock-inline-unit-convert-search)
+
 | Criterion | Source-backed behavior |
 | --- | --- |
 | CONVERT-01 | Preserve 17 physical categories, canonical units, independent source/target filters and favorites, Swap, up to six targets and per-target validation. Keep exact displayed unit, rounding/approximation and Copy value. |

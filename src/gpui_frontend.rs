@@ -8,6 +8,7 @@ mod external_launch;
 mod file_search;
 mod date_search;
 mod base_convert_search;
+mod unit_convert_search;
 mod plugin_editor;
 #[cfg(windows)]
 mod downloads_triage;
@@ -375,8 +376,9 @@ impl LauncherSearchCatalog {
             .filter_map(|(provider, action)| {
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
+                let unit_result = unit_convert_search::classify(&provider, &action).is_some();
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result
+                    .is_some() || date_result || base_result || unit_result
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -6842,6 +6844,8 @@ impl RootWindow {
                     date_search::classify(provider, action).is_some()
                 } else if provider == "base_convert" {
                     base_convert_search::classify(provider, action).is_some()
+                } else if provider == "unit_convert" {
+                    unit_convert_search::classify(provider, action).is_some()
                 } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
                     external_launch::provider_association_by_name(provider, action).is_some()
                 } else if cfg!(windows) && provider == "downloads_triage" {
@@ -7586,6 +7590,15 @@ impl RootWindow {
                 self.open_file_search(window, cx);
             }
             return;
+        }
+        if let LauncherResultOrigin::Provider(name) = &result.origin {
+            if let Some(route) = unit_convert_search::classify(name, &result.action) {
+                if !unit_convert_search::is_current(
+                    &query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref(),
+                ) { return; }
+                self.start_unit_launch(result.action, route, query, source, window, cx);
+                return;
+            }
         }
         if let LauncherResultOrigin::Provider(name) = &result.origin {
             if let Some(text) = base_convert_search::classify(name, &result.action) {
@@ -14105,6 +14118,42 @@ mod tests {
     }
 
     #[test]
+    fn unit_convert_shared_route_preserves_scoring_and_base_precedence() {
+        let enabled = HashSet::from(["unit_convert".to_owned(), "base_convert".to_owned()]);
+        let mut catalog = completion_catalog(Vec::new(), true, Some(&enabled));
+        for query in ["CONVERT 1 MB to Mb", "conv 1 month to day", "kind:clipboard conv 1 MB to Mb"] {
+            let rows = super::search_providers::search_routed(catalog.providers.plugins(), query, Some(&enabled), None);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, "unit_convert");
+            assert!(super::unit_convert_search::is_current(query, &rows[0].1, Some(&enabled), None));
+            let projected = catalog.compose(query, rows.clone(), false);
+            assert_eq!(projected.len(), 1);
+            let mut results = LauncherSearchResults::default();
+            results.replace(query.into(), projected, ResolvedQueryResultsLayout::default(), 2);
+            let generation = results.generation;
+            assert!(results.resolve_result(generation, 0, query).is_some());
+            assert!(results.resolve_result(generation, 0, "changed").is_none());
+            results.replace("changed".into(), Vec::new(), ResolvedQueryResultsLayout::default(), 2);
+            assert!(results.resolve_result(generation, 0, query).is_none());
+        }
+        let base = super::search_providers::search_routed(catalog.providers.plugins(), "conv 255 dec to hex", Some(&enabled), None);
+        assert_eq!(base.len(), 1);
+        assert_eq!(base[0].0, "base_convert");
+        let no_unit = HashSet::from(["base_convert".to_owned()]);
+        assert!(super::search_providers::search_routed(catalog.providers.plugins(), "conv 1 month to day", Some(&no_unit), None).is_empty());
+        let query = "conv 3 km to kg";
+        let diagnostic = super::search_providers::search_routed(catalog.providers.plugins(), query, Some(&enabled), None);
+        assert_eq!(diagnostic.len(), 1);
+        assert!(catalog.compose(query, diagnostic.clone(), false).is_empty());
+        catalog.match_exact = false;
+        let projected = catalog.compose(query, diagnostic.clone(), false);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].action, diagnostic[0].1);
+        let disabled = HashMap::from([("unit_convert".to_owned(), Vec::new())]);
+        assert!(!super::unit_convert_search::is_current(query, &diagnostic[0].1, Some(&enabled), Some(&disabled)));
+    }
+
+    #[test]
     fn base_convert_search_uses_stock_scoring_gates_and_stale_receipts() {
         let enabled = HashSet::from(["base_convert".to_owned()]);
         let catalog = completion_catalog(Vec::new(), true, Some(&enabled));
@@ -14898,9 +14947,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["base_convert", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["base_convert", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["base_convert", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["base_convert", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14929,7 +14978,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 14 } else { 13 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 15 } else { 14 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(

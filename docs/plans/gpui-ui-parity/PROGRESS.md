@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G05 inline Unit Convert now uses shared routing, checked clipboard completion and typed diagnostics. Matched Windows runs at 1516 × 937 verified exact and approximate payloads plus the cached Unit and Base order. [Unit Convert evidence](VALIDATION_LOG.md#g05-stock-inline-unit-convert-search)
+
 G05 stock Base Convert now copies numeric and literal text results through the checked Search worker. Windows matched egui at 1516 × 937 and verified exact Unicode whitespace and success accounting. [Base Convert evidence](VALIDATION_LOG.md#g05-stock-base-convert-search)
 
 G04 Hash File mode now shows a visual and accessible Kit progress indicator. Matched Windows File-mode runs at 1516 × 937 streamed and canceled the same owned file in both frontends. [Hash progress evidence](VALIDATION_LOG.md#g04-visual-and-accessible-hash-progress)
@@ -29,7 +31,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue broader G05 provider admission with inline Unit Convert. G04 matched native Clipboard Load, SHA-256 comparison, Copy and running progress cancellation passed in both frontends. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
+| Current next action | Continue broader G05 provider admission with inline Calculator. G04 matched native Clipboard Load, SHA-256 comparison, Copy and running progress cancellation passed in both frontends. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

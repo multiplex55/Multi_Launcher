@@ -243,3 +243,7 @@ GPUI projects the existing Date Arithmetic results through shared filters and sc
 ## Stock Base Convert Search
 
 GPUI uses the stock `conv` and `convert` parser, conversion and ordinary provider scoring. The checked worker copies the exact current result and records the original Action in History and Usage. Legacy clipboard markers have reserved meanings and are suppressed as Base results in GPUI. Embedded NUL is excluded from the Windows Base route because the standard clipboard format ends text at NUL. The shared saved Action parser retains its meanings. Inline Unit Convert and the Convert Panel have separate migration scope. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-stock-base-convert-search)
+
+## Stock inline Unit Convert Search
+
+GPUI shares the stock Unit Convert engine, Base precedence and ordinary provider scoring. It copies the exact published value and authored destination spelling, including case, and retains the approximation description. Fuzzy Search can present the typed diagnostic with no clipboard or success accounting. Bare `conv` and `convert` keep the Unit and Base fallback order observed in egui. The interactive Convert Panel belongs to G16. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-stock-inline-unit-convert-search)
