@@ -142,6 +142,14 @@ Complete coherent vertical slices: retained state, all controls, domain operatio
 
 Use natural checkpoint commits such as `feat(gpui): [G07-B] preserve file search filters and result actions`. Commit coherent increments before materially different work. A checkpoint may be committed with required native evidence still pending when accurately recorded; that does not make its GUI Accepted or its goal complete. Preserve a buildable, working egui path at accepted checkpoints.
 
+### Two-pass execution by GUI family
+
+**Pass 1 · Functional coverage.** Select related interfaces with real engine, hosting or control reuse. A typical batch covers three to five smaller interfaces or several substantial increments of a larger family. Inspect each existing egui surface, wire the complete GPUI behavior to authoritative engines and persistence, add targeted tests, type-check with the locked `fast-dev` profile and obtain independent review. Keep substantial views and rendering in feature modules. Reuse the Hash and launcher work as implementation references. Extract shared hosting, input, controls, accessibility, dispatch, persistence or worker behavior when concrete consumers need it.
+
+**Pass 2 · Verification and acceptance.** Group focused selectors by target and build one Windows candidate for the batch where practical. Compare both frontends at the established 1516 × 937 baseline, collect related defects and revalidate the affected scope together. Record implementation, compilation, executed tests, native evidence and formal acceptance separately. Assign each deferred criterion an owner and verification stage. Continue safe independent implementation while environment-limited evidence remains pending, and resolve shared blocking defects before dependent features rely on them.
+
+Verify high-risk startup, shutdown, shared service ownership, destructive effects, persistence, Windows authority, global input, unsafe code and asynchronous lifetime changes immediately at the narrowest useful boundary. Use ordinary scoped checks between implementation checkpoints and preserve the existing compilation caches. Keep the anchored Search field and independent body scrolling at the native baseline, with compact sizes supplemental.
+
 ## 8. Branch and agent workflow
 
 Start a fresh branch such as `feat/gpui-ui-parity` from the latest safely fetched `origin/master`. Record the parent SHA, branch, initial baseline commit, and upstream. Preserve staged/unstaged/untracked user work. Do not discard, reset, force-checkout, auto-stash, or incorporate unrelated work merely to create the branch.

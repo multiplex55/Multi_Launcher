@@ -15,6 +15,7 @@ mod plugin_editor;
 #[cfg(windows)]
 mod downloads_triage;
 mod favorites;
+mod favorite_search;
 mod hash_jump;
 mod hash_progress;
 mod hash_layout;
@@ -484,7 +485,7 @@ impl LauncherSearchCatalog {
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_filename_start(raw_query, &action).is_some();
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -7103,6 +7104,8 @@ impl RootWindow {
                     base_convert_search::classify(provider, action).is_some()
                 } else if provider == "unit_convert" {
                     unit_convert_search::classify(provider, action).is_some()
+                } else if provider == "favorites" {
+                    favorite_search::is_executable(action) || is_supported_launcher_search_action(action)
                 } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
                     external_launch::provider_association_by_name(provider, action).is_some()
                 } else if cfg!(windows) && provider == "downloads_triage" {
@@ -7828,6 +7831,16 @@ impl RootWindow {
             return;
         };
         if !self.launcher_result_activation_is_live(origin, window, cx) {
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "favorites")
+            && favorite_search::is_executable(&result.action)
+        {
+            if self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("favorites"))
+                && multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "favorites")
+            {
+                self.start_favorite_launch(result.action, query, source, window, cx);
+            }
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "activity")
@@ -15446,7 +15459,8 @@ mod tests {
             providers.plugins(), "fav", Some(&enabled), Some(&no_search),
         ).is_empty());
         let commands = providers.cached_commands(Some(&enabled));
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.iter().map(|command| command.action.as_str()).collect::<Vec<_>>(),
+            vec!["query:fav ", "query:fav add ", "query:fav list"]);
         assert!(providers.cached_commands(Some(&HashSet::new())).is_empty());
         for (command, admitted) in [("fav:dialog:", true), ("fav:dialog:name", true)] {
             let action = saved_action("saved favorite", command, None);

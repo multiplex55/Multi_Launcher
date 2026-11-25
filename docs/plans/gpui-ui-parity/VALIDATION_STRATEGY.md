@@ -140,6 +140,8 @@ Some current architectural tests inspect source paths or egui-specific commands.
 
 ## 7. Layered checks by change type
 
+During the functional pass, type-check touched launcher, library or test targets with the locked `fast-dev` profile. Record written and type-checked tests separately from executed tests. Run immediate focused checks for high-risk ownership, persistence, destructive effects, native identity, input and worker lifetime changes. At the family verification boundary, link one focused union by target, reuse the binaries for further selectors when the source and configuration match, and build one paired native candidate where practical. Verify each GUI against its own criteria and record the remaining gates before proceeding.
+
 | Change | Smallest sufficient starting checks | Reason to add more |
 |---|---|---|
 | Pure GPUI layout/theme/control mapping | Compile affected frontend; exercise changed GUI state and interaction; inspect visual result. | Shared adapter, focus semantics, keyboard behavior or data conversion changed. |

@@ -63,7 +63,7 @@ pub(super) struct InstalledLauncherProviders {
     pub(super) hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
     settings: multi_launcher::plugins::settings::SettingsPlugin,
     help: multi_launcher::plugins::help::HelpPlugin,
-    favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
+    favorites: super::favorite_search::Provider,
     activity: multi_launcher::plugins::activity::ActivityPlugin,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
@@ -88,18 +88,20 @@ impl InstalledLauncherProviders {
             enabled_plugins
                 .is_none_or(|enabled| enabled.contains("bookmarks"))
                 .then(multi_launcher::plugins::bookmarks::BookmarksPlugin::new),
+            enabled_plugins.is_none_or(|enabled| enabled.contains("favorites")),
         )
     }
 
     fn with_providers(
         folders: Option<multi_launcher::plugins::folders::FoldersPlugin>,
         bookmarks: Option<multi_launcher::plugins::bookmarks::BookmarksPlugin>,
+        watch_favorites: bool,
     ) -> Self {
         Self {
             hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
             settings: multi_launcher::plugins::settings::SettingsPlugin,
             help: multi_launcher::plugins::help::HelpPlugin,
-            favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
+            favorites: super::favorite_search::Provider::new(watch_favorites),
             activity: multi_launcher::plugins::activity::ActivityPlugin,
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
@@ -119,7 +121,7 @@ impl InstalledLauncherProviders {
 
     #[cfg(test)]
     pub(super) fn test_without_persisted_providers() -> Self {
-        Self::with_providers(None, None)
+        Self::with_providers(None, None, false)
     }
 
     pub(super) fn plugins<'a>(

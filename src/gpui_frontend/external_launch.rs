@@ -532,6 +532,7 @@ pub(super) enum DiagnosticKind {
 pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
     Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
+    Favorite(ExternalCommand),
     Copy(String),
     WindowSwitch(multi_launcher::window_activation::CheckedWindowSwitch),
     WindowClose(multi_launcher::window_close::CheckedWindowClose),
@@ -657,6 +658,17 @@ struct IndexedHost<'a> {
     host: &'a Host,
     authority: &'a super::indexed_applications::LaunchAuthority,
 }
+
+struct FavoriteHost<'a> { host: &'a Host }
+impl ExternalCommandHost for FavoriteHost<'_> {
+    fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
+        anyhow::ensure!(command.namespace.is_none() && command.target == action.action && command.args == action.args, "Invalid favorite command");
+        super::favorite_search::checked_launch_with(action, multi_launcher::plugins::fav::FAV_FILE, multi_launcher::actions::exec::launch)
+    }
+    fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
+    fn external_hide_after_run(&self) -> bool { self.host.external_hide_after_run() }
+    fn external_launcher_should_refocus(&self) -> bool { self.host.external_launcher_should_refocus() }
+}
 impl ExternalCommandHost for IndexedHost<'_> {
     fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
         anyhow::ensure!(command.namespace.is_none() && command.args.is_none() && command.target == action.action, "Invalid indexed application command");
@@ -696,6 +708,7 @@ fn execute_request(
             CommandBus.dispatch_external(command, &request.action, request.source, None,
                 &mut IndexedHost { host, authority })
         }
+        RunCommand::Favorite(command) => CommandBus.dispatch_external(command, &request.action, request.source, None, &mut FavoriteHost { host }),
         RunCommand::WindowSwitch(checked) => {
             let effect = multi_launcher::window_activation::activate_checked_window_switch(checked.clone())
                 .map_err(anyhow::Error::new);
@@ -777,7 +790,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
+            RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -870,6 +883,11 @@ impl RootWindow {
         query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>,
     ) {
         self.start_run(action, RunCommand::WindowClose(checked), query, source, None, window, cx);
+    }
+
+    pub(super) fn start_favorite_launch(&mut self, action: Action, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = super::external_launch::saved_external(&action) else { return; };
+        self.start_run(action, RunCommand::Favorite(command), query, source, None, window, cx);
     }
 
     pub(super) fn start_indexed_launch(
