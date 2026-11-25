@@ -13060,7 +13060,7 @@ pub(crate) fn run_foundation_window(
             cx.spawn(async move |cx| {
                 let mut event_rx: Receiver<()> = event_rx;
                 let mut return_target = initial_return_target;
-                if let Err(error) = root_placement::apply_static(root_placement, native_window, || {
+                if let Err(error) = root_placement::apply_placement(root_placement, native_window, root_placement::PlacementEdge::Startup, || {
                     visibility.is_current(startup_revision, true) && !restart_admission_for_hotkey.is_fenced()
                 }) {
                     tracing::warn!(%error, "could not apply saved launcher placement");
@@ -13205,7 +13205,7 @@ pub(crate) fn run_foundation_window(
                         continue;
                     }
                     if root_placement::should_place_reveal(was_visible, desired_visible, visibility.is_current(revision, desired_visible)) {
-                        if let Err(error) = root_placement::apply_static(root_placement, native_window, || {
+                        if let Err(error) = root_placement::apply_placement(root_placement, native_window, root_placement::PlacementEdge::Reveal, || {
                             visibility.is_current(revision, true) && !restart_admission_for_hotkey.is_fenced()
                         }) {
                             tracing::warn!(%error, "could not apply saved launcher placement");

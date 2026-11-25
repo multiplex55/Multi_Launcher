@@ -4,6 +4,8 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RootPlacement {
     pub initial_client: (i32, i32),
+    startup_client: (i32, i32),
+    follow_mouse: bool,
     position: Option<(i32, i32)>,
     client_size: Option<(i32, i32)>,
 }
@@ -20,6 +22,8 @@ impl RootPlacement {
         let valid = |size: (i32, i32)| size.0 > 0 && size.1 > 0;
         let clamp = |size: (i32, i32)| (size.0.max(320), size.1.max(160));
         Self {
+            startup_client: settings.window_size.unwrap_or((400, 220)),
+            follow_mouse: settings.follow_mouse,
             initial_client: clamp(
                 settings
                     .window_size
@@ -37,14 +41,48 @@ impl RootPlacement {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum PlacementEdge {
+    Startup,
+    Reveal,
+}
+
+fn mouse_position(cursor: Option<(f32, f32)>, basis: (i32, i32), scale: f32) -> Option<(i32, i32)> {
+    let (x, y) = multi_launcher::window_manager::cursor_centered_position(
+        cursor?,
+        (basis.0 as f32, basis.1 as f32),
+    );
+    let convert = |value: f32| {
+        let physical = f64::from(value * scale).round();
+        (physical.is_finite() && physical >= i32::MIN as f64 && physical <= i32::MAX as f64)
+            .then_some(physical as i32)
+    };
+    Some((convert(x)?, convert(y)?))
+}
+
+fn client_basis(
+    edge: PlacementEdge,
+    startup: (i32, i32),
+    metrics: NativeWindowMetrics,
+) -> (i32, i32) {
+    match edge {
+        PlacementEdge::Startup => startup,
+        PlacementEdge::Reveal => (
+            (metrics.client_width as f32 / metrics.scale_factor) as i32,
+            (metrics.client_height as f32 / metrics.scale_factor) as i32,
+        ),
+    }
+}
+
 pub(super) fn should_place_reveal(was_visible: bool, desired_visible: bool, current: bool) -> bool {
     !was_visible && desired_visible && current
 }
 
 #[cfg(windows)]
-pub(super) fn apply_static(
+pub(super) fn apply_placement(
     placement: RootPlacement,
     window: NativeWindow,
+    edge: PlacementEdge,
     current: impl Fn() -> bool,
 ) -> Result<(), String> {
     use windows::Win32::{
@@ -53,7 +91,7 @@ pub(super) fn apply_static(
             SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
         },
     };
-    if !placement.has_static() {
+    if !placement.follow_mouse && !placement.has_static() {
         return Ok(());
     }
     if !current() || !native_window_is_valid(window) {
@@ -64,6 +102,31 @@ pub(super) fn apply_static(
         1.0,
     )?
     .ok_or("launcher window metrics are unavailable")?;
+    if placement.follow_mouse {
+        let basis = client_basis(edge, placement.startup_client, metrics);
+        let Some((x, y)) = mouse_position(
+            multi_launcher::window_manager::current_mouse_position(),
+            basis,
+            metrics.scale_factor,
+        ) else {
+            return Ok(());
+        };
+        if !current() || !native_window_is_valid(window) {
+            return Err("launcher placement request is stale".into());
+        }
+        return unsafe {
+            SetWindowPos(
+                HWND(window.identity.hwnd as *mut _),
+                HWND::default(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOSIZE,
+            )
+        }
+        .map_err(|error| format!("Windows rejected launcher placement: {error}"));
+    }
     let scaled = |value: i32| -> Result<i32, String> {
         let n = (value as f64 * metrics.scale_factor as f64).round();
         if !n.is_finite() || n < i32::MIN as f64 || n > i32::MAX as f64 {
@@ -127,7 +190,8 @@ pub(super) fn apply_static(
 
 #[cfg(test)]
 mod tests {
-    use super::{RootPlacement, should_place_reveal};
+    use super::{PlacementEdge, RootPlacement, client_basis, mouse_position, should_place_reveal};
+    use crate::gpui_frontend::{NativeWindowMetrics, NativeWindowRect};
     use multi_launcher::settings::Settings;
 
     #[test]
@@ -163,8 +227,46 @@ mod tests {
         settings.static_location_enabled = true;
         settings.follow_mouse = true;
         assert!(!RootPlacement::from_settings(&settings).has_static());
+        assert!(RootPlacement::from_settings(&settings).follow_mouse);
         assert!(should_place_reveal(false, true, true));
         assert!(!should_place_reveal(true, true, true));
         assert!(!should_place_reveal(false, true, false));
+    }
+
+    #[test]
+    fn mouse_placement_uses_stock_signed_formula_and_edge_basis() {
+        let metrics = NativeWindowMetrics {
+            outer: NativeWindowRect {
+                left: -500,
+                top: 0,
+                right: 500,
+                bottom: 800,
+            },
+            client_width: 1201,
+            client_height: 601,
+            scale_factor: 1.5,
+        };
+        let startup = (401, 221);
+        assert_eq!(
+            client_basis(PlacementEdge::Startup, startup, metrics),
+            startup
+        );
+        assert_eq!(
+            client_basis(PlacementEdge::Reveal, startup, metrics),
+            (800, 400)
+        );
+        assert_eq!(
+            mouse_position(Some((-100.0, 50.0)), startup, 1.5),
+            Some((-451, -91))
+        );
+        assert_eq!(
+            mouse_position(Some((-100.0, 50.0)), (800, 400), 1.5),
+            Some((-750, -225))
+        );
+        assert_eq!(mouse_position(None, startup, 1.5), None);
+        assert_eq!(
+            mouse_position(Some((-299.0, 0.0)), (401, 0), 160.0_f32 / 96.0),
+            Some((-833, 0))
+        );
     }
 }

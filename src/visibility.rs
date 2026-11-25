@@ -1576,7 +1576,8 @@ pub fn apply_visibility_with_focus_intent<C: ViewportCtx>(
 /// launcher rectangle was already off-desktop and no placement is configured.
 pub(crate) fn cursor_centered_outer_position(window_size: (f32, f32)) -> Option<egui::Pos2> {
     let (x, y) = crate::window_manager::current_mouse_position()?;
-    Some(egui::pos2(x - window_size.0 / 2.0, y - window_size.1 / 2.0))
+    let (x, y) = crate::window_manager::cursor_centered_position((x, y), window_size);
+    Some(egui::pos2(x, y))
 }
 
 #[cfg(test)]

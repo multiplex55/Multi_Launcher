@@ -3,6 +3,11 @@ pub use crate::platform::windows_api::{
     set_mock_mouse_position,
 };
 
+/// Stock launcher placement uses the cursor and logical client dimensions.
+pub fn cursor_centered_position(cursor: (f32, f32), client_size: (f32, f32)) -> (f32, f32) {
+    (cursor.0 - client_size.0 / 2.0, cursor.1 - client_size.1 / 2.0)
+}
+
 use crate::radial::acceptance_trace::{
     self, Correlation, Event, NativeActivationEdge, NativeWindowIdentity,
 };
