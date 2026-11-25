@@ -7,6 +7,7 @@ mod appearance;
 mod external_launch;
 mod file_search;
 mod date_search;
+mod base_convert_search;
 mod plugin_editor;
 #[cfg(windows)]
 mod downloads_triage;
@@ -373,8 +374,9 @@ impl LauncherSearchCatalog {
             .into_iter()
             .filter_map(|(provider, action)| {
                 let date_result = date_search::classify(&provider, &action).is_some();
+                let base_result = base_convert_search::classify(&provider, &action).is_some();
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result
+                    .is_some() || date_result || base_result
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -6838,6 +6840,8 @@ impl RootWindow {
             .filter(|(provider, action)| {
                 if provider == "date_arithmetic" {
                     date_search::classify(provider, action).is_some()
+                } else if provider == "base_convert" {
+                    base_convert_search::classify(provider, action).is_some()
                 } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
                     external_launch::provider_association_by_name(provider, action).is_some()
                 } else if cfg!(windows) && provider == "downloads_triage" {
@@ -7582,6 +7586,20 @@ impl RootWindow {
                 self.open_file_search(window, cx);
             }
             return;
+        }
+        if let LauncherResultOrigin::Provider(name) = &result.origin {
+            if let Some(text) = base_convert_search::classify(name, &result.action) {
+                if !base_convert_search::is_current(
+                    &query,
+                    &result.action,
+                    self.enabled_plugins.as_ref(),
+                    self.enabled_capabilities.as_ref(),
+                ) {
+                    return;
+                }
+                self.start_copy_launch(result.action, text, query, source, window, cx);
+                return;
+            }
         }
         if let LauncherResultOrigin::Provider(name) = &result.origin {
             if let Some(route) = date_search::classify(name, &result.action) {
@@ -14087,6 +14105,42 @@ mod tests {
     }
 
     #[test]
+    fn base_convert_search_uses_stock_scoring_gates_and_stale_receipts() {
+        let enabled = HashSet::from(["base_convert".to_owned()]);
+        let catalog = completion_catalog(Vec::new(), true, Some(&enabled));
+        for query in ["conv 255 dec to hex", "CONVERT 20436166c3a920 hex to text"] {
+            let rows = super::search_providers::search_routed(
+                catalog.providers.plugins(), query, Some(&enabled), None,
+            );
+            assert_eq!(rows.len(), 1);
+            assert!(super::base_convert_search::is_current(
+                query, &rows[0].1, Some(&enabled), None,
+            ));
+            let projected = catalog.compose(query, rows.clone(), false);
+            assert_eq!(projected.len(), 1);
+            assert_eq!(projected[0].action, rows[0].1);
+            let mut results = LauncherSearchResults::default();
+            results.replace(query.into(), projected, ResolvedQueryResultsLayout::default(), 2);
+            let generation = results.generation;
+            assert!(results.resolve_result(generation, 0, query).is_some());
+            assert!(results.resolve_result(generation, 0, "changed").is_none());
+            results.replace("changed".into(), Vec::new(), ResolvedQueryResultsLayout::default(), 2);
+            assert!(results.resolve_result(generation, 0, query).is_none());
+            let no_search = HashMap::from([("base_convert".to_owned(), Vec::new())]);
+            assert!(!super::base_convert_search::is_current(
+                query, &rows[0].1, Some(&enabled), Some(&no_search),
+            ));
+            assert!(!super::base_convert_search::is_current(
+                query, &rows[0].1, Some(&HashSet::new()), None,
+            ));
+        }
+        let cached = catalog.compose("conv", Vec::new(), true);
+        assert!(cached.iter().any(|row| row.action.action == "query:conv "));
+        let cached = catalog.compose("convert", Vec::new(), true);
+        assert!(cached.iter().any(|row| row.action.action == "query:convert "));
+    }
+
+    #[test]
     fn date_provider_search_projection_obeys_gate_and_exact_bypass() {
         let enabled = HashSet::from(["date_arithmetic".to_owned()]);
         let catalog = completion_catalog(Vec::new(), true, Some(&enabled));
@@ -14844,9 +14898,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["base_convert", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["base_convert", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "weather", "web_search", "wikipedia", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14875,7 +14929,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 13 } else { 12 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 14 } else { 13 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(

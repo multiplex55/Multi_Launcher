@@ -514,7 +514,8 @@ fn checked_web_association_with(
 #[derive(Clone)]
 pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
-    Date(super::date_search::DateRoute),
+    Copy(String),
+    DateDiagnostic(String),
 }
 
 #[derive(Clone)]
@@ -632,7 +633,7 @@ fn execute_request(
         RunCommand::External { command, .. } => CommandBus.dispatch_external(
             command, &request.action, request.source, None, host,
         ),
-        RunCommand::Date(super::date_search::DateRoute::Copy(text)) => {
+        RunCommand::Copy(text) => {
             let effect = copy(text);
             CommandBus.complete_checked_clipboard_text(text.clone(), &request.action, request.source, effect,
                 multi_launcher::commands::LauncherRunPreferences {
@@ -641,7 +642,7 @@ fn execute_request(
                     refocus: true,
                 })
         }
-        RunCommand::Date(super::date_search::DateRoute::Diagnostic(message)) => {
+        RunCommand::DateDiagnostic(message) => {
             Err(CommandError::new("date_arithmetic", message.clone()).with_gui_failure_policy())
         }
     }
@@ -650,7 +651,7 @@ fn execute_request(
 pub(super) fn run(request: &Request) -> WorkerResult {
     let mut host = Host {
         settings: request.settings.clone(),
-        association: match &request.command { RunCommand::External { association, .. } => *association, RunCommand::Date(_) => None },
+        association: match &request.command { RunCommand::External { association, .. } => *association, RunCommand::Copy(_) | RunCommand::DateDiagnostic(_) => None },
         query: request.query.clone(),
     };
     let outcome = execute_request(request, &mut host, multi_launcher::actions::clipboard::set_text);
@@ -731,7 +732,23 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_run(action, RunCommand::Date(route), query, source, window, cx);
+        let command = match route {
+            super::date_search::DateRoute::Copy(text) => RunCommand::Copy(text),
+            super::date_search::DateRoute::Diagnostic(message) => RunCommand::DateDiagnostic(message),
+        };
+        self.start_run(action, command, query, source, window, cx);
+    }
+
+    pub(super) fn start_copy_launch(
+        &mut self,
+        action: Action,
+        text: String,
+        query: String,
+        source: ActivationSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_run(action, RunCommand::Copy(text), query, source, window, cx);
     }
 
     fn start_run(
@@ -925,7 +942,7 @@ impl RootWindow {
             )
             .enumerate()
         {
-            let message = if matches!(&receipt.request.command, RunCommand::Date(super::date_search::DateRoute::Copy(_))) {
+            let message = if matches!(&receipt.request.command, RunCommand::Copy(_)) {
                 format!("Copied, but bookkeeping failed: {error}")
             } else {
                 format!("Application launched, but bookkeeping failed: {error}")
@@ -1058,6 +1075,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn base_convert_copy_preserves_literal_spaces_and_unicode() {
+        use multi_launcher::plugin::Plugin;
+        let query = "CONVERT 20436166c3a920 hex to text";
+        let action = multi_launcher::plugins::base_convert::BaseConvertPlugin
+            .search(query)
+            .remove(0);
+        let text = super::super::base_convert_search::classify("base_convert", &action).unwrap();
+        let settings = Settings {
+            clear_query_after_run: false,
+            hide_after_run: false,
+            history_limit: 10,
+            enable_toasts: true,
+            show_error_toasts: true,
+            show_inline_errors: true,
+            toast_duration: 1.0,
+        };
+        let request = Request {
+            action: action.clone(),
+            command: RunCommand::Copy(text),
+            query: query.into(),
+            source: ActivationSource::Click,
+            settings: settings.clone(),
+        };
+        let mut host = Host {
+            settings,
+            association: None,
+            query: query.into(),
+        };
+        let mut copied = None;
+        let outcome = execute_request(&request, &mut host, |text| {
+            copied = Some(text.to_owned());
+            Ok(())
+        }).unwrap();
+        assert_eq!(copied.as_deref(), Some(" Café "));
+        assert!(matches!(
+            &outcome.toasts[0],
+            multi_launcher::commands::ToastPolicy::Copied(_)
+        ));
+        let mut history = None;
+        let result = bookkeep(Ok(outcome), &request, |entry, _| {
+            history = Some(entry);
+            Ok(())
+        }, |_| Ok(1));
+        assert!(result.outcome.is_ok());
+        assert_eq!(history.unwrap().action, action);
+    }
+
+    #[test]
     fn date_copy_uses_exact_published_text_and_diagnostics_never_copy() {
         use crate::gpui_frontend::date_search::{DateRoute, classify};
         let settings = Settings {
@@ -1082,7 +1147,10 @@ mod tests {
         let route = classify("date_arithmetic", &action).unwrap();
         let mut request = Request {
             action: action.clone(),
-            command: RunCommand::Date(route),
+            command: match route {
+                DateRoute::Copy(text) => RunCommand::Copy(text),
+                DateRoute::Diagnostic(message) => RunCommand::DateDiagnostic(message),
+            },
             query: query.into(),
             source: ActivationSource::Enter,
             settings: settings.clone(),
@@ -1120,7 +1188,7 @@ mod tests {
         let error = execute_request(&request, &mut host, |_| anyhow::bail!("clipboard unavailable"))
             .unwrap_err();
         assert!(error.message.contains("clipboard unavailable"));
-        request.command = RunCommand::Date(DateRoute::Diagnostic("bad date".into()));
+        request.command = RunCommand::DateDiagnostic("bad date".into());
         let error = execute_request(&request, &mut host, |_| panic!("diagnostic copied")).unwrap_err();
         assert_eq!(error.message, "bad date");
         let result = bookkeep(

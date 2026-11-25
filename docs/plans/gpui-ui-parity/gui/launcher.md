@@ -239,3 +239,7 @@ The saved GPUI route treats a valid HTTP(S) URL that ends in `.exe` as a URL ass
 ## Stock Date Arithmetic Search
 
 GPUI projects the existing Date Arithmetic results through shared filters and scoring, including calculations whose result text differs from the query. Activation rechecks the published provider origin and current Search capability. Successful calculations copy the exact text attached to the result and use the shared success, History, Usage and visibility policy. GPUI presents the engine's diagnostic in Search and preserves the query and clipboard. Date Studio remains a separate utility migration. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-stock-date-arithmetic-search)
+
+## Stock Base Convert Search
+
+GPUI uses the stock `conv` and `convert` parser, conversion and ordinary provider scoring. The checked worker copies the exact current result and records the original Action in History and Usage. Legacy clipboard markers have reserved meanings and are suppressed as Base results in GPUI. Embedded NUL is excluded from the Windows Base route because the standard clipboard format ends text at NUL. The shared saved Action parser retains its meanings. Inline Unit Convert and the Convert Panel have separate migration scope. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-stock-base-convert-search)

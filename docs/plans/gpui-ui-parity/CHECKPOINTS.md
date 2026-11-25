@@ -963,3 +963,7 @@ The ordinary List uses centered single-line rows at the theme height and spacing
 ## G04 visual and accessible Hash progress
 
 The GPUI Hash view now shows Kit progress from the existing worker's byte counts. Four focused cases passed. Both frontends showed advancing progress on the same owned 3 GiB sparse file and cleared it on Cancel, without publishing a digest. GPUI exposed the numeric progress role and retained the exact byte status. The docked GPUI footer required scrolling. Unknown totals use the Kit indeterminate indicator and are covered by the focused test. Global invocation, mixed DPI and remaining presentation criteria stay open. [Exact receipts](VALIDATION_LOG.md#g04-visual-and-accessible-hash-progress)
+
+## G05 stock Base Convert Search
+
+The stock Base Convert provider supplies GPUI Search, cached command fallback and Command List. Nine focused cases passed. Both frontends copied the same numeric and Unicode results at 1516 × 937, including one leading and one trailing space around the Unicode text. GPUI refused reserved command strings, embedded Windows NUL and disabled Search. Continue inline Unit Convert through its separate provider. [Exact receipts](VALIDATION_LOG.md#g05-stock-base-convert-search)
