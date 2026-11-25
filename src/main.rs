@@ -4842,6 +4842,7 @@ fn main() -> anyhow::Result<()> {
             .to_owned();
         let search_startup = gpui_frontend::LauncherSearchStartup {
             actions: actions_vec,
+            calculator_settings: settings.plugin_settings.get("calculator").cloned(),
             match_exact: settings.match_exact,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,

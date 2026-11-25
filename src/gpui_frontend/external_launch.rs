@@ -521,6 +521,7 @@ pub(super) enum DiagnosticKind {
 pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
     Copy(String),
+    Calculator(super::calculator_search::ScalarResult),
     Diagnostic { kind: DiagnosticKind, message: String },
 }
 
@@ -648,6 +649,17 @@ fn execute_request(
                     refocus: true,
                 })
         }
+        RunCommand::Calculator(scalar) => {
+            let effect = multi_launcher::actions::calc::copy_result(&scalar.result, scalar.expression.as_deref());
+            CommandBus.complete_checked_calculator_result(
+                scalar.result.clone(), scalar.expression.clone(), &request.action, request.source, effect,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run,
+                    refocus: true,
+                },
+            )
+        }
         RunCommand::Diagnostic { kind, message } => {
             let domain = match kind {
                 DiagnosticKind::Date => "date_arithmetic",
@@ -663,7 +675,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::Copy(_) | RunCommand::Diagnostic { .. } => None,
+            RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::Diagnostic { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -753,6 +765,18 @@ impl RootWindow {
             },
         };
         self.start_run(action, command, query, source, window, cx);
+    }
+
+    pub(super) fn start_calculator_launch(
+        &mut self,
+        action: Action,
+        scalar: super::calculator_search::ScalarResult,
+        query: String,
+        source: ActivationSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_run(action, RunCommand::Calculator(scalar), query, source, window, cx);
     }
 
     pub(super) fn start_unit_launch(
@@ -977,7 +1001,7 @@ impl RootWindow {
             )
             .enumerate()
         {
-            let message = if matches!(&receipt.request.command, RunCommand::Copy(_)) {
+            let message = if matches!(&receipt.request.command, RunCommand::Copy(_) | RunCommand::Calculator(_)) {
                 format!("Copied, but bookkeeping failed: {error}")
             } else {
                 format!("Application launched, but bookkeeping failed: {error}")

@@ -2,6 +2,18 @@ use super::{CommandHelpProvider, supported_launcher_search_actions};
 use multi_launcher::actions::Action;
 use std::{collections::HashSet, sync::Arc};
 
+struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
+
+impl multi_launcher::plugin::Plugin for CalculatorMetadata {
+    fn name(&self) -> &str { "calculator" }
+    fn description(&self) -> &str { "Evaluate inline scalar expressions (prefix: `=`)" }
+    fn capabilities(&self) -> &[&str] { self.0.capabilities() }
+    fn search(&self, _: &str) -> Vec<Action> { Vec::new() }
+    fn commands(&self) -> Vec<Action> {
+        self.0.commands().into_iter().filter(|action| action.action == "query:= ").collect()
+    }
+}
+
 struct FileSearchBarePlugin(multi_launcher::plugins::file_search::FileSearchPlugin);
 
 impl multi_launcher::plugin::Plugin for FileSearchBarePlugin {
@@ -39,6 +51,7 @@ pub(super) struct InstalledLauncherProviders {
     help: multi_launcher::plugins::help::HelpPlugin,
     favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
     file_search: FileSearchBarePlugin,
+    calculator: CalculatorMetadata,
     date_arithmetic: multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin,
     base_convert: multi_launcher::plugins::base_convert::BaseConvertPlugin,
     unit_convert: multi_launcher::plugins::unit_convert::UnitConvertPlugin,
@@ -73,6 +86,7 @@ impl InstalledLauncherProviders {
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
+            calculator: CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin::default()),
             date_arithmetic: multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin,
             base_convert: multi_launcher::plugins::base_convert::BaseConvertPlugin,
             unit_convert: multi_launcher::plugins::unit_convert::UnitConvertPlugin,
@@ -97,6 +111,7 @@ impl InstalledLauncherProviders {
             Some(&self.help as &dyn multi_launcher::plugin::Plugin),
             Some(&self.favorites as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
             Some(&self.date_arithmetic as &dyn multi_launcher::plugin::Plugin),
             Some(&self.unit_convert as &dyn multi_launcher::plugin::Plugin),
             Some(&self.base_convert as &dyn multi_launcher::plugin::Plugin),

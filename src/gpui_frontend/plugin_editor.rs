@@ -362,7 +362,7 @@ impl PluginEditorView {
                 if let Some(map) = committed {
                     root.enabled_capabilities = map;
                     let query = root.query.read(cx).value().to_string();
-                    root.refresh_launcher_results_with_viewport(query, false);
+                    root.refresh_launcher_results_with_viewport(query, false, cx);
                     cx.notify();
                 }
             });

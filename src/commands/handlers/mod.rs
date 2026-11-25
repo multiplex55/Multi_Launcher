@@ -41,7 +41,7 @@ pub(crate) use dialog_crop::{handle_crop, handle_simple_dialog};
 pub(crate) use file_search_diff::{handle_diff, handle_file_search};
 pub use hash_generator::handle_hash_generator;
 pub(crate) use headless_gui::{
-    handle_checked_clipboard_text, handle_external, handle_headless_gui, handle_headless_gui_with_history_query, success_outcome,
+    handle_checked_headless_effect, handle_external, handle_headless_gui, handle_headless_gui_with_history_query, success_outcome,
 };
 pub(crate) use hotfolder::handle_hotfolder;
 pub(crate) use json_utility::handle_json_utility;

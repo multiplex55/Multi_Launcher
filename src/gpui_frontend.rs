@@ -7,6 +7,7 @@ mod appearance;
 mod external_launch;
 mod file_search;
 mod date_search;
+mod calculator_search;
 mod base_convert_search;
 mod unit_convert_search;
 mod plugin_editor;
@@ -146,6 +147,7 @@ use fst::Map;
 
 pub(crate) struct LauncherSearchStartup {
     pub actions: Vec<Action>,
+    pub calculator_settings: Option<serde_json::Value>,
     pub match_exact: bool,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
@@ -206,6 +208,7 @@ impl LauncherSearchResult {
 
 struct LauncherSearchCatalog {
     providers: InstalledLauncherProviders,
+    calculator_settings: Option<serde_json::Value>,
     command_help_providers: Arc<[CommandHelpProvider]>,
     quick_help_providers: Arc<[QuickHelpProvider]>,
     actions: Vec<Action>,
@@ -266,6 +269,7 @@ impl LauncherSearchCatalog {
         let completion_index = multi_launcher::completion::build_index(&commands, &actions);
         Self {
             providers,
+            calculator_settings: startup.calculator_settings,
             command_help_providers,
             quick_help_providers,
             actions,
@@ -377,8 +381,9 @@ impl LauncherSearchCatalog {
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
                 let unit_result = unit_convert_search::classify(&provider, &action).is_some();
+                let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some();
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result
+                    .is_some() || date_result || base_result || unit_result || calculator_result
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -2372,6 +2377,7 @@ struct RootWindow {
     enabled_capabilities: Option<HashMap<String, Vec<String>>>,
     search_catalog: LauncherSearchCatalog,
     launcher_results: LauncherSearchResults,
+    calculator_search: calculator_search::SearchOwner,
     external_launch: external_launch::ExternalLaunch,
     external_launch_preferences: ExternalLaunchPreferences,
     action_sheet: Option<action_sheet::Sheet>,
@@ -3546,6 +3552,7 @@ enum RootCloseBlocker {
     ExternalLaunch,
     BooleanPreferenceSave,
     PluginPreferenceSave,
+    CalculatorSearch,
 }
 
 fn root_close_blocker(
@@ -5398,6 +5405,9 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if self.calculator_search.active {
+            return Err(calculator_search::SEARCH_PENDING_STATUS.to_owned());
+        }
         if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
             return Err("A plugin Search capability save is still pending.".to_owned());
         }
@@ -6823,11 +6833,11 @@ impl RootWindow {
         cx.notify();
     }
 
-    fn refresh_launcher_results(&mut self, query: String) {
-        self.refresh_launcher_results_with_viewport(query, true);
+    fn refresh_launcher_results(&mut self, query: String, cx: &mut Context<Self>) {
+        self.refresh_launcher_results_with_viewport(query, true, cx);
     }
 
-    fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool) {
+    fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
         self.retire_context_favorite();
         self.retire_search_jump_mode();
         let raw_provider_actions = search_providers::search_routed(
@@ -6836,11 +6846,39 @@ impl RootWindow {
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
+        self.calculator_search.pending = None;
+        let calculator_enabled = calculator_search::scalar_expression(&query).is_some()
+            && self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("calculator"))
+            && multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "calculator");
+        if calculator_enabled {
+            let layout = self.search_catalog.resolve_result_layout(&query, self.enabled_plugins.as_ref());
+            self.launcher_results.replace(query.clone(), Vec::new(), layout, self.search_catalog.page_jump);
+            self.fresh_search_enter = None;
+            self.launcher_results_scroll = ScrollHandle::new();
+            if scroll_to_search { self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM); }
+            let names: Vec<_> = self.search_catalog.providers.plugins().map(|plugin| plugin.name().to_owned()).collect();
+            let calculator_index = names.iter().position(|name| name == "calculator").unwrap_or(names.len());
+            let insert_at = raw_provider_actions.iter().position(|(name, _)| {
+                names.iter().position(|candidate| candidate == name).is_some_and(|index| index > calculator_index)
+            }).unwrap_or(raw_provider_actions.len());
+            self.calculator_search.pending = Some(calculator_search::PendingSearch {
+                query, generation: self.launcher_results.generation,
+                other_rows: raw_provider_actions, insert_at,
+            });
+            self.start_pending_calculator_search(cx);
+            return;
+        }
+        self.publish_launcher_provider_results(query, raw_provider_actions, scroll_to_search);
+    }
+
+    fn publish_launcher_provider_results(&mut self, query: String, raw_provider_actions: Vec<(String, Action)>, scroll_to_search: bool) {
         let raw_provider_results_empty = raw_provider_actions.is_empty();
         let provider_actions = raw_provider_actions
             .into_iter()
             .filter(|(provider, action)| {
-                if provider == "date_arithmetic" {
+                if provider == "calculator" {
+                    calculator_search::classify(provider, &query, action).is_some()
+                } else if provider == "date_arithmetic" {
                     date_search::classify(provider, action).is_some()
                 } else if provider == "base_convert" {
                     base_convert_search::classify(provider, action).is_some()
@@ -6894,7 +6932,7 @@ impl RootWindow {
         if self.search_catalog.replace_saved_actions(rows) {
             let query = self.query.read(cx).value().to_string();
             self.search_completion.reset_for_query(&self.search_catalog, &query);
-            self.refresh_launcher_results_with_viewport(query, false);
+            self.refresh_launcher_results_with_viewport(query, false, cx);
             true
         } else {
             false
@@ -7590,6 +7628,15 @@ impl RootWindow {
                 self.open_file_search(window, cx);
             }
             return;
+        }
+        if let LauncherResultOrigin::Provider(name) = &result.origin {
+            if let Some(scalar) = calculator_search::classify(name, &query, &result.action) {
+                if self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains(name))
+                    || !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), name)
+                { return; }
+                self.start_calculator_launch(result.action, scalar, query, source, window, cx);
+                return;
+            }
         }
         if let LauncherResultOrigin::Provider(name) = &result.origin {
             if let Some(route) = unit_convert_search::classify(name, &result.action) {
@@ -9389,6 +9436,9 @@ impl RootWindow {
             Some(RootCloseBlocker::ExternalLaunch) => {
                 self.restart_status = Some(external_launch::CLOSE_STATUS.to_owned());
             }
+            Some(RootCloseBlocker::CalculatorSearch) => {
+                self.restart_status = Some(calculator_search::SEARCH_PENDING_STATUS.to_owned());
+            }
             Some(RootCloseBlocker::PluginPreferenceSave) => {
                 self.restart_status = Some("Wait for the plugin Search capability save.".to_owned());
             }
@@ -9417,6 +9467,9 @@ impl RootWindow {
         file_picker_pending: bool,
         cx: &App,
     ) -> Option<RootCloseBlocker> {
+        if self.calculator_search.active {
+            return Some(RootCloseBlocker::CalculatorSearch);
+        }
         if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
             return Some(RootCloseBlocker::PluginPreferenceSave);
         }
@@ -12228,6 +12281,7 @@ pub(crate) fn run_foundation_window(
                 enabled_capabilities: enabled_capabilities.clone(),
                 search_catalog: search_catalog_for_root,
                 launcher_results: initial_launcher_results,
+                calculator_search: calculator_search::SearchOwner::default(),
                 external_launch: external_launch::ExternalLaunch::default(),
                 external_launch_preferences: external_launch_preferences_for_root.clone(),
                 action_sheet: None,
@@ -12464,7 +12518,7 @@ pub(crate) fn run_foundation_window(
                                 root.query_history.synchronize(&query_text);
                                 root.search_completion
                                     .apply_change(&root.search_catalog, &query_text);
-                                root.refresh_launcher_results(query_text);
+                                root.refresh_launcher_results(query_text, cx);
                                 cx.notify();
                             }
                             InputEvent::PressEnter { secondary, shift } => {
@@ -12648,6 +12702,13 @@ pub(crate) fn run_foundation_window(
                 };
                 match blocker {
                     None => return true,
+                    Some(RootCloseBlocker::CalculatorSearch) => {
+                        let _ = root_for_window_close.update(app, |root, cx| {
+                            root.restart_status = Some(calculator_search::SEARCH_PENDING_STATUS.to_owned());
+                            cx.notify();
+                        });
+                        false
+                    }
                     Some(RootCloseBlocker::PluginPreferenceSave) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
                             root.restart_status = Some("Wait for the plugin Search capability save.".to_owned());
@@ -13984,6 +14045,7 @@ mod tests {
         LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 actions,
+                calculator_settings: None,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -14519,6 +14581,7 @@ mod tests {
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 actions: Vec::new(),
+                calculator_settings: None,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -14557,6 +14620,7 @@ mod tests {
         let globally_gridded = LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 actions: Vec::new(),
+                calculator_settings: None,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -14706,6 +14770,7 @@ mod tests {
 
         let settings_action = saved_action("Open Settings", "settings:dialog", None);
         let startup = || LauncherSearchStartup {
+            calculator_settings: None,
             actions: vec![settings_action.clone()],
             match_exact: true,
             fuzzy_weight: 0.25,
@@ -14913,6 +14978,7 @@ mod tests {
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
                 actions: Vec::new(),
+                calculator_settings: None,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -14947,9 +15013,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["base_convert", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["base_convert", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14960,6 +15026,7 @@ mod tests {
 
         let disabled_catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
+                calculator_settings: None,
                 actions: vec![saved_action("Saved Help", "help:show", None)],
                 match_exact: true,
                 fuzzy_weight: 0.75,
@@ -14978,7 +15045,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 15 } else { 14 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 16 } else { 15 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(
@@ -15706,6 +15773,7 @@ mod tests {
         };
         let catalog = LauncherSearchCatalog::new(
             LauncherSearchStartup {
+                calculator_settings: None,
                 actions: vec![
                     alpha.clone(),
                     beta.clone(),
@@ -15776,6 +15844,7 @@ mod tests {
     fn gpui_cached_hash_command_fallback_respects_enablement_and_provider_precedence() {
         let enabled = HashSet::from(["hash_generator".to_owned()]);
         let startup = |match_exact| LauncherSearchStartup {
+            calculator_settings: None,
             actions: Vec::new(),
             match_exact,
             fuzzy_weight: 0.25,

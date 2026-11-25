@@ -94,7 +94,7 @@ pub(crate) fn handle_external<H: ExternalCommandHost + ?Sized>(
     })
 }
 
-pub(crate) fn handle_checked_clipboard_text(
+pub(crate) fn handle_checked_headless_effect(
     preferences: super::super::LauncherRunPreferences,
     invocation: &CommandInvocation,
     result: anyhow::Result<()>,

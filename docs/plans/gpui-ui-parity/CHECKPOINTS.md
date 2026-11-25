@@ -971,3 +971,7 @@ The stock Base Convert provider supplies GPUI Search, cached command fallback an
 ## G05 stock inline Unit Convert Search
 
 The existing Unit provider supplies exact and approximate GPUI Search results through the checked clipboard route. Eleven focused cases passed. Matched 1516 × 937 native checks verified both clipboard values and the tied Unit and Base command order. GPUI fuzzy Search reported the exact incompatible-unit diagnostic and preserved the clipboard. Disabling Unit left Base results available. The separate G16 Convert Panel remains open. [Exact receipts](VALIDATION_LOG.md#g05-stock-inline-unit-convert-search)
+
+## G05 stock inline Calculator Search
+
+The stock scalar Calculator runs off the UI thread and publishes only the current query and generation. Ten focused cases passed. Both frontends copied exact `42` at 1516 × 937, honored both Save on Enter timings and kept the root visible with Hide After Run enabled. GPUI also verified disabled Search leaves its clipboard and calculator history alone. Mutable Calculator history rows, the Calculation Pad and its settings surface remain open. The next layout increment aligns the pinned Search header and completion spacing. [Exact receipts](VALIDATION_LOG.md#g05-stock-inline-calculator-search)

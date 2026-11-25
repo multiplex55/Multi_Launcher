@@ -9,7 +9,6 @@
 use crate::actions::Action;
 use crate::password_generator::{SecretResult, generate_legacy_password};
 use crate::platform::protected_clipboard::{ClipboardError, CopyStatus, RejectedSecretCopy, copy_secret};
-use crate::plugins::calc_history::{self, CALC_HISTORY_FILE, CalcHistoryEntry, MAX_ENTRIES};
 
 use super::*;
 
@@ -840,17 +839,9 @@ fn execute_clipboard_with_password_copy(
 }
 
 fn execute_calculator(command: CalculatorCommand) -> anyhow::Result<()> {
-    use crate::actions::clipboard;
     match command {
         CalculatorCommand::CopyResult { result, expression } => {
-            if let Some(expression) = expression {
-                let entry = CalcHistoryEntry {
-                    expr: expression,
-                    result: result.clone(),
-                };
-                let _ = calc_history::append_entry(CALC_HISTORY_FILE, entry, MAX_ENTRIES);
-            }
-            clipboard::calc_to_clipboard(&result)
+            crate::actions::calc::copy_result(&result, expression.as_deref())
         }
         CalculatorCommand::CopyHistory { index } => {
             crate::actions::calc::copy_history_result(index)

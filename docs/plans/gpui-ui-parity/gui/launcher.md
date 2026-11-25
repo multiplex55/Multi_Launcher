@@ -247,3 +247,7 @@ GPUI uses the stock `conv` and `convert` parser, conversion and ordinary provide
 ## Stock inline Unit Convert Search
 
 GPUI shares the stock Unit Convert engine, Base precedence and ordinary provider scoring. It copies the exact published value and authored destination spelling, including case, and retains the approximation description. Fuzzy Search can present the typed diagnostic with no clipboard or success accounting. Bare `conv` and `convert` keep the Unit and Base fallback order observed in egui. The interactive Convert Panel belongs to G16. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-stock-inline-unit-convert-search)
+
+## Stock inline Calculator Search
+
+GPUI evaluates stock scalar `=` expressions off the UI thread. The calculator worker preserves the stored Save on Enter mode, orders accepted requests, and publishes only the current query and generation. A newer query can replace a pending request that has not started. A typed result keeps the original expression and action through the shared clipboard and calculator-history behavior. Calculator success honors the launcher clear and focus policy and keeps the root visible when Hide After Run is enabled. Calculator history row activation, Calculation Pad and its settings surface retain their separate migration scope. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-stock-inline-calculator-search)

@@ -6,7 +6,7 @@ use crate::actions::Action;
 use crate::commands::handlers::{
     handle_batch_rename, handle_calendar, handle_clipboard_modify_with_history_query,
     handle_color_pick, handle_coordinate_tool, handle_crop, handle_data, handle_diff,
-    handle_checked_clipboard_text, handle_external, handle_file_search, handle_hash_generator,
+    handle_checked_headless_effect, handle_external, handle_file_search, handle_hash_generator,
     handle_headless_gui_with_history_query, handle_hotfolder, handle_json_utility, handle_launcher,
     handle_link, handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr,
     handle_paste_sequence, handle_pinboard, handle_query, handle_radial, handle_recording,
@@ -41,7 +41,26 @@ impl CommandBus {
             query_override: None,
             source,
         };
-        handle_checked_clipboard_text(preferences, &invocation, effect)
+        handle_checked_headless_effect(preferences, &invocation, effect)
+    }
+
+    /// Apply the normal Calculator outcome to a completed scalar effect.
+    pub fn complete_checked_calculator_result(
+        &self,
+        result: String,
+        expression: Option<String>,
+        original_action: &Action,
+        source: ActivationSource,
+        effect: anyhow::Result<()>,
+        preferences: LauncherRunPreferences,
+    ) -> Result<CommandOutcome, CommandError> {
+        let invocation = CommandInvocation {
+            command: Command::Calculator(super::CalculatorCommand::CopyResult { result, expression }),
+            original_action: original_action.clone(),
+            query_override: None,
+            source,
+        };
+        handle_checked_headless_effect(preferences, &invocation, effect)
     }
 
     /// Execute an external command through the shared launcher outcome policy.
@@ -184,6 +203,22 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn calculator_scalar_completion_retains_launcher_outcome_policy() {
+        let action = Action { label: "6 * 7 = 42".into(), desc: "Calculator".into(), action: "calc:42".into(), args: Some("6 * 7".into()) };
+        let preferences = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
+        let outcome = CommandBus.complete_checked_calculator_result(
+            "42".into(), Some("6 * 7".into()), &action, ActivationSource::Enter, Ok(()), preferences,
+        ).unwrap();
+        assert_eq!(outcome.history, HistoryPolicy::Record);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
+        assert!(matches!(&outcome.toasts[0], crate::commands::ToastPolicy::Launched(label) if label == "6 * 7 = 42"));
+        assert!(CommandBus.complete_checked_calculator_result(
+            "42".into(), None, &action, ActivationSource::Enter,
+            Err(anyhow::anyhow!("clipboard unavailable")), preferences,
+        ).is_err());
+    }
 
     #[derive(Default)]
     struct FakeHost {
