@@ -2,6 +2,22 @@
 use super::*;
 use gpui_kit::component::ActiveTheme as _;
 
+#[derive(Debug, PartialEq, Eq)]
+enum ComparisonFeedback {
+    Match,
+    Mismatch,
+    Invalid(String),
+}
+
+fn comparison_feedback(comparison: Option<Result<HashComparison, String>>) -> Option<ComparisonFeedback> {
+    match comparison? {
+        Ok(HashComparison::NotRequested) => None,
+        Ok(HashComparison::Match) => Some(ComparisonFeedback::Match),
+        Ok(HashComparison::Mismatch) => Some(ComparisonFeedback::Mismatch),
+        Err(error) => Some(ComparisonFeedback::Invalid(error)),
+    }
+}
+
 #[inline(never)]
 fn render_hash_digest(
     digest: String,
@@ -84,8 +100,6 @@ impl HashGeneratorWindow {
     fn render_calculation_row(
         &self,
         jump_render: &hash_jump::HashJumpRender<'_>,
-        is_running: bool,
-        show_copy: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let metrics = jump_render.metrics;
@@ -108,32 +122,34 @@ impl HashGeneratorWindow {
                 .on_click(cx.listener(|this, _, _, cx| this.calculate_hash(cx))),
             hash_jump::HashControl::Calculate,
         );
-        let cancel = is_running.then(|| {
+        let cancel_enabled = eligibility.allows(hash_jump::HashControl::Cancel);
+        let copy_enabled = eligibility.allows(hash_jump::HashControl::Copy);
+        let cancel = {
             jump_render.wrap(
                 Button::new("cancel-hash")
                     .max_w_full()
                     .min_w(px(0.0))
                     .track_focus(&self.jump.cancel)
                     .label("Cancel")
-                    .tab_stop(true)
-                    .disabled(!eligibility.allows(hash_jump::HashControl::Cancel))
-                    .on_click(cx.listener(|this, _, _, cx| this.cancel_hash(cx))),
+                    .tab_stop(cancel_enabled)
+                    .disabled(!cancel_enabled)
+                    .when(cancel_enabled, |button| button.on_click(cx.listener(|this, _, _, cx| this.cancel_hash(cx)))),
                 hash_jump::HashControl::Cancel,
             )
-        });
-        let copy = show_copy.then(|| {
+        };
+        let copy = {
             jump_render.wrap(
                 Button::new("copy-hash-digest")
                     .max_w_full()
                     .min_w(px(0.0))
                     .track_focus(&self.jump.copy)
                     .label("Copy Digest")
-                    .tab_stop(true)
-                    .disabled(!eligibility.allows(hash_jump::HashControl::Copy))
-                    .on_click(cx.listener(|this, _, _, cx| this.copy_digest(cx))),
+                    .tab_stop(copy_enabled)
+                    .disabled(!copy_enabled)
+                    .when(copy_enabled, |button| button.on_click(cx.listener(|this, _, _, cx| this.copy_digest(cx)))),
                 hash_jump::HashControl::Copy,
             )
-        });
+        };
         div()
             .flex()
             .flex_wrap()
@@ -149,8 +165,8 @@ impl HashGeneratorWindow {
                     .child(algorithm_control),
             )
             .child(div().max_w_full().min_w(px(0.0)).child(calculate))
-            .children(cancel.map(|control| div().max_w_full().min_w(px(0.0)).child(control)))
-            .children(copy.map(|control| div().max_w_full().min_w(px(0.0)).child(control)))
+            .child(div().max_w_full().min_w(px(0.0)).child(cancel))
+            .child(div().max_w_full().min_w(px(0.0)).child(copy))
             .into_any_element()
     }
 
@@ -283,17 +299,7 @@ impl Render for HashGeneratorWindow {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let comparison_label = comparison.map(|comparison| match comparison {
-            Ok(HashComparison::NotRequested) => (
-                "Enter an expected digest to compare".to_owned(),
-                palette.primary_text,
-            ),
-            Ok(HashComparison::Match) => ("Expected digest matches".to_owned(), palette.success),
-            Ok(HashComparison::Mismatch) => {
-                ("Expected digest does not match".to_owned(), palette.warning)
-            }
-            Err(error) => (format!("Expected digest: {error}"), palette.error),
-        });
+        let comparison_label = comparison_feedback(comparison);
         if let Some(scope) = self.jump.scope {
             let scope_current = match scope {
                 hash_jump::HashJumpScope::Main => self.hash_jump_owns_input(window, cx),
@@ -325,12 +331,7 @@ impl Render for HashGeneratorWindow {
         };
 
         let source_row = self.render_source_row(&jump_render, cx);
-        let calculation_row = self.render_calculation_row(
-            &jump_render,
-            is_running,
-            can_copy_digest && digest.is_some(),
-            cx,
-        );
+        let calculation_row = self.render_calculation_row(&jump_render, cx);
         let host_row = self.render_host_row(&jump_render, cx);
 
         div()
@@ -450,6 +451,9 @@ impl Render for HashGeneratorWindow {
                                     })), hash_jump::HashControl::File),
                             )
                     })
+                    .child(Label::new("Expected digest (optional)")
+                        .text_size(px(metrics.small_text_size))
+                        .line_height(px(metrics.line_height)))
                     .child(
                         jump_render.wrap(Textarea::new(&self.expected)
                             .font_family(mono_family.clone())
@@ -457,15 +461,6 @@ impl Render for HashGeneratorWindow {
                             .aria_label("Expected digest")
                             .tab_index(0)
                             .readonly(!eligibility.allows(hash_jump::HashControl::Expected)), hash_jump::HashControl::Expected),
-                    )
-                    .children(
-                        comparison_label.map(|(label, color)| {
-                            Label::new(label)
-                                .id("hash-comparison-status")
-                                .text_color(appearance::to_hsla(color))
-                                .text_size(px(metrics.small_text_size))
-                                .line_height(px(metrics.line_height))
-                        }),
                     )
                     .child(calculation_row)
                     .children(
@@ -488,12 +483,30 @@ impl Render for HashGeneratorWindow {
                     .children(digest.map(|digest| {
                         render_hash_digest(digest, mono_family.clone(), mono_size, palette, metrics)
                     }))
+                    .children(comparison_label.map(|feedback| {
+                        let (label, color, role) = match feedback {
+                            ComparisonFeedback::Match => ("Match".to_owned(), palette.success, Role::Status),
+                            ComparisonFeedback::Mismatch => ("Mismatch".to_owned(), palette.error, Role::Status),
+                            ComparisonFeedback::Invalid(error) => (format!("Invalid expected digest: {error}"), palette.error, Role::Alert),
+                        };
+                        div()
+                            .id("hash-comparison-status")
+                            .role(role)
+                            .aria_label(label.clone())
+                            .text_color(appearance::to_hsla(color))
+                            .text_size(px(metrics.small_text_size))
+                            .line_height(px(metrics.line_height))
+                            .child(label)
+                    }))
                     .children(error.map(|error| {
-                        Label::new(error)
+                        div()
                             .id("hash-error-status")
+                            .role(Role::Alert)
+                            .aria_label(error.clone())
                             .text_color(appearance::to_hsla(palette.error))
                             .text_size(px(metrics.small_text_size))
                             .line_height(px(metrics.line_height))
+                            .child(error)
                     }))
                     .children(picker_feedback.map(|feedback| {
                         Label::new(feedback)
@@ -503,17 +516,23 @@ impl Render for HashGeneratorWindow {
                             .line_height(px(metrics.line_height))
                     }))
                     .children(clipboard_pending_status.map(|feedback| {
-                        Label::new(feedback)
+                        div()
                             .id("hash-clipboard-operation-status")
+                            .role(Role::Status)
+                            .aria_label(feedback)
                             .text_color(appearance::to_hsla(palette.warning))
                             .text_size(px(metrics.small_text_size))
                             .line_height(px(metrics.line_height))
+                            .child(feedback)
                     }))
-                    .children(clipboard_feedback.map(|feedback| {
-                        Label::new(feedback)
+                    .children(clipboard_feedback.filter(|_| !clipboard_pending).map(|feedback| {
+                        div()
                             .id("hash-clipboard-feedback-status")
+                            .role(Role::Status)
+                            .aria_label(feedback.clone())
                             .text_size(px(metrics.small_text_size))
                             .line_height(px(metrics.line_height))
+                            .child(feedback)
                     }))
                     .children(
                         presentation_feedback.map(|feedback| {
@@ -563,5 +582,20 @@ impl Render for HashGeneratorWindow {
                 "hash-generator-tool-scroll-{}",
                 self.mount_generation
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{comparison_feedback, ComparisonFeedback};
+    use multi_launcher::hash_generator::HashComparison;
+
+    #[test]
+    fn comparison_feedback_matches_stock_wording_and_semantics() {
+        assert_eq!(comparison_feedback(None), None);
+        assert_eq!(comparison_feedback(Some(Ok(HashComparison::NotRequested))), None);
+        assert_eq!(comparison_feedback(Some(Ok(HashComparison::Match))), Some(ComparisonFeedback::Match));
+        assert_eq!(comparison_feedback(Some(Ok(HashComparison::Mismatch))), Some(ComparisonFeedback::Mismatch));
+        assert_eq!(comparison_feedback(Some(Err("bad length".into()))), Some(ComparisonFeedback::Invalid("bad length".into())));
     }
 }
