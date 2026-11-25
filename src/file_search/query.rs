@@ -30,6 +30,27 @@ pub struct SearchRequestDraft {
 ///
 /// Returns `None` when the first token is not `fs` (case-insensitive).
 pub fn parse_file_search_query(query: &str) -> Option<FileSearchCommand> {
+    parse_file_search_query_with(query, |path| path.is_dir())
+}
+
+/// Parse against an already validated directory, without probing the filesystem.
+pub fn parse_file_search_query_with_root(query: &str, root: &Path) -> Option<FileSearchCommand> {
+    parse_file_search_query_with(query, |path| path == root)
+}
+
+/// Identify an explicit filename root without touching the filesystem.
+pub fn explicit_filename_root_candidate(query: &str) -> Option<PathBuf> {
+    let tokens = split_shell_words_preserving_backslashes(query).ok()?;
+    let (first, rest) = tokens.split_first()?;
+    if !first.eq_ignore_ascii_case("fs") { return None; }
+    let rest = if rest.first().is_some_and(|word| word.eq_ignore_ascii_case("here")) { &rest[1..] } else { rest };
+    if rest.len() < 3 || parse_kind(&rest[0]) != Some(SearchKind::Filename) { return None; }
+    let root = PathBuf::from(rest.last()?);
+    let FileSearchCommand::StartSearch(draft) = parse_file_search_query_with_root(query, &root)? else { return None; };
+    (root.is_absolute() && !draft.search_text.trim().is_empty()).then_some(root)
+}
+
+fn parse_file_search_query_with(query: &str, is_directory: impl Fn(&Path) -> bool) -> Option<FileSearchCommand> {
     let tokens = match split_shell_words_preserving_backslashes(query) {
         Ok(tokens) => tokens,
         Err(message) => {
@@ -64,7 +85,7 @@ pub fn parse_file_search_query(query: &str) -> Option<FileSearchCommand> {
     }
 
     let mut args = rest[index..].to_vec();
-    let root = match take_trailing_directory(&mut args) {
+    let root = match take_trailing_directory(&mut args, is_directory) {
         Ok(root) => root,
         Err(error) => return Some(FileSearchCommand::Error(error)),
     };
@@ -133,12 +154,12 @@ fn parse_kind(token: &str) -> Option<SearchKind> {
     }
 }
 
-fn take_trailing_directory(args: &mut Vec<String>) -> Result<Option<PathBuf>, FileSearchError> {
+fn take_trailing_directory(args: &mut Vec<String>, is_directory: impl Fn(&Path) -> bool) -> Result<Option<PathBuf>, FileSearchError> {
     let Some(last) = args.last() else {
         return Ok(None);
     };
     let path = Path::new(last);
-    if path.is_dir() {
+    if is_directory(path) {
         let root = PathBuf::from(last);
         args.pop();
         return Ok(Some(root));

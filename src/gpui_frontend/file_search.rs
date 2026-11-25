@@ -290,6 +290,19 @@ impl FileSearchView {
         if !self.open || self.running() {
             return;
         }
+        self.start_with_expected_root(None, cx);
+    }
+
+    fn start_typed(&mut self, receipt: ScopedReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = true;
+        self.term.update(cx, |input, cx| input.set_value(receipt.draft.search_text, window, cx));
+        let directory = receipt.draft.root.unwrap_or_default().to_string_lossy().into_owned();
+        self.directory.update(cx, |input, cx| input.set_value(directory, window, cx));
+        self.term.focus_handle(cx).focus(window, cx);
+        self.start_with_expected_root(Some(receipt.canonical_root), cx);
+    }
+
+    fn start_with_expected_root(&mut self, expected_root: Option<PathBuf>, cx: &mut Context<Self>) {
         let Some(permit) = self.admission.admit() else {
             self.status = "Application is closing.".into();
             cx.notify();
@@ -303,7 +316,9 @@ impl FileSearchView {
         let settings = self.settings.clone();
         let task = cx.background_executor().spawn(async move {
             let preferences = settings.ui_preferences.clone();
-            let request = build_request(&RequestInput {
+            let request = if expected_root.is_some() && !checked_root(std::path::Path::new(&directory)) {
+                Err(multi_launcher::file_search::request::RequestError::EmptyDirectoryRoots)
+            } else { build_request(&RequestInput {
                 text: &term,
                 kind: SearchKind::Filename,
                 scope: RootScope::Directory,
@@ -313,12 +328,12 @@ impl FileSearchView {
                 excluded_directory_names: settings.excluded_directory_names.clone(),
                 settings: &settings,
                 preferences: &preferences,
-            });
-            (request, permit)
+            }) };
+            (request, permit, expected_root)
         });
         let owner = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
-            let (request, permit) = task.await;
+            let (request, permit, expected_root) = task.await;
             let started = owner
                 .update(cx, |this, cx| {
                     if !this.open || this.generation != generation || this.admission.is_fenced() {
@@ -326,6 +341,11 @@ impl FileSearchView {
                     }
                     this.validating = false;
                     match request {
+                        Ok(request) if !validated_root_matches(expected_root.as_deref(), &request.scope) => {
+                            this.status = "The search directory changed; enter the query again.".into();
+                            cx.notify();
+                            false
+                        }
                         Ok(request) => {
                             let id = this
                                 .coordinator
@@ -603,5 +623,217 @@ impl Render for FileSearchView {
                     .children(rows)
                     .vertical_scrollbar(&self.results_scroll),
             )
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ScopedReceipt {
+    query: String,
+    action: Action,
+    generation: u64,
+    draft: multi_launcher::file_search::query::SearchRequestDraft,
+    canonical_root: PathBuf,
+}
+
+struct ProbeRequest {
+    query: String,
+    generation: u64,
+    revision: u64,
+    other: Vec<(String, Action)>,
+    enabled: Option<HashSet<String>>,
+    caps: Option<HashMap<String, Vec<String>>>,
+}
+
+#[derive(Default)]
+pub(super) struct ProbeOwner {
+    active: bool,
+    pending: Option<ProbeRequest>,
+    receipt: Option<ScopedReceipt>,
+    revision: u64,
+}
+
+impl ProbeOwner {
+    pub(super) fn retire(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.pending = None;
+        self.receipt = None;
+    }
+
+    pub(super) fn receipt(&self, generation: u64, query: &str, action: &Action,
+        plugins: Option<&HashSet<String>>, caps: Option<&HashMap<String, Vec<String>>>,
+        fenced: bool) -> Option<ScopedReceipt> {
+        self.receipt.as_ref().filter(|receipt| !fenced && enabled(plugins, caps)
+            && receipt.generation == generation && receipt.query == query && receipt.action == *action
+            && multi_launcher::plugins::file_search::scoped_filename_start(query, action).as_ref() == Some(&receipt.draft)
+        ).cloned()
+    }
+}
+
+pub(super) fn enabled(plugins: Option<&HashSet<String>>, caps: Option<&HashMap<String, Vec<String>>>) -> bool {
+    plugins.is_none_or(|plugins| plugins.contains("file_search"))
+        && multi_launcher::settings::provider_search_capability_enabled(caps, "file_search")
+}
+
+pub(super) fn typed_query(query: &str) -> bool {
+    let (filtered, _) = multi_launcher::common::query::split_action_filters(query);
+    multi_launcher::file_search::query::explicit_filename_root_candidate(&filtered)
+        .is_some_and(|path| local_absolute(&path))
+}
+
+fn local_absolute(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    { multi_launcher::actions::exec::ordinary_local_path_is_admissible(path) }
+    #[cfg(not(windows))]
+    { path.is_absolute() && !path.to_string_lossy().starts_with(r"\\") }
+}
+
+fn checked_root(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    { multi_launcher::actions::exec::checked_local_directory(path).is_ok() }
+    #[cfg(not(windows))]
+    { local_absolute(path) && path.is_dir() }
+}
+
+fn validated_root_matches(expected: Option<&std::path::Path>, scope: &multi_launcher::file_search::model::SearchScope) -> bool {
+    expected.is_none_or(|expected| matches!(scope, multi_launcher::file_search::model::SearchScope::Roots { roots } if roots.len() == 1 && roots[0] == expected))
+}
+
+struct ScopedStockRow(Action);
+impl multi_launcher::plugin::Plugin for ScopedStockRow {
+    fn name(&self) -> &str { "file_search" }
+    fn description(&self) -> &str { "Open local filename/content search" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["fs"] }
+    fn search(&self, _: &str) -> Vec<Action> { vec![self.0.clone()] }
+}
+
+impl RootWindow {
+    pub(super) fn start_file_search_probe(&mut self, query: String, other: Vec<(String, Action)>, scroll: bool, cx: &mut Context<Self>) {
+        self.publish_launcher_provider_results(query.clone(), other.clone(), scroll);
+        self.file_search_probe.pending = Some(ProbeRequest {
+            query, generation: self.launcher_results.generation, revision: self.file_search_probe.revision, other,
+            enabled: self.enabled_plugins.clone(), caps: self.enabled_capabilities.clone(),
+        });
+        self.launch_file_search_probe(cx);
+    }
+
+    fn launch_file_search_probe(&mut self, cx: &mut Context<Self>) {
+        if self.file_search_probe.active { return; }
+        if self.restart_admission.is_fenced() { self.file_search_probe.retire(); return; }
+        let Some(request) = self.file_search_probe.pending.take() else { return; };
+        self.file_search_probe.active = true;
+        let query = request.query.clone();
+        let plugins = request.enabled.clone();
+        let caps = request.caps.clone();
+        let task = cx.background_executor().spawn(async move {
+            let (filtered, _) = multi_launcher::common::query::split_action_filters(&query);
+            let root = multi_launcher::file_search::query::explicit_filename_root_candidate(&filtered)?;
+            if !local_absolute(&root) || !checked_root(&root) { return None; }
+            let multi_launcher::file_search::query::FileSearchCommand::StartSearch(draft) =
+                multi_launcher::file_search::query::parse_file_search_query_with_root(&filtered, &root)? else { return None; };
+            let canonical_root = multi_launcher::file_search::request::resolve_valid_roots([root]).into_iter().next()?;
+            let action = multi_launcher::plugins::file_search::start_action(draft.clone());
+            let plugin = ScopedStockRow(action.clone());
+            let rows = search_providers::search_routed(
+                [&plugin as &dyn multi_launcher::plugin::Plugin], &query,
+                plugins.as_ref(), caps.as_ref(),
+            );
+            rows.into_iter().any(|(name, row)| name == "file_search" && row == action)
+                .then_some((action, draft, canonical_root))
+        });
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = root.update(cx, |root, cx| {
+                root.file_search_probe.active = false;
+                let current = root.file_search_probe.revision == request.revision
+                    && root.launcher_results.generation == request.generation
+                    && root.launcher_results.query == request.query
+                    && root.query.read(cx).value().as_str() == request.query
+                    && root.root_visibility.active.load(Ordering::Acquire)
+                    && root.root_visibility.visible.load(Ordering::Acquire)
+                    && !root.restart_admission.is_fenced()
+                    && enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref());
+                if current {
+                    if let Some((action, draft, canonical_root)) = result {
+                        let mut rows = request.other;
+                        let names: Vec<_> = root.search_catalog.providers.plugins().map(|p| p.name().to_owned()).collect();
+                        let position = names.iter().position(|name| name == "file_search").unwrap_or(names.len());
+                        let index = rows.iter().position(|(name, _)| names.iter().position(|n| n == name).is_some_and(|i| i > position)).unwrap_or(rows.len());
+                        rows.insert(index, ("file_search".into(), action.clone()));
+                        root.publish_launcher_provider_results(request.query.clone(), rows, false);
+                        root.file_search_probe.receipt = Some(ScopedReceipt {
+                            query: request.query, action, generation: root.launcher_results.generation, draft, canonical_root,
+                        });
+                        cx.notify();
+                    }
+                }
+                root.launch_file_search_probe(cx);
+            });
+        }).detach();
+    }
+
+    pub(super) fn open_typed_file_search(&mut self, receipt: ScopedReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(_permit) = self.restart_admission.admit() else { return; };
+        let view = if let Some(view) = &self.file_search { view.clone() } else {
+            let root = cx.entity().downgrade();
+            let admission = Arc::clone(&self.restart_admission);
+            let settings = self.file_search_settings.clone();
+            let view = cx.new(|cx| FileSearchView::new(window, cx, root, admission, settings));
+            self.file_search = Some(view.clone());
+            view
+        };
+        view.update(cx, |view, cx| view.start_typed(receipt, window, cx));
+        self.root_scroll.scroll_to_top_of_item(self.file_search_scroll_item());
+        self.query_history.reset();
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod typed_tests {
+    use super::{ProbeOwner, ProbeRequest, ScopedReceipt, validated_root_matches};
+    use std::{collections::HashSet, path::PathBuf};
+    use multi_launcher::file_search::{model::{SearchKind, SearchScope}, query::SearchRequestDraft};
+
+    #[test]
+    fn typed_receipt_allows_repeat_and_rejects_stale_authority() {
+        let query = r#"fs file "Café Marker" "C:\Owned Corpus""#;
+        let draft = SearchRequestDraft { kind: SearchKind::Filename, root: Some(PathBuf::from(r"C:\Owned Corpus")), search_text: "Café Marker".into() };
+        let action = multi_launcher::plugins::file_search::start_action(draft.clone());
+        let mut owner = ProbeOwner::default();
+        owner.receipt = Some(ScopedReceipt { query: query.into(), action: action.clone(), generation: 7, draft, canonical_root: PathBuf::from("canonical") });
+        assert!(owner.receipt(6, query, &action, None, None, false).is_none());
+        let mut forged = action.clone();
+        forged.desc.push('!');
+        assert!(owner.receipt(7, query, &forged, None, None, false).is_none());
+        assert!(owner.receipt(7, query, &action, Some(&HashSet::new()), None, false).is_none());
+        assert!(owner.receipt(7, query, &action, None, None, true).is_none());
+        assert!(owner.receipt(7, query, &action, None, None, false).is_some());
+        assert!(owner.receipt(7, query, &action, None, None, false).is_some());
+        owner.retire();
+        assert!(owner.receipt(7, query, &action, None, None, false).is_none());
+    }
+
+    #[test]
+    fn typed_root_must_match_validated_canonical_identity() {
+        let expected = std::path::Path::new("one");
+        assert!(validated_root_matches(Some(expected), &SearchScope::Roots { roots: vec![expected.into()] }));
+        assert!(!validated_root_matches(Some(expected), &SearchScope::Roots { roots: vec![PathBuf::from("replacement")] }));
+        assert!(!validated_root_matches(Some(expected), &SearchScope::Roots { roots: vec![] }));
+    }
+
+    #[test]
+    fn typed_probe_retirement_invalidates_receipt_and_pending_generation() {
+        let mut owner = ProbeOwner::default();
+        owner.pending = Some(ProbeRequest {
+            query: "fs file needle /root".into(), generation: 1, revision: owner.revision,
+            other: Vec::new(), enabled: None, caps: None,
+        });
+        let previous = owner.revision;
+        owner.retire();
+        assert_ne!(owner.revision, previous);
+        assert!(owner.receipt.is_none());
+        assert!(owner.pending.is_none());
     }
 }

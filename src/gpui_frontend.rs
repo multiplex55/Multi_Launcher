@@ -478,8 +478,9 @@ impl LauncherSearchCatalog {
                 let window_result = window_search::action_is_switch(&provider, &action);
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
+                let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_filename_start(raw_query, &action).is_some();
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -488,7 +489,7 @@ impl LauncherSearchCatalog {
                         raw_query,
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
-                        date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action),
+                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result,
                         &self.matcher,
                         self.fuzzy_weight,
                         folder_aliases,
@@ -2506,6 +2507,7 @@ struct RootWindow {
     calculator_search: calculator_search::SearchOwner,
     indexed_applications: indexed_applications::Owner,
     window_search: window_search::Owner,
+    file_search_probe: file_search::ProbeOwner,
     external_launch: external_launch::ExternalLaunch,
     external_launch_preferences: ExternalLaunchPreferences,
     action_sheet: Option<action_sheet::Sheet>,
@@ -5915,6 +5917,7 @@ impl RootWindow {
         }
         self.root_visibility.deactivate();
         self.window_search.retire();
+        self.file_search_probe.retire();
         self.indexed_applications.retire();
         self.retire_search_jump_mode();
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
@@ -6975,6 +6978,7 @@ impl RootWindow {
         self.calculator_search.pending = None;
         self.calculator_search.retire_history();
         self.window_search.retire();
+        self.file_search_probe.retire();
         if query.trim().is_empty() {
             self.publish_launcher_provider_results(query, Vec::new(), scroll_to_search);
             return;
@@ -6985,6 +6989,10 @@ impl RootWindow {
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
+        if file_search::typed_query(&query) && file_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+            self.start_file_search_probe(query, raw_provider_actions, scroll_to_search, cx);
+            return;
+        }
         if window_search::query_is_windows(&query) && window_search::enabled(
             self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref(),
         ) {
@@ -7036,7 +7044,7 @@ impl RootWindow {
                 } else if cfg!(windows) && provider == "downloads_triage" {
                     is_downloads_triage_opener(action)
                 } else if provider == "file_search" {
-                    is_file_search_opener(&query, action)
+                    is_file_search_opener(&query, action) || multi_launcher::plugins::file_search::scoped_filename_start(&query, action).is_some()
                 } else {
                     is_supported_launcher_search_action(action)
                 }
@@ -7769,6 +7777,10 @@ impl RootWindow {
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "file_search") {
+            if let Some(receipt) = self.file_search_probe.receipt(generation, &query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref(), self.restart_admission.is_fenced()) {
+                self.open_typed_file_search(receipt, window, cx);
+                return;
+            }
             if is_file_search_opener(&query, &result.action)
                 && self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("file_search"))
                 && self.enabled_capabilities.as_ref().is_none_or(|caps| caps.get("file_search").is_none_or(|caps| caps.iter().any(|cap| cap == "search")))
@@ -9648,6 +9660,7 @@ impl RootWindow {
             return;
         }
         self.window_search.retire();
+        self.file_search_probe.retire();
         self.indexed_applications.retire();
         self.hash_docked_resize
             .lock()
@@ -12103,6 +12116,7 @@ pub(crate) fn run_foundation_window(
                 calculator_search: calculator_search::SearchOwner::default(),
                 indexed_applications: indexed_applications::Owner::default(),
                 window_search: window_search::Owner::default(),
+                file_search_probe: file_search::ProbeOwner::default(),
                 external_launch: external_launch::ExternalLaunch::default(),
                 external_launch_preferences: external_launch_preferences_for_root.clone(),
                 action_sheet: None,
@@ -12525,7 +12539,7 @@ pub(crate) fn run_foundation_window(
                 match blocker {
                     None => {
                         let _ = root_for_window_close.update(app, |root, _| {
-                            root.window_search.retire();
+                            root.window_search.retire(); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });
                         return true;
@@ -12552,7 +12566,7 @@ pub(crate) fn run_foundation_window(
                             .unwrap_or(false);
                         if close_now {
                             let _ = root_for_window_close.update(app, |root, _| {
-                            root.window_search.retire();
+                            root.window_search.retire(); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });
                         }
@@ -12901,8 +12915,10 @@ pub(crate) fn run_foundation_window(
                             let mut search_focus_selected = false;
                             if desired_visible {
                                 let query = root.query.read(cx).value().to_string();
-                                if window_search::query_is_windows(&query)
-                                    && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref())
+                                if (window_search::query_is_windows(&query)
+                                    && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
+                                    || (file_search::typed_query(&query)
+                                        && file_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
                                 {
                                     root.refresh_launcher_results_with_viewport(query, false, cx);
                                 }
@@ -12992,11 +13008,14 @@ pub(crate) fn run_foundation_window(
                                     root.retire_context_favorite();
                                     root.retire_search_jump_mode();
                                     root.cancel_docked_hash_preview();
-                                    root.window_search.retire();
+                                    root.window_search.retire(); root.file_search_probe.retire();
                                 },
                             );
                         } else {
-                            let _ = root_view.update(&mut *cx, |root, _| root.window_search.retire());
+                            let _ = root_view.update(&mut *cx, |root, _| {
+                                root.window_search.retire();
+                                root.file_search_probe.retire();
+                            });
                         }
                     }
                     let foreground_after_transition = current_foreground_identity();

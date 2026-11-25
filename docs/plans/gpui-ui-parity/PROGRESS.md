@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G07 now accepts quoted Directory Filename commands in launcher Search with Exact Match. At 1516 × 937, both frontends found the same two Unicode filenames and delivered the selected file to Hash for the same SHA-256. GPUI repeated the command after closing File Search and refused a directory replaced after publication. [Typed File Search evidence](VALIDATION_LOG.md#g07-and-g04-typed-directory-filename-search)
+
 GPUI Settings can reload the application index live. Windows verified same-config discovery, a successful launch from the refreshed index, replacement roots, malformed and invalid configurations, and clearing both indexed views while keeping the saved action editable. The same 1516 × 937 egui build showed the replacement stock catalog. [Live index evidence](VALIDATION_LOG.md#g02-g05-and-g06-live-application-index-reload)
 
 G06 App Editor now displays saved rows followed by the read-only stock index. Matched Windows runs at 1516 × 937 verified the same indexed fields and filtering. GPUI kept Search and the editor footer visible while the catalog scrolled through wrapped paths at 499 × 504. Refresh kept the viewport, and checked Edit and Remove changed only the intended saved rows. [Indexed App Editor evidence](VALIDATION_LOG.md#g06-read-only-indexed-app-editor-catalog)
@@ -51,7 +53,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue the checked typed File Search entry point that leads into the existing G04 Hash handoff. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
+| Current next action | Continue checked File Search result Open and Reveal. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

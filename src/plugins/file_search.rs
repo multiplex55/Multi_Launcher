@@ -681,7 +681,7 @@ fn mode_action(kind: SearchKind) -> Action {
     }
 }
 
-fn start_action(request: SearchRequestDraft) -> Action {
+pub fn start_action(request: SearchRequestDraft) -> Action {
     let root = request
         .root
         .as_ref()
@@ -696,6 +696,38 @@ fn start_action(request: SearchRequestDraft) -> Action {
             encode_action_payload(&payload).expect("file search action payload should serialize")
         ),
         args: None,
+    }
+}
+
+/// Admit only the exact stock scoped filename row for the filtered query.
+pub fn scoped_filename_start(query: &str, action: &Action) -> Option<SearchRequestDraft> {
+    use crate::file_search::actions::{decode_action_payload, FileSearchStartPayload};
+    let encoded = action.action.strip_prefix(START_PREFIX)?;
+    let payload: FileSearchStartPayload = decode_action_payload(encoded).ok()?;
+    if payload.search_kind() != crate::file_search::model::SearchKind::Filename || payload.text.trim().is_empty() {
+        return None;
+    }
+    let root = std::path::PathBuf::from(payload.root.as_ref()?);
+    let (filtered, _) = crate::common::query::split_action_filters(query);
+    let FileSearchCommand::StartSearch(request) = crate::file_search::query::parse_file_search_query_with_root(&filtered, &root)? else { return None; };
+    (request.kind == crate::file_search::model::SearchKind::Filename && request.root.as_ref() == Some(&root) && start_action(request.clone()) == *action).then_some(request)
+}
+
+#[cfg(test)]
+mod scoped_filename_start_tests {
+    use super::*;
+
+    #[test]
+    fn quoted_scoped_filename_requires_exact_stock_row() {
+        let root = std::path::PathBuf::from(r"C:\Owned Corpus");
+        let draft = SearchRequestDraft { kind: crate::file_search::model::SearchKind::Filename, root: Some(root), search_text: "Café Marker".into() };
+        let row = start_action(draft.clone());
+        let query = r#"fs file "Café Marker" "C:\Owned Corpus""#;
+        assert_eq!(scoped_filename_start(query, &row), Some(draft));
+        assert!(scoped_filename_start(r#"fs file "other" "C:\Owned Corpus""#, &row).is_none());
+        let mut forged = row;
+        forged.desc.push('!');
+        assert!(scoped_filename_start(query, &forged).is_none());
     }
 }
 

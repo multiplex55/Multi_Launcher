@@ -1117,7 +1117,8 @@ impl LauncherApp {
                     raw_query,
                     &query_term_lc,
                     self.match_exact || self.fuzzy_weight <= 0.0,
-                    Self::should_bypass_exact_post_filter(trimmed, &a.action),
+                    Self::should_bypass_exact_post_filter(trimmed, &a.action)
+                        || crate::plugins::file_search::scoped_filename_start(raw_query, &a).is_some(),
                     &self.matcher,
                     self.fuzzy_weight,
                     &self.folder_aliases_lc,
