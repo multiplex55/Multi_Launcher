@@ -58,11 +58,11 @@ impl HashControl {
             Self::Expected => ("Expected", 4, TargetKind::TextEntry),
             Self::Algorithm => ("Algorithm", 5, TargetKind::ComboBox),
             Self::Calculate => ("Calculate", 6, TargetKind::Button),
-            Self::Dock => ("Dock", 7, TargetKind::Button),
-            Self::Popout => ("Pop Out", 8, TargetKind::Button),
-            Self::Close => ("Close", 9, TargetKind::Button),
-            Self::Copy => ("Copy Digest", 10, TargetKind::Button),
-            Self::Cancel => ("Cancel", 11, TargetKind::Button),
+            Self::Dock => ("Dock", 9, TargetKind::Button),
+            Self::Popout => ("Pop Out", 10, TargetKind::Button),
+            Self::Close => ("Close", 11, TargetKind::Button),
+            Self::Copy => ("Copy Digest", 8, TargetKind::Button),
+            Self::Cancel => ("Cancel", 7, TargetKind::Button),
         }
     }
     pub fn from_name(name: &str) -> Option<Self> {
@@ -284,5 +284,24 @@ impl HashJump {
             self.scope = None;
         }
         retired
+    }
+}
+
+#[cfg(test)]
+mod layout_order_tests {
+    use super::HashControl;
+
+    #[test]
+    fn calculation_actions_precede_host_actions_in_visual_order() {
+        let roles = [
+            HashControl::Algorithm,
+            HashControl::Calculate,
+            HashControl::Cancel,
+            HashControl::Copy,
+            HashControl::Dock,
+            HashControl::Popout,
+            HashControl::Close,
+        ];
+        assert!(roles.windows(2).all(|pair| pair[0].metadata().1 < pair[1].metadata().1));
     }
 }

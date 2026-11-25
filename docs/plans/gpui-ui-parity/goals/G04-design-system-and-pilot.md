@@ -2,6 +2,8 @@
 
 **Status: In implementation.** The real Kit Hash Generator has shared Text, File and Clipboard operations, native picker, visual and accessible worker progress, retained Dock and Pop Out, and persisted keyboard and pointer geometry. The compact footer is reachable with the wheel and scrollbar in both hosts. The popout calculated while the launcher was hidden by the configured app-launch policy and rehosted its exact result through Dock. The matched Clipboard Load, digest, Copy, File progress and cancellation replays passed in both frontends. Scoped Windows focus and main-control and dropdown Jump evidence exists for both Hash hosts. Mixed DPI, global invocation, and the remaining component and presentation criteria are open. See the [Hash Generator record](../gui/hash-generator.md) and [checkpoints](../CHECKPOINTS.md).
 
+Matched native replay closed each popout during live File progress and reopened a fresh Text session. The shared GPUI view now keeps progress, digest and calculation actions together in both hosts. The initial standard popout shows those actions without scrolling, and a Comfortable 150% narrow dock wraps controls and retains visible Jump targets. [Native close evidence](../VALIDATION_LOG.md#g04-native-hash-close-and-reopen-during-file-calculation) · [Layout evidence](../VALIDATION_LOG.md#g04-compact-hash-viewport-actions)
+
 Read the [master Goal](../../../CODEX_GOAL_GPUI_UI_PARITY.md), [requirements](../REQUIREMENTS.md), [goal register](../GOAL_REGISTER.md) and [validation strategy](../VALIDATION_STRATEGY.md). All work stays on the same dedicated migration branch.
 
 

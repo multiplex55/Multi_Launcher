@@ -8,6 +8,8 @@ G05 Calculator history queries now publish indexed stock rows and copy only a cu
 
 G02 and G05 saved local folders now open through the checked external worker. Windows verified Add, Edit and Refresh publication from the real App Editor, the same Explorer destination in both frontends, and refusal after a saved folder was replaced. [Saved folder evidence](VALIDATION_LOG.md#g02-and-g05-checked-saved-local-folder-activation)
 
+G04 places Hash progress, Cancel, digest and Copy in the initial view of the standard popout. Both frontends passed native close during active File calculation and reopened with a fresh Text result. The corrected GPUI layout also passed docked and Comfortable 150% compact checks. [Hash lifecycle evidence](VALIDATION_LOG.md#g04-native-hash-close-and-reopen-during-file-calculation) · [Hash layout evidence](VALIDATION_LOG.md#g04-compact-hash-viewport-actions)
+
 G05 Date Arithmetic, Base Convert and inline Unit Convert use shared Search and checked clipboard completion. Matched Windows replay verified their exact payloads, including Base Convert Unicode whitespace, Unit approximation and tied fallback order. [Date evidence](VALIDATION_LOG.md#g05-stock-date-arithmetic-search) · [Base Convert evidence](VALIDATION_LOG.md#g05-stock-base-convert-search) · [Unit Convert evidence](VALIDATION_LOG.md#g05-stock-inline-unit-convert-search)
 
 G04 Hash File mode now shows a visual and accessible Kit progress indicator. Matched Windows File-mode runs at 1516 × 937 streamed and canceled the same owned file in both frontends. [Hash progress evidence](VALIDATION_LOG.md#g04-visual-and-accessible-hash-progress)
@@ -31,7 +33,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue G04 with a matched Hash Generator replay that closes a native popout during observed File progress, then reopens and verifies a fresh session. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
+| Current next action | Continue G05 with the installed command and saved-action inventory for blank Search. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
