@@ -78,18 +78,37 @@ impl Drop for Owner {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexedKind {
+    Executable,
+    Shortcut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IndexedTarget<'a> {
+    dos: &'a str,
+    kind: IndexedKind,
+}
+
 #[cfg(windows)]
-fn ordinary_target(target: &str) -> Option<&str> {
+fn ordinary_target(target: &str) -> Option<IndexedTarget<'_>> {
     let dos = target.strip_prefix(r"\\?\")?;
     let path = std::path::Path::new(dos);
-    (multi_launcher::actions::exec::ordinary_local_path_is_admissible(path)
-        && path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe")))
-    .then_some(dos)
+    if !multi_launcher::actions::exec::ordinary_local_path_is_admissible(path) {
+        return None;
+    }
+    let extension = path.extension()?;
+    let kind = if extension.eq_ignore_ascii_case("exe") {
+        IndexedKind::Executable
+    } else if extension.eq_ignore_ascii_case("lnk") {
+        IndexedKind::Shortcut
+    } else {
+        return None;
+    };
+    Some(IndexedTarget { dos, kind })
 }
 #[cfg(not(windows))]
-fn ordinary_target(_: &str) -> Option<&str> {
+fn ordinary_target(_: &str) -> Option<IndexedTarget<'_>> {
     None
 }
 
@@ -103,34 +122,39 @@ pub(super) fn row_matches(action: &Action, roots: &[std::path::PathBuf]) -> bool
     if action.args.is_some() || action.action != action.desc {
         return false;
     }
-    let Some(dos) = ordinary_target(&action.action) else {
+    let Some(target) = ordinary_target(&action.action) else {
         return false;
     };
     roots
         .iter()
-        .any(|root| root_contains(root, std::path::Path::new(dos)))
+        .any(|root| root_contains(root, std::path::Path::new(target.dos)))
 }
 
 #[cfg(windows)]
 pub(super) fn checked_launch_with(
     action: &Action,
     roots: &[std::path::PathBuf],
-    launch: impl FnOnce(&str) -> anyhow::Result<()>,
+    launch_executable: impl FnOnce(&str) -> anyhow::Result<()>,
+    launch_shortcut: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         row_matches(action, roots),
         "Invalid indexed application target"
     );
-    let dos = ordinary_target(&action.action)
+    let target = ordinary_target(&action.action)
         .ok_or_else(|| anyhow::anyhow!("Invalid indexed application path"))?;
-    multi_launcher::actions::exec::checked_local_file(std::path::Path::new(dos))?;
-    launch(&action.action)
+    multi_launcher::actions::exec::checked_local_file(std::path::Path::new(target.dos))?;
+    match target.kind {
+        IndexedKind::Executable => launch_executable(&action.action),
+        IndexedKind::Shortcut => launch_shortcut(target.dos),
+    }
 }
 
 #[cfg(not(windows))]
 pub(super) fn checked_launch_with(
     _: &Action,
     _: &[std::path::PathBuf],
+    _: impl FnOnce(&str) -> anyhow::Result<()>,
     _: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Indexed applications require Windows")
@@ -204,7 +228,7 @@ fn scan(
                 continue;
             };
             anyhow::ensure!(!cancelled.load(Ordering::Acquire), "Index retired");
-            if multi_launcher::actions::exec::checked_local_file(std::path::Path::new(path))
+            if multi_launcher::actions::exec::checked_local_file(std::path::Path::new(path.dos))
                 .is_err()
             {
                 continue;
@@ -326,11 +350,58 @@ mod tests {
         ));
         assert!(!row_matches(&row(r"\\?\UNC\server\share\Tool.exe"), &roots));
         assert!(!row_matches(&row(r"C:\Apps\Tool.lnk"), &roots));
+        assert!(row_matches(&row(r"\\?\C:\Apps\Tool.lnk"), &roots));
+        assert!(!row_matches(&row(r"\\?\C:\Apps\Tool.txt"), &roots));
         assert!(!row_matches(&row(r"C:\Apps\Tool.exe"), &roots));
         assert!(ordinary_target(r"\\?\C:\Apps\..\Tool.exe").is_none());
         let mut with_args = admitted;
         with_args.args = Some(String::new());
         assert!(!row_matches(&with_args, &roots));
+    }
+
+    #[test]
+    fn indexed_shortcut_uses_checked_dos_projection_and_rejects_missing_or_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(temp.path()).unwrap();
+        let root_text = canonical_root.to_str().unwrap();
+        let root_dos = PathBuf::from(root_text.strip_prefix(r"\\?\").unwrap_or(root_text));
+        let file = temp.path().join("App.lnk");
+        std::fs::write(&file, b"fixture only").unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        let action = row(canonical.to_str().unwrap());
+        let expected = action.action.strip_prefix(r"\\?\").unwrap().to_owned();
+        let mut calls = Vec::new();
+        checked_launch_with(
+            &action,
+            &[root_dos.clone()],
+            |_| panic!("shortcut dispatched as executable"),
+            |path| {
+                calls.push(path.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, [expected]);
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            checked_launch_with(
+                &action,
+                &[root_dos.clone()],
+                |_| panic!("missing executable"),
+                |_| panic!("missing shortcut"),
+            )
+            .is_err()
+        );
+        std::fs::create_dir(&file).unwrap();
+        assert!(
+            checked_launch_with(
+                &action,
+                &[root_dos],
+                |_| panic!("directory executable"),
+                |_| panic!("directory shortcut"),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -348,17 +419,25 @@ mod tests {
         let canonical = std::fs::canonicalize(&file).unwrap();
         let action = row(canonical.to_str().unwrap());
         let mut calls = Vec::new();
-        checked_launch_with(&action, &[root_dos.clone()], |target| {
-            calls.push(target.to_owned());
-            Ok(())
-        })
+        checked_launch_with(
+            &action,
+            &[root_dos.clone()],
+            |target| {
+                calls.push(target.to_owned());
+                Ok(())
+            },
+            |_| panic!("executable dispatched as shortcut"),
+        )
         .unwrap();
         assert_eq!(calls, [action.action.clone()]);
         std::fs::remove_file(file).unwrap();
         assert!(
-            checked_launch_with(&action, &[root_dos], |_| panic!(
-                "stale indexed file launched"
-            ))
+            checked_launch_with(
+                &action,
+                &[root_dos],
+                |_| panic!("stale indexed file launched"),
+                |_| panic!("stale shortcut launched")
+            )
             .is_err()
         );
     }

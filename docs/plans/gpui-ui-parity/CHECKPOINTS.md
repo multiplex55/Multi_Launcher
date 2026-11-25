@@ -1011,3 +1011,7 @@ The GPUI Text and Expected editors, file path and result use resolved monospace 
 ## G05 checked Window Search and foreground handoff
 
 GPUI admits stock Switch results with current, exact native identity. The existing activation engine verifies the selected window on the current virtual desktop and the launcher records only observed success. The conditional hide preserves selected foreground. Sixteen focused tests passed. Both frontends restored the same minimized Beta, cleared Search and left view. GPUI rejected the separately closed Alpha row and retained its query. Close, cross-desktop switching and known-duration global invocation remain open. Continue checked indexed local shortcuts. [Exact receipts](VALIDATION_LOG.md#g05-checked-window-search-and-foreground-handoff)
+
+## G02 and G05 checked indexed Windows shortcuts
+
+GPUI admits local indexed shortcuts and uses the existing checked Windows shortcut engine. The stock verbatim link remains the History and Usage identity. Nine focused tests passed. At 1516 × 937, both frontends launched the same target and Start In from Search and Action Sheet, preserving a quoted value, an empty argument and an embedded quote. GPUI refused missing Start In and a link replaced with a directory. Continue checked indexed documents. [Exact receipts](VALIDATION_LOG.md#g02-and-g05-checked-indexed-windows-shortcuts)

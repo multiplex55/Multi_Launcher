@@ -654,9 +654,17 @@ struct IndexedHost<'a> {
 impl ExternalCommandHost for IndexedHost<'_> {
     fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
         anyhow::ensure!(command.namespace.is_none() && command.args.is_none() && command.target == action.action, "Invalid indexed application command");
-        super::indexed_applications::checked_launch_with(action, self.roots, |target| {
-            multi_launcher::actions::exec::launch(target, None)
-        })
+        super::indexed_applications::checked_launch_with(
+            action,
+            self.roots,
+            |target| multi_launcher::actions::exec::launch(target, None),
+            |path| {
+                #[cfg(windows)]
+                { multi_launcher::actions::exec::launch_shortcut(path) }
+                #[cfg(not(windows))]
+                { let _ = path; anyhow::bail!("Indexed shortcuts require Windows") }
+            },
+        )
     }
     fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
     fn external_hide_after_run(&self) -> bool { self.host.external_hide_after_run() }

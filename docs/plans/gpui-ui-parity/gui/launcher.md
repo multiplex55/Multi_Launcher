@@ -270,7 +270,11 @@ The shared composer supplies the command rows followed by the saved rows in cata
 
 GPUI starts a one-time stock scan of the configured absolute local index roots. It preserves the stock item cap and adds eligible executable rows after saved actions in blank browse and `app` Search. Indexed rows retain their own source identity through scoring and App Editor updates. Completion data is built off the UI thread. Publication updates suggestions for the current text and refreshes results only for blank and `app` Search.
 
-The existing launch worker checks the selected row's local path again before passing the exact stock target to the shared process launcher. History and Usage retain the stock target spelling. Live index settings, rescans, indexed shortcuts and documents, other discovery sources and large-catalog rendering remain open. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-indexed-local-windows-executable-execution)
+The existing launch worker checks the selected row's local path again before passing the exact stock target to the shared process launcher. History and Usage retain the stock target spelling. Live index settings, rescans, other discovery sources and large-catalog rendering remain open. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-indexed-local-windows-executable-execution)
+
+## Checked indexed Windows shortcuts
+
+Ordinary indexed `.lnk` rows use the same index provenance and checked worker. The worker derives a DOS path only for loading the link through the existing Windows shortcut engine. That engine checks the link, executable and explicit Start In directory, then forwards the embedded Windows arguments. History and Usage keep the stock verbatim link. Search Enter and Action Sheet Execute share this route. [Focused and Windows evidence](../VALIDATION_LOG.md#g02-and-g05-checked-indexed-windows-shortcuts)
 
 ## Action Sheet Execute for applications
 
