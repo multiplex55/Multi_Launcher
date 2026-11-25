@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G04 and G23 connect GPUI Hash to the shared Activity Center. At 1516 × 937 both frontends showed advancing file progress, cancelled the exact operation from Activity and added a separate completed Text row with the known digest confined to Hash. All 12 focused tests passed. [Activity evidence](VALIDATION_LOG.md#g04-and-g23-hash-jobs-in-activity)
+
 G04 and G05 restored the saved Hash pin in Docked and Pop Out. At 1516 × 937, native replay verified retained activation, close refusal, fresh explicit remount, checked unpin and fresh-launch readback. A failed save left the same session open and displayed its warning below anchored Search. All 11 focused tests passed. [Saved Hash pin evidence](VALIDATION_LOG.md#g04-and-g05-saved-hash-pin)
 
 G07 checked Filename result Open in Explorer passed 12 focused tests and matched Windows replay at 1516 × 937. Both frontends selected the exact Unicode file despite a same-named decoy in another folder and opened the same directory. GPUI refused the selected file after it was replaced with a directory. [Explorer evidence](VALIDATION_LOG.md#g07-checked-filename-result-open-in-explorer)
@@ -47,17 +49,17 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Goals with active or completed work | G00–G07, the G11 Downloads Triage slice and the G23 Toast Log slice. G00 source discovery and representative baseline are accepted. G01–G07, G11 and G23 have open criteria. |
+| Goals with active or completed work | G00–G07, G11 Downloads Triage and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11 and G23 have open criteria. |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 204 Specified, 14 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 203 Specified, 15 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Connect Hash jobs to the shared Activity Center and the first usable GPUI activity view. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
+| Current next action | Admit the ordinary checked Window Search Close row on the current virtual desktop. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

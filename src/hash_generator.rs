@@ -587,23 +587,7 @@ impl HashJob {
             } else {
                 result
             };
-            if let Some(activity) = worker_activity.as_ref() {
-                let (outcome, diagnostic) = match &result {
-                    Ok(_) => (crate::activity::ActivityOutcome::Completed, None),
-                    Err(HashError::Cancelled) => {
-                        (crate::activity::ActivityOutcome::Cancelled, None)
-                    }
-                    Err(_) => (
-                        crate::activity::ActivityOutcome::Failed,
-                        Some(crate::activity::ActivityDiagnostic::WorkerFailed),
-                    ),
-                };
-                activity.finish(
-                    outcome,
-                    diagnostic,
-                    crate::activity::ActivityRetirement::Unavailable,
-                );
-            }
+            let result = resolve_hash_activity_result(result, worker_activity.as_ref());
             terminal_wake.publish(HashJobEvent { request_id, result });
         });
         if let Err(error) = spawn(worker) {
@@ -678,6 +662,24 @@ impl HashJob {
         };
         self.receiver = None;
         Some(event)
+    }
+}
+
+fn resolve_hash_activity_result(
+    result: Result<HashResult, HashError>,
+    activity: Option<&crate::activity::ActivityTask>,
+) -> Result<HashResult, HashError> {
+    let Some(activity) = activity else { return result; };
+    let (outcome, diagnostic) = match &result {
+        Ok(_) => (crate::activity::ActivityOutcome::Completed, None),
+        Err(HashError::Cancelled) => (crate::activity::ActivityOutcome::Cancelled, None),
+        Err(_) => (crate::activity::ActivityOutcome::Failed, Some(crate::activity::ActivityDiagnostic::WorkerFailed)),
+    };
+    let committed = activity.finish_hash_calculation(outcome, diagnostic, crate::activity::ActivityRetirement::Unavailable);
+    if committed == crate::activity::ActivityOutcome::Cancelled {
+        Err(HashError::Cancelled)
+    } else {
+        result
     }
 }
 
@@ -1300,6 +1302,47 @@ mod tests {
                 crate::activity::ActivityOutcome::Completed
             )
         );
+    }
+
+    #[test]
+    fn accepted_activity_cancel_wins_after_hash_final_token_sample() {
+        use crate::activity::{ActivityCancelResult, ActivityCenter, ActivityIncarnation, ActivityLifecycle, ActivityOperation, ActivityOutcome, ActivityOwner, ActivitySlot};
+
+        let center = ActivityCenter::new();
+        let first_request = request(HashAlgorithm::Sha256, HashInput::Text("abc".into()), None);
+        let request_id = first_request.request_id();
+        let activity = center.start(ActivityOwner::Hash, ActivitySlot::Primary,
+            ActivityIncarnation::new(request_id.get()), ActivityOperation::CalculateHash).unwrap();
+        let cancellation = HashCancellationToken::new();
+        let worker_cancel = cancellation.clone();
+        activity.set_cancel_handler(move || worker_cancel.cancel());
+        activity.mark_running();
+        let computed = hash_request(first_request, &cancellation, |_| {}).unwrap();
+        // This is the worker's final token sample; cancellation arrives after it.
+        assert!(!cancellation.is_cancelled());
+        let sampled_result = Ok(computed);
+        assert_eq!(center.request_cancel(activity.key()), ActivityCancelResult::Requested);
+        let event = HashJobEvent { request_id, result: resolve_hash_activity_result(sampled_result, Some(&activity)) };
+        assert!(matches!(event.result, Err(HashError::Cancelled)));
+        assert_eq!(center.snapshot().rows[0].lifecycle, ActivityLifecycle::Terminal(ActivityOutcome::Cancelled));
+        assert_eq!(center.request_cancel(activity.key()), ActivityCancelResult::Terminal);
+
+        let request = request(HashAlgorithm::Sha256, HashInput::Text("abc".into()), None);
+        let request_id = request.request_id();
+        let activity = center.start(ActivityOwner::Hash, ActivitySlot::Primary,
+            ActivityIncarnation::new(request_id.get()), ActivityOperation::CalculateHash).unwrap();
+        activity.set_cancel_handler(|| {});
+        let computed = hash_request(request, &HashCancellationToken::new(), |_| {}).unwrap();
+        assert!(resolve_hash_activity_result(Ok(computed), Some(&activity)).is_ok());
+        assert_eq!(center.request_cancel(activity.key()), ActivityCancelResult::Terminal);
+
+        let unrelated = center.start(ActivityOwner::FileSearch, ActivitySlot::Primary,
+            ActivityIncarnation::new(1), ActivityOperation::SearchFiles).unwrap();
+        unrelated.set_cancel_handler(|| {});
+        assert_eq!(center.request_cancel(unrelated.key()), ActivityCancelResult::Requested);
+        unrelated.finish(ActivityOutcome::Completed, None, crate::activity::ActivityRetirement::Confirmed);
+        assert_eq!(center.snapshot().rows.iter().find(|row| row.key == unrelated.key()).unwrap().lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Completed));
     }
 
     #[test]

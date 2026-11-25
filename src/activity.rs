@@ -706,7 +706,8 @@ impl ActivityCenter {
         diagnostic: Option<ActivityDiagnostic>,
         retirement: ActivityRetirement,
         retention: &AtomicU8,
-    ) {
+        hash_cancel_wins: bool,
+    ) -> ActivityOutcome {
         let mut registry = lock_registry(&self.registry);
         let Some(mut record) = registry.current.remove(&key) else {
             if retention
@@ -724,12 +725,17 @@ impl ActivityCenter {
                 drop(registry);
                 self.report_terminal(key, outcome);
             }
-            return;
+            return outcome;
         };
         if record.slot != slot {
             registry.current.insert(key, record);
-            return;
+            return outcome;
         }
+        let cancelled = hash_cancel_wins && key.owner == ActivityOwner::Hash
+            && record.operation == ActivityOperation::CalculateHash
+            && record.lifecycle == ActivityLifecycle::Cancelling;
+        let outcome = if cancelled { ActivityOutcome::Cancelled } else { outcome };
+        let diagnostic = if cancelled { None } else { diagnostic };
         let now = Instant::now();
         record.lifecycle = ActivityLifecycle::Terminal(outcome);
         record.retirement = retirement;
@@ -761,6 +767,7 @@ impl ActivityCenter {
         }
         drop(registry);
         self.report_terminal(key, outcome);
+        outcome
     }
 }
 
@@ -862,7 +869,19 @@ impl ActivityTask {
             diagnostic,
             retirement,
             &self.retention,
+            false,
         );
+    }
+
+    /// Commit Hash's terminal fact under the same lock as cancellation admission.
+    /// A cancellation admitted first suppresses the worker's computed result.
+    pub(crate) fn finish_hash_calculation(
+        &self,
+        outcome: ActivityOutcome,
+        diagnostic: Option<ActivityDiagnostic>,
+        retirement: ActivityRetirement,
+    ) -> ActivityOutcome {
+        self.center.finish(self.slot, self.key, outcome, diagnostic, retirement, &self.retention, true)
     }
 
     pub fn retirement_confirmed(&self) {

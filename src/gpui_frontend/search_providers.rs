@@ -64,6 +64,7 @@ pub(super) struct InstalledLauncherProviders {
     settings: multi_launcher::plugins::settings::SettingsPlugin,
     help: multi_launcher::plugins::help::HelpPlugin,
     favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
+    activity: multi_launcher::plugins::activity::ActivityPlugin,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
     #[cfg(windows)]
@@ -99,6 +100,7 @@ impl InstalledLauncherProviders {
             settings: multi_launcher::plugins::settings::SettingsPlugin,
             help: multi_launcher::plugins::help::HelpPlugin,
             favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
+            activity: multi_launcher::plugins::activity::ActivityPlugin,
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
@@ -128,6 +130,7 @@ impl InstalledLauncherProviders {
             Some(&self.settings as &dyn multi_launcher::plugin::Plugin),
             Some(&self.help as &dyn multi_launcher::plugin::Plugin),
             Some(&self.favorites as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.activity as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
@@ -298,6 +301,18 @@ mod tests {
         plugin::{Plugin, search_filtered_plugins_with_origin},
     };
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn installed_activity_provider_uses_stock_search_gates() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        let enabled = HashSet::from(["activity".to_owned()]);
+        let rows = super::search_routed(providers.plugins(), "activity", Some(&enabled), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "activity");
+        assert!(super::super::activity::provider_is_current("activity", &rows[0].1, Some(&enabled), None));
+        let caps = HashMap::from([("activity".to_owned(), Vec::new())]);
+        assert!(super::search_routed(providers.plugins(), "activity", Some(&enabled), Some(&caps)).is_empty());
+    }
 
     #[test]
     fn installed_web_providers_use_shared_search_and_capability_gates() {

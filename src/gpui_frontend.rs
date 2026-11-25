@@ -2,6 +2,7 @@ use std::pin::Pin;
 #[cfg(windows)]
 use std::sync::mpsc::{Receiver, Sender, channel};
 mod action_sheet;
+mod activity;
 mod add_action;
 mod appearance;
 mod external_launch;
@@ -972,6 +973,7 @@ impl RenderOnce for LauncherMenuBar {
                 let action_context = file_action_context.clone();
                 let editor_context = file_action_context.clone();
                 let hash_context = file_action_context.clone();
+                let activity_context = file_action_context.clone();
                 let restart_context = file_action_context.clone();
                 menu.submenu("Apps", window, cx, move |menu, _, _| {
                     let editor_context = editor_context.clone();
@@ -997,6 +999,13 @@ impl RenderOnce for LauncherMenuBar {
                             }),
                     )
                 })
+                .item(
+                    PopupMenuItem::new("Activity")
+                        .action(Box::new(OpenActivity))
+                        .on_click(move |_, window, app| {
+                            activity_context.dispatch_action(&OpenActivity, window, app);
+                        }),
+                )
                 .item(
                     PopupMenuItem::new("Restart in egui")
                         .action(Box::new(RestartWithEgui))
@@ -1991,6 +2000,7 @@ enum InstalledSearchRoute {
     QuerySet(CommandOutcome),
     Settings,
     Help,
+    Activity,
     FavoritesBrowse,
     FavoritesNamed(String),
 }
@@ -2039,6 +2049,7 @@ fn classify_installed_search_command(
         }
         Command::Dialog(DialogCommand::Settings) => Ok(InstalledSearchRoute::Settings),
         Command::Dialog(DialogCommand::Help) => Ok(InstalledSearchRoute::Help),
+        Command::Dialog(DialogCommand::Activity) => Ok(InstalledSearchRoute::Activity),
         Command::Storage(StorageCommand::FavoriteDialog(label)) => {
             if label.is_empty() {
                 Ok(InstalledSearchRoute::FavoritesBrowse)
@@ -2351,6 +2362,7 @@ gpui_kit::actions!([
     ToggleCoordinateHudProbe,
     ToggleSettings,
     OpenAppEditor,
+    OpenActivity,
     OpenPluginEditor,
     ToggleRetainedWindow,
     CloseApplication,
@@ -2604,6 +2616,9 @@ struct RootWindow {
     hash_geometry_sequence: Arc<AtomicU64>,
     hash_tool_key: UtilityToolKey,
     hash_session: Arc<Mutex<HashSession>>,
+    // The root owns the shared center independently of Hash presentation mounts.
+    activity_center: multi_launcher::activity::ActivityCenter,
+    activity_view: Option<Entity<activity::ActivityView>>,
     hash_wake_signal: Arc<HashWakeSignal>,
     hash_file_picker_pending: Arc<AtomicBool>,
     hash_clipboard_pending: Arc<HashClipboardPendingState>,
@@ -2645,6 +2660,13 @@ struct RootWindow {
     restart_status: Option<String>,
     restart_exit: Rc<RefCell<Option<(RestartContext, Vec<NativeWindow>)>>>,
     restart_failure: Rc<RefCell<Option<String>>>,
+}
+
+fn new_activity_hash_session() -> (multi_launcher::activity::ActivityCenter, Arc<Mutex<HashSession>>) {
+    let center = multi_launcher::activity::ActivityCenter::new();
+    let mut session = HashSession::new();
+    session.attach_activity_center(center.clone());
+    (center, Arc::new(Mutex::new(session)))
 }
 
 #[derive(Clone)]
@@ -7806,6 +7828,10 @@ impl RootWindow {
         if !self.launcher_result_activation_is_live(origin, window, cx) {
             return;
         }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "activity")
+            && !activity::provider_is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+            return;
+        }
         #[cfg(windows)]
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "downloads_triage") {
             if is_downloads_triage_opener(&result.action)
@@ -7991,6 +8017,7 @@ impl RootWindow {
             InstalledSearchRoute::Settings
         );
         let help_open = matches!(&installed_invocation.route, InstalledSearchRoute::Help);
+        let activity_open = matches!(&installed_invocation.route, InstalledSearchRoute::Activity);
         let favorites_open = matches!(
             &installed_invocation.route,
             InstalledSearchRoute::FavoritesBrowse | InstalledSearchRoute::FavoritesNamed(_)
@@ -8005,6 +8032,9 @@ impl RootWindow {
             } else if help_open {
                 self.launcher_search_error =
                     Some("GPUI is closing; Command Help can no longer be opened.".to_owned());
+            } else if activity_open {
+                self.launcher_search_error =
+                    Some("GPUI is closing; Activity can no longer be opened.".to_owned());
             } else if favorites_open {
                 self.launcher_search_error =
                     Some("GPUI is closing; Favorites can no longer be opened.".to_owned());
@@ -8041,6 +8071,11 @@ impl RootWindow {
             InstalledSearchRoute::Help => {
                 drop(operation);
                 self.open_command_help(window, cx, CommandHelpOpenOrigin::Search, None);
+            }
+            InstalledSearchRoute::Activity => {
+                drop(operation);
+                let focus = Some(self.query.focus_handle(cx));
+                self.open_activity(focus, window, cx);
             }
             InstalledSearchRoute::FavoritesBrowse => {
                 drop(operation);
@@ -10569,6 +10604,13 @@ impl Render for RootWindow {
                     this.open_app_editor(Some(origin), window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &OpenActivity, window, cx| {
+                let origin = this.root_menu_previous_focus.clone()
+                    .filter(|focus| this.focus_handle.contains(focus, window))
+                    .or_else(|| Some(this.query.focus_handle(cx)));
+                if this.file_menu_open { this.root_menu_action_routed_focus = true; }
+                this.open_activity(origin, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &CommandList, window, cx| {
                 this.open_command_help(window, cx, CommandHelpOpenOrigin::Menu, None);
             }))
@@ -10664,6 +10706,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.plugin_editor.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.activity_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -12128,7 +12173,7 @@ pub(crate) fn run_foundation_window(
     let restart_failure = Rc::new(RefCell::new(None));
     let restart_failure_after_run = Rc::clone(&restart_failure);
     let initial_return_target = capture_foreground_identity();
-    let hash_session = Arc::new(Mutex::new(HashSession::new()));
+    let (activity_center, hash_session) = new_activity_hash_session();
     let hash_session_for_quit = Arc::clone(&hash_session);
     let hash_session_for_root = Arc::clone(&hash_session);
     let hash_window_revision = Arc::new(AtomicU64::new(0));
@@ -12378,6 +12423,8 @@ pub(crate) fn run_foundation_window(
                 hash_geometry_sequence: Arc::clone(&hash_geometry_sequence_for_root),
                 hash_tool_key,
                 hash_session: session_for_root,
+                activity_center,
+                activity_view: None,
                 hash_wake_signal: wake_signal_for_root,
                 hash_file_picker_pending: hash_file_picker_pending_for_root,
                 hash_clipboard_pending: hash_clipboard_pending_for_root,
@@ -13119,6 +13166,9 @@ pub(crate) fn run_foundation_window(
                             let mut search_focus_selected = false;
                             if desired_visible {
                                 root.remount_pinned_hash_if_ready(window, cx);
+                                if let Some(view) = root.activity_view.clone().filter(|view| view.read(cx).open) {
+                                    view.update(cx, |view, cx| view.resume(cx));
+                                }
                                 let query = root.query.read(cx).value().to_string();
                                 if (window_search::query_is_windows(&query)
                                     && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
@@ -13406,6 +13456,49 @@ pub(crate) fn run_foundation_window(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn app_activity_tracks_hash_across_fresh_sessions_without_private_inputs() {
+        use multi_launcher::activity::{ActivityLifecycle, ActivityOperation, ActivityOutcome, ActivityOwner};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let (center, session) = super::new_activity_hash_session();
+        let secret = "private hash draft café";
+        let directory = tempfile::tempdir().unwrap();
+        let private_path = directory.path().join("private-hash-input.txt");
+        std::fs::write(&private_path, secret).unwrap();
+        for expected_rows in 1..=2 {
+            {
+                let mut session = session.lock().unwrap();
+                session.begin((expected_rows == 2).then(|| private_path.clone()));
+                if expected_rows == 1 { session.set_text(secret.to_owned()); }
+                session.calculate(Arc::new(|| {})).unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let mut session = session.lock().unwrap();
+                session.poll();
+                if !session.has_job() { break; }
+                drop(session);
+                assert!(Instant::now() < deadline, "hash worker did not finish");
+                std::thread::yield_now();
+            }
+            let snapshot = center.snapshot();
+            assert_eq!(snapshot.rows.len(), expected_rows);
+            assert!(snapshot.rows.iter().all(|row| row.key.owner() == ActivityOwner::Hash
+                && row.operation == ActivityOperation::CalculateHash
+                && row.lifecycle == ActivityLifecycle::Terminal(ActivityOutcome::Completed)));
+            let visible = format!("{snapshot:?}");
+            let digest = session.lock().unwrap().result().unwrap().digest.clone();
+            assert!(!visible.contains(secret));
+            assert!(!visible.contains("private-hash-input.txt"));
+            assert!(!visible.contains(&digest));
+            session.lock().unwrap().end();
+        }
+        let snapshot = center.snapshot();
+        assert_ne!(snapshot.rows[0].key, snapshot.rows[1].key);
+    }
+
     use super::{
         ActivationSource, AppliedWindowSize, CommandOutcome, DockedHashResize,
         DockedHashResizeOrigin, ForegroundIdentity, Frontend, FrontendSelection, FutureContext,

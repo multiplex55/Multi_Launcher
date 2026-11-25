@@ -1,6 +1,6 @@
 # Goal register
 
-G00–G07 have active or completed checkpoints. G11 Downloads Triage has its first checked Inspect route, and the G23 Toast Log slice is paired with G05 launcher menus. The matrix and individual GUI records track source specifications, scoped implementation and native evidence. Read the master Goal for shared contracts and the packets for concrete checkpoints.
+G00–G07 have active or completed checkpoints. G11 Downloads Triage has its first checked Inspect route. G23 includes the Toast Log launcher route and the first Activity Center view for the Hash pilot. The matrix and individual GUI records track source specifications, scoped implementation and native evidence. Read the master Goal for shared contracts and the packets for concrete checkpoints.
 
 The initial program has 27 goals. All remain on **one migration branch**, with one active source writer. Ordering below is a default, not a requirement to block independent work behind an unavailable unrelated native check. Record any resequencing and preserve dependency/evidence ownership.
 
@@ -29,7 +29,7 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | G20 | [Radial runtime, designer, preview, and assets](goals/G20-radial-interfaces.md) | G00–G05; G01 native capability findings | Not started |
 | G21 | [Paste Sequences, gestures, and Hot Folder](goals/G21-automation-tools.md) | G00–G05; G13 clipboard contracts | Not started |
 | G22 | [Pinboard, Screen Draw, OCR, and coordinate surfaces](goals/G22-native-overlays.md) | G00–G05; native proof started in G01 | Not started |
-| G23 | [Dashboard, calendar, todos, timers, notifications, and activity](goals/G23-dashboard-and-organizers.md) | G00–G05; relevant feature adapters | In implementation for Toast Log |
+| G23 | [Dashboard, calendar, todos, timers, notifications, and activity](goals/G23-dashboard-and-organizers.md) | G00–G05; relevant feature adapters | In implementation for Toast Log and Activity Center |
 | G24 | [MultiManager, layouts, processes, shell, and system controls](goals/G24-system-tools.md) | G00–G05; G01 native integration | Not started |
 | G25 | [Cross-feature integration and exhaustive parity reconciliation](goals/G25-integration-and-parity-reconciliation.md) | Applicable feature goals; incremental checks begin earlier | Not started |
 | G26 | [Performance, production packaging, final review, and delivery](goals/G26-final-acceptance-and-delivery.md) | G00–G25 applicable acceptance | Not started |

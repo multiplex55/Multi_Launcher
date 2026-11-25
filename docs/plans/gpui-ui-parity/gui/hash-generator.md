@@ -71,6 +71,8 @@ Late Load checks mount, session, source generation and whether a rehost was acce
 
 The GPUI Hash presenter reads the shared running job's byte snapshot. The Kit control exposes a progress bar with the exact byte status and a whole percentage. A known zero-byte total reports 100%, an incomplete count stays below 100%, and unknown totals use indeterminate progress. The status and stopping message retain the existing session ownership. Windows verified visually advancing progress, numeric accessibility and cancellation on the same file in both frontends. The GPUI dock revealed the progress and Cancel with its internal scroll. [Hash progress evidence](../VALIDATION_LOG.md#g04-visual-and-accessible-hash-progress)
 
+Hash also registers its jobs with the shared Activity Center in GPUI. In both frontends, Activity showed advancing bytes, cancelled the exact live file request and retained a separate completed Text record. The shared terminal commit withholds a digest when Activity admits cancellation first. [Activity integration evidence](../VALIDATION_LOG.md#g04-and-g23-hash-jobs-in-activity)
+
 ## Pending geometry checkpoint
 
 Reuse the canonical `Settings.utility_dialog_sizes` component merge and `SettingsSaveWorkerRegistry`. Keep docked logical `size` and popped-out `native` outer placement independent. Extract the existing acknowledgement and accepted-intent ownership from `UtilityDialogSizeManager`. Keep egui viewport and widget discovery in its adapter. Load and place the popout on initial open and rehost through the existing nearest monitor/work-area policy. GPUI's reported bounds and resize operation describe the client area, so sample actual checked outer bounds and monitor DPI for the saved placement.
