@@ -477,7 +477,7 @@ impl LauncherSearchCatalog {
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
                 let unit_result = unit_convert_search::classify(&provider, &action).is_some();
-                let window_result = window_search::action_is_switch(&provider, &action);
+                let window_result = window_search::action_is_operation(&provider, &action);
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_filename_start(raw_query, &action).is_some();
@@ -7091,7 +7091,7 @@ impl RootWindow {
             .into_iter()
             .filter(|(provider, action)| {
                 if provider == "windows" {
-                    window_search::action_is_switch(provider, action)
+                    window_search::action_is_operation(provider, action)
                 } else if provider == "calculator" {
                     calculator_search::classify(provider, &query, action).is_some()
                         || calculator_search::history_index(provider, &query, action).is_some()
@@ -11726,6 +11726,11 @@ enum RootVisibilityRequest {
     Set(bool),
     HideAfterExternalLaunch(u64),
     HideAfterWindowSwitch(u64, ForegroundIdentity, Arc<str>),
+    HideAfterWindowClose(u64, ForegroundIdentity, ForegroundIdentity, Arc<str>),
+}
+
+fn exclude_closed_return_target(return_target: Option<ForegroundIdentity>, closed: ForegroundIdentity) -> Option<ForegroundIdentity> {
+    return_target.filter(|target| *target != closed)
 }
 
 fn window_switch_hide_is_current(
@@ -11737,18 +11742,23 @@ fn window_switch_hide_is_current(
     foreground == Some(expected_target) && expected_query.is_some() && expected_query == live_query
 }
 
+fn window_close_hide_is_current(expected_root: ForegroundIdentity, foreground: Option<ForegroundIdentity>, expected_query: &str, live_query: Option<&str>) -> bool {
+    foreground == Some(expected_root) && live_query == Some(expected_query)
+}
+
 impl RootVisibilityRequest {
     fn is_current(&self, revision: u64, visible: bool, newer_pending: bool) -> bool {
         match self {
             Self::Set(_) => true,
-            Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _) => {
+            Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _)
+                | Self::HideAfterWindowClose(expected, _, _, _) => {
                 *expected == revision && visible && !newer_pending
             }
         }
     }
 
     fn superseded_by_hotkey(&self, take_hotkey: impl FnOnce() -> bool) -> bool {
-        matches!(self, Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _)) && take_hotkey()
+        matches!(self, Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _) | Self::HideAfterWindowClose(_, _, _, _)) && take_hotkey()
     }
 }
 
@@ -11840,6 +11850,10 @@ impl RootVisibility {
         self.queue_visible(RootVisibilityRequest::HideAfterExternalLaunch(revision), None)
     }
 
+    fn request_window_close_hide(&self, revision: u64, root: ForegroundIdentity, target: ForegroundIdentity, query: &str) -> bool {
+        self.queue_visible(RootVisibilityRequest::HideAfterWindowClose(revision, root, target, Arc::from(query)), None)
+    }
+
     fn queue_visible(&self, request: RootVisibilityRequest, hash_focus: Option<u64>) -> bool {
         #[cfg(windows)]
         {
@@ -11915,6 +11929,7 @@ impl RootVisibility {
         let visible = match request {
             RootVisibilityRequest::Set(visible) => *visible,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
+            RootVisibilityRequest::HideAfterWindowClose(_, _, _, _) => false,
             RootVisibilityRequest::HideAfterWindowSwitch(_, target, _) => {
                 if current_foreground_identity() != Some(*target) { return None; }
                 false
@@ -13064,7 +13079,7 @@ pub(crate) fn run_foundation_window(
                                 && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref())
                                 && !root.restart_admission.is_fenced()
                             {
-                                if root.external_launch.window_switch_pending() {
+                                if root.external_launch.window_catalog_pending() {
                                     root.window_search.defer_update();
                                 } else {
                                     root.refresh_launcher_results_with_viewport(query, false, cx);
@@ -13123,12 +13138,26 @@ pub(crate) fn run_foundation_window(
                             |root, _, cx| root.query.read(cx).value().as_str() == expected.as_ref(),
                         ).unwrap_or(false)
                     });
-                    let accepted_visible = if hotkey_for_conditional || !switch_query_current {
+                    let close_current = requested_visible.as_ref().is_none_or(|request| {
+                        let RootVisibilityRequest::HideAfterWindowClose(_, root, _, expected) = request else { return true; };
+                        let current_query = update_kit_window_content(root_window, &root_view, &mut *cx,
+                            |root, _, cx| root.query.read(cx).value().to_string(),
+                        ).ok();
+                        native_window.identity == *root
+                            && window_close_hide_is_current(*root, current_foreground_identity(), expected, current_query.as_deref())
+                    });
+                    let accepted_visible = if hotkey_for_conditional || !switch_query_current || !close_current {
                         None
                     } else {
                         requested_visible.as_ref().and_then(|request| visibility.accept_requested_visible(request))
                     };
                     let switch_hide = accepted_visible.is_some().then_some(switch_hide).flatten();
+                    let close_hide = if accepted_visible.is_some() {
+                        requested_visible.as_ref().and_then(|request| match request {
+                            RootVisibilityRequest::HideAfterWindowClose(_, root, target, query) => Some((*root, *target, Arc::clone(query))),
+                            _ => None,
+                        })
+                    } else { None };
                     let (revision, desired_visible, hash_focus_generation, hotkey_toggle) =
                         if let Some((revision, visible)) = accepted_visible {
                             let hash_focus_generation = visibility.take_requested_hash_focus();
@@ -13150,12 +13179,13 @@ pub(crate) fn run_foundation_window(
                         continue;
                     }
                     let switch_hide_accepted = switch_hide.is_some();
+                    let guarded_hide = switch_hide_accepted || close_hide.is_some();
                     let query_window = update_kit_window_content(
                         root_window,
                         &root_view,
                         &mut *cx,
                         |root, window, cx| {
-                            if !switch_hide_accepted {
+                            if !guarded_hide {
                                 root.revoke_search_completion_focus();
                                 if !desired_visible {
                                     root.retire_action_sheet_now(window, cx, true);
@@ -13202,7 +13232,7 @@ pub(crate) fn run_foundation_window(
                                 } else {
                                     root.query.focus_handle(cx).focus(window, cx);
                                 }
-                            } else if !desired_visible && !switch_hide_accepted {
+                            } else if !desired_visible && !guarded_hide {
                                 root.cancel_docked_hash_preview();
                             }
                             (root.native_window, search_focus_selected)
@@ -13228,15 +13258,7 @@ pub(crate) fn run_foundation_window(
                     let show_request_is_current = desired_visible
                         && foreground
                             .is_some_and(|captured| Some(captured) == foreground_before_transition);
-                    if desired_visible {
-                        return_target = foreground
-                            .filter(|captured| Some(*captured) == foreground_before_transition)
-                            .filter(|captured| captured.hwnd != native_window.identity.hwnd);
-                    } else if !should_restore && switch_hide.is_none() {
-                        return_target = None;
-                    }
-
-                    if let Some((target, expected_query)) = switch_hide {
+                    if let Some((target, ref expected_query)) = switch_hide {
                         let current_query = update_kit_window_content(
                             root_window, &root_view, &mut *cx,
                             |root, _, cx| root.query.read(cx).value().to_string(),
@@ -13248,14 +13270,38 @@ pub(crate) fn run_foundation_window(
                             continue;
                         }
                     }
+                    if let Some((root, _, expected_query)) = &close_hide {
+                        let current_query = update_kit_window_content(
+                            root_window, &root_view, &mut *cx,
+                            |root, _, cx| root.query.read(cx).value().to_string(),
+                        ).ok();
+                        if !visibility.is_current(revision, false) || native_window.identity != *root
+                            || !window_close_hide_is_current(*root, current_foreground_identity(), expected_query, current_query.as_deref())
+                        {
+                            visibility.revert_if_current(revision, false);
+                            continue;
+                        }
+                    }
+                    if desired_visible {
+                        return_target = foreground
+                            .filter(|captured| Some(*captured) == foreground_before_transition)
+                            .filter(|captured| captured.hwnd != native_window.identity.hwnd);
+                    } else if !should_restore && switch_hide.is_none() {
+                        return_target = None;
+                    }
                     if let Err(error) = set_native_window_visible(native_window, desired_visible) {
                         visibility.revert_if_current(revision, desired_visible);
                         tracing::error!(%error, "could not change GPUI root window visibility");
                         continue;
                     }
                     if !desired_visible {
-                        if switch_hide_accepted {
-                            return_target = None;
+                        if let Some((_, closed, _)) = close_hide {
+                            return_target = exclude_closed_return_target(return_target, closed);
+                        }
+                    }
+                    if !desired_visible {
+                        if guarded_hide {
+                            if switch_hide_accepted { return_target = None; }
                             let _ = update_kit_window_content(
                                 root_window, &root_view, &mut *cx, |root, window, cx| {
                                     root.revoke_search_completion_focus();
@@ -14285,6 +14331,21 @@ mod tests {
             },
             enabled_plugins,
         )
+    }
+
+    #[test]
+    fn window_close_preparation_uses_existing_provider_scoring() {
+        let mut catalog = completion_catalog(Vec::new(), true, None);
+        let mut switch = saved_action("Switch to Editor", "window:switch:42", None); switch.desc = "Windows".into();
+        let mut close = saved_action("Close Editor", "window:close:42", None); close.desc = "Windows".into();
+        let mut other = saved_action("Close Browser", "window:close:43", None); other.desc = "Windows".into();
+        let rows = || vec![("windows".to_owned(), switch.clone()), ("windows".to_owned(), close.clone()), ("windows".to_owned(), other.clone())];
+        let exact = catalog.compose("win Editor", rows(), false);
+        assert!(exact.iter().any(|row| row.action == switch && matches!(&row.origin, super::LauncherResultOrigin::Provider(name) if name == "windows")));
+        assert!(exact.iter().any(|row| row.action == close && matches!(&row.origin, super::LauncherResultOrigin::Provider(name) if name == "windows")));
+        assert!(!exact.iter().any(|row| row.action == other));
+        catalog.match_exact = false;
+        assert!(catalog.compose("win Editor", rows(), false).iter().any(|row| row.action == close));
     }
 
     #[test]
@@ -17602,6 +17663,24 @@ mod tests {
         assert!(request.is_current(5, true, false));
         assert!(!request.is_current(6, true, false));
         assert!(request.superseded_by_hotkey(|| true));
+    }
+
+    #[test]
+    fn accepted_close_hide_excludes_only_the_exact_closed_return_target() {
+        let target = super::ForegroundIdentity { hwnd: 42, process_id: 2, thread_id: 3 };
+        let other_process = super::ForegroundIdentity { process_id: 4, ..target };
+        let other_thread = super::ForegroundIdentity { thread_id: 5, ..target };
+        assert_eq!(super::exclude_closed_return_target(Some(target), target), None);
+        assert_eq!(super::exclude_closed_return_target(Some(other_process), target), Some(other_process));
+        assert_eq!(super::exclude_closed_return_target(Some(other_thread), target), Some(other_thread));
+        assert_eq!(super::exclude_closed_return_target(None, target), None);
+        let request = super::RootVisibilityRequest::HideAfterWindowClose(5, target, target, Arc::from("query"));
+        assert!(request.is_current(5, true, false));
+        assert!(!request.is_current(6, true, false));
+        assert!(request.superseded_by_hotkey(|| true));
+        assert!(super::window_close_hide_is_current(target, Some(target), "query", Some("query")));
+        assert!(!super::window_close_hide_is_current(target, Some(other_process), "query", Some("query")));
+        assert!(!super::window_close_hide_is_current(target, Some(target), "query", Some("changed")));
     }
 
     #[test]

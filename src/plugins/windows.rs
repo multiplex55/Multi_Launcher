@@ -12,6 +12,15 @@ fn switch_action(window: &WindowDescriptor) -> Action {
     }
 }
 
+fn close_action(window: &WindowDescriptor) -> Action {
+    Action {
+        label: format!("Close {}", window.title),
+        desc: "Windows".into(),
+        action: format!("window:close:{}", window.hwnd),
+        args: None,
+    }
+}
+
 fn title_matches(window: &WindowDescriptor, filter: &str) -> bool {
     filter.is_empty() || window.title.to_lowercase().contains(filter)
 }
@@ -23,12 +32,7 @@ fn actions_from_windows(windows: &[WindowDescriptor], filter: &str) -> Vec<Actio
         .flat_map(|window| {
             [
                 switch_action(window),
-                Action {
-                    label: format!("Close {}", window.title),
-                    desc: "Windows".into(),
-                    action: format!("window:close:{}", window.hwnd),
-                    args: None,
-                },
+                close_action(window),
             ]
         })
         .collect()
@@ -39,6 +43,18 @@ fn actions_from_windows(windows: &[WindowDescriptor], filter: &str) -> Vec<Actio
 pub struct WindowSwitchRow {
     pub action: Action,
     pub identity: crate::window_catalog::WindowSwitchIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowOperation { Switch, Close }
+
+/// Exact stock operation bound to the one freshly enriched native target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowOperationRow {
+    pub operation: WindowOperation,
+    pub action: Action,
+    pub identity: crate::window_catalog::WindowSwitchIdentity,
+    pub published_title: String,
 }
 
 #[cfg(test)]
@@ -56,18 +72,35 @@ fn switch_rows_from_windows_if_current(
     mut current: impl FnMut(usize) -> Option<(WindowDescriptor, crate::window_catalog::WindowSwitchIdentity)>,
     is_current: impl Fn() -> bool,
 ) -> Vec<WindowSwitchRow> {
+    operation_rows_from_windows_if_current(windows, filter, &mut current, is_current)
+        .into_iter().filter(|row| row.operation == WindowOperation::Switch)
+        .map(|row| WindowSwitchRow { action: row.action, identity: row.identity }).collect()
+}
+
+fn operation_rows_from_windows_if_current(
+    windows: &[WindowDescriptor],
+    filter: &str,
+    mut current: impl FnMut(usize) -> Option<(WindowDescriptor, crate::window_catalog::WindowSwitchIdentity)>,
+    is_current: impl Fn() -> bool,
+) -> Vec<WindowOperationRow> {
     windows
         .iter()
         .take_while(|_| is_current())
         .filter_map(|window| {
             let (current, identity) = current(window.hwnd)?;
             if identity.native.hwnd != window.hwnd || identity.native.pid != window.pid
+                || current.hwnd != identity.native.hwnd || current.pid != identity.native.pid
+                || identity.native.tid == 0 || !identity.descriptor.matches(&current)
                 || current.title.is_empty() || !title_matches(&current, filter)
             {
                 return None;
             }
-            Some(WindowSwitchRow { action: switch_action(&current), identity })
+            Some([
+                WindowOperationRow { operation: WindowOperation::Switch, action: switch_action(&current), identity: identity.clone(), published_title: current.title.clone() },
+                WindowOperationRow { operation: WindowOperation::Close, action: close_action(&current), identity, published_title: current.title.clone() },
+            ])
         })
+        .flatten()
         .collect()
 }
 
@@ -101,6 +134,15 @@ impl WindowSwitchCatalog {
         let windows = self.catalog.snapshot_and_refresh();
         let filter = rest.trim().to_lowercase();
         switch_rows_from_windows_if_current(&windows, &filter, crate::window_catalog::current_switch_window, is_current)
+    }
+
+    /// Enrich each target once, then project its stock Switch and Close actions.
+    pub fn search_operations_if_current(&self, query: &str, is_current: impl Fn() -> bool) -> Vec<WindowOperationRow> {
+        if !is_current() { return Vec::new(); }
+        let Some(rest) = crate::common::strip_prefix_ci(query.trim(), "win") else { return Vec::new(); };
+        let windows = self.catalog.snapshot_and_refresh();
+        let filter = rest.trim().to_lowercase();
+        operation_rows_from_windows_if_current(&windows, &filter, crate::window_catalog::current_switch_window, is_current)
     }
 }
 
@@ -228,5 +270,29 @@ mod tests {
         }, || calls.get() < 1);
         assert_eq!(calls.get(), 1);
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn paired_operations_share_one_enriched_target_and_stock_actions() {
+        use crate::window_catalog::{WindowNativeIdentity, WindowSwitchIdentity, WindowTargetIdentity};
+        use std::cell::Cell;
+        let window = WindowDescriptor { title: "Editor".into(), hwnd: 42, pid: 7,
+            executable: Some("editor.exe".into()), process_path: None, class_name: None };
+        let identity = WindowSwitchIdentity { native: WindowNativeIdentity { hwnd: 42, pid: 7, tid: 9 },
+            descriptor: WindowTargetIdentity::from_descriptor(&window) };
+        let calls = Cell::new(0);
+        let rows = operation_rows_from_windows_if_current(std::slice::from_ref(&window), "edit", |_| {
+            calls.set(calls.get() + 1);
+            Some((window.clone(), identity.clone()))
+        }, || true);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(rows.iter().map(|row| row.operation).collect::<Vec<_>>(), [WindowOperation::Switch, WindowOperation::Close]);
+        assert_eq!(rows.iter().map(|row| row.action.clone()).collect::<Vec<_>>(), actions_from_windows(std::slice::from_ref(&window), "edit"));
+        assert!(rows.iter().all(|row| row.identity == identity));
+        assert!(rows.iter().all(|row| row.published_title == window.title));
+        let mut wrong = identity.clone(); wrong.descriptor.executable = Some("other.exe".into());
+        assert!(operation_rows_from_windows_if_current(std::slice::from_ref(&window), "", |_| Some((window.clone(), wrong.clone())), || true).is_empty());
+        let mut wrong = identity; wrong.native.tid = 0;
+        assert!(operation_rows_from_windows_if_current(std::slice::from_ref(&window), "", |_| Some((window.clone(), wrong.clone())), || true).is_empty());
     }
 }

@@ -534,6 +534,7 @@ pub(super) enum RunCommand {
     Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
     Copy(String),
     WindowSwitch(multi_launcher::window_activation::CheckedWindowSwitch),
+    WindowClose(multi_launcher::window_close::CheckedWindowClose),
     Calculator(super::calculator_search::ScalarResult),
     CalculatorHistory(super::calculator_search::HistoryResult),
     Diagnostic { kind: DiagnosticKind, message: String },
@@ -567,7 +568,7 @@ struct Pending {
     ticket: u64,
     stamp: Stamp,
     permit: EffectPermit,
-    window_switch: bool,
+    window_catalog: bool,
 }
 
 #[derive(Default)]
@@ -581,8 +582,8 @@ impl ExternalLaunch {
         self.pending.is_some()
     }
 
-    pub fn window_switch_pending(&self) -> bool {
-        self.pending.as_ref().is_some_and(|pending| pending.window_switch)
+    pub fn window_catalog_pending(&self) -> bool {
+        self.pending.as_ref().is_some_and(|pending| pending.window_catalog)
     }
 
     pub fn begin(
@@ -601,7 +602,7 @@ impl ExternalLaunch {
             ticket,
             stamp,
             permit,
-            window_switch: matches!(&request.command, RunCommand::WindowSwitch(_)),
+            window_catalog: matches!(&request.command, RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_)),
         });
         Some(ticket)
     }
@@ -707,6 +708,18 @@ fn execute_request(
                 },
             )
         }
+        RunCommand::WindowClose(checked) => {
+            let effect = multi_launcher::window_close::post_checked_window_close(checked.clone())
+                .map_err(anyhow::Error::new);
+            CommandBus.complete_checked_window_close(
+                checked.selected.native.hwnd as isize, &request.action, request.source, effect,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run,
+                    refocus: true,
+                },
+            )
+        }
         RunCommand::Copy(text) => {
             let effect = copy(text);
             CommandBus.complete_checked_clipboard_text(text.clone(), &request.action, request.source, effect,
@@ -764,7 +777,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::WindowSwitch(_) | RunCommand::Indexed { .. } | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
+            RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -850,6 +863,13 @@ impl RootWindow {
         query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>,
     ) {
         self.start_run(action, RunCommand::WindowSwitch(checked), query, source, None, window, cx);
+    }
+
+    pub(super) fn start_window_close(
+        &mut self, action: Action, checked: multi_launcher::window_close::CheckedWindowClose,
+        query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        self.start_run(action, RunCommand::WindowClose(checked), query, source, None, window, cx);
     }
 
     pub(super) fn start_indexed_launch(
@@ -1041,6 +1061,14 @@ impl RootWindow {
             }),
             _ => None,
         };
+        let close_target = match &receipt.request.command {
+            RunCommand::WindowClose(checked) => Some(ForegroundIdentity {
+                hwnd: checked.selected.native.hwnd,
+                process_id: checked.selected.native.pid,
+                thread_id: checked.selected.native.tid,
+            }),
+            _ => None,
+        };
         let switch_current = match &receipt.request.command {
             RunCommand::WindowSwitch(checked) => {
                 let initiating = ForegroundIdentity {
@@ -1057,6 +1085,15 @@ impl RootWindow {
                     receipt.result.outcome.is_ok(), (checked.is_current)(), current_foreground_identity(),
                     initiating, target, window.is_window_active(),
                 )
+            }
+            RunCommand::WindowClose(checked) => {
+                let initiating = ForegroundIdentity {
+                    hwnd: checked.initiating.hwnd,
+                    process_id: checked.initiating.pid,
+                    thread_id: checked.initiating.tid,
+                };
+                (checked.is_current)() && window.is_window_active()
+                    && current_foreground_identity() == Some(initiating)
             }
             _ => true,
         };
@@ -1094,6 +1131,17 @@ impl RootWindow {
                         self.root_visibility.request_window_switch_hide(
                             revision, target, changed_query.as_deref().unwrap_or(&receipt.request.query),
                         );
+                    } else if let Some(target) = close_target {
+                        if let RunCommand::WindowClose(checked) = &receipt.request.command {
+                            let root = ForegroundIdentity {
+                                hwnd: checked.initiating.hwnd,
+                                process_id: checked.initiating.pid,
+                                thread_id: checked.initiating.tid,
+                            };
+                            self.root_visibility.request_window_close_hide(
+                                revision, root, target, changed_query.as_deref().unwrap_or(&receipt.request.query),
+                            );
+                        }
                     } else {
                         self.root_visibility.request_external_hide(revision);
                     }

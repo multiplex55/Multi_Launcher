@@ -775,6 +775,11 @@ fn describe_window_minimal(hwnd: usize) -> Option<WindowDescriptor> {
     })
 }
 
+#[cfg(windows)]
+pub(crate) fn current_window_title(hwnd: usize) -> Option<String> {
+    describe_window_minimal(hwnd).map(|window| window.title)
+}
+
 /// Read metadata for one known HWND without starting another enumeration worker.
 ///
 /// Foreground-event consumers use this after leaving the native callback. Empty

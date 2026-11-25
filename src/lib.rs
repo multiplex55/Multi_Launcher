@@ -108,6 +108,7 @@ pub mod virtual_desktop;
 pub mod visibility;
 pub mod window_activation;
 pub mod window_catalog;
+pub mod window_close;
 
 pub mod global_hotkey;
 pub mod graph;

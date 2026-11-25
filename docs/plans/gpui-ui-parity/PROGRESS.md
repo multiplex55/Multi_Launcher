@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G05 Window Search now publishes the stock Close row alongside Switch on the current virtual desktop. Matched Windows runs at 1516 × 937 sent one request to the selected Alpha in each frontend and left Beta live. GPUI verified that a target can decline and that an expired row adds no success receipt. All 15 focused tests passed. [Window Close evidence](VALIDATION_LOG.md#g05-checked-window-search-close)
+
 G04 and G23 connect GPUI Hash to the shared Activity Center. At 1516 × 937 both frontends showed advancing file progress, cancelled the exact operation from Activity and added a separate completed Text row with the known digest confined to Hash. All 12 focused tests passed. [Activity evidence](VALIDATION_LOG.md#g04-and-g23-hash-jobs-in-activity)
 
 G04 and G05 restored the saved Hash pin in Docked and Pop Out. At 1516 × 937, native replay verified retained activation, close refusal, fresh explicit remount, checked unpin and fresh-launch readback. A failed save left the same session open and displayed its warning below anchored Search. All 11 focused tests passed. [Saved Hash pin evidence](VALIDATION_LOG.md#g04-and-g05-saved-hash-pin)
@@ -59,7 +61,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Admit the ordinary checked Window Search Close row on the current virtual desktop. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
+| Current next action | Complete the Hash Expected digest and comparison and Copy feedback checkpoint. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

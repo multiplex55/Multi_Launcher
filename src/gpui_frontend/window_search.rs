@@ -1,14 +1,14 @@
 //! Scoped stock Window Switch search and exact result receipts.
 use super::*;
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::windows::{WindowSwitchCatalog, WindowSwitchRow};
+use multi_launcher::plugins::windows::{WindowOperation, WindowOperationRow, WindowSwitchCatalog};
 
 #[derive(Default)]
 pub(super) struct Owner {
     catalog: Option<Arc<WindowSwitchCatalog>>,
     epoch: Arc<AtomicU64>,
     generation: u64,
-    rows: HashMap<usize, WindowSwitchRow>,
+    rows: HashMap<usize, WindowOperationRow>,
     deferred_update: bool,
 }
 impl Owner {
@@ -46,16 +46,22 @@ pub(super) fn enabled(
         && plugins.is_none_or(|plugins| plugins.contains("windows"))
         && multi_launcher::settings::provider_search_capability_enabled(caps, "windows")
 }
-pub(super) fn action_is_switch(name: &str, action: &Action) -> bool {
-    name == "windows"
-        && action.desc == "Windows"
-        && action.args.is_none()
-        && matches!(
-            parse_action(action),
-            Ok(Command::System(
-                multi_launcher::commands::SystemCommand::WindowSwitch(_)
-            ))
-        )
+pub(super) fn action_is_operation(name: &str, action: &Action) -> bool {
+    name == "windows" && action.desc == "Windows" && action.args.is_none()
+        && matches!(parse_action(action), Ok(Command::System(
+            multi_launcher::commands::SystemCommand::WindowSwitch(_)
+            | multi_launcher::commands::SystemCommand::WindowClose(_)
+        )))
+}
+fn row_matches_action(row: &WindowOperationRow, action: &Action) -> bool {
+    if row.action != *action || !action_is_operation("windows", action) { return false; }
+    match (row.operation, parse_action(action)) {
+        (WindowOperation::Switch, Ok(Command::System(multi_launcher::commands::SystemCommand::WindowSwitch(hwnd))))
+        | (WindowOperation::Close, Ok(Command::System(multi_launcher::commands::SystemCommand::WindowClose(hwnd)))) => {
+            usize::try_from(hwnd).ok() == Some(row.identity.native.hwnd)
+        }
+        _ => false,
+    }
 }
 fn publication_current(
     expected_epoch: u64,
@@ -78,7 +84,7 @@ fn publication_current(
         && enabled
 }
 
-struct SnapshotPlugin<'a>(&'a [WindowSwitchRow]);
+struct SnapshotPlugin<'a>(&'a [WindowOperationRow]);
 impl Plugin for SnapshotPlugin<'_> {
     fn name(&self) -> &str {
         "windows"
@@ -145,7 +151,7 @@ impl RootWindow {
         let task = cx.background_executor().spawn(async move {
             let (filtered, _) = multi_launcher::common::query::split_action_filters(&task_query);
             let rows = catalog
-                .search_switches_if_current(&filtered, || {
+                .search_operations_if_current(&filtered, || {
                     task_epoch.load(Ordering::Acquire) == epoch
                         && task_visibility.active.load(Ordering::Acquire)
                         && task_visibility.visible.load(Ordering::Acquire)
@@ -222,7 +228,7 @@ impl RootWindow {
             .window_search
             .rows
             .get(&index)
-            .filter(|row| row.action == result.action)
+            .filter(|row| row_matches_action(row, &result.action))
             .cloned()
         else {
             return;
@@ -250,24 +256,31 @@ impl RootWindow {
             let epoch_ref = self.window_search.epoch.clone();
             let visibility = self.root_visibility.clone();
             let revision = visibility.request_revision.load(Ordering::Acquire);
-            let checked = multi_launcher::window_activation::CheckedWindowSwitch {
-                initiating,
-                selected: row.identity,
-                is_current: Arc::new(move || {
+            let is_current: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
                     epoch_ref.load(Ordering::Acquire) == epoch
                         && visibility.active.load(Ordering::Acquire)
                         && visibility.visible.load(Ordering::Acquire)
                         && visibility.request_revision.load(Ordering::Acquire) == revision
-                }),
-            };
-            self.start_window_switch(row.action, checked, query, source, window, cx);
+                });
+            match row.operation {
+                WindowOperation::Switch => {
+                    let checked = multi_launcher::window_activation::CheckedWindowSwitch { initiating, selected: row.identity, is_current };
+                    self.start_window_switch(row.action, checked, query, source, window, cx);
+                }
+                WindowOperation::Close => {
+                    let checked = multi_launcher::window_close::CheckedWindowClose {
+                        initiating, selected: row.identity, published_title: row.published_title, is_current,
+                    };
+                    self.start_window_close(row.action, checked, query, source, window, cx);
+                }
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{action_is_switch, enabled, publication_current, query_is_windows};
+    use super::{SnapshotPlugin, action_is_operation, enabled, publication_current, query_is_windows, row_matches_action};
     use multi_launcher::actions::Action;
     use std::collections::{HashMap, HashSet};
 
@@ -312,10 +325,44 @@ mod tests {
             action: "window:switch:42".into(),
             args: None,
         };
-        assert!(action_is_switch("windows", &action));
-        assert!(!action_is_switch("other", &action));
+        assert!(action_is_operation("windows", &action));
+        assert!(!action_is_operation("other", &action));
         let mut close = action;
         close.action = "window:close:42".into();
-        assert!(!action_is_switch("windows", &close));
+        assert!(action_is_operation("windows", &close));
+        assert!(!action_is_operation("other", &close));
+        close.args = Some("payload".into());
+        assert!(!action_is_operation("windows", &close));
+    }
+
+    #[test]
+    fn paired_snapshot_respects_provider_gates_and_exact_operation() {
+        use multi_launcher::plugin::Plugin;
+        use multi_launcher::plugins::windows::{WindowOperation, WindowOperationRow};
+        use multi_launcher::window_catalog::{WindowDescriptor, WindowNativeIdentity, WindowSwitchIdentity, WindowTargetIdentity};
+        let descriptor = WindowDescriptor { title: "Editor".into(), hwnd: 42, pid: 7,
+            executable: None, process_path: None, class_name: None };
+        let identity = WindowSwitchIdentity { native: WindowNativeIdentity { hwnd: 42, pid: 7, tid: 8 },
+            descriptor: WindowTargetIdentity::from_descriptor(&descriptor) };
+        let rows = [WindowOperation::Switch, WindowOperation::Close].map(|operation| WindowOperationRow {
+            operation, identity: identity.clone(), published_title: descriptor.title.clone(), action: Action {
+                label: if operation == WindowOperation::Switch { "Switch to Editor" } else { "Close Editor" }.into(),
+                desc: "Windows".into(), action: if operation == WindowOperation::Switch { "window:switch:42" } else { "window:close:42" }.into(), args: None,
+            },
+        });
+        let plugin = SnapshotPlugin(&rows);
+        let enabled = HashSet::from(["windows".to_owned()]);
+        let routed = super::super::search_providers::search_routed([&plugin as &dyn Plugin], "win Editor", Some(&enabled), None);
+        assert_eq!(routed.len(), 2);
+        assert_eq!(routed.iter().filter(|(name, action)| action_is_operation(name, action)).count(), 2);
+        assert!(row_matches_action(&rows[0], &rows[0].action));
+        assert!(row_matches_action(&rows[1], &rows[1].action));
+        let mut forged = rows[1].clone(); forged.operation = WindowOperation::Switch;
+        assert!(!row_matches_action(&forged, &forged.action));
+        let mut forged = rows[1].clone(); forged.identity.native.hwnd = 99;
+        assert!(!row_matches_action(&forged, &forged.action));
+        let disabled = HashMap::from([("windows".to_owned(), Vec::new())]);
+        assert!(super::super::search_providers::search_routed([&plugin as &dyn Plugin], "win Editor", Some(&enabled), Some(&disabled)).is_empty());
+        assert!(super::super::search_providers::search_routed([&plugin as &dyn Plugin], "win Editor", Some(&HashSet::new()), None).is_empty());
     }
 }

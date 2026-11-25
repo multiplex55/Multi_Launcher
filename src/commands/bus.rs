@@ -80,6 +80,24 @@ impl CommandBus {
         handle_checked_headless_effect(preferences, &invocation, effect)
     }
 
+    /// Apply ordinary launcher policy once to the result of a checked close post.
+    pub fn complete_checked_window_close(
+        &self,
+        hwnd: isize,
+        original_action: &Action,
+        source: ActivationSource,
+        effect: anyhow::Result<()>,
+        preferences: LauncherRunPreferences,
+    ) -> Result<CommandOutcome, CommandError> {
+        let invocation = CommandInvocation {
+            command: Command::System(super::SystemCommand::WindowClose(hwnd)),
+            original_action: original_action.clone(),
+            query_override: None,
+            source,
+        };
+        handle_checked_headless_effect(preferences, &invocation, effect)
+    }
+
     /// Execute an external command through the shared launcher outcome policy.
     pub fn dispatch_external<H: ExternalCommandHost + ?Sized>(
         &self,
@@ -230,6 +248,19 @@ mod tests {
         assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
         assert!(outcome.search);
         assert!(CommandBus.complete_checked_window_switch(42, &action, ActivationSource::Click, Err(anyhow::anyhow!("stale")), preferences).is_err());
+    }
+
+    #[test]
+    fn checked_window_close_completion_uses_ordinary_policy_and_propagates_failure() {
+        let action = Action { label: "Close Editor".into(), desc: "Windows".into(), action: "window:close:42".into(), args: None };
+        let preferences = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
+        let outcome = CommandBus.complete_checked_window_close(42, &action, ActivationSource::Click, Ok(()), preferences).unwrap();
+        assert_eq!(outcome.history, HistoryPolicy::Record);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+        assert_eq!(outcome.query, QueryPolicy::Set(String::new()));
+        assert!(outcome.search);
+        let error = CommandBus.complete_checked_window_close(42, &action, ActivationSource::Enter, Err(anyhow::anyhow!("post failed")), preferences).unwrap_err();
+        assert!(error.message.contains("post failed"));
     }
 
     #[test]
