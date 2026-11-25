@@ -12,6 +12,7 @@ mod plugin_editor;
 mod downloads_triage;
 mod favorites;
 mod hash_jump;
+mod hash_progress;
 mod hash_jump_select;
 mod launcher_controls;
 mod launcher_result;
@@ -10995,27 +10996,6 @@ impl Render for HashGeneratorWindow {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let progress_label = progress.map(|progress| match progress.total_bytes {
-            Some(total) => {
-                let percent = if total == 0 {
-                    0
-                } else {
-                    progress
-                        .bytes_processed
-                        .saturating_mul(100)
-                        .saturating_div(total)
-                        .min(100)
-                };
-                format!(
-                    "Hashing · {} / {} bytes ({percent}%)",
-                    progress.bytes_processed, total
-                )
-            }
-            None => format!(
-                "Hashing · {} bytes processed (total unknown)",
-                progress.bytes_processed
-            ),
-        });
         let comparison_label = comparison.map(|comparison| match comparison {
             Ok(HashComparison::NotRequested) => (
                 "Enter an expected digest to compare".to_owned(),
@@ -11268,12 +11248,7 @@ impl Render for HashGeneratorWindow {
                                 this.request_close(cx);
                             })), hash_jump::HashControl::Close),
                     )
-                    .children(progress_label.map(|label| {
-                        Label::new(label)
-                            .id("hash-progress-status")
-                            .text_size(px(metrics.small_text_size))
-                            .line_height(px(metrics.line_height))
-                    }))
+                    .children(progress.map(|progress| hash_progress::render(progress, metrics)))
                     .children(is_stopping.then(|| {
                         Label::new("Stopping the previous calculation…")
                             .id("hash-stopping-status")

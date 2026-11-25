@@ -959,3 +959,7 @@ The existing Date engine now supplies GPUI Search calculations and diagnostics. 
 ## G05 ordinary List density and launcher menu controls
 
 The ordinary List uses centered single-line rows at the theme height and spacing. Foundation controls moved into File and Help. Twelve focused cases and matched Windows captures verified the 32-pixel pitch and 22 complete rows at 1516 × 937, practical scrolling and Page Down, exact GPUI context and Jump targets, and focus after File Restart cancel and File Apps Hash. A 415 × 337 GPUI follow-up verified the compact List and resize guidance. Header alignment, list-scale settings, styling and wheel travel remain open. The next G04 pilot increment adds the existing Hash worker progress to the GPUI visual and accessible indicator. [Exact receipts](VALIDATION_LOG.md#g05-ordinary-list-density-and-launcher-menu-controls)
+
+## G04 visual and accessible Hash progress
+
+The GPUI Hash view now shows Kit progress from the existing worker's byte counts. Four focused cases passed. Both frontends showed advancing progress on the same owned 3 GiB sparse file and cleared it on Cancel, without publishing a digest. GPUI exposed the numeric progress role and retained the exact byte status. The docked GPUI footer required scrolling. Unknown totals use the Kit indeterminate indicator and are covered by the focused test. Global invocation, mixed DPI and remaining presentation criteria stay open. [Exact receipts](VALIDATION_LOG.md#g04-visual-and-accessible-hash-progress)
