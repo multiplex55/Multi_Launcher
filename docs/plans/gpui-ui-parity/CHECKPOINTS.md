@@ -1007,3 +1007,7 @@ Execute now uses the current saved or indexed executable receipt after closing t
 ## G04 Hash exact-data typography and digest
 
 The GPUI Text and Expected editors, file path and result use resolved monospace styling. A stable stock Label wraps the exact digest below the calculation row. Five focused cases passed. Matched native docks and popouts showed the entire SHA-512 digest. GPUI also kept the internal-newline diagnostic and showed the exact 128 accessible digits and reachable footer at Comfortable 150% on a 415 × 502 root. Persisted dock and popout geometry stayed exact. Continue G05 Window Search admission and foreground handoff. [Exact receipts](VALIDATION_LOG.md#g04-hash-exact-data-typography-and-digest)
+
+## G05 checked Window Search and foreground handoff
+
+GPUI admits stock Switch results with current, exact native identity. The existing activation engine verifies the selected window on the current virtual desktop and the launcher records only observed success. The conditional hide preserves selected foreground. Sixteen focused tests passed. Both frontends restored the same minimized Beta, cleared Search and left view. GPUI rejected the separately closed Alpha row and retained its query. Close, cross-desktop switching and known-duration global invocation remain open. Continue checked indexed local shortcuts. [Exact receipts](VALIDATION_LOG.md#g05-checked-window-search-and-foreground-handoff)

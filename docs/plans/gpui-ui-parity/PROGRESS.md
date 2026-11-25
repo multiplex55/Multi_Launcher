@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G05 Window Search now switches to the exact external window on the current virtual desktop. Both frontends restored the same minimized window at 1516 × 937, kept it foreground and cleared Search while the launcher left view. GPUI declined a closed target without adding a success receipt. [Window Search evidence](VALIDATION_LOG.md#g05-checked-window-search-and-foreground-handoff)
+
 G04 Hash now uses the resolved monospace style for exact data. Both frontends displayed the full SHA-512 digest in matched docked and popout hosts. GPUI exposed one exact accessible digest and wrapped all 128 digits at Comfortable 150% without displacing Search. [Hash exact-data evidence](VALIDATION_LOG.md#g04-hash-exact-data-typography-and-digest)
 
 G05 Action Sheet Execute now launches checked saved and indexed executables. At 1516 × 937, both frontends preserved saved arguments, recorded the correct keyboard or pointer source, and applied Clear After Run. GPUI also rejected an indexed file replaced while its sheet was open. [Action Sheet evidence](VALIDATION_LOG.md#g05-checked-application-execution-from-the-action-sheet)
@@ -41,7 +43,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Continue G05 broader provider admission with checked Window Search and foreground handoff. Mixed DPI and G01 known-duration F2 remain open. The owned external editor retry confirmed launch-hide and retained Hash, and its discrete F2 presses produced no wake. |
+| Current next action | Continue G02 and G05 general application execution with checked indexed local shortcuts. Mixed DPI and G01 known-duration F2 remain open. Window Search has separate native evidence for selected-target foreground and launcher hide. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

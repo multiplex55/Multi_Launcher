@@ -275,3 +275,7 @@ The existing launch worker checks the selected row's local path again before pas
 ## Action Sheet Execute for applications
 
 The shared registry supplies Execute for a current saved or indexed executable. GPUI retains the exact result, including its origin, while the sheet is open. It closes the sheet, restores Search focus, and rechecks the receipt before sending the selected row through the same worker as ordinary Search activation. History retains the original Enter or Click source, and Clear After Run follows the ordinary completion policy. Other file associations and secondary choices retain their existing scope. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-checked-application-execution-from-the-action-sheet)
+
+## Checked Window Search
+
+The Windows provider publishes stock Switch results for the `win` Search token through the existing asynchronous catalog. GPUI pairs each displayed action with an enriched external window identity and accepts the row only for its current Search generation. The shared activation worker rechecks the initiating root, target, current desktop and foreground. A confirmed switch records the exact target and can clear and hide the launcher while the selected window keeps foreground. A refused switch leaves Search intact. Close and cross-desktop switching retain their G05 scope. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-checked-window-search-and-foreground-handoff)

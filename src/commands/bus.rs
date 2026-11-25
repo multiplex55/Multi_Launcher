@@ -62,6 +62,24 @@ impl CommandBus {
         handle_checked_headless_effect(preferences, &invocation, effect)
     }
 
+    /// Apply the normal launcher outcome to a checked window-switch effect.
+    pub fn complete_checked_window_switch(
+        &self,
+        hwnd: isize,
+        original_action: &Action,
+        source: ActivationSource,
+        effect: anyhow::Result<()>,
+        preferences: LauncherRunPreferences,
+    ) -> Result<CommandOutcome, CommandError> {
+        let invocation = CommandInvocation {
+            command: Command::System(super::SystemCommand::WindowSwitch(hwnd)),
+            original_action: original_action.clone(),
+            query_override: None,
+            source,
+        };
+        handle_checked_headless_effect(preferences, &invocation, effect)
+    }
+
     /// Execute an external command through the shared launcher outcome policy.
     pub fn dispatch_external<H: ExternalCommandHost + ?Sized>(
         &self,
@@ -202,6 +220,17 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn checked_window_switch_completion_records_and_uses_normal_visibility_policy() {
+        let action = Action { label: "Switch to Editor".into(), desc: "Windows".into(), action: "window:switch:42".into(), args: None };
+        let preferences = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: false };
+        let outcome = CommandBus.complete_checked_window_switch(42, &action, ActivationSource::Enter, Ok(()), preferences).unwrap();
+        assert_eq!(outcome.history, HistoryPolicy::Record);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+        assert!(outcome.search);
+        assert!(CommandBus.complete_checked_window_switch(42, &action, ActivationSource::Click, Err(anyhow::anyhow!("stale")), preferences).is_err());
+    }
 
     #[test]
     fn calculator_scalar_completion_retains_launcher_outcome_policy() {

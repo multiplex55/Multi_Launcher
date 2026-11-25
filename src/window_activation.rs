@@ -117,7 +117,7 @@ fn activate_window_with_fence(
 ) -> Result<(), WindowActivationError> {
     #[cfg(windows)]
     {
-        activate_with_fence(&mut WindowsActivationBackend, request, fence.as_ref())
+        activate_with_fence(&mut WindowsActivationBackend { checked: None }, request, fence.as_ref())
     }
     #[cfg(not(windows))]
     {
@@ -129,7 +129,49 @@ fn activate_window_with_fence(
     }
 }
 
+/// The captured launcher and selected window are rechecked before every native effect.
+#[derive(Clone)]
+pub struct CheckedWindowSwitch {
+    pub initiating: crate::window_catalog::WindowNativeIdentity,
+    pub selected: crate::window_catalog::WindowSwitchIdentity,
+    pub is_current: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+#[cfg(any(test, windows))]
+fn checked_switch_identities_match(
+    checked: &CheckedWindowSwitch,
+    hwnd: usize,
+    initiating: Option<crate::window_catalog::WindowNativeIdentity>,
+    selected: Option<&crate::window_catalog::WindowSwitchIdentity>,
+    foreground: Option<crate::window_catalog::WindowNativeIdentity>,
+) -> bool {
+    (checked.is_current)()
+        && hwnd == checked.selected.native.hwnd
+        && checked.selected.native.pid != checked.initiating.pid
+        && initiating == Some(checked.initiating)
+        && selected == Some(&checked.selected)
+        && (foreground == Some(checked.initiating) || foreground == Some(checked.selected.native))
+        && (checked.is_current)()
+}
+
+/// Activate a captured Switch target on the current virtual desktop only.
+pub fn activate_checked_window_switch(checked: CheckedWindowSwitch) -> Result<(), WindowActivationError> {
+    #[cfg(windows)]
+    {
+        let request = WindowActivationRequest::current_desktop_only(checked.selected.native.hwnd);
+        activate_with_fence(&mut WindowsActivationBackend { checked: Some(checked) }, request, None)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = checked;
+        Err(WindowActivationError::new(WindowActivationErrorKind::ForegroundDenied, "Window activation is available only on Windows"))
+    }
+}
+
 trait ActivationBackend {
+    fn check_checked(&mut self, _hwnd: usize) -> Result<(), WindowActivationError> { Ok(()) }
+    fn checked_attachment_allowed(&self, _thread: u32) -> bool { true }
+    fn checked_success(&mut self, _hwnd: usize) -> Result<(), WindowActivationError> { Ok(()) }
     fn is_window(&mut self, hwnd: usize) -> bool;
     fn window_desktop(&mut self, hwnd: usize) -> Result<VirtualDesktopId, VirtualDesktopError>;
     fn current_desktop(&mut self) -> Result<VirtualDesktopId, VirtualDesktopError>;
@@ -947,16 +989,13 @@ fn authorize<T>(
     effects: &mut ActivationEffects,
     side_effect: impl FnOnce(&mut dyn ActivationBackend) -> T,
 ) -> Result<T, WindowActivationError> {
-    let Some(fence) = fence else {
-        return Ok(side_effect(backend));
-    };
-    ensure_current(backend, Some(fence), hwnd)?;
+    ensure_current(backend, fence, hwnd)?;
     // Native activation may synchronously wait on another GUI thread. Keep it
     // outside VisibilityRevision's ordering gate so that thread can publish a
     // newer visibility request while USER32/COM is working.
     effects.native_side_effect_started = true;
     let result = side_effect(backend);
-    ensure_current(backend, Some(fence), hwnd)?;
+    ensure_current(backend, fence, hwnd)?;
     Ok(result)
 }
 
@@ -965,6 +1004,7 @@ fn ensure_current(
     fence: Option<&WindowActivationFence>,
     hwnd: usize,
 ) -> Result<(), WindowActivationError> {
+    backend.check_checked(hwnd)?;
     let Some(fence) = fence else {
         return Ok(());
     };
@@ -1056,9 +1096,10 @@ fn activate_with_observation(
         fence.and_then(|_| capture_previous_foreground(backend, request.hwnd, observation));
     let mut effects = ActivationEffects::default();
     let result = activate_with_fence_inner(backend, request, fence, &mut effects);
-    let result = match (result, fence) {
-        (Ok(()), Some(fence)) => ensure_current(backend, Some(fence), request.hwnd),
-        (result, _) => result,
+    let result = match result {
+        Ok(()) => ensure_current(backend, fence, request.hwnd)
+            .and_then(|()| backend.checked_success(request.hwnd)),
+        Err(error) => Err(error),
     };
     if effects.native_side_effect_started
         && result
@@ -1509,6 +1550,7 @@ fn activate_with_fence_inner(
         .context("hwnd", request.hwnd.to_string()));
     }
 
+    ensure_current(backend, fence, request.hwnd)?;
     prepare_desktop(backend, request, fence, effects)?;
     if backend.is_minimized(request.hwnd) {
         let restore_result = authorize(backend, fence, request.hwnd, effects, |backend| {
@@ -1558,6 +1600,7 @@ fn activate_with_fence_inner(
     let mut attach_failures = Vec::new();
     for thread in [foreground_thread, target_thread] {
         if thread != 0
+            && guard.backend().checked_attachment_allowed(thread)
             && current_thread != 0
             && thread != current_thread
             && !guard.attached.contains(&(thread, current_thread))
@@ -1586,6 +1629,8 @@ fn activate_with_fence_inner(
         .context("activation_observed", activated.to_string()));
     }
     if activated {
+        ensure_current(backend, fence, request.hwnd)?;
+        backend.checked_success(request.hwnd)?;
         return Ok(());
     }
 
@@ -1769,7 +1814,9 @@ fn desktop_error(
 }
 
 #[cfg(windows)]
-struct WindowsActivationBackend;
+struct WindowsActivationBackend {
+    checked: Option<CheckedWindowSwitch>,
+}
 
 #[cfg(windows)]
 fn native_window_intersects_physical_display(hwnd: usize) -> Option<bool> {
@@ -1828,6 +1875,39 @@ fn native_window_intersects_physical_display(hwnd: usize) -> Option<bool> {
 
 #[cfg(windows)]
 impl ActivationBackend for WindowsActivationBackend {
+    fn checked_attachment_allowed(&self, thread: u32) -> bool {
+        self.checked.as_ref().is_none_or(|checked| {
+            thread == checked.initiating.tid || thread == checked.selected.native.tid
+        })
+    }
+    fn checked_success(&mut self, hwnd: usize) -> Result<(), WindowActivationError> {
+        self.check_checked(hwnd)?;
+        let Some(checked) = self.checked.clone() else { return Ok(()); };
+        if self.foreground_window().and_then(crate::window_catalog::native_window_identity)
+            != Some(checked.selected.native) || !(checked.is_current)()
+        {
+            return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Window switch target is no longer foreground"));
+        }
+        Ok(())
+    }
+    fn check_checked(&mut self, hwnd: usize) -> Result<(), WindowActivationError> {
+        let Some(checked) = self.checked.clone() else { return Ok(()); };
+        if !(checked.is_current)() {
+            return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Window switch is no longer current"));
+        }
+        let initiating = crate::window_catalog::native_window_identity(checked.initiating.hwnd);
+        let selected = crate::window_catalog::current_switch_identity(hwnd);
+        if !self.is_window_on_current(hwnd).map_err(|error| WindowActivationError::new(
+            WindowActivationErrorKind::Desktop, format!("Could not check target desktop: {error}"),
+        ))? {
+            return Err(WindowActivationError::new(WindowActivationErrorKind::Desktop, "Target window is on another virtual desktop"));
+        }
+        let foreground = self.foreground_window().and_then(crate::window_catalog::native_window_identity);
+        if !checked_switch_identities_match(&checked, hwnd, initiating, selected.as_ref(), foreground) {
+            return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Window switch target or launcher is no longer current"));
+        }
+        Ok(())
+    }
     fn is_window(&mut self, hwnd: usize) -> bool {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::IsWindow;
@@ -1967,6 +2047,9 @@ mod tests {
     struct FakeBackend {
         events: Vec<String>,
         valid: bool,
+        checked_guard: Option<(usize, usize, Arc<AtomicBool>)>,
+        checked_allowed_threads: Option<Vec<u32>>,
+        reject_checked_success: bool,
         target: VirtualDesktopId,
         current: VirtualDesktopId,
         on_current: bool,
@@ -2007,6 +2090,9 @@ mod tests {
             Self {
                 events: Vec::new(),
                 valid: true,
+                checked_guard: None,
+                checked_allowed_threads: None,
+                reject_checked_success: false,
                 target: id(2),
                 current: id(1),
                 on_current: false,
@@ -2103,6 +2189,26 @@ mod tests {
     }
 
     impl ActivationBackend for FakeBackend {
+        fn checked_attachment_allowed(&self, thread: u32) -> bool {
+            self.checked_allowed_threads.as_ref().is_none_or(|threads| threads.contains(&thread))
+        }
+        fn checked_success(&mut self, _: usize) -> Result<(), WindowActivationError> {
+            if self.reject_checked_success {
+                self.events.push("checked_success".into());
+                return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "stale after detach"));
+            }
+            Ok(())
+        }
+        fn check_checked(&mut self, hwnd: usize) -> Result<(), WindowActivationError> {
+            if let Some((launcher, target, current)) = &self.checked_guard {
+                if !current.load(Ordering::Acquire) || hwnd != *target
+                    || !matches!(self.foreground, Some(value) if value == *launcher || value == *target)
+                {
+                    return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "stale checked switch"));
+                }
+            }
+            Ok(())
+        }
         fn is_window(&mut self, _: usize) -> bool {
             self.events.push("validate".into());
             self.valid
@@ -3418,6 +3524,53 @@ mod tests {
     }
 
     #[test]
+    fn checked_switch_identity_ignores_title_but_rejects_reused_thread_and_third_foreground() {
+        use crate::window_catalog::{WindowDescriptor, WindowNativeIdentity, WindowSwitchIdentity, WindowTargetIdentity};
+        let descriptor = WindowDescriptor { title: "before".into(), hwnd: 42, pid: 99, executable: Some("app.exe".into()), process_path: None, class_name: Some("Class".into()) };
+        let target = WindowNativeIdentity { hwnd: 42, pid: 99, tid: 3 };
+        let launcher = WindowNativeIdentity { hwnd: 7, pid: 4, tid: 5 };
+        let selected = WindowSwitchIdentity { native: target, descriptor: WindowTargetIdentity::from_descriptor(&descriptor) };
+        let current = Arc::new(AtomicBool::new(true));
+        let gate = current.clone();
+        let checked = CheckedWindowSwitch { initiating: launcher, selected: selected.clone(), is_current: Arc::new(move || gate.load(Ordering::Acquire)) };
+        let mut renamed = descriptor.clone(); renamed.title = "after".into();
+        assert!(selected.descriptor.matches(&renamed));
+        assert!(checked_switch_identities_match(&checked, 42, Some(launcher), Some(&selected), Some(launcher)));
+        assert!(checked_switch_identities_match(&checked, 42, Some(launcher), Some(&selected), Some(target)));
+        let mut self_target = checked.clone();
+        self_target.initiating.pid = target.pid;
+        assert!(!checked_switch_identities_match(&self_target, 42, Some(self_target.initiating), Some(&selected), Some(self_target.initiating)));
+        let mut reused = selected.clone(); reused.native.tid += 1;
+        assert!(!checked_switch_identities_match(&checked, 42, Some(launcher), Some(&reused), Some(launcher)));
+        assert!(!checked_switch_identities_match(&checked, 42, Some(launcher), Some(&selected), Some(WindowNativeIdentity { hwnd: 8, ..launcher })));
+        current.store(false, Ordering::Release);
+        assert!(!checked_switch_identities_match(&checked, 42, Some(launcher), Some(&selected), Some(launcher)));
+    }
+
+    #[test]
+    fn checked_switch_fences_stale_and_third_foreground_and_observes_success() {
+        let current = Arc::new(AtomicBool::new(false));
+        let mut backend = FakeBackend::new();
+        backend.on_current = true;
+        backend.checked_guard = Some((7, 42, current.clone()));
+        let request = WindowActivationRequest::current_desktop_only(42);
+        assert_eq!(activate_with(&mut backend, request).unwrap_err().kind, WindowActivationErrorKind::Superseded);
+        assert_eq!(backend.attempts, 0);
+        current.store(true, Ordering::Release);
+        backend.foreground = Some(91);
+        assert_eq!(activate_with(&mut backend, request).unwrap_err().kind, WindowActivationErrorKind::Superseded);
+        assert_eq!(backend.attempts, 0);
+        backend.foreground = Some(7);
+        backend.external_focus_after_block = Some(91);
+        assert_eq!(activate_with(&mut backend, request).unwrap_err().kind, WindowActivationErrorKind::Superseded);
+        assert_eq!(backend.attempts, 1);
+        backend.foreground = Some(7);
+        backend.attempts = 0;
+        activate_with(&mut backend, request).unwrap();
+        assert_eq!(backend.foreground, Some(42));
+    }
+
+    #[test]
     fn minimized_window_is_restored_before_foreground_activation() {
         let mut backend = FakeBackend::new();
         backend.on_current = true;
@@ -3567,6 +3720,23 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind, WindowActivationErrorKind::Desktop);
         assert_eq!(backend.events, ["validate", "is_current"]);
+    }
+
+    #[test]
+    fn checked_fallback_limits_attachment_and_rechecks_after_detach() {
+        let mut backend = FakeBackend::new();
+        backend.on_current = true;
+        backend.activate_on_attempt = 3;
+        backend.checked_allowed_threads = Some(vec![3]);
+        backend.reject_checked_success = true;
+        let error = activate_with(&mut backend, WindowActivationRequest::current_desktop_only(42)).unwrap_err();
+        assert_eq!(error.kind, WindowActivationErrorKind::Superseded);
+        let events = &backend.events;
+        assert!(!events.iter().any(|event| event == "attach:2:1:true"));
+        let attach = events.iter().position(|event| event == "attach:3:1:true").unwrap();
+        let detach = events.iter().position(|event| event == "attach:3:1:false").unwrap();
+        let verify = events.iter().position(|event| event == "checked_success").unwrap();
+        assert!(attach < detach && detach < verify);
     }
 
     #[test]

@@ -14,6 +14,20 @@ impl multi_launcher::plugin::Plugin for CalculatorMetadata {
     }
 }
 
+#[cfg(windows)]
+struct WindowsMetadata;
+#[cfg(windows)]
+impl multi_launcher::plugin::Plugin for WindowsMetadata {
+    fn name(&self) -> &str { "windows" }
+    fn description(&self) -> &str { "Switch windows (prefix: `win`)" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["win"] }
+    fn search(&self, _: &str) -> Vec<Action> { Vec::new() }
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "win".into(), desc: "Windows".into(), action: "query:win ".into(), args: None }]
+    }
+}
+
 struct FileSearchBarePlugin(multi_launcher::plugins::file_search::FileSearchPlugin);
 
 impl multi_launcher::plugin::Plugin for FileSearchBarePlugin {
@@ -52,6 +66,8 @@ pub(super) struct InstalledLauncherProviders {
     favorites: multi_launcher::plugins::fav::FavBrowsePlugin,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
+    #[cfg(windows)]
+    windows: WindowsMetadata,
     date_arithmetic: multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin,
     base_convert: multi_launcher::plugins::base_convert::BaseConvertPlugin,
     unit_convert: multi_launcher::plugins::unit_convert::UnitConvertPlugin,
@@ -87,6 +103,8 @@ impl InstalledLauncherProviders {
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
             calculator: CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin::default()),
+            #[cfg(windows)]
+            windows: WindowsMetadata,
             date_arithmetic: multi_launcher::plugins::date_arithmetic::DateArithmeticPlugin,
             base_convert: multi_launcher::plugins::base_convert::BaseConvertPlugin,
             unit_convert: multi_launcher::plugins::unit_convert::UnitConvertPlugin,
@@ -112,6 +130,8 @@ impl InstalledLauncherProviders {
             Some(&self.favorites as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
+            #[cfg(windows)]
+            Some(&self.windows as &dyn multi_launcher::plugin::Plugin),
             Some(&self.date_arithmetic as &dyn multi_launcher::plugin::Plugin),
             Some(&self.unit_convert as &dyn multi_launcher::plugin::Plugin),
             Some(&self.base_convert as &dyn multi_launcher::plugin::Plugin),

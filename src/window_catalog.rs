@@ -54,6 +54,59 @@ impl WindowTargetIdentity {
     }
 }
 
+/// Exact native window identity; titles are not part of identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowNativeIdentity {
+    pub hwnd: usize,
+    pub pid: u32,
+    pub tid: u32,
+}
+
+/// Enriched identity captured for a stock Switch row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowSwitchIdentity {
+    pub native: WindowNativeIdentity,
+    pub descriptor: WindowTargetIdentity,
+}
+
+#[cfg(windows)]
+pub fn native_window_identity(hwnd: usize) -> Option<WindowNativeIdentity> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+    let handle = HWND(hwnd as *mut _);
+    if hwnd == 0 || !unsafe { IsWindow(handle) }.as_bool() { return None; }
+    let mut pid = 0;
+    let tid = unsafe { GetWindowThreadProcessId(handle, Some(&mut pid)) };
+    (pid != 0 && tid != 0).then_some(WindowNativeIdentity { hwnd, pid, tid })
+}
+
+#[cfg(not(windows))]
+pub fn native_window_identity(_: usize) -> Option<WindowNativeIdentity> { None }
+
+/// Capture a visible, unowned top-level target with its full descriptor.
+#[cfg(windows)]
+pub fn current_switch_window(hwnd: usize) -> Option<(WindowDescriptor, WindowSwitchIdentity)> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetWindow, IsWindowVisible, GA_ROOT, GW_OWNER};
+    let handle = HWND(hwnd as *mut _);
+    let native = native_window_identity(hwnd)?;
+    if !unsafe { IsWindowVisible(handle) }.as_bool()
+        || unsafe { GetAncestor(handle, GA_ROOT) } != handle
+        || !unsafe { GetWindow(handle, GW_OWNER) }.unwrap_or_default().0.is_null()
+    { return None; }
+    let descriptor = describe_window(hwnd)?;
+    if descriptor.pid != native.pid || native_window_identity(hwnd) != Some(native) { return None; }
+    let identity = WindowSwitchIdentity { native, descriptor: WindowTargetIdentity::from_descriptor(&descriptor) };
+    Some((descriptor, identity))
+}
+
+#[cfg(not(windows))]
+pub fn current_switch_window(_: usize) -> Option<(WindowDescriptor, WindowSwitchIdentity)> { None }
+
+pub fn current_switch_identity(hwnd: usize) -> Option<WindowSwitchIdentity> {
+    current_switch_window(hwnd).map(|(_, identity)| identity)
+}
+
 type CurrentWindowDescriptor = dyn Fn(usize) -> Option<WindowDescriptor> + Send + Sync + 'static;
 
 #[derive(Clone)]

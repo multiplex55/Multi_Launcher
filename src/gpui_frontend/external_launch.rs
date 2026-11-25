@@ -9,7 +9,7 @@ use multi_launcher::commands::{
 };
 use multi_launcher::history::HistoryEntry;
 
-use super::RootWindow;
+use super::{RootWindow, ForegroundIdentity, current_foreground_identity};
 use crate::gpui_restart::{EffectPermit, RestartAdmission};
 use gpui_kit::component::{
     WindowExt as _,
@@ -528,6 +528,7 @@ pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
     Indexed { command: ExternalCommand, roots: Vec<std::path::PathBuf> },
     Copy(String),
+    WindowSwitch(multi_launcher::window_activation::CheckedWindowSwitch),
     Calculator(super::calculator_search::ScalarResult),
     CalculatorHistory(super::calculator_search::HistoryResult),
     Diagnostic { kind: DiagnosticKind, message: String },
@@ -561,6 +562,7 @@ struct Pending {
     ticket: u64,
     stamp: Stamp,
     permit: EffectPermit,
+    window_switch: bool,
 }
 
 #[derive(Default)]
@@ -572,6 +574,10 @@ pub(super) struct ExternalLaunch {
 impl ExternalLaunch {
     pub fn is_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    pub fn window_switch_pending(&self) -> bool {
+        self.pending.as_ref().is_some_and(|pending| pending.window_switch)
     }
 
     pub fn begin(
@@ -590,6 +596,7 @@ impl ExternalLaunch {
             ticket,
             stamp,
             permit,
+            window_switch: matches!(&request.command, RunCommand::WindowSwitch(_)),
         });
         Some(ticket)
     }
@@ -669,6 +676,18 @@ fn execute_request(
             CommandBus.dispatch_external(command, &request.action, request.source, None,
                 &mut IndexedHost { host, roots })
         }
+        RunCommand::WindowSwitch(checked) => {
+            let effect = multi_launcher::window_activation::activate_checked_window_switch(checked.clone())
+                .map_err(anyhow::Error::new);
+            CommandBus.complete_checked_window_switch(
+                checked.selected.native.hwnd as isize, &request.action, request.source, effect,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run,
+                    refocus: false,
+                },
+            )
+        }
         RunCommand::Copy(text) => {
             let effect = copy(text);
             CommandBus.complete_checked_clipboard_text(text.clone(), &request.action, request.source, effect,
@@ -726,7 +745,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::Indexed { .. } | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
+            RunCommand::WindowSwitch(_) | RunCommand::Indexed { .. } | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -764,6 +783,13 @@ pub(super) fn run(request: &Request) -> WorkerResult {
     result
 }
 
+fn switch_receipt_foreground_current(
+    success: bool, current: bool, foreground: Option<ForegroundIdentity>,
+    initiating: ForegroundIdentity, target: ForegroundIdentity, root_active: bool,
+) -> bool {
+    current && if success { foreground == Some(target) } else { root_active && foreground == Some(initiating) }
+}
+
 struct ExternalNotification;
 
 impl RootWindow {
@@ -798,6 +824,13 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         self.start_run(action, RunCommand::External { command, association }, query, source, history_label, window, cx);
+    }
+
+    pub(super) fn start_window_switch(
+        &mut self, action: Action, checked: multi_launcher::window_activation::CheckedWindowSwitch,
+        query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        self.start_run(action, RunCommand::WindowSwitch(checked), query, source, None, window, cx);
     }
 
     pub(super) fn start_indexed_launch(
@@ -934,6 +967,9 @@ impl RootWindow {
                         return;
                     };
                     root.apply_external_receipt(ticket, receipt, window, cx);
+                    if root.window_search.take_deferred_update() {
+                        root.root_visibility.notify_window_search();
+                    }
                 });
             });
         })
@@ -978,8 +1014,34 @@ impl RootWindow {
                     .is_current_visible_revision(revision, native)
             });
         }
-        let local_focus_owned =
-            self.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx);
+        let switch_target = match &receipt.request.command {
+            RunCommand::WindowSwitch(checked) => Some(ForegroundIdentity {
+                hwnd: checked.selected.native.hwnd,
+                process_id: checked.selected.native.pid,
+                thread_id: checked.selected.native.tid,
+            }),
+            _ => None,
+        };
+        let switch_current = match &receipt.request.command {
+            RunCommand::WindowSwitch(checked) => {
+                let initiating = ForegroundIdentity {
+                    hwnd: checked.initiating.hwnd,
+                    process_id: checked.initiating.pid,
+                    thread_id: checked.initiating.tid,
+                };
+                let target = ForegroundIdentity {
+                    hwnd: checked.selected.native.hwnd,
+                    process_id: checked.selected.native.pid,
+                    thread_id: checked.selected.native.tid,
+                };
+                switch_receipt_foreground_current(
+                    receipt.result.outcome.is_ok(), (checked.is_current)(), current_foreground_identity(),
+                    initiating, target, window.is_window_active(),
+                )
+            }
+            _ => true,
+        };
+        let local_focus_owned = self.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx);
         let current = receipt.stamp.presentation_is_current(
             root.window_id(),
             self.launcher_results.generation,
@@ -987,7 +1049,7 @@ impl RootWindow {
             self.query.read(cx).value().as_str(),
             visible,
         ) && window.window_handle().window_id() == root.window_id()
-            && local_focus_owned;
+            && local_focus_owned && switch_current;
         if !current {
             cx.notify();
             return;
@@ -1009,9 +1071,15 @@ impl RootWindow {
                         .update(cx, |state, cx| state.replace_all(query.clone(), window, cx));
                 }
                 if outcome.visibility == multi_launcher::commands::VisibilityPolicy::Hide {
-                    self.root_visibility.request_external_hide(revision);
+                    if let Some(target) = switch_target {
+                        self.root_visibility.request_window_switch_hide(
+                            revision, target, changed_query.as_deref().unwrap_or(&receipt.request.query),
+                        );
+                    } else {
+                        self.root_visibility.request_external_hide(revision);
+                    }
                 }
-                if outcome.focus && focus_owned {
+                if outcome.focus && focus_owned && switch_target.is_none() {
                     self.query.focus_handle(cx).focus(window, cx);
                 }
                 if settings.enable_toasts {
@@ -1212,6 +1280,18 @@ fn bookkeep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_switch_receipt_separates_success_and_failure_foreground_ownership() {
+        let root = ForegroundIdentity { hwnd: 1, process_id: 2, thread_id: 3 };
+        let target = ForegroundIdentity { hwnd: 4, process_id: 5, thread_id: 6 };
+        let other = ForegroundIdentity { hwnd: 7, ..target };
+        assert!(switch_receipt_foreground_current(true, true, Some(target), root, target, false));
+        assert!(!switch_receipt_foreground_current(true, true, Some(root), root, target, true));
+        assert!(switch_receipt_foreground_current(false, true, Some(root), root, target, true));
+        assert!(!switch_receipt_foreground_current(false, true, Some(other), root, target, true));
+        assert!(!switch_receipt_foreground_current(true, false, Some(target), root, target, false));
+    }
 
     #[test]
     fn base_convert_copy_preserves_literal_spaces_and_unicode() {

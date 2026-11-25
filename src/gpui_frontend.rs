@@ -18,6 +18,7 @@ mod hash_jump;
 mod hash_progress;
 mod hash_layout;
 mod indexed_applications;
+mod window_search;
 mod hash_jump_select;
 mod launcher_controls;
 pub(crate) mod launcher_header;
@@ -466,10 +467,11 @@ impl LauncherSearchCatalog {
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
                 let unit_result = unit_convert_search::classify(&provider, &action).is_some();
+                let window_result = window_search::action_is_switch(&provider, &action);
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -2479,6 +2481,7 @@ struct RootWindow {
     launcher_results: LauncherSearchResults,
     calculator_search: calculator_search::SearchOwner,
     indexed_applications: indexed_applications::Owner,
+    window_search: window_search::Owner,
     external_launch: external_launch::ExternalLaunch,
     external_launch_preferences: ExternalLaunchPreferences,
     action_sheet: Option<action_sheet::Sheet>,
@@ -5887,6 +5890,7 @@ impl RootWindow {
             session.set_algorithm(snapshot.drafts.hash.algorithm);
         }
         self.root_visibility.deactivate();
+        self.window_search.retire();
         self.indexed_applications.retire();
         self.retire_search_jump_mode();
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
@@ -6946,6 +6950,7 @@ impl RootWindow {
         self.retire_search_jump_mode();
         self.calculator_search.pending = None;
         self.calculator_search.retire_history();
+        self.window_search.retire();
         if query.trim().is_empty() {
             self.publish_launcher_provider_results(query, Vec::new(), scroll_to_search);
             return;
@@ -6956,6 +6961,12 @@ impl RootWindow {
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
+        if window_search::query_is_windows(&query) && window_search::enabled(
+            self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref(),
+        ) {
+            self.start_window_search(query, raw_provider_actions, scroll_to_search, cx);
+            return;
+        }
         let calculator_enabled = calculator_search::eligible_query(&query)
             && self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("calculator"))
             && multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "calculator");
@@ -6985,7 +6996,9 @@ impl RootWindow {
         let provider_actions = raw_provider_actions
             .into_iter()
             .filter(|(provider, action)| {
-                if provider == "calculator" {
+                if provider == "windows" {
+                    window_search::action_is_switch(provider, action)
+                } else if provider == "calculator" {
                     calculator_search::classify(provider, &query, action).is_some()
                         || calculator_search::history_index(provider, &query, action).is_some()
                 } else if provider == "date_arithmetic" {
@@ -7791,6 +7804,10 @@ impl RootWindow {
                 self.start_date_launch(result.action, route, query, source, window, cx);
                 return;
             }
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "windows") {
+            self.activate_window_search_result(&result, index, query, source, window, cx);
+            return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Indexed { .. }) {
             if let Some(roots) = indexed_applications::admitted_result(
@@ -9606,6 +9623,7 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        self.window_search.retire();
         self.indexed_applications.retire();
         self.hash_docked_resize
             .lock()
@@ -11453,6 +11471,7 @@ struct RootVisibility {
     request_revision: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
     retired: Arc<AtomicBool>,
+    window_search_update: Arc<AtomicBool>,
     #[cfg(windows)]
     request_sender: Arc<Mutex<Option<Sender<()>>>>,
     #[cfg(windows)]
@@ -11461,24 +11480,34 @@ struct RootVisibility {
     requested_hash_focus: Arc<AtomicU64>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum RootVisibilityRequest {
     Set(bool),
     HideAfterExternalLaunch(u64),
+    HideAfterWindowSwitch(u64, ForegroundIdentity, Arc<str>),
+}
+
+fn window_switch_hide_is_current(
+    expected_target: ForegroundIdentity,
+    foreground: Option<ForegroundIdentity>,
+    expected_query: Option<&str>,
+    live_query: Option<&str>,
+) -> bool {
+    foreground == Some(expected_target) && expected_query.is_some() && expected_query == live_query
 }
 
 impl RootVisibilityRequest {
-    fn is_current(self, revision: u64, visible: bool, newer_pending: bool) -> bool {
+    fn is_current(&self, revision: u64, visible: bool, newer_pending: bool) -> bool {
         match self {
             Self::Set(_) => true,
-            Self::HideAfterExternalLaunch(expected) => {
-                expected == revision && visible && !newer_pending
+            Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _) => {
+                *expected == revision && visible && !newer_pending
             }
         }
     }
 
-    fn superseded_by_hotkey(self, take_hotkey: impl FnOnce() -> bool) -> bool {
-        matches!(self, Self::HideAfterExternalLaunch(_)) && take_hotkey()
+    fn superseded_by_hotkey(&self, take_hotkey: impl FnOnce() -> bool) -> bool {
+        matches!(self, Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _)) && take_hotkey()
     }
 }
 
@@ -11489,6 +11518,7 @@ impl RootVisibility {
             request_revision: Arc::new(AtomicU64::new(0)),
             active: Arc::new(AtomicBool::new(false)),
             retired: Arc::new(AtomicBool::new(false)),
+            window_search_update: Arc::new(AtomicBool::new(false)),
             #[cfg(windows)]
             request_sender: Arc::new(Mutex::new(None)),
             #[cfg(windows)]
@@ -11548,6 +11578,21 @@ impl RootVisibility {
                 self.request_revision.fetch_add(1, Ordering::AcqRel);
             }
         }
+    }
+
+    fn notify_window_search(&self) {
+        #[cfg(windows)]
+        if self.active.load(Ordering::Acquire) && !self.retired.load(Ordering::Acquire) {
+            self.window_search_update.store(true, Ordering::Release);
+            if let Ok(sender) = self.request_sender.lock() {
+                if let Some(sender) = sender.as_ref() { let _ = sender.send(()); }
+            }
+        }
+    }
+
+    fn request_window_switch_hide(&self, revision: u64, target: ForegroundIdentity, query: &str) -> bool {
+        if current_foreground_identity() != Some(target) { return false; }
+        self.queue_visible(RootVisibilityRequest::HideAfterWindowSwitch(revision, target, Arc::from(query)), None)
     }
 
     fn request_external_hide(&self, revision: u64) -> bool {
@@ -11615,7 +11660,7 @@ impl RootVisibility {
     }
 
     #[cfg(windows)]
-    fn accept_requested_visible(&self, request: RootVisibilityRequest) -> Option<(u64, bool)> {
+    fn accept_requested_visible(&self, request: &RootVisibilityRequest) -> Option<(u64, bool)> {
         let pending = self.requested_visible.lock().ok()?;
         if !self.active.load(Ordering::Acquire)
             || !request.is_current(
@@ -11627,8 +11672,12 @@ impl RootVisibility {
             return None;
         }
         let visible = match request {
-            RootVisibilityRequest::Set(visible) => visible,
+            RootVisibilityRequest::Set(visible) => *visible,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
+            RootVisibilityRequest::HideAfterWindowSwitch(_, target, _) => {
+                if current_foreground_identity() != Some(*target) { return None; }
+                false
+            }
         };
         Some(self.set_visible(visible))
     }
@@ -12024,6 +12073,7 @@ pub(crate) fn run_foundation_window(
                 launcher_results: initial_launcher_results,
                 calculator_search: calculator_search::SearchOwner::default(),
                 indexed_applications: indexed_applications::Owner::default(),
+                window_search: window_search::Owner::default(),
                 external_launch: external_launch::ExternalLaunch::default(),
                 external_launch_preferences: external_launch_preferences_for_root.clone(),
                 action_sheet: None,
@@ -12445,7 +12495,10 @@ pub(crate) fn run_foundation_window(
                 };
                 match blocker {
                     None => {
-                        let _ = root_for_window_close.update(app, |root, _| root.indexed_applications.retire());
+                        let _ = root_for_window_close.update(app, |root, _| {
+                            root.window_search.retire();
+                            root.indexed_applications.retire();
+                        });
                         return true;
                     }
                     Some(RootCloseBlocker::CalculatorSearch) => {
@@ -12469,7 +12522,10 @@ pub(crate) fn run_foundation_window(
                             })
                             .unwrap_or(false);
                         if close_now {
-                            let _ = root_for_window_close.update(app, |root, _| root.indexed_applications.retire());
+                            let _ = root_for_window_close.update(app, |root, _| {
+                            root.window_search.retire();
+                            root.indexed_applications.retire();
+                        });
                         }
                         return close_now;
                     }
@@ -12706,6 +12762,24 @@ pub(crate) fn run_foundation_window(
                         break;
                     };
 
+                    if visibility.window_search_update.swap(false, Ordering::AcqRel) {
+                        let _ = root_view.update(&mut *cx, |root, cx| {
+                            let query = root.query.read(cx).value().to_string();
+                            if root.root_visibility.visible.load(Ordering::Acquire)
+                                && window_search::query_is_windows(&query)
+                                && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref())
+                                && !root.restart_admission.is_fenced()
+                            {
+                                if root.external_launch.window_switch_pending() {
+                                    root.window_search.defer_update();
+                                } else {
+                                    root.refresh_launcher_results_with_viewport(query, false, cx);
+                                    cx.notify();
+                                }
+                            }
+                        });
+                    }
+
                     let quick_help_stamp = quick_help_trigger
                         .as_ref()
                         .and_then(|trigger| trigger.take_scoped_stamp());
@@ -12744,13 +12818,23 @@ pub(crate) fn run_foundation_window(
                         );
                     }
 
-                    let hotkey_for_conditional = requested_visible
+                    let hotkey_for_conditional = requested_visible.as_ref()
                         .is_some_and(|request| request.superseded_by_hotkey(|| trigger.take()));
-                    let accepted_visible = if hotkey_for_conditional {
+                    let switch_hide = requested_visible.as_ref().and_then(|request| match request {
+                        RootVisibilityRequest::HideAfterWindowSwitch(_, target, query) => Some((*target, Arc::clone(query))),
+                        _ => None,
+                    });
+                    let switch_query_current = switch_hide.as_ref().is_none_or(|(_, expected)| {
+                        update_kit_window_content(root_window, &root_view, &mut *cx,
+                            |root, _, cx| root.query.read(cx).value().as_str() == expected.as_ref(),
+                        ).unwrap_or(false)
+                    });
+                    let accepted_visible = if hotkey_for_conditional || !switch_query_current {
                         None
                     } else {
-                        requested_visible.and_then(|request| visibility.accept_requested_visible(request))
+                        requested_visible.as_ref().and_then(|request| visibility.accept_requested_visible(request))
                     };
+                    let switch_hide = accepted_visible.is_some().then_some(switch_hide).flatten();
                     let (revision, desired_visible, hash_focus_generation, hotkey_toggle) =
                         if let Some((revision, visible)) = accepted_visible {
                             let hash_focus_generation = visibility.take_requested_hash_focus();
@@ -12771,18 +12855,29 @@ pub(crate) fn run_foundation_window(
                     if !visibility.is_current(revision, desired_visible) {
                         continue;
                     }
+                    let switch_hide_accepted = switch_hide.is_some();
                     let query_window = update_kit_window_content(
                         root_window,
                         &root_view,
                         &mut *cx,
                         |root, window, cx| {
-                            root.revoke_search_completion_focus();
-                            if !desired_visible {
-                                root.retire_action_sheet_now(window, cx, true);
-                                root.retire_context_favorite();
-                                root.retire_search_jump_mode();
+                            if !switch_hide_accepted {
+                                root.revoke_search_completion_focus();
+                                if !desired_visible {
+                                    root.retire_action_sheet_now(window, cx, true);
+                                    root.retire_context_favorite();
+                                    root.retire_search_jump_mode();
+                                }
                             }
                             let mut search_focus_selected = false;
+                            if desired_visible {
+                                let query = root.query.read(cx).value().to_string();
+                                if window_search::query_is_windows(&query)
+                                    && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref())
+                                {
+                                    root.refresh_launcher_results_with_viewport(query, false, cx);
+                                }
+                            }
                             if desired_visible && root.action_sheet.is_none() {
                                 let docked_mount_generation = match &root.hash_window {
                                     HashWindowState::Docked {
@@ -12807,7 +12902,7 @@ pub(crate) fn run_foundation_window(
                                 } else {
                                     root.query.focus_handle(cx).focus(window, cx);
                                 }
-                            } else if !desired_visible {
+                            } else if !desired_visible && !switch_hide_accepted {
                                 root.cancel_docked_hash_preview();
                             }
                             (root.native_window, search_focus_selected)
@@ -12837,14 +12932,43 @@ pub(crate) fn run_foundation_window(
                         return_target = foreground
                             .filter(|captured| Some(*captured) == foreground_before_transition)
                             .filter(|captured| captured.hwnd != native_window.identity.hwnd);
-                    } else if !should_restore {
+                    } else if !should_restore && switch_hide.is_none() {
                         return_target = None;
                     }
 
+                    if let Some((target, expected_query)) = switch_hide {
+                        let current_query = update_kit_window_content(
+                            root_window, &root_view, &mut *cx,
+                            |root, _, cx| root.query.read(cx).value().to_string(),
+                        ).ok();
+                        if !window_switch_hide_is_current(
+                            target, current_foreground_identity(), Some(expected_query.as_ref()), current_query.as_deref(),
+                        ) {
+                            visibility.revert_if_current(revision, false);
+                            continue;
+                        }
+                    }
                     if let Err(error) = set_native_window_visible(native_window, desired_visible) {
                         visibility.revert_if_current(revision, desired_visible);
                         tracing::error!(%error, "could not change GPUI root window visibility");
                         continue;
+                    }
+                    if !desired_visible {
+                        if switch_hide_accepted {
+                            return_target = None;
+                            let _ = update_kit_window_content(
+                                root_window, &root_view, &mut *cx, |root, window, cx| {
+                                    root.revoke_search_completion_focus();
+                                    root.retire_action_sheet_now(window, cx, true);
+                                    root.retire_context_favorite();
+                                    root.retire_search_jump_mode();
+                                    root.cancel_docked_hash_preview();
+                                    root.window_search.retire();
+                                },
+                            );
+                        } else {
+                            let _ = root_view.update(&mut *cx, |root, _| root.window_search.retire());
+                        }
                     }
                     let foreground_after_transition = current_foreground_identity();
                     let show_request_is_current = show_request_is_current
@@ -14916,7 +15040,7 @@ mod tests {
         #[cfg(not(windows))]
         assert_eq!(help_names, ["base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "youtube"]);
+        assert_eq!(help_names, ["base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -14949,7 +15073,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 16 } else { 15 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 17 } else { 15 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(
@@ -17114,6 +17238,19 @@ mod tests {
         assert!(!docked_hash_focus_is_current(Some(8), 8, Some(7)));
         assert!(!docked_hash_focus_is_current(Some(8), 8, None));
         assert!(!docked_hash_focus_is_current(None, 8, Some(8)));
+    }
+
+    #[test]
+    fn queued_window_hide_requires_exact_target_and_query_and_yields_to_hotkey() {
+        let target = super::ForegroundIdentity { hwnd: 42, process_id: 2, thread_id: 3 };
+        let other = super::ForegroundIdentity { hwnd: 43, ..target };
+        assert!(super::window_switch_hide_is_current(target, Some(target), Some(""), Some("")));
+        assert!(!super::window_switch_hide_is_current(target, Some(other), Some(""), Some("")));
+        assert!(!super::window_switch_hide_is_current(target, Some(target), Some(""), Some("new")));
+        let request = super::RootVisibilityRequest::HideAfterWindowSwitch(5, target, Arc::from(""));
+        assert!(request.is_current(5, true, false));
+        assert!(!request.is_current(6, true, false));
+        assert!(request.superseded_by_hotkey(|| true));
     }
 
     #[test]
