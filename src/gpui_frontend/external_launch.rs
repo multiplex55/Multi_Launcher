@@ -20,6 +20,37 @@ pub(super) fn saved_external(action: &Action) -> Option<ExternalCommand> {
     ordinary_external(&multi_launcher::commands::parse_action(action).ok()?).cloned()
 }
 
+#[cfg(windows)]
+pub(super) fn saved_shortcut(action: &Action) -> Option<ExternalCommand> {
+    let command = multi_launcher::commands::parse_action(action).ok()?;
+    shortcut_external(action, &command).cloned()
+}
+
+#[cfg(windows)]
+pub(super) fn shortcut_external<'a>(
+    action: &Action,
+    command: &'a multi_launcher::commands::Command,
+) -> Option<&'a ExternalCommand> {
+    if action
+        .args
+        .as_deref()
+        .is_some_and(|args| !args.trim().is_empty())
+    {
+        return None;
+    }
+    let multi_launcher::commands::Command::External(command) = command else {
+        return None;
+    };
+    (command.namespace.is_none()
+        && command.target == action.action
+        && command
+            .args
+            .as_deref()
+            .is_none_or(|args| args.trim().is_empty())
+        && multi_launcher::actions::exec::shortcut_path_is_admissible(&command.target))
+    .then_some(command)
+}
+
 /// Admit only saved document paths whose external arguments are absent or blank.
 pub(super) fn saved_document(action: &Action) -> Option<ExternalCommand> {
     let command = multi_launcher::commands::parse_action(action).ok()?;
@@ -219,6 +250,8 @@ pub(super) enum AssociationKind {
     Folder,
     Bookmark,
     SavedDocument,
+    #[cfg(windows)]
+    SavedShortcut,
     Web(super::search_providers::WebProvider),
 }
 
@@ -265,6 +298,8 @@ fn association_command(kind: AssociationKind, action: &Action) -> Option<Externa
     let valid = match kind {
         AssociationKind::Folder => ordinary_path(&command.target, false),
         AssociationKind::SavedDocument => false,
+        #[cfg(windows)]
+        AssociationKind::SavedShortcut => false,
         AssociationKind::Bookmark | AssociationKind::Web(_) => {
             let raw = command.target.as_str();
             let authority = raw
@@ -296,6 +331,14 @@ fn checked_association(
     command: &ExternalCommand,
     query: &str,
 ) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if kind == AssociationKind::SavedShortcut {
+        anyhow::ensure!(
+            saved_shortcut(action).as_ref() == Some(command),
+            "Invalid saved shortcut target"
+        );
+        return multi_launcher::actions::exec::launch_shortcut(&command.target);
+    }
     if kind == AssociationKind::SavedDocument {
         return checked_document_association_with(action, command, |target| {
             multi_launcher::actions::exec::launch_association(target)
@@ -339,6 +382,8 @@ fn checked_association_with(
             )?
         }
         AssociationKind::Web(_) | AssociationKind::SavedDocument => false,
+        #[cfg(windows)]
+        AssociationKind::SavedShortcut => false,
     };
     anyhow::ensure!(current, "The Search result is stale; refresh and try again");
     if kind == AssociationKind::Folder {

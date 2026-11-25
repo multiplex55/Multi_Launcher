@@ -223,3 +223,7 @@ GPUI uses the existing Reddit, RuneScape, Weather, Wikipedia, YouTube and Google
 ## Saved document Search activation
 
 GPUI Search admits saved `.txt`, `.rtf`, `.pdf`, `.docx`, `.xlsx` and `.pptx` paths with absent or blank Args. Primary activation checks the current saved row, and the existing single-flight external worker checks the regular file and its ancestors before passing the literal stored path to the Windows association. The worker gives failures the existing launcher feedback and records History and Usage after association succeeds. The real App Editor, GPUI Search and explicit egui Search successfully opened the same owned document on Windows. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-checked-saved-document-activation)
+
+## Saved Windows shortcut activation
+
+GPUI admits ordinary absolute local `.lnk` rows saved with absent or blank launcher Args. The Windows launch boundary reads the shortcut's stored executable, argument tail, and explicit Start In, checks the file and directory paths, and passes the native argument tail to the checked executable. Normal show mode is supported. Shortcuts with alternate launch modes, missing Start In, non-executable targets, remote paths or reparse components fail with the current launcher feedback. History and Usage use the literal stored shortcut action. [Focused and Windows evidence](../VALIDATION_LOG.md#g05-saved-windows-shortcuts)

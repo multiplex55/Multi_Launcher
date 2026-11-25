@@ -1,3 +1,8 @@
+#[cfg(windows)]
+mod shortcut;
+#[cfg(windows)]
+pub use shortcut::{launch_shortcut, shortcut_path_is_admissible};
+
 use std::{ffi::OsStr, path::Path};
 
 pub fn launch(path: &str, args: Option<&str>) -> anyhow::Result<()> {

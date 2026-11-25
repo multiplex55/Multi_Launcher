@@ -943,3 +943,7 @@ Search stays in a responsive header above the results and docked content. Review
 ## G04 matched Windows Clipboard Load and Copy
 
 Both frontends loaded the owned three-byte snapshot, matched the known SHA-256, and copied its exact value. With the same executable and 1516 × 937 roots, native paste into an empty Expected Digest field confirmed the clipboard write in each frontend. The owned fixture exited cleanly in both modes. The rest of Hash acceptance remains open for mixed DPI, global invocation and the remaining host and presentation criteria. [Exact receipts](VALIDATION_LOG.md#g04-matched-windows-clipboard-load-and-copy)
+
+## G05 saved Windows shortcuts
+
+The native App Editor saved the owned `.lnk` and GPUI Search opened it through the existing launcher worker. Eight focused tests passed. The matched 1516 × 937 Windows replay in GPUI and egui recorded the same executable, explicit Start In, and exact quoted and empty arguments. Negative GPUI activations produced no child receipts or success accounting. Saved literal HTTP(S) rows are next. [Exact receipts](VALIDATION_LOG.md#g05-saved-windows-shortcuts) · [G01 owned external foreground retry](VALIDATION_LOG.md#g01-owned-external-foreground-wake-retry)

@@ -171,6 +171,13 @@ struct LauncherSearchResult {
 }
 
 impl LauncherSearchResult {
+    #[cfg(windows)]
+    fn saved_shortcut(&self) -> Option<multi_launcher::commands::ExternalCommand> {
+        (self.origin == LauncherResultOrigin::Saved)
+            .then(|| external_launch::saved_shortcut(&self.action))
+            .flatten()
+    }
+
     fn saved_document(&self) -> Option<multi_launcher::commands::ExternalCommand> {
         (self.origin == LauncherResultOrigin::Saved)
             .then(|| external_launch::saved_document(&self.action))
@@ -1772,6 +1779,10 @@ fn supported_saved_search_actions(actions: Vec<Action>) -> Vec<Action> {
         .into_iter()
         .filter(|action| {
             parse_action(action).is_ok_and(|command| {
+                #[cfg(windows)]
+                if external_launch::shortcut_external(action, &command).is_some() {
+                    return true;
+                }
                 external_launch::ordinary_external(&command).is_some()
                     || external_launch::document_external(action, &command).is_some()
                     || classify_installed_search_command(&command, ActivationSource::Click).is_ok()
@@ -7469,6 +7480,19 @@ impl RootWindow {
             {
                 self.open_file_search(window, cx);
             }
+            return;
+        }
+        #[cfg(windows)]
+        if let Some(command) = result.saved_shortcut() {
+            self.start_external_launch(
+                result.action,
+                command,
+                query,
+                source,
+                Some(external_launch::AssociationKind::SavedShortcut),
+                window,
+                cx,
+            );
             return;
         }
         if let Some(command) = result.saved_document() {
@@ -13975,6 +13999,26 @@ mod tests {
         assert!(pending.take_requested_visible().is_none());
         assert!(pending.take_requested_hash_focus().is_none());
         assert!(!pending.request_external_hide(0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn saved_shortcut_projection_requires_saved_origin_and_blank_args() {
+        use super::LauncherResultOrigin;
+        let action = saved_action("Shortcut", r"C:\Links\Tool.lnk", Some("  "));
+        let catalog = completion_catalog(vec![action.clone()], true, None);
+        let rows = catalog.compose(
+            "app Shortcut",
+            vec![("provider".into(), action.clone())],
+            false,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].origin, LauncherResultOrigin::Saved);
+        assert!(rows[0].saved_shortcut().is_some());
+        assert!(rows[1].saved_shortcut().is_none());
+        let mut invalid = action;
+        invalid.args = Some("extra".into());
+        assert!(super::external_launch::saved_shortcut(&invalid).is_none());
     }
 
     #[test]
