@@ -1628,3 +1628,13 @@ File Search popup can hand the exact selected file to a fresh or existing Hash p
 Refusal releases the exact pending transition and reports to a still-current File Search origin. Existing Hash persistence feedback remains available. A minimized or hidden existing Hash asks the user to restore it before retrying. Automatic native restore and matched 1516 × 937 verification remain open.
 
 The final locked fast-dev launcher check passed in 4.89 s. Warm links took 16.08 s and 21.86 s after correcting refusal feedback, with no shared-library rebuild. Nextest run `5133716c-a6ba-4104-83e5-c3e6149f9d0b` passed all 16 in 8.897 s with 415 skipped. Review and focused tests cover the exact activation gate, retained and changed paths, source and target retirement, and pin and effect fences. Continue with live Preview transfer.
+
+### G07 retained native Preview while File Search moves
+
+A native Preview keeps its child window, document, scroll position, in-flight read and geometry binding while File Search docks or moves back to Pop Out. Dock rollback keeps the same child. The worker uses the stable child and selection receipt. Explorer, copy, Return and Escape use the issuing action receipt, which is revoked during transfer and rebound after settlement. A pending child effect blocks transfer.
+
+The exact current parent can reopen the same child without another read. Preview-initiated return resolves the original toolbar control or Content result on the new parent mount. Return checks the accepted focus baseline and current modal and visibility state. Newer focus and a hidden launcher remain undisturbed. Escape closes the owned Preview from the toolbar or document. Pointer Return leaves the parent ready for its next Escape.
+
+Independent review covered load and geometry lifetime, exact action retirement, rollback, semantic focus and popup reactivation. The final scoped locked launcher check passed in 3.65 s. One warm launcher link took 16.40 s with no shared-library rebuild. Nextest run `7f635b30-4ae8-4b35-aa8a-d771ff1871fd` passed all 29 in 11.976 s, with 403 skipped.
+
+Paired Windows 1516 × 937 replay remains open. Witness the same native child HWND, loaded document position, one completed read, geometry write and checked return through Dock and rollback. Live inline Preview still asks to close before parent Pop Out. Confirm the stock inline child presentation and continue that route separately.

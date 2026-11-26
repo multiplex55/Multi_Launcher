@@ -501,9 +501,9 @@ impl HostedUtility for super::file_search::FileSearchView {
     fn set_rehosting(&mut self, value: bool, cx: &mut Context<Self>) { self.set_host_rehosting(value, cx); }
     fn set_error(&mut self, value: Option<String>) { self.presentation_error = value; }
     fn set_geometry_error(&mut self, value: Option<String>) { self.geometry_error = value; }
-    fn after_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
-    fn after_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
-    fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
+    fn after_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.settle_host_focus(window, cx); }
+    fn after_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.settle_host_focus(window, cx); }
+    fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.settle_host_focus(window, cx); }
     fn shutdown(&mut self, cx: &mut Context<Self>) { self.shutdown(cx); }
     fn pinned(_: &RootWindow) -> bool { false }
 }

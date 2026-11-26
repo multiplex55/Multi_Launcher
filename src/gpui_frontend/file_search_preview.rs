@@ -36,6 +36,8 @@ fn line_navigation(offset: usize, count: usize, key: &str) -> Option<usize> {
     })
 }
 
+fn popup_load_current(selection: bool, native: bool, fenced: bool) -> bool { selection && native && !fenced }
+
 fn popup_action_authorized(selection: bool, action: bool, parent: bool, native: bool, foreground: bool, live: bool) -> bool {
     selection && action && parent && native && foreground && live
 }
@@ -81,7 +83,8 @@ pub(super) struct FileSearchPreview {
     focus_guard: Option<Subscription>,
     activation_guard: Option<Subscription>,
     feedback: Option<String>,
-    pub(super) return_focus: FocusHandle,
+    pub(super) return_focus: Option<FocusHandle>,
+    pub(super) return_baseline: Option<Option<FocusHandle>>,
     pub(super) return_scroll: Point<Pixels>,
     host: AnyWindowHandle,
     visibility: RootVisibility,
@@ -108,7 +111,7 @@ impl FileSearchPreview {
         Self { parent, root, receipt, owner, mount, action_owner, action_mount, parent_mount, popup, focus: cx.focus_handle(), document_focus: cx.focus_handle(), explorer_focus: cx.focus_handle(),
             copy_path_focus: cx.focus_handle(), copy_line_focus: cx.focus_handle(), pending: false,
             effect_lease: None, focus_guard: None, activation_guard: None, feedback: None,
-            return_focus, return_scroll, host, visibility, revision, native, admission,
+            return_baseline: Some(Some(return_focus.clone())), return_focus: Some(return_focus), return_scroll, host, visibility, revision, native, admission,
             state: PreviewLoadStateMachine::default(), found, rendered: Vec::new(), match_present: false, line_offset: 0, column_offset: 0, max_column: 0, scroll: ScrollHandle::new() }
     }
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) { self.document_focus.focus(window, cx); }
@@ -116,6 +119,28 @@ impl FileSearchPreview {
         self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
     }
     pub(super) fn effect_pending(&self) -> bool { self.pending }
+    pub(super) fn load_receipt(&self) -> utility_mount::MountReceipt { self.mount.clone() }
+    pub(super) fn suspend_actions(&mut self) {
+        if let Some(lease) = &self.effect_lease { lease.store(false, Ordering::Release); }
+        self.action_owner.retire();
+        self.focus_guard = None; self.activation_guard = None;
+    }
+    pub(super) fn parent_matches(&self, parent_mount: &utility_mount::MountReceipt) -> bool { self.parent_mount.matches(parent_mount) }
+    pub(super) fn bind_parent(&mut self, parent_mount: utility_mount::MountReceipt, return_focus: Option<FocusHandle>) {
+        if !self.parent_mount.matches(&parent_mount) {
+            self.parent_mount = parent_mount;
+            self.return_focus = return_focus;
+            self.return_baseline = None;
+        }
+        self.action_mount = self.action_owner.attach();
+    }
+    pub(super) fn set_return_baseline(&mut self, baseline: Option<FocusHandle>) { self.return_baseline = Some(baseline); }
+    pub(super) fn retarget_return(&mut self, focus: FocusHandle) {
+        self.return_baseline = Some(Some(focus.clone())); self.return_focus = Some(focus);
+    }
+    pub(super) fn action_is_current(&self, receipt: &utility_mount::MountReceipt) -> bool {
+        receipt.is_current() && receipt.matches(&self.action_mount)
+    }
     pub(super) fn action_receipt(&self) -> utility_mount::MountReceipt { self.action_mount.clone() }
     pub(super) fn native(&self) -> Option<NativeWindow> { self.native }
     pub(super) fn native_matches(&self, native: NativeWindow) -> bool { self.native == Some(native) }
@@ -130,7 +155,8 @@ impl FileSearchPreview {
         if let Some(lease) = &self.effect_lease { lease.store(false, Ordering::Release); }
         self.action_owner.retire(); self.owner.retire(); self.state.clear(); self.rendered.clear();
     }
-    fn start_action(&mut self, action: PreviewAction, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_action(&mut self, action: PreviewAction, issuing: &utility_mount::MountReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.action_is_current(issuing) { return; }
         let Some(native) = self.native else { return; };
         if (action == PreviewAction::CopyLine && self.found.is_none()) || self.pending || !self.scope_current()
             || self.host.window_id() != window.window_handle().window_id() || !window.is_window_active()
@@ -286,8 +312,10 @@ impl FileSearchPreview {
         let parent_mount = self.parent_mount.clone();
         let popup = self.popup;
         let task = cx.background_executor().spawn(async move {
-            if !worker_mount.is_current() || !parent_mount.is_current() || admission.is_fenced()
-                || !(if popup { native_window_is_valid(native) } else { json_utility::native_host_current(&visibility, revision, Some(native), false) }) { return None; }
+            let current = if popup { popup_load_current(worker_mount.is_current(), native_window_is_valid(native), admission.is_fenced()) }
+                else { worker_mount.is_current() && parent_mount.is_current() && !admission.is_fenced()
+                    && json_utility::native_host_current(&visibility, revision, Some(native), false) };
+            if !current { return None; }
             let mut preview = preview_file(&request);
             let selected_index = found.as_ref().and_then(|found| preview.lines.iter().position(|line| line.line_number == found.line_number)).unwrap_or(0);
             let match_present = found.as_ref().is_some_and(|found| preview.lines.get(selected_index)
@@ -301,7 +329,9 @@ impl FileSearchPreview {
             let _permit = permit;
             let result = task.await;
             let _ = weak.update(cx, |view, cx| {
-                if !mount.is_current() || !mount.matches(&view.mount) || !view.scope_current()
+                if !mount.is_current() || !mount.matches(&view.mount)
+                    || (!view.popup && !view.scope_current()) || view.admission.is_fenced()
+                    || (view.popup && !view.native.is_some_and(native_window_is_valid))
                     || view.state.current_request_id != Some(epoch) { return; }
                 let Some(parent) = view.parent.upgrade() else { return; };
                 if !parent.read(cx).preview_is_current(cx.entity_id(), &view.receipt) { return; }
@@ -320,18 +350,8 @@ impl FileSearchPreview {
 
 impl Render for FileSearchPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let parent_escape = self.parent.clone();
-        let child_id = cx.entity_id();
         let mut pane = div().id("file-search-preview-document").track_focus(&self.document_focus).flex().flex_col().gap_2()
-            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
-                if view.popup && event.keystroke.key == "escape" && event.keystroke.modifiers == Modifiers::default()
-                    && view.owns_focus(window, cx) {
-                    window.prevent_default(); cx.stop_propagation();
-                    if !event.is_held { let parent = parent_escape.clone(); window.defer(cx, move |window, app| {
-                        let _ = parent.update(app, |parent, cx| parent.close_preview(child_id, window, cx));
-                    }); }
-                    return;
-                }
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.modifiers == Modifiers::default() && view.document_focus.is_focused(window)
                     && view.navigate(&event.keystroke.key, cx) {
                     window.prevent_default(); cx.stop_propagation();
@@ -380,24 +400,39 @@ impl Render for FileSearchPreview {
                 .child(Button::new("preview-left").label("Previous columns").disabled(self.column_offset == 0).on_click(cx.listener(|view, _, _, cx| { view.navigate("left", cx); })))
                 .child(Button::new("preview-right").label("Next columns").disabled(self.column_offset.saturating_add(MAX_LINE_CHARS) > self.max_column).on_click(cx.listener(|view, _, _, cx| { view.navigate("right", cx); }))));
         }
-        let mut pane = div().id("file-search-preview").track_focus(&self.focus).flex().flex_col().gap_2().p_3().child(pane);
+        let parent_escape = self.parent.clone(); let escape_receipt = self.action_mount.clone(); let child_id = cx.entity_id();
+        let mut pane = div().id("file-search-preview").track_focus(&self.focus).flex().flex_col().gap_2().p_3()
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if view.popup && view.action_is_current(&escape_receipt) && event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == Modifiers::default() && view.owns_focus(window, cx) {
+                    window.prevent_default(); cx.stop_propagation();
+                    if !event.is_held { let parent = parent_escape.clone(); let receipt = escape_receipt.clone();
+                        window.defer(cx, move |window, app| { let _ = parent.update(app, |parent, cx|
+                            parent.close_preview_if_action(child_id, &receipt, true, window, cx)); }); }
+                }
+            })).child(pane);
         if let Some(message) = &self.feedback { pane = pane.child(Label::new(message.clone())); }
         let parent = self.parent.clone();
         let owner = cx.entity_id();
+        let explorer_receipt = self.action_mount.clone();
+        let path_receipt = self.action_mount.clone();
+        let line_receipt = self.action_mount.clone();
+        let return_receipt = self.action_mount.clone();
         pane.child(div().flex().flex_wrap().gap_2()
             .child(Button::new("file-search-preview-explorer").label("Open in Explorer").tab_stop(true)
                 .track_focus(&self.explorer_focus).disabled(self.pending)
-                .on_click(cx.listener(|view, _, window, cx| view.start_action(PreviewAction::Explorer, window, cx))))
+                .on_click(cx.listener(move |view, _, window, cx| view.start_action(PreviewAction::Explorer, &explorer_receipt, window, cx))))
             .child(Button::new("file-search-preview-copy-path").label("Copy Full Path").tab_stop(true)
                 .track_focus(&self.copy_path_focus).disabled(self.pending)
-                .on_click(cx.listener(|view, _, window, cx| view.start_action(PreviewAction::CopyPath, window, cx))))
+                .on_click(cx.listener(move |view, _, window, cx| view.start_action(PreviewAction::CopyPath, &path_receipt, window, cx))))
             .when(self.found.is_some(), |row| row.child(Button::new("file-search-preview-copy-line").label("Copy Matching Line").tab_stop(true)
                 .track_focus(&self.copy_line_focus).disabled(self.pending)
-                .on_click(cx.listener(|view, _, window, cx| view.start_action(PreviewAction::CopyLine, window, cx)))))
+                .on_click(cx.listener(move |view, _, window, cx| view.start_action(PreviewAction::CopyLine, &line_receipt, window, cx)))))
             .child(Button::new("file-search-preview-return").label("Return to Search").tab_stop(true).on_click(cx.listener(move |_, _, window, cx| {
                 let parent = parent.clone();
+                let receipt = return_receipt.clone();
                 window.defer(cx, move |window, app| {
-                    let _ = parent.update(app, |parent, cx| parent.close_preview(owner, window, cx));
+                    let _ = parent.update(app, |parent, cx| parent.close_preview_if_action(owner, &receipt, false, window, cx));
                 });
             }))))
     }
@@ -462,6 +497,24 @@ mod tests {
         assert!(!current(true, true, true, false, true, true));
         assert!(!current(true, true, true, true, false, true));
         assert!(!current(true, true, true, true, true, false));
+    }
+
+    #[test]
+    fn popup_load_survives_action_rotation_but_not_selection_retirement() {
+        let selection_owner = super::super::utility_mount::MountOwner::default();
+        let selection = selection_owner.attach();
+        let action_owner = super::super::utility_mount::MountOwner::default();
+        let old = action_owner.attach();
+        action_owner.retire();
+        assert!(!old.is_current());
+        assert!(super::popup_load_current(selection.is_current(), true, false));
+        let rebound = action_owner.attach();
+        assert!(rebound.is_current());
+        assert!(!old.matches(&rebound));
+        selection_owner.retire();
+        assert!(!super::popup_load_current(selection.is_current(), true, false));
+        assert!(!super::popup_load_current(true, false, false));
+        assert!(!super::popup_load_current(true, true, true));
     }
 
     #[test]

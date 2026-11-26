@@ -14085,14 +14085,14 @@ pub(crate) fn run_foundation_window(
                                     root.retire_search_jump_mode();
                                     root.cancel_docked_hash_preview();
                                     root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
-                                    if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { if !view.popout { view.retire_preview(cx); } }); }
+                                    if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { view.retire_inline_preview(cx); }); }
                                 },
                             );
                         } else {
                             let _ = root_view.update(&mut *cx, |root, cx| {
                                 root.window_search.retire();
                                 root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
-                                if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { if !view.popout { view.retire_preview(cx); } }); }
+                                if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { view.retire_inline_preview(cx); }); }
                             });
                         }
                     }

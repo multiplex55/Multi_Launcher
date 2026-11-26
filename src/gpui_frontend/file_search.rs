@@ -108,6 +108,9 @@ fn typed_source(draft: multi_launcher::file_search::query::SearchRequestDraft, c
     Some(SearchSource { term: draft.search_text, directory: draft.root?, kind: draft.kind, expected_root: Some(canonical_root) })
 }
 
+#[derive(Clone)]
+enum PreviewReturnRole { Toolbar, Content(FileSearchResultKey), Other }
+
 pub(super) struct FileSearchView {
     pub open: bool,
     pub(super) root: WeakEntity<RootWindow>,
@@ -135,6 +138,8 @@ pub(super) struct FileSearchView {
     preview: Option<Entity<file_search_preview::FileSearchPreview>>,
     preview_popup: Option<AnyWindowHandle>,
     preview_geometry: Option<utility_host::ShellGeometry>,
+    preview_return_role: PreviewReturnRole,
+    preview_needs_baseline: bool,
     preview_retiring: Vec<RetiringHashWindow>,
     preview_owner: utility_mount::MountOwner,
      explorer_authority: Arc<AtomicBool>,
@@ -225,6 +230,8 @@ impl FileSearchView {
             preview: None,
             preview_popup: None,
             preview_geometry: None,
+            preview_return_role: PreviewReturnRole::Other,
+            preview_needs_baseline: false,
             preview_retiring: Vec::new(),
             preview_owner: utility_mount::MountOwner::default(),
              explorer_authority: Arc::new(AtomicBool::new(false)),
@@ -264,7 +271,7 @@ impl FileSearchView {
             term.update(cx, |input, cx| input.set_readonly(true, cx));
             directory.update(cx, |input, cx| input.set_readonly(true, cx));
         }
-        self.retire_preview(cx);
+        if self.preview_popup.is_none() { self.retire_preview(cx); }
         self.retire_explorer();
         self.pending_popup_typed = None;
         self.mount_receipt = self.mount_owner.attach();
@@ -275,6 +282,9 @@ impl FileSearchView {
         self.explorer_focus = cx.focus_handle();
         self.preview_focus = cx.focus_handle();
         self.content_focus.clear();
+        if let PreviewReturnRole::Content(key) = &self.preview_return_role {
+            self.content_focus.insert(key.clone(), cx.focus_handle());
+        }
         self.term = term;
         self.directory = directory;
         let receipt = self.mount_receipt.clone();
@@ -311,6 +321,16 @@ impl FileSearchView {
             self.term.focus_handle(cx).focus(window, cx);
         }
     }
+    pub(super) fn settle_host_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_host(window, cx);
+        if self.preview_needs_baseline {
+            let baseline = window.focused(cx);
+            if let Some(child) = self.preview.clone().filter(|_| self.preview_popup.is_some()) {
+                child.update(cx, |child, _| child.set_return_baseline(baseline));
+            }
+            self.preview_needs_baseline = false;
+        }
+    }
 
     pub(super) fn wake_pending_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !window.is_window_active() || !self.is_mounted_in(window.window_handle().window_id(), true) || self.rehosting { return; }
@@ -341,6 +361,18 @@ impl FileSearchView {
         self.rehosting = value;
         self.term.update(cx, |input, cx| input.set_readonly(value, cx));
         self.directory.update(cx, |input, cx| input.set_readonly(value, cx));
+        if !value {
+            if let Some(child) = self.preview.clone().filter(|_| self.preview_popup.is_some()) {
+                let mount = self.mount_receipt.clone();
+                let focus = match &self.preview_return_role {
+                    PreviewReturnRole::Toolbar => Some(self.preview_focus.clone()),
+                    PreviewReturnRole::Content(key) => self.content_focus.get(key).cloned(),
+                    PreviewReturnRole::Other => None,
+                };
+                self.preview_needs_baseline = !child.read(cx).parent_matches(&mount);
+                child.update(cx, |child, cx| { child.bind_parent(mount, focus); cx.notify(); });
+            }
+        }
     }
     pub(super) fn host_effect_pending(&self, cx: &App) -> bool {
         self.explorer_pending || self.preview_retiring.iter().any(|item| item.native_window.is_none())
@@ -349,8 +381,12 @@ impl FileSearchView {
     pub(super) fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
         if !self.open || self.rehosting || self.explorer_pending || self.admission.is_fenced() || self.popout == popout || !self.mount_receipt.is_current() { return; }
         let Some(root) = self.root.upgrade() else { return; };
-        if self.preview.is_some() { self.status = "Close Preview before changing windows.".into(); cx.notify(); return; }
-        if root.read(cx).external_launch.auxiliary_effect_pending() { return; }
+        if self.preview.is_some() && self.preview_popup.is_none() { self.status = "Close Preview before changing windows.".into(); cx.notify(); return; }
+        if self.preview.as_ref().is_some_and(|child| child.read(cx).effect_pending())
+            || root.read(cx).external_launch.auxiliary_effect_pending() { self.status = "Wait for the Preview action to finish.".into(); cx.notify(); return; }
+        if let Some(child) = self.preview.clone().filter(|_| self.preview_popup.is_some()) {
+            child.update(cx, |child, cx| { child.suspend_actions(); cx.notify(); });
+        }
         let visibility_revision = root.read(cx).root_visibility.request_revision.load(Ordering::Acquire);
         let gesture = self.native.map(|source| hash_dock::Gesture {
             source, foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity),
@@ -542,11 +578,18 @@ impl FileSearchView {
             && self.receipt_is_current(receipt, receipt.owner)
     }
 
+    fn preview_role_for_focus(&self, focus: &FocusHandle) -> PreviewReturnRole {
+        if &self.preview_focus == focus { return PreviewReturnRole::Toolbar; }
+        self.content_focus.iter().find_map(|(key, candidate)| (candidate == focus).then(|| PreviewReturnRole::Content(key.clone())))
+            .unwrap_or(PreviewReturnRole::Other)
+    }
+
     fn open_preview(&mut self, receipt: SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
         if self.rehosting || !matches!(receipt.kind, FileKind::File | FileKind::Directory) || !self.receipt_is_current(&receipt, cx.entity_id())
             || !window.is_window_active() || window.has_active_dialog(cx) || !self.owns_focus(window, cx) { return; }
         let Some(return_focus) = window.focused(cx) else { return; };
-        if self.popout { self.open_popup_preview(receipt, return_focus, window, cx); return; }
+        if self.preview_popup.is_none() { self.preview_return_role = self.preview_role_for_focus(&return_focus); }
+        if self.preview_popup.is_some() || self.popout { self.open_popup_preview(receipt, return_focus, window, cx); return; }
         let Some(root) = self.root.upgrade() else { return; };
         let root_state = root.read(cx);
         let host = window.window_handle();
@@ -588,9 +631,27 @@ impl FileSearchView {
         cx.notify();
     }
 
+    fn preview_reuse_origin_current(&self, receipt: &SelectionReceipt, child: EntityId,
+        mount: &utility_mount::MountReceipt, focus: &FocusHandle, host: AnyWindowHandle, require_active: bool,
+        cx: &mut Context<Self>) -> bool {
+        if self.rehosting || !mount.is_current() || !mount.matches(&self.mount_receipt)
+            || !self.is_mounted_in(host.window_id(), self.popout) || !self.preview_is_current(child, receipt)
+            || self.admission.is_fenced() { return false; }
+        let Some(root) = self.root.upgrade() else { return false; };
+        host.update(cx, |_, window, app| {
+            (!require_active || window.is_window_active()) && !window.has_active_dialog(app)
+                && root.read(app).external_owner_is_current(Some(focus), window, app)
+        }).unwrap_or(false)
+    }
+
     fn open_popup_preview(&mut self, receipt: SelectionReceipt, return_focus: FocusHandle, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_mounted_in(window.window_handle().window_id(), true) || self.rehosting { return; }
+        if !self.is_mounted_in(window.window_handle().window_id(), self.popout) || self.rehosting { return; }
         let Some(parent_native) = self.native else { return; };
+        if !self.popout {
+            let Some(root) = self.root.upgrade() else { return; };
+            let root = root.read(cx); let revision = root.root_visibility.request_revision.load(Ordering::Acquire);
+            if !json_utility::native_host_current(&root.root_visibility, revision, Some(parent_native), false) { return; }
+        }
         if !native_window_is_valid(parent_native) || current_foreground_identity() != Some(parent_native.identity) { return; }
         let Some(root) = self.root.upgrade() else { return; };
         if !root.read(cx).external_owner_is_current(Some(&return_focus), window, cx) { return; }
@@ -600,17 +661,30 @@ impl FileSearchView {
             let parent_mount = self.mount_receipt.clone();
             let action_mount = child.read(cx).action_receipt();
             let admission = self.admission.clone();
+            let Some(permit) = self.admission.admit() else { return; };
+            let role = self.preview_role_for_focus(&return_focus);
+            let parent = cx.entity().downgrade();
+            let parent_host = self.host;
             let revision = self.activation_revision.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-            let guard = self.activation_revision.clone(); let worker = guard.clone();
+            let guard = self.activation_revision.clone();
             cx.spawn(async move |_, cx| {
-                let active = cx.background_executor().spawn(async move {
-                    activate_for_secondary_window_if(&worker, revision, native, Some(parent_native.identity), &||
-                        parent_mount.is_current() && action_mount.is_current() && !admission.is_fenced())
-                }).await;
+                let _permit = permit;
+                let valid = parent.update(cx, |parent, cx| parent.preview_reuse_origin_current(&receipt, child.entity_id(),
+                    &parent_mount, &return_focus, parent_host, true, cx)).unwrap_or(false);
+                if !valid || !action_mount.is_current() || current_foreground_identity() != Some(parent_native.identity) { return; }
+                let active = activate_for_secondary_window_if(&guard, revision, native, Some(parent_native.identity), &||
+                    parent_mount.is_current() && action_mount.is_current() && !admission.is_fenced());
                 if active && guard.load(Ordering::Acquire) == revision && current_foreground_identity() == Some(native.identity) {
-                    let _ = update_kit_window_content(popup, &child, cx, |child, window, cx| {
+                    let accepted = parent.update(cx, |parent, cx| {
+                        if !action_mount.is_current() || !parent.preview_reuse_origin_current(&receipt, child.entity_id(),
+                            &parent_mount, &return_focus, parent_host, false, cx) { return false; }
+                        parent.preview_return_role = role;
+                        child.update(cx, |child, cx| { child.retarget_return(return_focus); cx.notify(); });
+                        true
+                    }).unwrap_or(false);
+                    if accepted { let _ = update_kit_window_content(popup, &child, cx, |child, window, cx| {
                         if child.scope_current() { child.focus(window, cx); }
-                    });
+                    }); }
                 }
             }).detach();
             return;
@@ -643,11 +717,11 @@ impl FileSearchView {
             let host = child_window.window_handle();
             child_window.on_window_should_close(app, move |window, app| {
                 close_parent.update(app, |parent, cx| {
-                    if parent.root.upgrade().is_some_and(|root| root.read(cx).external_launch.auxiliary_effect_pending()) { return false; }
+                    if parent.rehosting || parent.root.upgrade().is_some_and(|root| root.read(cx).external_launch.auxiliary_effect_pending()) { return false; }
                     let Some(child) = parent.preview.as_ref().filter(|child| child.read(cx).host() == window.window_handle().window_id()).cloned() else { return true; };
-                    let (receipt, focus, native, owns) = { let child = child.read(cx);
-                        (child.receipt().clone(), child.return_focus.clone(), child.native(), child.owns_focus(window, cx)) };
-                    parent.return_from_popup_preview(receipt, focus, native, owns, window, cx);
+                    let (receipt, focus, baseline, native, owns) = { let child = child.read(cx);
+                        (child.receipt().clone(), child.return_focus.clone(), child.return_baseline.clone(), child.native(), child.owns_focus(window, cx)) };
+                    parent.return_from_popup_preview(receipt, focus, baseline, native, owns, window, cx);
                     let sample = parent.take_preview_geometry(true);
                     if let Some(sample) = sample { let root = parent.root.clone(); cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.record_file_preview_geometry(sample, cx)); }).detach(); }
                     let native = child.read(cx).native();
@@ -668,7 +742,7 @@ impl FileSearchView {
         }
         self.preview = Some(child.clone()); self.preview_popup = Some(popup);
         let Some(child_native) = child.read(cx).native() else { return; };
-        let action_receipt = child.read(cx).action_receipt();
+        let load_receipt = child.read(cx).load_receipt();
         if let Ok(key) = UtilityToolKey::parse("file-preview") {
             let geometry = {
                 let state = root.read(cx);
@@ -683,7 +757,7 @@ impl FileSearchView {
                 }
             }
             let state = root.read(cx);
-            match utility_host::ShellGeometry::attach(child_native, key, action_receipt, state.hash_geometry_sequence.clone(), state.hash_wake_signal.clone()) {
+            match utility_host::ShellGeometry::attach(child_native, key, load_receipt, state.hash_geometry_sequence.clone(), state.hash_wake_signal.clone()) {
                 Ok(geometry) => self.preview_geometry = Some(geometry),
                 Err(error) => self.status = format!("Could not observe Preview geometry: {error}"),
             }
@@ -700,15 +774,22 @@ impl FileSearchView {
         cx.notify();
     }
 
-    fn return_from_popup_preview(&self, receipt: SelectionReceipt, focus: FocusHandle, child_native: Option<NativeWindow>,
+    fn return_from_popup_preview(&self, receipt: SelectionReceipt, focus: Option<FocusHandle>, baseline: Option<Option<FocusHandle>>, child_native: Option<NativeWindow>,
         owns: bool, window: &Window, cx: &mut Context<Self>) {
+        let (Some(focus), Some(baseline)) = (focus, baseline) else { return; };
         let host = self.host; let native = self.native; let mount = self.mount_receipt.clone();
         let parent_focus_unchanged = host.update(cx, |_, parent_window, app| {
-            parent_window.focused(app).is_none_or(|current| current == focus)
+            !parent_window.has_active_dialog(app) && !context_stack_has_primary(&parent_window.context_stack(), "PopupMenu")
+                && parent_window.focused(app) == baseline
         }).unwrap_or(false);
         let child_current = owns && window.is_window_active()
             && child_native.is_some_and(|native| native_window_is_valid(native) && current_foreground_identity() == Some(native.identity));
-        let parent_current = mount.is_current() && self.is_mounted_in(host.window_id(), true)
+        let parent_popup = self.popout;
+        let root_visible = parent_popup || self.root.upgrade().is_some_and(|root| {
+            let root = root.read(cx); let revision = root.root_visibility.request_revision.load(Ordering::Acquire);
+            json_utility::native_host_current(&root.root_visibility, revision, native, false)
+        });
+        let parent_current = mount.is_current() && self.is_mounted_in(host.window_id(), parent_popup) && root_visible
             && native.is_some_and(native_window_is_valid) && !self.admission.is_fenced();
         if !popup_return_allowed(child_current, parent_current, self.receipt_is_current(&receipt, cx.entity_id()), parent_focus_unchanged) { return; }
         let Some(native) = native else { return; };
@@ -717,27 +798,42 @@ impl FileSearchView {
         cx.spawn(async move |_, cx| {
             let Some(view) = weak.upgrade() else { return; };
             let _ = update_kit_window_content(host, &view, cx, |view, window, cx| {
-                if mount.is_current() && view.is_mounted_in(window.window_handle().window_id(), true)
+                if mount.is_current() && view.is_mounted_in(window.window_handle().window_id(), parent_popup)
                     && view.receipt_is_current(&receipt, cx.entity_id()) && window.is_window_active()
+                    && !window.has_active_dialog(cx) && !context_stack_has_primary(&window.context_stack(), "PopupMenu")
+                    && (parent_popup || view.root.upgrade().is_some_and(|root| {
+                        let root = root.read(cx); let revision = root.root_visibility.request_revision.load(Ordering::Acquire);
+                        json_utility::native_host_current(&root.root_visibility, revision, Some(native), false)
+                    }))
                     && current_foreground_identity() == Some(native.identity)
-                    && window.focused(cx).is_none_or(|current| current == focus) { focus.focus(window, cx); }
+                    && window.focused(cx) == baseline { focus.focus(window, cx); }
             });
         }).detach();
+    }
+
+    pub(super) fn close_preview_if_action(&mut self, child: EntityId, receipt: &utility_mount::MountReceipt, escape: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting || !self.preview.as_ref().is_some_and(|preview| preview.entity_id() == child
+            && preview.read(cx).action_is_current(receipt) && preview.read(cx).scope_current()) { return; }
+        if escape { self.escape_waiting_for_release = true; }
+        self.close_preview(child, window, cx);
+    }
+
+    pub(super) fn retire_inline_preview(&mut self, cx: &mut Context<Self>) {
+        if self.preview_popup.is_none() { self.retire_preview(cx); }
     }
 
     pub(super) fn close_preview(&mut self, child: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(preview) = self.preview.as_ref().filter(|preview| preview.entity_id() == child).cloned() else { return; };
         if self.preview_popup.is_some_and(|popup| popup.window_id() == window.window_handle().window_id()) {
             if self.root.upgrade().is_some_and(|root| root.read(cx).external_launch.auxiliary_effect_pending()) { return; }
-            let (receipt, focus, native, owns) = { let child = preview.read(cx);
-                (child.receipt().clone(), child.return_focus.clone(), child.native(), child.owns_focus(window, cx)) };
-            self.return_from_popup_preview(receipt, focus, native, owns, window, cx);
+            let (receipt, focus, baseline, native, owns) = { let child = preview.read(cx);
+                (child.receipt().clone(), child.return_focus.clone(), child.return_baseline.clone(), child.native(), child.owns_focus(window, cx)) };
+            self.return_from_popup_preview(receipt, focus, baseline, native, owns, window, cx);
             let sample = self.take_preview_geometry(true);
             if let Some(sample) = sample { let root = self.root.clone(); cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.record_file_preview_geometry(sample, cx)); }).detach(); }
             let native = preview.read(cx).native();
             if let Some(popup) = self.preview_popup.take() { let _ = self.track_retiring_preview(popup, native, cx); }
             preview.update(cx, |view, _| view.retire());
-            self.escape_waiting_for_release = true;
             self.preview = None; window.remove_window(); cx.notify(); return;
         }
         let view = preview.read(cx);
@@ -757,7 +853,7 @@ impl FileSearchView {
             });
             if valid {
                 let _ = self.root.update(cx, |root, cx| { root.root_scroll.set_offset(return_scroll); cx.notify(); });
-                return_focus.focus(window, cx);
+                if let Some(return_focus) = return_focus { return_focus.focus(window, cx); }
             }
         }
         cx.notify();
@@ -884,7 +980,7 @@ impl FileSearchView {
         cx: &mut Context<Self>,
         held: Option<bool>,
     ) -> bool {
-        if !self.owns_focus(window, cx) || self.admission.is_fenced() {
+        if !self.owns_focus(window, cx) || self.rehosting || self.admission.is_fenced() {
             return false;
         }
         if self.escape_waiting_for_release || held == Some(true) { return true; }
