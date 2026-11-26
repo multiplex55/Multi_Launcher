@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Regex now supports explicit protected clipboard import, exact copies, complete replacement output and counts-only case summaries with checked host and action authority. All 14 grouped tests passed, including the queued Substitution and Test Cases cases. Native and ordinary editor clipboard evidence remain pending. History controls and Presets follow. [Regex clipboard checkpoint](CHECKPOINTS.md#g14-c-explicit-protected-regex-clipboard)
+Regex History now displays persisted rows and supports checked Load, Reload and Retry through the canonical store. The locked launcher check and independent review passed. The focused History cases are queued for the Presets batch, and matched Windows replay remains pending. [Regex History checkpoint](CHECKPOINTS.md#g14-c-live-regex-history-controls)
+
+Regex supports explicit protected clipboard import, exact copies, complete replacement output and counts-only case summaries with checked host and action authority. All 14 grouped tests passed, including Substitution and Test Cases. Native and ordinary editor clipboard evidence remain pending. [Regex clipboard checkpoint](CHECKPOINTS.md#g14-c-explicit-protected-regex-clipboard)
 
 Regex has live Replacement and Test Cases backed by the shared session. These inputs evaluate independently of primary matches and history. Four stock baseline tests passed from the reused library. [Regex Substitution and Test Cases](gui/regex-tester.md#gpui-substitution-and-test-cases)
 

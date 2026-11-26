@@ -78,7 +78,7 @@ pub(super) struct RegexMount {
     pub(super) receipt: utility_mount::MountReceipt,
     pub(super) window: AnyWindowHandle,
     pub(super) native: Option<NativeWindow>,
-    pattern: Entity<InputState>,
+    pub(super) pattern: Entity<InputState>,
     pub(super) text: Entity<TextareaState>,
     pub(super) replacement: Entity<TextareaState>,
     pub(super) cases:
@@ -357,6 +357,9 @@ impl RegexWorkspace {
     }
     pub(super) fn changed(&mut self, cases_changed: bool, cx: &mut Context<Self>) {
         self.clipboard_epochs.main_changed(cases_changed);
+        self.finish_prepared_change(cx);
+    }
+    pub(super) fn finish_prepared_change(&mut self, cx: &mut Context<Self>) {
         self.session.mark_changed(Instant::now());
         self.pump(cx);
         cx.notify();
@@ -833,7 +836,7 @@ impl Render for RegexWorkspace {
             )
             .children(self.history.diagnostic.as_ref().map(|message| {
                 div().id("regex-history-warning").role(Role::Alert).child(
-                    Label::new(format!("Regex history could not be saved: {message}"))
+                    Label::new(format!("Regex history: {message}"))
                         .id("regex-history-warning-text"),
                 )
             }))
@@ -887,6 +890,7 @@ impl Render for RegexWorkspace {
             .child(super::regex_substitution::render(self, cx))
             .child(super::regex_cases::render(self, cx))
             .child(super::regex_clipboard::render(self, cx))
+            .child(super::regex_history::render(self, cx))
     }
 }
 impl RootWindow {

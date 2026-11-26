@@ -1260,3 +1260,9 @@ Each operation checks its exact mount and relevant state revision. Case-result p
 The corrected locked `fast-dev` library and launcher check passed in 31.16 s. Independent review cleared final authority, pre-write and focus checks. The first grouped link stopped on a test-only macro import conflict after 23 min 42 s. The correction reused the built library and the final link passed in 40.36 s. Nextest run `8ec61279-4259-4de7-80ba-73209a0f19e2` passed all 14 cases in 5.776 s with 9141 skips. This includes the queued Substitution and Test Cases tests, stock egui clipboard behavior, empty and unmatched captures, independent action receipts and restart admission.
 
 The matched Windows replay remains pending for protected refusal, one import, complete Unicode output copy, empty and unmatched capture controls, counts-only summary, stale effect refusal and native focus. Ordinary Kit editor keyboard and context-menu Copy and Paste remain a separate G14-C validation and implementation obligation. Continue History controls and Presets via the existing canonical stores after this batch.
+
+### G14-C live Regex History controls
+
+Expanding History requests the persisted rows through the existing serialized lane. Load checks the exact mounted row and snapshot, revokes the affected clipboard receipts, updates only pattern and flags, and focuses Pattern. Reload refreshes the canonical snapshot and Retry repeats the current successful nonempty pair. Storage failures preserve existing rows and file bytes and surface the store diagnostic.
+
+The final locked `fast-dev` launcher check passed in 3.15 s. Independent review cleared stale row identity, focus and receipt ordering. The new History cases will run with the Presets link. Matched Windows replay still needs History Load, Reload, Retry, corruption recovery and both host modes.

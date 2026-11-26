@@ -30,4 +30,8 @@ Test Cases edits the same retained collection through stable case IDs. Add, Dupl
 
 Use Clipboard Text reads through the shared protected backend and replaces only Test Text. The entire draft survives an oversized import. Explicit Copy uses the full selected and accepted payload. Capture choice is scoped to the exact current match, and Test Cases Copy summary includes counts only. One checked lane validates current host and action authority after Windows clipboard acquisition and before a write. It coordinates Close, rehost and restart.
 
-The matched Windows replay still needs actual protected refusal, clipboard contents, focus and host behavior. Ordinary editor keyboard and context-menu clipboard behavior remains a separate scope. Continue History controls and Presets, explanation, syntax, reference, examples and scoped Jump.
+The matched Windows replay still needs actual protected refusal, clipboard contents, focus and host behavior. Ordinary editor keyboard and context-menu clipboard behavior, Presets, explanation, syntax, reference, examples and scoped Jump remain open.
+
+## GPUI History controls
+
+History lists canonical saved pattern and flag pairs. Load checks the current row, assigns its pattern and flags and focuses Pattern. Reload refreshes the store, and Retry repeats the current accepted pair. The launcher check and independent review passed. Focused History tests and the matched Windows replay remain pending. [Checkpoint](../CHECKPOINTS.md#g14-c-live-regex-history-controls)
