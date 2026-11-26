@@ -7,6 +7,7 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod file_search;
+mod file_search_preview;
 mod date_search;
 mod calculator_search;
 mod base_convert_search;
@@ -14148,12 +14149,14 @@ pub(crate) fn run_foundation_window(
                                     root.retire_search_jump_mode();
                                     root.cancel_docked_hash_preview();
                                     root.window_search.retire(); root.file_search_probe.retire();
+                                    if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.retire_preview(cx)); }
                                 },
                             );
                         } else {
-                            let _ = root_view.update(&mut *cx, |root, _| {
+                            let _ = root_view.update(&mut *cx, |root, cx| {
                                 root.window_search.retire();
                                 root.file_search_probe.retire();
+                                if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.retire_preview(cx)); }
                             });
                         }
                     }

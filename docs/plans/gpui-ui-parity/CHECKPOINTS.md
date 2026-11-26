@@ -1531,4 +1531,12 @@ The same-HWND two-desktop replay, known-duration F2 and mixed DPI remain open. [
 
 Quoted `fs content "term" "C:\Owned Corpus"` and the stock Content aliases use the same installed provider and exact query, generation, action and directory admission as Filename. GPUI builds the request directly from the checked draft's decoded term, original path and mode, while the form displays those values. The canonical directory is checked again before submission.
 
-The scoped locked launcher checks passed in 50.77 s and 5.61 s. The focused typed action and request tests are queued with the retained selected-match Preview launcher batch. Paired native Content activation and Preview remain open.
+The scoped locked launcher checks passed in 50.77 s and 5.61 s. The typed action and request tests passed in the grouped selected-match Preview run below. Paired native Content activation remains open.
+
+### G07 retained selected-match Preview
+
+Enter on the exact focused Content match or select Preview to open the retained child. It uses the shared preview loader off-thread and binds completion to the exact result, original file, parent search, child mount, load ID and root visibility. It presents bounded context around the selected line and clears highlighting when the loaded line differs from the captured match. The shared request converts the authoritative UTF-8 byte span to character columns for both frontends. Return and fresh Escape retire the child and restore the exact current origin and scroll. A held Escape preserves the parent.
+
+Independent review found and cleared a Return callback that re-entered the child entity, and moved the child above the results with an exact reveal anchor. Scoped locked library and launcher checks passed in 1 min 07 s and 24.85 s. The bin-target test build first rebuilt the ordinary library in 86.63 s, then stopped before linking on a wildcard-import test attribute conflict. The explicit test imports allowed the one corrective launcher build to pass in 16.98 s. No shared-library test link was run. Nextest run `c4cd4f88-1115-46d2-b958-5c113c1cf354` passed all 12 in 4.699 s with 398 skipped. The owned Unicode-file case calls the updated public preview request and loader and verifies the exact highlighted text. Reused shared baseline run `7ea37896-c051-418f-954f-0832061c8b25` passed five unaffected parser, late-line and stale-load cases in 1.066 s before the span change. The updated library assertion can run with the next applicable shared batch.
+
+Matched 1516 × 937 and compact Windows focus, held Escape, scroll, and selected-line evidence remain open. Continue with explicit child Explorer and exact clipboard payloads, then complete remaining navigation, preview modes and hosts.

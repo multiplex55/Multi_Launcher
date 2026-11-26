@@ -104,6 +104,10 @@ pub(super) struct FileSearchView {
     focus: FocusHandle,
     calculate_focus: FocusHandle,
     explorer_focus: FocusHandle,
+    preview_focus: FocusHandle,
+    content_focus: HashMap<FileSearchResultKey, FocusHandle>,
+    preview: Option<Entity<file_search_preview::FileSearchPreview>>,
+    preview_owner: utility_mount::MountOwner,
     explorer_authority: Arc<AtomicBool>,
     explorer_pending: bool,
     escape_waiting_for_release: bool,
@@ -180,6 +184,10 @@ impl FileSearchView {
             focus,
             calculate_focus: cx.focus_handle(),
             explorer_focus,
+            preview_focus: cx.focus_handle(),
+            content_focus: HashMap::new(),
+            preview: None,
+            preview_owner: utility_mount::MountOwner::default(),
             explorer_authority: Arc::new(AtomicBool::new(false)),
             explorer_pending: false,
             escape_waiting_for_release: false,
@@ -204,6 +212,9 @@ impl FileSearchView {
 
     fn invalidate(&mut self, message: &str) {
         self.explorer_authority.store(false, Ordering::Release);
+        self.preview_owner.retire();
+        self.preview = None;
+        self.content_focus.clear();
         self.generation = self.generation.wrapping_add(1).max(1);
         if self.active.take().is_some() {
             self.coordinator.cancel_and_retire();
@@ -244,6 +255,11 @@ impl FileSearchView {
 
     pub(super) fn retire_explorer(&self) {
         self.explorer_authority.store(false, Ordering::Release);
+    }
+
+    pub(super) fn retire_preview(&mut self, cx: &mut Context<Self>) {
+        self.preview_owner.retire();
+        if self.preview.take().is_some() { cx.notify(); }
     }
 
     pub fn shutdown(&mut self) {
@@ -290,6 +306,69 @@ impl FileSearchView {
                     path: row.path.clone(), kind: FileKind::File, content_key: Some(row.key.clone()) })
             }
         }
+    }
+
+    pub(super) fn preview_is_current(&self, child: EntityId, receipt: &SelectionReceipt) -> bool {
+        self.preview.as_ref().is_some_and(|preview| preview.entity_id() == child)
+            && self.receipt_is_current(receipt, receipt.owner)
+    }
+
+    fn open_preview(&mut self, receipt: SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview.is_some() || receipt.content_key.is_none() || !self.receipt_is_current(&receipt, cx.entity_id())
+            || !window.is_window_active() || window.has_active_dialog(cx) || !self.owns_focus(window, cx) { return; }
+        let Some(found) = self.content_rows.get(receipt.index).filter(|row| Some(&row.key) == receipt.content_key.as_ref() && row.path == receipt.path).map(|row| row.found.clone()) else { return; };
+        let Some(return_focus) = window.focused(cx) else { return; };
+        let Some(root) = self.root.upgrade() else { return; };
+        let root_state = root.read(cx);
+        let host = window.window_handle();
+        let Some(native) = root_state.native_window else { return; };
+        if root_state.root_window.is_none_or(|current| current.window_id() != host.window_id())
+            || !root_state.external_owner_is_current(Some(&return_focus), window, cx)
+            || current_foreground_identity() != Some(native.identity) { return; }
+        let Some(permit) = self.admission.admit() else { return; };
+        let return_scroll = root_state.root_scroll.offset();
+        let visibility = root_state.root_visibility.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire);
+        if !json_utility::native_host_current(&visibility, revision, Some(native), false) { return; }
+        let request = multi_launcher::file_search::preview::PreviewRequest::from_search_result(
+            &receipt.path, Some(&found), self.settings.max_full_preview_file_size_bytes);
+        let parent = cx.entity().downgrade();
+        let owner = self.preview_owner.clone();
+        let mount = owner.attach();
+        let preview = cx.new(|cx| file_search_preview::FileSearchPreview::new(parent, receipt, return_focus, return_scroll,
+            host.window_id(), found, owner, mount, visibility, revision, native, self.admission.clone(), cx));
+        self.preview = Some(preview.clone());
+        preview.update(cx, |preview, cx| { preview.focus(window, cx); preview.load(request, permit, cx); });
+        root.update(cx, |root, cx| {
+            root.root_scroll.scroll_to_top_of_item(root.file_search_scroll_item());
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    pub(super) fn close_preview(&mut self, child: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preview) = self.preview.as_ref().filter(|preview| preview.entity_id() == child).cloned() else { return; };
+        let view = preview.read(cx);
+        let owns_focus = view.owns_focus(window, cx);
+        let same_host = view.host() == window.window_handle().window_id() && view.scope_current();
+        let current = self.receipt_is_current(view.receipt(), cx.entity_id());
+        let return_focus = view.return_focus.clone();
+        let return_scroll = view.return_scroll;
+        preview.update(cx, |view, _| view.retire());
+        self.preview = None;
+        if owns_focus && same_host && current && window.is_window_active() && !window.has_active_dialog(cx) {
+            let valid = self.root.upgrade().is_some_and(|root| {
+                let root = root.read(cx);
+                root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
+                    && root.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity))
+                    && !root.restart_admission.is_fenced()
+            });
+            if valid {
+                let _ = self.root.update(cx, |root, cx| { root.root_scroll.set_offset(return_scroll); cx.notify(); });
+                return_focus.focus(window, cx);
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn receipt_is_current(&self, receipt: &SelectionReceipt, owner: EntityId) -> bool {
@@ -408,6 +487,13 @@ impl FileSearchView {
         if !self.owns_focus(window, cx) || self.admission.is_fenced() {
             return false;
         }
+        if self.escape_waiting_for_release || held == Some(true) { return true; }
+        if let Some(preview) = self.preview.as_ref().filter(|preview| preview.read(cx).owns_focus(window, cx)) {
+            let child = preview.entity_id();
+            self.escape_waiting_for_release = true;
+            self.close_preview(child, window, cx);
+            return true;
+        }
         if !held.unwrap_or(self.escape_waiting_for_release) {
             if self.running() {
                 self.escape_waiting_for_release = true;
@@ -433,6 +519,9 @@ impl FileSearchView {
     fn set_page(&mut self, page: usize) {
         self.explorer_authority.store(false, Ordering::Release);
         self.page = page;
+        self.preview_owner.retire();
+        self.preview = None;
+        self.content_focus.clear();
         self.selected = None;
         self.results_scroll.set_offset(point(px(0.0), px(0.0)));
     }
@@ -622,6 +711,12 @@ impl Render for FileSearchView {
         let generation = self.generation;
         let active = self.active;
         let selected_receipt = self.selected_receipt(cx.entity_id());
+        if self.kind == SearchKind::Content {
+            for row in self.content_rows.iter().skip(start).take(MOUNTED_ROWS) {
+                self.content_focus.entry(row.key.clone()).or_insert_with(|| cx.focus_handle());
+            }
+        }
+        let preview_receipt = selected_receipt.clone().filter(|receipt| receipt.content_key.is_some());
         let hash_receipt = selected_receipt.clone().filter(|receipt| receipt.kind == FileKind::File && receipt.content_key.is_none());
         let selected_path = selected_receipt
             .as_ref()
@@ -663,17 +758,21 @@ impl Render for FileSearchView {
         } else {
             self.content_rows.iter().enumerate().skip(start).take(MOUNTED_ROWS).map(|(index, row)| {
                 let key = row.key.clone();
+                let row_focus = self.content_focus.get(&key).cloned();
                 let path = row.path.clone();
                 let label = format!("{}:{}  {}", row.found.line_number,
                     row.found.column.map(|column| column.saturating_add(1)).unwrap_or(1), match_excerpt(&row.found));
                 let button = Button::new(SharedString::from(format!("file-search-content-{generation}-{index}")))
                     .accessibility_label(format!("Content match: {label}"))
                     .label(label).tab_stop(true).selected(self.selected == Some(index))
+                    .when_some(row_focus, |button, focus| button.track_focus(&focus))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.kind == SearchKind::Content && current_row(this.open, this.generation, this.active,
                             generation, active, index, this.visible_rows())
                             && this.content_rows.get(index).is_some_and(|row| row.key == key && row.path == path) {
                             this.explorer_authority.store(false, Ordering::Release);
+                            this.preview_owner.retire();
+                            this.preview = None;
                             this.selected = Some(index); cx.notify();
                         }
                     }));
@@ -693,6 +792,21 @@ impl Render for FileSearchView {
                 }),
             )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "enter" && event.keystroke.modifiers == Modifiers::default()
+                    && !event.is_held && this.preview.is_none() {
+                    let focused = this.visible_rows().find(|index| this.content_rows.get(*index).is_some_and(|row|
+                        this.content_focus.get(&row.key).is_some_and(|focus| focus.is_focused(window))));
+                    if this.kind == SearchKind::Content {
+                        if let Some(index) = focused {
+                            this.explorer_authority.store(false, Ordering::Release);
+                            this.selected = Some(index);
+                            if let Some(receipt) = this.selected_receipt(cx.entity_id()) {
+                                window.prevent_default(); cx.stop_propagation();
+                                this.open_preview(receipt, window, cx); return;
+                            }
+                        }
+                    }
+                }
                 if event.keystroke.key != "escape"
                     || event.keystroke.modifiers != Modifiers::default()
                     || !this.owns_focus(window, cx)
@@ -762,6 +876,14 @@ impl Render for FileSearchView {
                             })),
                     )
                     .child(
+                        Button::new("file-search-preview-selected")
+                            .tab_stop(true).track_focus(&self.preview_focus)
+                            .label("Preview").disabled(preview_receipt.is_none() || self.preview.is_some())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(receipt) = preview_receipt.clone() { this.open_preview(receipt, window, cx); }
+                            })),
+                    )
+                    .child(
                         Button::new("file-search-open-explorer")
                             .tab_stop(true).track_focus(&self.explorer_focus)
                             .label("Open in Explorer")
@@ -819,6 +941,7 @@ impl Render for FileSearchView {
                         ),
                 )
             })
+            .when_some(self.preview.clone(), |pane, preview| pane.child(preview))
             .child(
                 div()
                     .id("file-search-results")

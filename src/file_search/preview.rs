@@ -124,11 +124,19 @@ impl PreviewRequest {
         let path = path.into();
         let mut request = match content_match {
             Some(found) => {
-                let mut request = Self::for_match(path, found.line_number,
-                    found.column.map(|column| column.saturating_add(1)).unwrap_or(1));
+                let byte_start = found.byte_start;
+                let valid_span = byte_start <= found.byte_end && found.byte_end <= found.line.len()
+                    && found.line.is_char_boundary(byte_start) && found.line.is_char_boundary(found.byte_end);
+                let (column, length) = if valid_span {
+                    (found.line[..byte_start].chars().count().saturating_add(1),
+                        found.line[byte_start..found.byte_end].chars().count().max(1))
+                } else {
+                    (found.column.map(|column| column.saturating_add(1)).unwrap_or(1),
+                        found.byte_end.saturating_sub(found.byte_start).max(1))
+                };
+                let mut request = Self::for_match(path, found.line_number, column);
                 if let Some(selection) = request.selected_match.as_mut() {
                     selection.source_line = Some(found.line.clone());
-                    let length = found.byte_end.saturating_sub(found.byte_start).max(1);
                     selection.match_length = Some(length);
                     selection.end_column = Some(selection.start_column.saturating_add(length));
                 }
@@ -767,15 +775,16 @@ mod tests {
 
     #[test]
     fn search_result_request_preserves_unicode_match_and_limits() {
-        let found = crate::file_search::model::ContentMatch::new(8, "café needle".into(), 6, 12);
+        let mut found = crate::file_search::model::ContentMatch::new(8, "café needle".into(), 6, 12);
+        found.column = Some(0); // Byte span remains authoritative over legacy presentation metadata.
         let request = PreviewRequest::from_search_result("owned.txt", Some(&found), 1234);
         assert_eq!(request.max_bytes_full_file_preview, 1234);
         let selected = request.selected_match.unwrap();
         assert_eq!(selected.line, 8);
         assert_eq!(selected.source_line.as_deref(), Some("café needle"));
-        assert_eq!(selected.start_column, 7);
+        assert_eq!(selected.start_column, 6);
         assert_eq!(selected.match_length, Some(6));
-        assert_eq!(selected.end_column, Some(13));
+        assert_eq!(selected.end_column, Some(12));
         assert!(PreviewRequest::from_search_result("owned.txt", None, 1).selected_match.is_none());
     }
 

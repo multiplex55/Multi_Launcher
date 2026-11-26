@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+Quoted Directory Content starts from the exact checked draft. Its selected-match Preview uses the shared loader, exact Unicode highlights and a retained Return path. The grouped launcher run passed all 12 tests. Matched Windows replay and explicit child actions remain open. [Typed Content](CHECKPOINTS.md#g07-typed-directory-content-search) · [Preview checkpoint](CHECKPOINTS.md#g07-retained-selected-match-preview)
+
 GPUI now prepares the exact retained launcher on the current virtual desktop before an authorized hidden-root hotkey reveal. All 24 focused tests passed. Actual two-desktop reveal, known-duration F2 and mixed DPI remain open. G07 typed Content and selected-match Preview follow. [Cross-desktop checkpoint](CHECKPOINTS.md#g01-checked-cross-desktop-hotkey-reveal)
 
 GPUI Directory Content Search streams grouped matches through the shared worker and can reveal the exact selected file. All 20 focused tests passed. Matched Windows replay, typed Content and selected-match Preview remain open. G01 guarded cross-desktop hotkey reveal follows. [Content Search checkpoint](CHECKPOINTS.md#g07-manual-directory-content-search)
@@ -155,13 +157,13 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 194 Specified, 24 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 193 Specified, 25 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Complete G07 typed Directory Content and retained selected-match Preview using the shared parser, request and preview service. Matched G01, G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
+| Current next action | Add explicit G07 Preview Explorer and exact clipboard actions through the existing checked services. Matched G01, G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
