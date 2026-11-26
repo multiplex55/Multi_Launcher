@@ -118,6 +118,7 @@ struct XmlReadReceipt {
     source_revision: Option<XmlSourceRevision>,
     owner: NativeWindow,
     visibility_revision: u64,
+    popout: bool,
     root_window: AnyWindowHandle,
     open_focus: Option<FocusHandle>,
 }
@@ -138,9 +139,7 @@ pub(super) struct XPathBinding {
     pub(super) uri: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
-pub(super) struct XmlWorkspace {
-    pub(super) open: bool,
-    source: String,
+pub(super) struct XmlMount {
     input: Entity<TextareaState>,
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
@@ -148,6 +147,34 @@ pub(super) struct XmlWorkspace {
     tree_focus: FocusHandle,
     xpath_focus: FocusHandle,
     schema_focus: FocusHandle,
+    pub(super) xpath_expression: Entity<InputState>,
+    pub(super) xpath_bindings: Vec<XPathBinding>,
+    pub(super) xpath_scroll: gpui_kit::UniformListScrollHandle,
+    pub(super) tree_scroll: gpui_kit::UniformListScrollHandle,
+    root_window: AnyWindowHandle,
+    native: Option<NativeWindow>,
+    _subscriptions: Vec<Subscription>,
+    xpath_subscription: Option<Subscription>,
+}
+impl std::ops::Deref for XmlWorkspace {
+    type Target = XmlMount;
+    fn deref(&self) -> &Self::Target {
+        &self.host
+    }
+}
+impl std::ops::DerefMut for XmlWorkspace {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.host
+    }
+}
+
+pub(super) struct XmlWorkspace {
+    pub(super) open: bool,
+    pub(super) popout: bool,
+    pub(super) rehosting: bool,
+    activation_revision: Arc<AtomicU64>,
+    host: XmlMount,
+    source: String,
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     epoch: Arc<AtomicU64>,
@@ -164,13 +191,9 @@ pub(super) struct XmlWorkspace {
     next_file_request: u64,
     schema_path_draft: Option<std::path::PathBuf>,
     pub(super) xpath: XmlToolkitXPathViewState,
-    pub(super) xpath_expression: Entity<InputState>,
-    pub(super) xpath_bindings: Vec<XPathBinding>,
     pub(super) xpath_namespaces_open: bool,
-    pub(super) xpath_scroll: gpui_kit::UniformListScrollHandle,
     xpath_epoch: Arc<AtomicU64>,
     pub(super) tree: XmlToolkitTreeViewState,
-    pub(super) tree_scroll: gpui_kit::UniformListScrollHandle,
     tree_epoch: Arc<AtomicU64>,
     tree_service_due: bool,
     tree_copy_visibility: Option<u64>,
@@ -180,42 +203,37 @@ pub(super) struct XmlWorkspace {
     pumping: bool,
     shutdown_error: Option<String>,
     clipboard_pending: bool,
-    feedback: Option<String>,
-    root: WeakEntity<RootWindow>,
-    root_window: AnyWindowHandle,
-    native: Option<NativeWindow>,
+    pub(super) feedback: Option<String>,
+    pub(super) geometry_error: Option<String>,
+    pub(super) root: WeakEntity<RootWindow>,
     visibility: RootVisibility,
-    admission: Arc<RestartAdmission>,
+    pub(super) admission: Arc<RestartAdmission>,
     activity: multi_launcher::activity::ActivityCenter,
-    _subscriptions: Vec<Subscription>,
-    xpath_subscription: Option<Subscription>,
 }
-impl XmlWorkspace {
+impl XmlMount {
     fn new(
         window: &mut Window,
-        cx: &mut Context<Self>,
-        root: WeakEntity<RootWindow>,
+        cx: &mut Context<XmlWorkspace>,
+        receipt: &utility_mount::MountReceipt,
         root_window: AnyWindowHandle,
         native: Option<NativeWindow>,
-        visibility: RootVisibility,
-        admission: Arc<RestartAdmission>,
-        activity: multi_launcher::activity::ActivityCenter,
     ) -> Self {
-        let owner = utility_mount::MountOwner::default();
-        let mount = owner.attach();
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(5, 12)
                 .placeholder("Enter XML source")
         });
+        let source_receipt = receipt.clone();
         let subscription = cx.subscribe(
             &input,
-            |this: &mut Self,
-             input: Entity<TextareaState>,
-             event: &InputEvent,
-             cx: &mut Context<Self>| {
-                if !this.open
+            move |this: &mut XmlWorkspace,
+                  input: Entity<TextareaState>,
+                  event: &InputEvent,
+                  cx: &mut Context<XmlWorkspace>| {
+                if !source_receipt.is_current()
+                    || !this.open
                     || this.schema_picker
+                    || this.rehosting
                     || !this.mount.is_current()
                     || !matches!(event, InputEvent::Change)
                     || this.admission.is_fenced()
@@ -233,27 +251,7 @@ impl XmlWorkspace {
         );
         let xpath_expression =
             cx.new(|cx| InputState::new(window, cx).placeholder("//item[@id='example']"));
-        let xpath_subscription = cx.subscribe(
-            &xpath_expression,
-            |view: &mut Self,
-             input: Entity<InputState>,
-             event: &InputEvent,
-             cx: &mut Context<Self>| {
-                if !view.xpath_live() || !matches!(event, InputEvent::Change) {
-                    return;
-                }
-                let value = input.read(cx).value().to_string();
-                view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
-                view.tree_epoch.fetch_add(1, Ordering::AcqRel);
-                if view.xpath.edit_expression(value, &mut view.tree) {
-                    view.invalidate_xpath(cx);
-                    view.sync_xpath_editors(cx);
-                }
-            },
-        );
         Self {
-            open: false,
-            source: String::new(),
             input,
             focus: cx.focus_handle(),
             return_focus: None,
@@ -261,6 +259,38 @@ impl XmlWorkspace {
             tree_focus: cx.focus_handle(),
             xpath_focus: cx.focus_handle(),
             schema_focus: cx.focus_handle(),
+            xpath_expression,
+            xpath_bindings: Vec::new(),
+            xpath_scroll: gpui_kit::UniformListScrollHandle::default(),
+            tree_scroll: gpui_kit::UniformListScrollHandle::default(),
+            root_window,
+            native,
+            _subscriptions: vec![subscription],
+            xpath_subscription: None,
+        }
+    }
+}
+impl XmlWorkspace {
+    fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        root: WeakEntity<RootWindow>,
+        root_window: AnyWindowHandle,
+        native: Option<NativeWindow>,
+        visibility: RootVisibility,
+        admission: Arc<RestartAdmission>,
+        activity: multi_launcher::activity::ActivityCenter,
+    ) -> Self {
+        let owner = utility_mount::MountOwner::default();
+        let mount = owner.attach();
+        let host = XmlMount::new(window, cx, &mount, root_window, native);
+        Self {
+            open: false,
+            popout: false,
+            rehosting: false,
+            activation_revision: Arc::new(AtomicU64::new(0)),
+            host,
+            source: String::new(),
             owner,
             mount,
             epoch: Arc::new(AtomicU64::new(1)),
@@ -277,13 +307,9 @@ impl XmlWorkspace {
             next_file_request: 0,
             schema_path_draft: None,
             xpath: XmlToolkitXPathViewState::default(),
-            xpath_expression,
-            xpath_bindings: Vec::new(),
             xpath_namespaces_open: false,
-            xpath_scroll: gpui_kit::UniformListScrollHandle::default(),
             xpath_epoch: Arc::new(AtomicU64::new(1)),
             tree: XmlToolkitTreeViewState::default(),
-            tree_scroll: gpui_kit::UniformListScrollHandle::default(),
             tree_epoch: Arc::new(AtomicU64::new(1)),
             tree_service_due: false,
             tree_copy_visibility: None,
@@ -294,15 +320,83 @@ impl XmlWorkspace {
             shutdown_error: None,
             clipboard_pending: false,
             feedback: None,
+            geometry_error: None,
             root,
-            root_window,
-            native,
             visibility,
             admission,
             activity,
-            _subscriptions: vec![subscription],
-            xpath_subscription: Some(xpath_subscription),
         }
+    }
+    pub(super) fn mount_receipt(&self) -> utility_mount::MountReceipt {
+        self.mount.clone()
+    }
+    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool {
+        self.open
+            && self.popout == popout
+            && self.mount.is_current()
+            && self.root_window.window_id() == id
+    }
+    pub(super) fn replace_mount(
+        &mut self,
+        root_window: AnyWindowHandle,
+        native: Option<NativeWindow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let receipt = self.owner.attach();
+        let mut host = XmlMount::new(window, cx, &receipt, root_window, native);
+        host.return_focus = self.host.return_focus.clone();
+        host.input.update(cx, |input, cx| {
+            input.set_value(self.source.clone(), window, cx)
+        });
+        self.host = host;
+        self.mount = receipt;
+        self.mount_xpath_editors(window, cx);
+    }
+    pub(super) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting {
+            self.focus.focus(window, cx);
+            return;
+        }
+        if self.schema_tab {
+            self.schema_focus.focus(window, cx);
+        } else if self.xpath_tab {
+            self.xpath_expression.focus_handle(cx).focus(window, cx);
+        } else if self.tree_tab {
+            self.tree_focus.focus(window, cx);
+        } else if self.output_tab {
+            self.output_focus.focus(window, cx);
+        } else {
+            self.input.focus_handle(cx).focus(window, cx);
+        }
+    }
+    pub(super) fn transfer_anchor_is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+    pub(super) fn transfer_effects_idle(&self) -> bool {
+        !self.file_effect_pending() && !self.clipboard_pending && self.save_review.is_none()
+            && !(self.tree_copy_visibility.is_some() && self.tree_service_due)
+            && !self.admission.is_fenced()
+    }
+    pub(super) fn can_rehost(&self) -> bool {
+        self.open && !self.rehosting && self.transfer_effects_idle()
+    }
+    pub(super) fn native_close_blocked(&self) -> bool {
+        self.rehosting || self.schema_picker || self.file_write_pending || self.save_review.is_some()
+    }
+    fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
+        if !self.can_rehost() || self.popout == popout { return; }
+        let source = self.mount_receipt();
+        let gesture = self.native.map(|source| hash_dock::Gesture {
+            source,
+            foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity),
+            visibility_revision: self.visibility.request_revision.load(Ordering::Acquire),
+        });
+        self.rehosting = true;
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        let root = self.root.clone();
+        cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.start_xml_rehost(popout, gesture, source, cx)); }).detach();
+        cx.notify();
     }
     fn start(&mut self, cx: &mut Context<Self>) {
         if !self.open || !matches!(self.engine, Engine::Idle) || self.admission.is_fenced() {
@@ -451,6 +545,7 @@ impl XmlWorkspace {
         .detach();
     }
     pub(super) fn shutdown(&mut self, cx: &mut Context<Self>) {
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
         self.open = false;
         self.save_review = None;
         self.owner.retire();
@@ -502,8 +597,6 @@ impl XmlWorkspace {
     }
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open {
-            self.mount = self.owner.attach();
-            self.mount_xpath_editors(window, cx);
             self.open = true;
             self.start(cx);
         }
@@ -524,16 +617,30 @@ impl XmlWorkspace {
         cx.notify();
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if super::xml_schema::pane_close_blocked(self.schema_picker || self.file_write_pending) {
+        if self.rehosting || super::xml_schema::pane_close_blocked(self.schema_picker || self.file_write_pending) {
             return;
         }
         let restore = window.is_window_active() && self.focus.contains_focused(window, cx);
+        let popout = self.popout;
+        if popout { let _ = self.root.update(cx, |root, cx| root.drain_xml_native_geometry(cx, true)); }
         self.shutdown(cx);
         let _ = self.root.update(cx, |root, cx| {
             panel_stack::retire(&mut root.panel_stack, Panel::XmlToolkitDialog);
+            if popout {
+                if let Some(popup) = root.xml_popup.take() {
+                    let retiring = RetiringHashWindow { window: popup.window, native_window: popup.native };
+                    root.xml_retiring.push(retiring);
+                    let weak = cx.entity().downgrade();
+                    cx.spawn(async move |_, cx| {
+                        if remove_and_wait_for_hash_window(cx, retiring).await {
+                            let _ = weak.update(cx, |root, _| root.xml_retiring.retain(|item| item.window.window_id() != retiring.window.window_id()));
+                        }
+                    }).detach();
+                }
+            }
             cx.notify();
         });
-        if restore {
+        if restore && !popout {
             if let Some(focus) = self.return_focus.take() {
                 focus.focus(window, cx);
             }
@@ -552,6 +659,7 @@ impl XmlWorkspace {
     }
     pub(super) fn tree_live(&self) -> bool {
         self.open
+            && !self.rehosting
             && !self.schema_picker
             && self.tree_tab
             && self.mount.is_current()
@@ -618,7 +726,7 @@ impl XmlWorkspace {
         self.tree_epoch.fetch_add(1, Ordering::AcqRel);
         self.tree_copy_visibility = if intent == XmlDetailIntent::Copy {
             let revision = self.visibility.request_revision.load(Ordering::Acquire);
-            if !json_utility::native_host_current(&self.visibility, revision, self.native, false) {
+            if !json_utility::native_host_current(&self.visibility, revision, self.native, self.popout) {
                 return;
             }
             Some(revision)
@@ -654,7 +762,7 @@ impl XmlWorkspace {
                     &self.visibility,
                     revision,
                     self.native,
-                    false,
+                    self.popout,
                 ) {
                     self.tree_copy_visibility = None;
                     self.tree_copy_request = None;
@@ -673,10 +781,11 @@ impl XmlWorkspace {
         }
     }
     pub(super) fn clipboard_available(&self) -> bool {
-        !self.clipboard_pending
+        !self.clipboard_pending && !self.rehosting
     }
     pub(super) fn xpath_live(&self) -> bool {
         self.open
+            && !self.rehosting
             && !self.schema_picker
             && self.xpath_tab
             && self.mount.is_current()
@@ -912,7 +1021,7 @@ impl XmlWorkspace {
             return;
         };
         let visibility = self.visibility.request_revision.load(Ordering::Acquire);
-        if !json_utility::native_host_current(&self.visibility, visibility, self.native, false) {
+        if !json_utility::native_host_current(&self.visibility, visibility, self.native, self.popout) {
             return;
         }
         self.tree_epoch.fetch_add(1, Ordering::AcqRel);
@@ -941,7 +1050,7 @@ impl XmlWorkspace {
         let request = self.tree_copy_request?;
         let visibility = self.tree_copy_visibility?;
         if !self.xpath_live()
-            || !json_utility::native_host_current(&self.visibility, visibility, self.native, false)
+            || !json_utility::native_host_current(&self.visibility, visibility, self.native, self.popout)
         {
             return None;
         }
@@ -1035,6 +1144,7 @@ impl XmlWorkspace {
     }
     pub(super) fn schema_live(&self) -> bool {
         self.open
+            && !self.rehosting
             && self.schema_tab
             && !self.file_effect_pending()
             && self.mount.is_current()
@@ -1071,6 +1181,7 @@ impl XmlWorkspace {
         cx: &mut Context<Self>,
     ) {
         if !self.open
+            || self.rehosting
             || !self.mount.is_current()
             || self.admission.is_fenced()
             || self.file_effect_pending()
@@ -1101,11 +1212,12 @@ impl XmlWorkspace {
             }
         };
         let visibility_revision = self.visibility.request_revision.load(Ordering::Acquire);
+        let popout = self.popout;
         if !json_utility::native_host_current(
             &self.visibility,
             visibility_revision,
             Some(owner),
-            false,
+            popout,
         ) {
             return;
         }
@@ -1149,7 +1261,7 @@ impl XmlWorkspace {
                         &worker_visibility,
                         visibility_revision,
                         Some(owner),
-                        false,
+                        popout,
                     ),
             ) {
                 return None;
@@ -1181,13 +1293,13 @@ impl XmlWorkspace {
                             && (!matches!(kind, XmlPickerKind::Schema)
                                 || snapshot.schema.revision == schema_revision)
                     }),
-                    view.native == Some(owner)
+                    view.native == Some(owner) && view.popout == popout
                         && window.window_handle().window_id() == root_window.window_id()
                         && json_utility::native_host_current(
                             &view.visibility,
                             visibility_revision,
                             Some(owner),
-                            false,
+                            popout,
                         ),
                 );
                 if !current {
@@ -1223,6 +1335,7 @@ impl XmlWorkspace {
                                         source_revision,
                                         owner,
                                         visibility_revision,
+                                        popout,
                                         root_window,
                                         open_focus: window
                                             .focused(cx)
@@ -1306,14 +1419,14 @@ impl XmlWorkspace {
                         snapshot
                             .as_ref()
                             .is_some_and(|snapshot| snapshot.revision == receipt.source_revision),
-                        view.native == Some(receipt.owner)
+                        view.native == Some(receipt.owner) && view.popout == receipt.popout
                             && window.window_handle().window_id()
                                 == receipt.root_window.window_id()
                             && json_utility::native_host_current(
                                 &view.visibility,
                                 receipt.visibility_revision,
                                 Some(receipt.owner),
-                                false,
+                                receipt.popout,
                             ),
                     );
                     if !current {
@@ -1364,13 +1477,13 @@ impl XmlWorkspace {
         self.open
             && receipt.mount.is_current()
             && !self.admission.is_fenced()
-            && self.native == Some(receipt.owner)
+            && self.native == Some(receipt.owner) && self.popout == receipt.popout
             && window.window_handle().window_id() == receipt.root_window.window_id()
             && json_utility::native_host_current(
                 &self.visibility,
                 receipt.visibility_revision,
                 Some(receipt.owner),
-                false,
+                receipt.popout,
             )
     }
     fn start_xml_save(
@@ -1408,6 +1521,7 @@ impl XmlWorkspace {
         let mount = receipt.mount.clone();
         let owner = receipt.owner;
         let visibility_revision = receipt.visibility_revision;
+        let popout = receipt.popout;
         let visibility = self.visibility.clone();
         let admission = self.admission.clone();
         let task = cx.background_executor().spawn(async move {
@@ -1424,7 +1538,7 @@ impl XmlWorkspace {
                             &visibility,
                             visibility_revision,
                             Some(owner),
-                            false,
+                            popout,
                         )
                 },
             )
@@ -1644,6 +1758,7 @@ impl XmlWorkspace {
     }
     fn format(&mut self, mode: XmlFormatMode, cx: &mut Context<Self>) {
         if !self.open
+            || self.rehosting
             || self.schema_picker
             || !self.mount.is_current()
             || self.admission.is_fenced()
@@ -1672,6 +1787,7 @@ impl XmlWorkspace {
     }
     fn apply_output(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open
+            || self.rehosting
             || self.schema_picker
             || !self.mount.is_current()
             || self.admission.is_fenced()
@@ -1703,7 +1819,7 @@ impl XmlWorkspace {
         scalar: Option<Arc<str>>,
         cx: &mut Context<Self>,
     ) {
-        if !self.open || self.schema_picker || self.clipboard_pending {
+        if !self.open || self.rehosting || self.schema_picker || self.clipboard_pending {
             return;
         }
         let output = if matches!(intent, ClipboardIntent::Output) {
@@ -1737,6 +1853,7 @@ impl XmlWorkspace {
             |(_, revision)| *revision,
         );
         let native = self.native;
+        let popout = self.popout;
         let admission = self.admission.clone();
         let source = self.source.clone();
         let xpath_epoch = self.xpath_epoch.clone();
@@ -1756,7 +1873,7 @@ impl XmlWorkspace {
                     epoch.load(Ordering::Acquire),
                     expected,
                     !admission.is_fenced()
-                        && json_utility::native_host_current(&visibility, revision, native, false)
+                        && json_utility::native_host_current(&visibility, revision, native, popout)
                         && (!matches!(intent, ClipboardIntent::Scalar)
                             || output_receipt_current(
                                 worker_xpath_epoch.load(Ordering::Acquire),
@@ -1832,7 +1949,7 @@ impl XmlWorkspace {
                                 &view.visibility,
                                 revision,
                                 view.native,
-                                false,
+                                popout,
                             ),
                     )
                 {
@@ -1883,6 +2000,7 @@ impl Render for XmlWorkspace {
         let copy_mount = self.mount.clone();
         let clear_mount = self.mount.clone();
         let close_mount = self.mount.clone();
+        let rehost_mount = self.mount.clone();
         let format_mount = self.mount.clone();
         let minify_mount = self.mount.clone();
         let apply_mount = self.mount.clone();
@@ -1896,19 +2014,20 @@ impl Render for XmlWorkspace {
         let output_epoch = self.output_epoch.load(Ordering::Acquire);
         let snapshot = self.current_snapshot();
         let can_open_file = self.open
+            && !self.rehosting
             && self.save_review.is_none()
             && !self.file_effect_pending()
             && !self.clipboard_pending
             && !self.admission.is_fenced()
             && snapshot.is_some();
-        let can_format = snapshot
+        let can_format = !self.rehosting && snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.parse == XmlParseStatus::Ready);
         let output = snapshot
             .as_ref()
             .and_then(|snapshot| multi_launcher::xml_source::current_output(snapshot));
-        let can_copy = output.is_some() && !self.clipboard_pending;
-        let can_apply = output.is_some_and(|output| {
+        let can_copy = output.is_some() && self.clipboard_available();
+        let can_apply = !self.rehosting && output.is_some_and(|output| {
             output.text.len() <= multi_launcher::xml_toolkit_engine::MAX_XML_INPUT_BYTES
         });
         let output_text = match snapshot.as_ref().map(|snapshot| &snapshot.output) {
@@ -2126,6 +2245,7 @@ impl Render for XmlWorkspace {
                 |div| {
                     div.child(
                         Textarea::new(&self.input)
+                            .disabled(self.rehosting)
                             .aria_label("XML Source")
                             .tab_index(0),
                     )
@@ -2182,7 +2302,8 @@ impl Render for XmlWorkspace {
                     .child(
                         Button::new("xml-paste")
                             .label("Paste")
-                            .disabled(self.clipboard_pending)
+                            .disabled(!self.clipboard_available())
+                            .tab_stop(self.clipboard_available())
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if paste_mount.is_current() {
                                     view.clipboard(ClipboardIntent::Paste, None, None, cx);
@@ -2192,7 +2313,8 @@ impl Render for XmlWorkspace {
                     .child(
                         Button::new("xml-copy")
                             .label("Copy Source")
-                            .disabled(self.clipboard_pending)
+                            .disabled(!self.clipboard_available())
+                            .tab_stop(self.clipboard_available())
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if copy_mount.is_current() {
                                     view.clipboard(ClipboardIntent::Source, None, None, cx);
@@ -2254,9 +2376,12 @@ impl Render for XmlWorkspace {
                     .child(
                         Button::new("xml-clear")
                             .label("Clear")
+                            .disabled(self.rehosting)
+                            .tab_stop(!self.rehosting)
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if !clear_mount.is_current()
                                     || !view.open
+                                    || view.rehosting
                                     || view.schema_picker
                                     || view.admission.is_fenced()
                                 {
@@ -2282,10 +2407,19 @@ impl Render for XmlWorkspace {
                             })),
                     )
                     .child(
+                        Button::new("xml-rehost")
+                            .label(if self.popout { "Dock" } else { "Pop Out" })
+                            .disabled(!self.can_rehost())
+                            .tab_stop(self.can_rehost())
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if rehost_mount.is_current() { view.request_rehost(!view.popout, cx); }
+                            })),
+                    )
+                    .child(
                         Button::new("xml-close")
                             .label("Close")
-                            .disabled(self.schema_picker || self.file_write_pending)
-                            .tab_stop(!self.schema_picker && !self.file_write_pending)
+                            .disabled(self.native_close_blocked())
+                            .tab_stop(!self.native_close_blocked())
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if close_mount.is_current()
                                     && view.open
@@ -2324,13 +2458,59 @@ impl Render for XmlWorkspace {
             }))
             .child(div().id("xml-status").role(Role::Status).child(status))
             .children(self.feedback.as_ref().map(|text| Label::new(text.clone())))
+            .children(
+                self.geometry_error
+                    .as_ref()
+                    .map(|text| Label::new(text.clone())),
+            )
     }
 }
 impl RootWindow {
+    pub(super) fn scroll_to_xml(&self, cx: &App) {
+        self.scroll_to_json(cx);
+        if let Some(root) = self.root_window {
+            if self.json_view.as_ref().is_some_and(|v| v.read(cx).is_mounted_in(root.window_id(), false)) {
+                let index = self.file_search_scroll_item()
+                    + usize::from(self.file_search.as_ref().is_some_and(|v| v.read(cx).open))
+                    + usize::from(self.downloads_triage_open(cx))
+                    + usize::from(self.plugin_editor.as_ref().is_some_and(|v| v.read(cx).open))
+                    + usize::from(self.activity_view.as_ref().is_some_and(|v| v.read(cx).open)) + 1;
+                self.root_scroll.scroll_to_top_of_item(index);
+            }
+        }
+    }
+    pub(super) fn retire_xml_workspace(&mut self, cx: &mut Context<Self>) {
+        self.drain_xml_native_geometry(cx, true);
+        if let Some(view) = self.xml_view.clone() { view.update(cx, |view, cx| view.shutdown(cx)); }
+    }
     pub(super) fn open_xml_toolkit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut host = OpenHost::default();
         multi_launcher::commands::handlers::handle_xml_toolkit(&mut host, XmlToolkitCommand::Open);
         if !host.0 || self.restart_admission.is_fenced() {
+            return;
+        }
+        if self.xml_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return; }
+        if let (Some(popup), Some(view), Some(root_native)) = (&self.xml_popup, &self.xml_view, self.native_window) {
+            let Some(native) = popup.native else { return; };
+            if current_foreground_identity() != Some(root_native.identity) { return; }
+            let Some(permit) = self.restart_admission.admit() else { return; };
+            let popup_window = popup.window;
+            let view = view.clone();
+            let receipt = view.read(cx).mount_receipt();
+            let guard = view.read(cx).activation_revision.clone();
+            let revision = guard.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+            let worker_guard = guard.clone();
+            cx.spawn(async move |_, cx| {
+                let _permit = permit;
+                cx.background_executor().spawn(async move {
+                    activate_for_secondary_window(&worker_guard, revision, native, Some(root_native.identity));
+                }).await;
+                if !receipt.is_current() || guard.load(Ordering::Acquire) != revision
+                    || current_foreground_identity() != Some(native.identity) { return; }
+                let _ = update_kit_window_content(popup_window, &view, cx, |view, window, cx| {
+                    if receipt.is_current() && view.popout && !view.rehosting { view.reopen(window, cx); }
+                });
+            }).detach();
             return;
         }
         let Some(root_window) = self.root_window else {
@@ -2352,13 +2532,21 @@ impl RootWindow {
             })
         });
         let origin = self.query.focus_handle(cx);
+        let was_open = view.read(cx).open;
+        let root_native = self.native_window;
+        let should_popout = multi_launcher::settings::UtilityToolKey::parse("xml-toolkit").ok()
+            .map(|key| self.utility_presentations.preference(key).unwrap_or(RememberedPresentation::Popout) == RememberedPresentation::Popout)
+            .unwrap_or(true);
         view.update(cx, |view, cx| {
             if !view.open {
+                view.popout = false;
+                view.replace_mount(root_window, root_native, window, cx);
                 view.return_focus = Some(origin);
             }
             view.reopen(window, cx);
         });
-        self.xml_view = Some(view);
+        self.xml_view = Some(view.clone());
+        if !was_open && should_popout { view.update(cx, |view, cx| view.request_rehost(true, cx)); }
         panel_stack::promote(&mut self.panel_stack, Panel::XmlToolkitDialog);
         let index =
             self.file_search_scroll_item()

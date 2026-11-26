@@ -2,11 +2,13 @@
 
 ## Current checkpoint
 
+G14 XML now reuses the shared checked utility host for remembered Dock and Pop Out. The same engine and draft survive moves, and Dock preserves a newer focus choice while the old popup retires. Ten focused host tests passed. Overwrite review transfer and saved JSON and XML pins follow. Matched desktop replay remains pending. [XML host checkpoint](CHECKPOINTS.md#xml-remembered-dock-and-pop-out)
+
 G14 now has XML Open, Save Source, Save Output and an explicit Overwrite review. Initial creation cannot clobber a file that appears late, and Windows rename retries check authority again. Twenty-three grouped tests passed, closing the queued automated Open and XSD checks. Paired desktop replay and review rehosting remain open. [XML file-effects checkpoint](CHECKPOINTS.md#xml-save-and-overwrite)
 
-G14 XML Open now uses the checked native picker and stock secure UTF-8 loader. A current read replaces Source, and newer edits or a closed pane reject old results. Scoped checks and source review are complete. Linked tests are queued with Save and Overwrite. [XML Open checkpoint](CHECKPOINTS.md#owned-xml-open)
+G14 XML Open uses the checked native picker and stock secure UTF-8 loader. A current read replaces Source, and newer edits or a closed pane reject old results. The grouped file-effects tests passed. [XML Open checkpoint](CHECKPOINTS.md#owned-xml-open)
 
-G14 XML Validation now has an owned local XSD chooser, Clear and explicit Validate. The source retains the path across engine reopen and checks the exact host and draft before using a picker result. Four focused launcher tests passed. The shared model tests and matched desktop replay remain queued. [XML Validation checkpoint](CHECKPOINTS.md#xml-validation-and-local-xsd)
+G14 XML Validation has an owned local XSD chooser, Clear and explicit Validate. The source retains the path across engine reopen and checks the exact host and draft before using a picker result. The focused launcher, shared model and real Windows schema engine tests passed. Matched desktop replay remains queued. [XML Validation checkpoint](CHECKPOINTS.md#xml-validation-and-local-xsd)
 
 G14 XPath adds stock namespace editing, exact scalar and node results, virtual navigation, Tree reveal and explicit copies. Eleven focused tests passed, including real Windows XPath and namespace validation in the engine. Matched desktop evidence remains pending. [XPath checkpoint](CHECKPOINTS.md#xml-xpath-and-namespace-mappings)
 
@@ -18,7 +20,7 @@ G14 docked XML Source now edits multiline XML under the stock `xml` route. It us
 
 G14 added JSON Pop Out and Dock through the retained workspace. Dock requires an accepted foreground receipt before the source popup retires. Mode persistence, native geometry capture and saved geometry restore use the shared settings owners. Independent review and the focused host and geometry tests passed. Native replay and saved pin remain pending. [Checked host checkpoint](CHECKPOINTS.md#json-checked-pop-out-and-dock) · [Geometry checkpoint](CHECKPOINTS.md#json-native-geometry-writeback)
 
-G14 docked JSON Tree adds virtualized rows, literal search and match reveal, bounded Details, and checked Value, Subtree and Pointer copies. Independent review and ten focused library and launcher tests passed. The retained mount, native Pop Out and pin follow. [Docked Tree checkpoint](CHECKPOINTS.md#docked-json-tree)
+G14 JSON Tree provides virtualized rows, literal search and match reveal, bounded Details, and checked Value, Subtree and Pointer copies. Independent review and ten focused library and launcher tests passed. Saved pin and paired desktop replay remain pending. [Docked Tree checkpoint](CHECKPOINTS.md#docked-json-tree)
 
 G14 has a docked GPUI JSON Text workspace through stock Search. Typing, Format, Minify, protected Paste and Copy Result, Clear and Close use the shared session. Independent source review and seven focused launcher tests passed, following nine focused tests for the shared extraction. Matched Windows replay remains pending. [Structured-text batch](CHECKPOINTS.md#g14-structured-text-gui-batch)
 

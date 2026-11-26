@@ -1,6 +1,6 @@
 # G14 — JSON Utility, XML Toolkit, and Regex Tester
 
-**Status:** In implementation. **Owner:** G14 implementer with existing transform/session owners. The shared JSON Text session extraction is underway on the program branch.
+**Status:** In implementation. **Owner:** G14 implementer with existing transform/session owners. JSON and XML workspace controls use the shared engines. Host and pin work continues before the Regex Tester batch.
 
 ## Objective and dependencies
 
@@ -42,7 +42,7 @@ The first functional batch delivers JSON Utility, XML Toolkit and its XML Save O
 
 Use focused checks as worker ownership and file effects change. Group the remaining Nextest selectors per target and use one paired 1516 × 937 Windows candidate where practical. Packet C follows as the next functional batch and retains `REGEX-01`–`05`. Packet D applies across both batches.
 
-After the checked JSON host and geometry writeback, begin the XML Source workspace. The G14 host implementer owns the remaining JSON saved pin and pinned-close behavior alongside XML's remembered presentation and pin controls. Verify passive startup, checked unpin, and exact native retirement with the paired profiles in the G14 Windows batch.
+Continue the retained host follow-up in order. First, XML uses the same checked Dock visibility acknowledgement, native geometry binding and retirement helpers as JSON. Second, transfer the open XML Overwrite review with the frozen payload and a new presentation receipt. Third, restore saved JSON and XML pins, reject pinned workspace close and accept unpin only after the checked settings write. Verify actual move, picker ownership, review transfer, passive startup, checked unpin, and exact native retirement with the paired profiles in the G14 Windows batch.
 
 ### A — Complete JSON source/tree interactions
 

@@ -1,9 +1,10 @@
 //! Checked native shell and Dock/Pop Out transitions for JSON.
-use super::json_utility::{JsonPopup, JsonWorkspace};
+use super::json_utility::JsonWorkspace;
+use super::utility_mount::UtilityPopup;
 use super::*;
 use multi_launcher::settings::{RememberedPresentation, UtilityToolKey};
 
-fn shell_geometry_mount_is_current(
+pub(super) fn shell_geometry_mount_is_current(
     mounted_in_popup: bool,
     receipt: &utility_mount::MountReceipt,
 ) -> bool {
@@ -13,14 +14,14 @@ fn shell_geometry_mount_is_current(
 /// A checked geometry observer owned by one utility shell mount.
 pub(super) struct ShellGeometry {
     key: UtilityToolKey,
-    receipt: utility_mount::MountReceipt,
+    pub(super) receipt: utility_mount::MountReceipt,
     stamp: NativeGeometryStamp,
     slot: NativeGeometrySlot,
     binding: NativeGeometryBinding,
     factory_size: Option<PreferredWindowSize>,
 }
 impl ShellGeometry {
-    fn attach(
+    pub(super) fn attach(
         native: NativeWindow,
         key: UtilityToolKey,
         receipt: utility_mount::MountReceipt,
@@ -60,7 +61,9 @@ impl ShellGeometry {
             factory_size,
         })
     }
-    fn take(&self) -> Option<(UtilityNativeGeometrySample, Option<PreferredWindowSize>)> {
+    pub(super) fn take(
+        &self,
+    ) -> Option<(UtilityNativeGeometrySample, Option<PreferredWindowSize>)> {
         if !self.receipt.is_current() {
             return None;
         }
@@ -102,10 +105,18 @@ impl Render for JsonShell {
     }
 }
 
-async fn retire_failed_json_candidate(
+fn retiring_utilities(root: &mut RootWindow, kind: utility_mount::UtilityKind) -> &mut Vec<RetiringHashWindow> {
+    match kind {
+        utility_mount::UtilityKind::Xml => &mut root.xml_retiring,
+        utility_mount::UtilityKind::Json => &mut root.json_retiring,
+    }
+}
+
+pub(super) async fn retire_failed_utility_candidate(
     root: &WeakEntity<RootWindow>,
     window: AnyWindowHandle,
     native: Option<NativeWindow>,
+    kind: utility_mount::UtilityKind,
     cx: &mut AsyncApp,
 ) {
     let retiring = RetiringHashWindow {
@@ -115,7 +126,7 @@ async fn retire_failed_json_candidate(
     let signal = Arc::new(HashWakeSignal::default());
     let wait_signal = signal.clone();
     let _ = root.update(cx, |root, cx| {
-        root.json_retiring.push(retiring);
+        retiring_utilities(root, kind).push(retiring);
         if native.is_none() {
             let id = window.window_id();
             let owner = cx.entity().downgrade();
@@ -123,8 +134,7 @@ async fn retire_failed_json_candidate(
             let subscription = cx.on_window_closed(move |app, closed| {
                 if closed == id {
                     let _ = owner.update(app, |root, _| {
-                        root.json_retiring
-                            .retain(|item| item.window.window_id() != id)
+                        retiring_utilities(root, kind).retain(|item| item.window.window_id() != id)
                     });
                     closed_signal.notify();
                 }
@@ -138,7 +148,7 @@ async fn retire_failed_json_candidate(
     });
     if native.is_some() && remove_and_wait_for_hash_window(cx, retiring).await {
         let _ = root.update(cx, |root, _| {
-            root.json_retiring
+            retiring_utilities(root, kind)
                 .retain(|item| item.window.window_id() != window.window_id())
         });
     } else if native.is_none() {
@@ -147,7 +157,7 @@ async fn retire_failed_json_candidate(
             .is_err()
         {
             let _ = root.update(cx, |root, _| {
-                root.json_retiring
+                retiring_utilities(root, kind)
                     .retain(|item| item.window.window_id() != window.window_id())
             });
             signal.notify();
@@ -275,6 +285,10 @@ impl RootWindow {
                         cx.notify();
                     });
                 }
+            } else if UtilityToolKey::parse("xml-toolkit").ok() == Some(key) {
+                if let Some(view) = self.xml_view.clone() {
+                    view.update(cx, |view, cx| { view.feedback = Some(error); cx.notify(); });
+                }
             }
         }
     }
@@ -368,12 +382,13 @@ impl RootWindow {
                         let local_id = window.window_handle().window_id();
                         window.on_window_should_close(app, move |_, app| {
                             weak.update(app, |view, cx| {
-                                if !view.is_mounted_in(local_id, true) {
-                                    return true;
-                                }
-                                if view.rehosting {
-                                    return false;
-                                }
+                                let tracked_source = view.root.upgrade().and_then(|root| {
+                                    root.read(cx).json_popup.as_ref().map(|popup| popup.window.window_id())
+                                });
+                                let source_in_transfer = utility_mount::transfer_source_is_owned(view.rehosting, tracked_source, local_id);
+                                if source_in_transfer { return false; }
+                                if !view.is_mounted_in(local_id, true) { return true; }
+                                if view.rehosting { return false; }
                                 let _ = view.root.update(cx, |root, cx| {
                                     root.drain_json_native_geometry(cx, true)
                                 });
@@ -434,7 +449,8 @@ impl RootWindow {
                             })
                             .ok()
                             .flatten();
-                        retire_failed_json_candidate(&root, window, candidate_native, cx).await;
+                        retire_failed_utility_candidate(&root, window, candidate_native, utility_mount::UtilityKind::Json, cx)
+                            .await;
                         let _ = workspace.update(cx, |view, cx| {
                             view.rehosting = false;
                             view.presentation_error = Some("Could not attach JSON window.".into());
@@ -514,7 +530,7 @@ impl RootWindow {
                                 }
                             });
                         });
-                        root.json_popup = Some(JsonPopup {
+                        root.json_popup = Some(UtilityPopup {
                             window,
                             native,
                             _subscription: subscription,
@@ -635,7 +651,7 @@ impl RootWindow {
                             }
                         },
                     );
-                    retire_failed_json_candidate(&root, window, native, cx).await;
+                    retire_failed_utility_candidate(&root, window, native, utility_mount::UtilityKind::Json, cx).await;
                 }
             } else {
                 let source_popup = root
@@ -875,10 +891,10 @@ mod tests {
             visibility_revision: 5,
         };
         let signal = Arc::new(HashWakeSignal::default());
-        let request = RootVisibilityRequest::DockJson(hash_dock::JsonReveal {
+        let request = RootVisibilityRequest::DockJson(hash_dock::UtilityReveal {
             gesture,
             mount: mount.clone(),
-            acknowledgement: hash_dock::JsonAcknowledgement {
+            acknowledgement: hash_dock::UtilityAcknowledgement {
                 signal,
                 accepted_revision: Arc::new(AtomicU64::new(0)),
             },
@@ -893,13 +909,13 @@ mod tests {
     fn json_dock_acknowledgement_records_only_explicit_acceptance() {
         let signal = Arc::new(HashWakeSignal::default());
         let revision = Arc::new(AtomicU64::new(0));
-        let denied = hash_dock::JsonAcknowledgement {
+        let denied = hash_dock::UtilityAcknowledgement {
             signal: signal.clone(),
             accepted_revision: revision.clone(),
         };
         drop(denied);
         assert_eq!(revision.load(Ordering::Acquire), 0);
-        let accepted = hash_dock::JsonAcknowledgement {
+        let accepted = hash_dock::UtilityAcknowledgement {
             signal: Arc::new(HashWakeSignal::default()),
             accepted_revision: revision.clone(),
         };

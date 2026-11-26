@@ -34,4 +34,8 @@ The Validation tab chooses a local XSD through the checked native owner, retains
 
 ## GPUI file effects
 
-Open uses the checked native picker and shared bounded UTF-8 loader. Source and full Output can be saved through an owned picker. An existing destination opens the exact overwrite review. The grouped file and XSD tests passed, including Windows retry authorization and stock confirmation behavior. Paired desktop replay, remembered native presentation and pin retain their assigned criteria.
+Open uses the checked native picker and shared bounded UTF-8 loader. Source and full Output can be saved through an owned picker. An existing destination opens the exact overwrite review. The grouped file and XSD tests passed, including Windows retry authorization and stock confirmation behavior. Verify actual picker ownership in both presentations in the paired desktop replay.
+
+## GPUI retained host
+
+Fresh typed Open uses the saved presentation, with Pop Out as the stock default. Dock and Pop Out retain the same engine, draft and tab state. The popup starts hidden, restores saved geometry before show and uses the shared native geometry observer. Dock requires exact launcher visibility and foreground acknowledgement before retiring its source. A rejected transfer restores the original mount. New edits and effects wait for transfer to finish, and picker and accepted write authority stay with the original mount. Paired native geometry, foreground, close and picker verification remain pending, along with overwrite review transfer and saved pin.

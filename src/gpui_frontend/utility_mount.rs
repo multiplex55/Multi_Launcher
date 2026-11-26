@@ -4,6 +4,27 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum UtilityKind {
+    Json,
+    Xml,
+}
+
+pub(super) struct UtilityPopup {
+    pub window: super::AnyWindowHandle,
+    pub native: Option<super::NativeWindow>,
+    pub _subscription: super::Subscription,
+    pub geometry: Option<super::json_host::ShellGeometry>,
+}
+
+pub(super) fn transfer_source_is_owned<T: PartialEq>(
+    transferring: bool,
+    tracked: Option<T>,
+    local: T,
+) -> bool {
+    transferring && tracked == Some(local)
+}
+
 #[derive(Clone, Default)]
 pub(super) struct MountOwner(Arc<AtomicU64>);
 #[derive(Clone)]
@@ -30,7 +51,14 @@ impl MountReceipt {
 }
 #[cfg(test)]
 mod tests {
-    use super::MountOwner;
+    use super::{MountOwner, transfer_source_is_owned};
+    #[test]
+    fn source_close_is_vetoed_only_for_exact_transfer_window() {
+        assert!(transfer_source_is_owned(true, Some(1), 1));
+        assert!(!transfer_source_is_owned(true, Some(1), 2));
+        assert!(!transfer_source_is_owned(false, Some(1), 1));
+        assert!(!transfer_source_is_owned(true, None, 1));
+    }
     #[test]
     fn replacement_and_retirement_revoke_exact_mount() {
         let owner = MountOwner::default();

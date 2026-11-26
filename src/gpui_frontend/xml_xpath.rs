@@ -19,7 +19,7 @@ pub(super) fn render(view: &mut XmlWorkspace, cx: &mut Context<XmlWorkspace>) ->
         .flex_col()
         .gap_2()
         .child(Label::new("XPath 1.0"))
-        .child(Input::new(&view.xpath_expression).aria_label("XPath expression"))
+        .child(Input::new(&view.xpath_expression).disabled(view.rehosting).aria_label("XPath expression"))
         .child(
             Button::new("xpath-namespaces-toggle")
                 .label("Namespace prefix mappings")
@@ -58,8 +58,8 @@ pub(super) fn render(view: &mut XmlWorkspace, cx: &mut Context<XmlWorkspace>) ->
                     .id(SharedString::from(format!("xpath-namespace-{id}")))
                     .flex()
                     .gap_1()
-                    .child(Input::new(&binding.prefix).aria_label("Namespace prefix"))
-                    .child(Input::new(&binding.uri).aria_label("Namespace URI"))
+                    .child(Input::new(&binding.prefix).disabled(view.rehosting).aria_label("Namespace prefix"))
+                    .child(Input::new(&binding.uri).disabled(view.rehosting).aria_label("Namespace URI"))
                     .child(
                         Button::new(SharedString::from(format!("xpath-remove-{id}")))
                             .label("Remove")

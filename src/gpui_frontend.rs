@@ -24,6 +24,7 @@ mod hash_dock;
 mod wake;
 mod json_utility;
 mod xml_utility;
+mod xml_host;
 mod xml_tree;
 mod xml_xpath;
 mod xml_schema;
@@ -2639,8 +2640,10 @@ struct RootWindow {
     activity_view: Option<Entity<activity::ActivityView>>,
     json_view: Option<Entity<json_utility::JsonWorkspace>>,
     xml_view: Option<Entity<xml_utility::XmlWorkspace>>,
+    xml_popup: Option<utility_mount::UtilityPopup>,
+    xml_retiring: Vec<RetiringHashWindow>,
     xml_terminal_quit: bool,
-    json_popup: Option<json_utility::JsonPopup>,
+    json_popup: Option<utility_mount::UtilityPopup>,
     json_retiring: Vec<RetiringHashWindow>,
     hash_wake_signal: Arc<HashWakeSignal>,
     hash_file_picker_pending: Arc<AtomicBool>,
@@ -5360,7 +5363,7 @@ impl RootWindow {
     }
 
     fn poll_utility_size_writer(&mut self, cx: &mut Context<Self>) -> bool {
-        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged) = {
+        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged) = {
             let mut store = self
                 .utility_size_store
                 .lock()
@@ -5370,7 +5373,10 @@ impl RootWindow {
             let acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| ack.acknowledgement.key == self.hash_tool_key));
             let json_key = UtilityToolKey::parse("json-utility").ok();
             let json_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == json_key));
+            let xml_key = UtilityToolKey::parse("xml-toolkit").ok();
+            let xml_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == xml_key));
             let failures = store.take_new_write_failures();
+            let xml_failure = failures.iter().find(|failure| Some(failure.key) == xml_key).map(|failure| failure.message.clone());
             let write_failure = failures.iter().find(|failure| failure.key == self.hash_tool_key).map(|failure| failure.message.clone());
             let json_failure = failures.into_iter().find(|failure| Some(failure.key) == json_key).map(|failure| failure.message);
             (
@@ -5380,6 +5386,8 @@ impl RootWindow {
                 acknowledged,
                 json_failure,
                 json_acknowledged,
+                xml_failure,
+                xml_acknowledged,
             )
         };
         if let Some(error) = poll_error {
@@ -5401,6 +5409,8 @@ impl RootWindow {
         }
         if let Some(error) = json_failure { self.set_json_size_error(Some(format!("Could not save JSON Utility window geometry: {error}")), cx); }
         else if json_acknowledged { self.set_json_size_error(None, cx); }
+        if let Some(error) = xml_failure { self.set_xml_size_error(Some(format!("Could not save XML Toolkit window geometry: {error}")), cx); }
+        else if xml_acknowledged { self.set_xml_size_error(None, cx); }
         if !pending {
             self.utility_size_polling.store(false, Ordering::Release);
         }
@@ -5602,6 +5612,7 @@ impl RootWindow {
         }
         self.drain_hash_native_geometry(cx, false);
         self.drain_json_native_geometry(cx, false);
+        self.drain_xml_native_geometry(cx, false);
         let _ = self.poll_utility_size_writer(cx);
         let size_status = self
             .utility_size_store
@@ -5629,6 +5640,11 @@ impl RootWindow {
             if let Some((_, error)) = status.failure {
                 return Err(format!("The JSON Utility window geometry could not be saved: {error}. Move or resize the popout to retry before restarting."));
             }
+        }
+        if let Ok(key) = UtilityToolKey::parse("xml-toolkit") {
+            let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
+            if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The XML Toolkit window geometry is still being saved.".to_owned()); }
+            if let Some((_, error)) = status.failure { return Err(format!("The XML Toolkit window geometry could not be saved: {error}")); }
         }
         if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
             return Err(format!("{message} Then retry the egui restart."));
@@ -5677,6 +5693,14 @@ impl RootWindow {
             child_windows.push(popup.window);
             if let Some(native) = popup.native { native_windows.push(native); }
             else if cfg!(windows) { return Err("The JSON window has no checked native handle.".to_owned()); }
+        }
+        if self.xml_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Err("XML Toolkit is changing presentation. Wait for it to finish before restarting.".to_owned()); }
+        self.xml_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
+        if !self.xml_retiring.is_empty() { return Err("A previous XML window has not retired.".to_owned()); }
+        if let Some(popup) = &self.xml_popup {
+            child_windows.push(popup.window);
+            if let Some(native) = popup.native { native_windows.push(native); }
+            else if cfg!(windows) { return Err("The XML window has no checked native handle.".to_owned()); }
         }
         let utility = match &self.secondary {
             SecondaryWindowState::Closed => None,
@@ -9808,7 +9832,7 @@ impl RootWindow {
                 );
             }
             Some(RootCloseBlocker::XmlFilePicker) => {
-                self.restart_status = Some("Wait for the XML file operation to finish before quitting Multi Launcher.".to_owned());
+                self.restart_status = Some("Finish the XML file operation or overwrite review, or wait for its window to finish docking, before quitting Multi Launcher.".to_owned());
             }
             Some(RootCloseBlocker::ToastLogOpen) => {
                 self.restart_status = Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
@@ -9857,13 +9881,19 @@ impl RootWindow {
         self.indexed_applications.retire();
         self.hash_docked_resize.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         self.drain_hash_native_geometry(cx, true);
-        let Some(view) = self.xml_view.clone() else { cx.quit(); return; };
-        view.update(cx, |view, cx| view.shutdown(cx));
+        self.drain_xml_native_geometry(cx, true);
+        let retiring = self.xml_popup.take().map(|popup| RetiringHashWindow { window: popup.window, native_window: popup.native });
+        let view = self.xml_view.clone();
+        if let Some(view) = &view { view.update(cx, |view, cx| view.shutdown(cx)); }
         cx.spawn(async move |_, cx| {
-            loop {
-                if cx.update(|app| view.read(app).reaped()) { cx.update(|app| app.quit()); break; }
-                cx.background_executor().timer(Duration::from_millis(40)).await;
+            if let Some(retiring) = retiring { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
+            if let Some(view) = view {
+                loop {
+                    if cx.update(|app| view.read(app).reaped()) { break; }
+                    cx.background_executor().timer(Duration::from_millis(40)).await;
+                }
             }
+            cx.update(|app| app.quit());
         }).detach();
     }
 
@@ -9873,7 +9903,7 @@ impl RootWindow {
         file_picker_pending: bool,
         cx: &App,
     ) -> Option<RootCloseBlocker> {
-        if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending()) { return Some(RootCloseBlocker::XmlFilePicker); }
+        if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending() || view.read(cx).rehosting || view.read(cx).save_review_pending()) { return Some(RootCloseBlocker::XmlFilePicker); }
         if self.calculator_search.active {
             return Some(RootCloseBlocker::CalculatorSearch);
         }
@@ -10734,7 +10764,7 @@ impl Render for RootWindow {
         if let Some(view) = self.json_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
-        if let Some(view) = self.xml_view.as_ref().filter(|view| view.read(cx).open) {
+        if let Some(view) = self.xml_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -11757,7 +11787,8 @@ struct RootVisibility {
 
 enum RootVisibilityRequest {
     DockHash(hash_dock::Reveal),
-    DockJson(hash_dock::JsonReveal),
+    DockJson(hash_dock::UtilityReveal),
+    DockXml(hash_dock::UtilityReveal),
     HideAfterExternalLaunch(u64),
     HideAfterWindowSwitch(u64, ForegroundIdentity, Arc<str>),
     HideAfterWindowClose(u64, ForegroundIdentity, ForegroundIdentity, Arc<str>),
@@ -11784,7 +11815,7 @@ impl RootVisibilityRequest {
     fn is_current(&self, revision: u64, visible: bool, newer_pending: bool) -> bool {
         match self {
             Self::DockHash(reveal) => reveal.gesture.visibility_revision == revision && !newer_pending,
-            Self::DockJson(reveal) => reveal.gesture.visibility_revision == revision && reveal.mount.is_current() && !newer_pending,
+            Self::DockJson(reveal) | Self::DockXml(reveal) => reveal.gesture.visibility_revision == revision && reveal.mount.is_current() && !newer_pending,
             Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _)
                 | Self::HideAfterWindowClose(expected, _, _, _) => {
                 *expected == revision && visible && !newer_pending
@@ -11902,7 +11933,7 @@ impl RootVisibility {
             let Ok(mut pending) = self.requested_visible.lock() else {
                 return false;
             };
-            let supersedes_dock = matches!(pending.as_ref(), Some(RootVisibilityRequest::DockHash(_) | RootVisibilityRequest::DockJson(_)))
+            let supersedes_dock = matches!(pending.as_ref(), Some(RootVisibilityRequest::DockHash(_) | RootVisibilityRequest::DockJson(_) | RootVisibilityRequest::DockXml(_)))
                 && matches!(&request, RootVisibilityRequest::HideAfterExternalLaunch(_)
                     | RootVisibilityRequest::HideAfterWindowSwitch(_, _, _)
                     | RootVisibilityRequest::HideAfterWindowClose(_, _, _, _));
@@ -11932,11 +11963,22 @@ impl RootVisibility {
         let acknowledgement = hash_dock::Acknowledgement(Arc::clone(&receiver));
         self.queue_visible(RootVisibilityRequest::DockHash(hash_dock::Reveal { gesture, mount_generation, acknowledgement })).then_some(receiver)
     }
-    fn request_json_visible(&self, gesture: hash_dock::Gesture, mount: utility_mount::MountReceipt) -> Option<(Arc<HashWakeSignal>, Arc<AtomicU64>)> {
+    fn request_utility_visible(&self, kind: utility_mount::UtilityKind, gesture: hash_dock::Gesture, mount: utility_mount::MountReceipt) -> Option<(Arc<HashWakeSignal>, Arc<AtomicU64>)> {
         let receiver = Arc::new(HashWakeSignal::default());
         let accepted = Arc::new(AtomicU64::new(0));
-        let acknowledgement = hash_dock::JsonAcknowledgement { signal: receiver.clone(), accepted_revision: accepted.clone() };
-        self.queue_visible(RootVisibilityRequest::DockJson(hash_dock::JsonReveal { gesture, mount, acknowledgement })).then_some((receiver, accepted))
+        let acknowledgement = hash_dock::UtilityAcknowledgement { signal: receiver.clone(), accepted_revision: accepted.clone() };
+        let reveal = hash_dock::UtilityReveal { gesture, mount, acknowledgement };
+        let request = match kind {
+            utility_mount::UtilityKind::Json => RootVisibilityRequest::DockJson(reveal),
+            utility_mount::UtilityKind::Xml => RootVisibilityRequest::DockXml(reveal),
+        };
+        self.queue_visible(request).then_some((receiver, accepted))
+    }
+    fn request_json_visible(&self, gesture: hash_dock::Gesture, mount: utility_mount::MountReceipt) -> Option<(Arc<HashWakeSignal>, Arc<AtomicU64>)> {
+        self.request_utility_visible(utility_mount::UtilityKind::Json, gesture, mount)
+    }
+    fn request_xml_visible(&self, gesture: hash_dock::Gesture, mount: utility_mount::MountReceipt) -> Option<(Arc<HashWakeSignal>, Arc<AtomicU64>)> {
+        self.request_utility_visible(utility_mount::UtilityKind::Xml, gesture, mount)
     }
 
     #[cfg(windows)]
@@ -11961,7 +12003,7 @@ impl RootVisibility {
         }
         let visible = match request {
             RootVisibilityRequest::DockHash(_) => true,
-            RootVisibilityRequest::DockJson(_) => true,
+            RootVisibilityRequest::DockJson(_) | RootVisibilityRequest::DockXml(_) => true,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
             RootVisibilityRequest::HideAfterWindowClose(_, _, _, _) => false,
             RootVisibilityRequest::HideAfterWindowSwitch(_, target, _) => {
@@ -12473,6 +12515,8 @@ pub(crate) fn run_foundation_window(
                 activity_view: None,
                 json_view: None,
                 xml_view: None,
+                xml_popup: None,
+                xml_retiring: Vec::new(),
                 xml_terminal_quit: false,
                 json_popup: None,
                 json_retiring: Vec::new(),
@@ -12881,7 +12925,7 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::XmlFilePicker) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
-                            root.restart_status = Some("Wait for the XML file operation to finish before closing Multi Launcher.".to_owned()); cx.notify();
+                            root.restart_status = Some("Finish the XML file operation or overwrite review, or wait for its window to finish docking, before closing Multi Launcher.".to_owned()); cx.notify();
                         });
                         false
                     }
@@ -13014,6 +13058,7 @@ pub(crate) fn run_foundation_window(
                     let live_window = hash_root_view.update(cx, |root, cx| {
                         root.drain_hash_native_geometry(cx, false);
                         root.drain_json_native_geometry(cx, false);
+                        root.drain_xml_native_geometry(cx, false);
                         root.hash_session
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -13187,7 +13232,7 @@ pub(crate) fn run_foundation_window(
                         );
                     }
 
-                    let was_visible = if matches!(requested_visible.as_ref(), Some(RootVisibilityRequest::DockJson(_))) {
+                    let was_visible = if matches!(requested_visible.as_ref(), Some(RootVisibilityRequest::DockJson(_) | RootVisibilityRequest::DockXml(_))) {
                         visibility.current_visible_revision(native_window).is_some()
                     } else { visibility.visible.load(Ordering::Acquire) };
                     let hotkey_for_conditional = requested_visible.as_ref()
@@ -13211,13 +13256,14 @@ pub(crate) fn run_foundation_window(
                     });
                     let dock_reveal = requested_visible.as_ref().and_then(|request| match request {
                         RootVisibilityRequest::DockHash(reveal) => Some((reveal.gesture, Some(reveal.mount_generation), None)),
-                        RootVisibilityRequest::DockJson(reveal) => Some((reveal.gesture, None, Some(reveal.mount.clone()))),
+                        RootVisibilityRequest::DockJson(reveal) => Some((reveal.gesture, None, Some((reveal.mount.clone(), utility_mount::UtilityKind::Json)))),
+                        RootVisibilityRequest::DockXml(reveal) => Some((reveal.gesture, None, Some((reveal.mount.clone(), utility_mount::UtilityKind::Xml)))),
                         _ => None,
                     });
-                    let dock_current = dock_reveal.as_ref().is_none_or(|(gesture, generation, json_mount)| {
+                    let dock_current = dock_reveal.as_ref().is_none_or(|(gesture, generation, utility_mount_receipt)| {
                         generation.is_none_or(|generation| dock_mount_generation.load(Ordering::Acquire) == generation)
-                            && json_mount.as_ref().is_none_or(|mount| mount.is_current())
-                            && (json_mount.is_none() || (gesture.foreground_authorized && current_foreground_identity() == Some(gesture.source.identity)))
+                            && utility_mount_receipt.as_ref().is_none_or(|(mount, _)| mount.is_current())
+                            && (utility_mount_receipt.is_none() || (gesture.foreground_authorized && current_foreground_identity() == Some(gesture.source.identity)))
                             && native_window_is_valid(gesture.source)
                             && !restart_admission_for_hotkey.is_fenced()
                     });
@@ -13316,10 +13362,14 @@ pub(crate) fn run_foundation_window(
                                 } else {
                                     None
                                 };
-                                let json_view = dock_reveal.as_ref().and_then(|(_, _, mount)| mount.as_ref()).filter(|mount| mount.is_current())
-                                    .and_then(|_| root.json_view.as_ref()).cloned();
-                                search_focus_selected = hash_view.is_none() && json_view.is_none();
-                                if let Some(view) = json_view {
+                                let utility = dock_reveal.as_ref().and_then(|(_, _, mount)| mount.as_ref()).filter(|(mount, _)| mount.is_current());
+                                let json_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Json).and_then(|_| root.json_view.as_ref()).cloned();
+                                let xml_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Xml).and_then(|_| root.xml_view.as_ref()).cloned();
+                                search_focus_selected = hash_view.is_none() && json_view.is_none() && xml_view.is_none();
+                                if let Some(view) = xml_view {
+                                    root.scroll_to_xml(cx);
+                                    view.update(cx, |tool, cx| tool.focus_editor(window, cx));
+                                } else if let Some(view) = json_view {
                                     root.scroll_to_json(cx);
                                     view.update(cx, |tool, cx| tool.focus_editor(window, cx));
                                 } else if let Some(view) = hash_view {
@@ -13430,10 +13480,10 @@ pub(crate) fn run_foundation_window(
                     } else {
                         None
                     };
-                    if let Some((gesture, generation, json_mount)) = dock_reveal {
+                    if let Some((gesture, generation, utility_mount_receipt)) = dock_reveal {
                         let current = visibility.is_current(revision, true)
                             && generation.is_none_or(|generation| dock_mount_generation.load(Ordering::Acquire) == generation)
-                            && json_mount.as_ref().is_none_or(|mount| mount.is_current())
+                            && utility_mount_receipt.as_ref().is_none_or(|(mount, _)| mount.is_current())
                             && !restart_admission_for_hotkey.is_fenced()
                             && native_window_is_valid(native_window)
                             && native_window_is_valid(gesture.source);
@@ -13447,7 +13497,7 @@ pub(crate) fn run_foundation_window(
                         }
                         match requested_visible.take() {
                             Some(RootVisibilityRequest::DockHash(reveal)) => drop(reveal.acknowledgement),
-                            Some(RootVisibilityRequest::DockJson(reveal)) => {
+                            Some(RootVisibilityRequest::DockJson(reveal) | RootVisibilityRequest::DockXml(reveal)) => {
                                 if activated && reveal.mount.is_current() && visibility.is_current(revision, true)
                                     && native_window_is_valid(gesture.source)
                                     && current_foreground_identity() == Some(native_window.identity)
@@ -14846,6 +14896,31 @@ mod tests {
         assert!(pending.take_requested_visible().is_none());
         assert!(acknowledgement.state.lock().unwrap().closed);
         assert!(!pending.request_external_hide(0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn xml_dock_reveal_rejects_retired_mount_and_releases_pending_ack() {
+        let visibility = super::RootVisibility::new();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        visibility.bind_request_sender(tx);
+        assert!(visibility.activate());
+        let gesture = super::hash_dock::Gesture {
+            source: super::NativeWindow { identity: super::ForegroundIdentity { hwnd: 1, process_id: 2, thread_id: 3 } },
+            foreground_authorized: true,
+            visibility_revision: 0,
+        };
+        let owner = super::utility_mount::MountOwner::default();
+        let old = owner.attach();
+        let (ack, accepted) = visibility.request_xml_visible(gesture, old.clone()).unwrap();
+        let current = owner.attach();
+        let request = visibility.take_requested_visible().unwrap();
+        assert!(!request.is_current(0, true, false));
+        drop(request);
+        assert!(ack.state.lock().unwrap().closed);
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::Acquire), 0);
+        assert!(visibility.request_xml_visible(gesture, old).is_none());
+        assert!(visibility.request_xml_visible(gesture, current).is_some());
     }
 
     #[cfg(windows)]

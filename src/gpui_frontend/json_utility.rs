@@ -144,12 +144,6 @@ pub(super) struct JsonMount {
     escape_waiting: bool,
     _subscriptions: Vec<Subscription>,
 }
-pub(super) struct JsonPopup {
-    pub window: AnyWindowHandle,
-    pub native: Option<NativeWindow>,
-    pub _subscription: Subscription,
-    pub geometry: Option<super::json_host::ShellGeometry>,
-}
 
 pub(super) struct JsonWorkspace {
     pub(super) open: bool,
