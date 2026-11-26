@@ -1638,3 +1638,11 @@ The exact current parent can reopen the same child without another read. Preview
 Independent review covered load and geometry lifetime, exact action retirement, rollback, semantic focus and popup reactivation. The final scoped locked launcher check passed in 3.65 s. One warm launcher link took 16.40 s with no shared-library rebuild. Nextest run `7f635b30-4ae8-4b35-aa8a-d771ff1871fd` passed all 29 in 11.976 s, with 403 skipped.
 
 Paired Windows 1516 × 937 replay remains open. Witness the same native child HWND, loaded document position, one completed read, geometry write and checked return through Dock and rollback. Live inline Preview still asks to close before parent Pop Out. Confirm the stock inline child presentation and continue that route separately.
+
+### G07 retained inline Preview while File Search moves
+
+An existing inline Preview stays in the launcher when File Search pops out, matching the stock independent child presentation. The launcher projects that same child in the File Search scroll slot while the parent is away. When the parent docks, the same child returns inside the pane. The document position, read request and selection survive transfer and rollback. Only the checked settled parent can renew action authority. Root scroll anchors count the shared slot once.
+
+Explorer and copy remain owned by the launcher HWND. Closing the detached child restores Search focus only if that exact launcher is visible, foreground and still owns focus. Escape uses the surviving launcher latch. A new popup Preview action on the same selection reports that the retained Preview is in the launcher. The separate checked promotion of that same child remains open.
+
+Independent review cleared root placement, action and load authority across Dock, Escape and focus return. The final scoped locked launcher check passed in 4.96 s. One warm launcher link took 15.89 s with no shared-library rebuild. Nextest run `c18d9c02-fc3b-4f8e-8ae9-7405bf102c63` passed all 31 in 16.030 s with 403 skipped. Paired 1516 × 937 verification remains open for the same root document position, exact effects, Dock rollback and detached close. Continue explicit Preview promotion, then the G10 Folder Size scan pane.

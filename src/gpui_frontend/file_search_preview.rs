@@ -36,6 +36,8 @@ fn line_navigation(offset: usize, count: usize, key: &str) -> Option<usize> {
     })
 }
 
+fn inline_load_current(selection: bool, root_visible: bool, fenced: bool) -> bool { selection && root_visible && !fenced }
+
 fn popup_load_current(selection: bool, native: bool, fenced: bool) -> bool { selection && native && !fenced }
 
 fn popup_action_authorized(selection: bool, action: bool, parent: bool, native: bool, foreground: bool, live: bool) -> bool {
@@ -118,6 +120,7 @@ impl FileSearchPreview {
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool {
         self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
     }
+    pub(super) fn focus_owner(&self) -> FocusHandle { self.focus.clone() }
     pub(super) fn effect_pending(&self) -> bool { self.pending }
     pub(super) fn load_receipt(&self) -> utility_mount::MountReceipt { self.mount.clone() }
     pub(super) fn suspend_actions(&mut self) {
@@ -132,6 +135,7 @@ impl FileSearchPreview {
             self.return_focus = return_focus;
             self.return_baseline = None;
         }
+        if !self.popup { self.revision = self.visibility.request_revision.load(Ordering::Acquire); }
         self.action_mount = self.action_owner.attach();
     }
     pub(super) fn set_return_baseline(&mut self, baseline: Option<FocusHandle>) { self.return_baseline = Some(baseline); }
@@ -305,16 +309,14 @@ impl FileSearchPreview {
         let mount = self.mount.clone();
         let worker_mount = mount.clone();
         let visibility = self.visibility.clone();
-        let revision = self.revision;
         let Some(native) = self.native else { return; };
         let admission = self.admission.clone();
         let found = self.found.clone();
-        let parent_mount = self.parent_mount.clone();
         let popup = self.popup;
         let task = cx.background_executor().spawn(async move {
             let current = if popup { popup_load_current(worker_mount.is_current(), native_window_is_valid(native), admission.is_fenced()) }
-                else { worker_mount.is_current() && parent_mount.is_current() && !admission.is_fenced()
-                    && json_utility::native_host_current(&visibility, revision, Some(native), false) };
+                else { inline_load_current(worker_mount.is_current(),
+                    json_utility::native_host_current(&visibility, visibility.request_revision.load(Ordering::Acquire), Some(native), false), admission.is_fenced()) };
             if !current { return None; }
             let mut preview = preview_file(&request);
             let selected_index = found.as_ref().and_then(|found| preview.lines.iter().position(|line| line.line_number == found.line_number)).unwrap_or(0);
@@ -330,8 +332,9 @@ impl FileSearchPreview {
             let result = task.await;
             let _ = weak.update(cx, |view, cx| {
                 if !mount.is_current() || !mount.matches(&view.mount)
-                    || (!view.popup && !view.scope_current()) || view.admission.is_fenced()
+                    || view.admission.is_fenced()
                     || (view.popup && !view.native.is_some_and(native_window_is_valid))
+                    || (!view.popup && !json_utility::native_host_current(&view.visibility, view.visibility.request_revision.load(Ordering::Acquire), view.native, false))
                     || view.state.current_request_id != Some(epoch) { return; }
                 let Some(parent) = view.parent.upgrade() else { return; };
                 if !parent.read(cx).preview_is_current(cx.entity_id(), &view.receipt) { return; }
@@ -497,6 +500,21 @@ mod tests {
         assert!(!current(true, true, true, false, true, true));
         assert!(!current(true, true, true, true, false, true));
         assert!(!current(true, true, true, true, true, false));
+    }
+
+    #[test]
+    fn inline_load_keeps_its_root_scope_across_parent_action_rotation() {
+        let selection_owner = super::super::utility_mount::MountOwner::default();
+        let selection = selection_owner.attach();
+        let parent_owner = super::super::utility_mount::MountOwner::default();
+        let original_parent = parent_owner.attach();
+        let replacement_parent = parent_owner.attach();
+        assert!(!original_parent.is_current());
+        assert!(replacement_parent.is_current());
+        assert!(super::inline_load_current(selection.is_current(), true, false));
+        assert!(!super::inline_load_current(selection.is_current(), false, false));
+        selection_owner.retire();
+        assert!(!super::inline_load_current(selection.is_current(), true, false));
     }
 
     #[test]

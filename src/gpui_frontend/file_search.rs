@@ -29,6 +29,10 @@ pub(super) fn current_row(
         && visible.contains(&index)
 }
 
+fn file_search_root_slot(open: bool, popout: bool, inline_preview: bool) -> bool {
+    open && (!popout || inline_preview)
+}
+
 fn popup_return_allowed(child_current: bool, parent_current: bool, selection_current: bool, parent_focus_unchanged: bool) -> bool {
     child_current && parent_current && selection_current && parent_focus_unchanged
 }
@@ -271,7 +275,6 @@ impl FileSearchView {
             term.update(cx, |input, cx| input.set_readonly(true, cx));
             directory.update(cx, |input, cx| input.set_readonly(true, cx));
         }
-        if self.preview_popup.is_none() { self.retire_preview(cx); }
         self.retire_explorer();
         self.pending_popup_typed = None;
         self.mount_receipt = self.mount_owner.attach();
@@ -362,13 +365,13 @@ impl FileSearchView {
         self.term.update(cx, |input, cx| input.set_readonly(value, cx));
         self.directory.update(cx, |input, cx| input.set_readonly(value, cx));
         if !value {
-            if let Some(child) = self.preview.clone().filter(|_| self.preview_popup.is_some()) {
+            if let Some(child) = self.preview.clone() {
                 let mount = self.mount_receipt.clone();
-                let focus = match &self.preview_return_role {
+                let focus = if self.preview_popup.is_none() && self.popout { None } else { match &self.preview_return_role {
                     PreviewReturnRole::Toolbar => Some(self.preview_focus.clone()),
                     PreviewReturnRole::Content(key) => self.content_focus.get(key).cloned(),
                     PreviewReturnRole::Other => None,
-                };
+                }};
                 self.preview_needs_baseline = !child.read(cx).parent_matches(&mount);
                 child.update(cx, |child, cx| { child.bind_parent(mount, focus); cx.notify(); });
             }
@@ -381,10 +384,9 @@ impl FileSearchView {
     pub(super) fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
         if !self.open || self.rehosting || self.explorer_pending || self.admission.is_fenced() || self.popout == popout || !self.mount_receipt.is_current() { return; }
         let Some(root) = self.root.upgrade() else { return; };
-        if self.preview.is_some() && self.preview_popup.is_none() { self.status = "Close Preview before changing windows.".into(); cx.notify(); return; }
         if self.preview.as_ref().is_some_and(|child| child.read(cx).effect_pending())
             || root.read(cx).external_launch.auxiliary_effect_pending() { self.status = "Wait for the Preview action to finish.".into(); cx.notify(); return; }
-        if let Some(child) = self.preview.clone().filter(|_| self.preview_popup.is_some()) {
+        if let Some(child) = self.preview.clone() {
             child.update(cx, |child, cx| { child.suspend_actions(); cx.notify(); });
         }
         let visibility_revision = root.read(cx).root_visibility.request_revision.load(Ordering::Acquire);
@@ -435,8 +437,16 @@ impl FileSearchView {
         cx.notify();
     }
 
+    pub(super) fn root_slot_occupied(&self) -> bool {
+        file_search_root_slot(self.open, self.popout, self.preview_popup.is_none() && self.preview.is_some())
+    }
+    pub(super) fn detached_inline_preview(&self, root: WindowId, cx: &App) -> Option<Entity<file_search_preview::FileSearchPreview>> {
+        if !self.open || !self.popout || self.preview_popup.is_some() { return None; }
+        self.preview.clone().filter(|child| child.read(cx).host() == root)
+    }
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool {
-        self.open && self.focus.contains_focused(window, cx)
+        self.open && (self.focus.contains_focused(window, cx) || (self.popout && self.preview_popup.is_none()
+            && self.preview.as_ref().is_some_and(|child| child.read(cx).owns_focus(window, cx))))
     }
 
     pub(super) fn hash_action_focus(&self, _: &App) -> FocusHandle { self.calculate_focus.clone() }
@@ -689,7 +699,9 @@ impl FileSearchView {
             }).detach();
             return;
         }
-        if self.preview.is_some() { return; }
+        if self.preview.is_some() {
+            self.status = "Preview is open in the launcher.".into(); cx.notify(); return;
+        }
         let found = if receipt.content_key.is_some() {
             let Some(row) = self.content_rows.get(receipt.index).filter(|row| Some(&row.key) == receipt.content_key.as_ref() && row.path == receipt.path) else { return; };
             Some(row.found.clone())
@@ -842,9 +854,26 @@ impl FileSearchView {
         let current = self.receipt_is_current(view.receipt(), cx.entity_id());
         let return_focus = view.return_focus.clone();
         let return_scroll = view.return_scroll;
+        let child_focus = view.focus_owner();
         preview.update(cx, |view, _| view.retire());
         self.preview = None;
-        if owns_focus && same_host && current && window.is_window_active() && !window.has_active_dialog(cx) {
+        if owns_focus && same_host && current && self.popout && window.is_window_active() && !window.has_active_dialog(cx) {
+            let root = self.root.clone();
+            window.defer(cx, move |window, app| {
+                let _ = root.update(app, |root, cx| {
+                    let revision = root.root_visibility.request_revision.load(Ordering::Acquire);
+                    let valid = root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
+                        && root.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity)
+                            && json_utility::native_host_current(&root.root_visibility, revision, Some(native), false))
+                        && !root.restart_admission.is_fenced() && root.action_sheet.is_none()
+                        && root.context_favorite_popup.is_none() && !window.has_active_dialog(cx)
+                        && !context_stack_has_primary(&window.context_stack(), "PopupMenu")
+                        && window.focused(cx).is_none_or(|focus| child_focus.contains(&focus, window));
+                    if valid { root.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM); root.query.focus_handle(cx).focus(window, cx); cx.notify(); }
+                });
+            });
+        }
+        if owns_focus && same_host && current && !self.popout && window.is_window_active() && !window.has_active_dialog(cx) {
             let valid = self.root.upgrade().is_some_and(|root| {
                 let root = root.read(cx);
                 root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
@@ -986,7 +1015,7 @@ impl FileSearchView {
         if self.escape_waiting_for_release || held == Some(true) { return true; }
         if let Some(preview) = self.preview.as_ref().filter(|preview| preview.read(cx).owns_focus(window, cx)) {
             let child = preview.entity_id();
-            self.escape_waiting_for_release = true;
+            if !(self.popout && self.preview_popup.is_none()) { self.escape_waiting_for_release = true; }
             self.close_preview(child, window, cx);
             return true;
         }
@@ -1438,7 +1467,7 @@ impl Render for FileSearchView {
                         ),
                 )
             })
-            .when_some(self.preview.clone().filter(|_| self.preview_popup.is_none()), |pane, preview| pane.child(preview))
+            .when_some(self.preview.clone().filter(|_| self.preview_popup.is_none() && !self.popout), |pane, preview| pane.child(preview))
             .child(
                 div()
                     .id("file-search-results")
@@ -1762,6 +1791,16 @@ mod typed_tests {
         assert!(!mounted_search_row_current(&candidate, true, 7, search, 7, search, 2, 0..10));
         assert!(mounted_search_row_current(&rollback, true, 7, search, 7, search, 2, 0..10));
         assert!(!mounted_search_row_current(&rollback, true, 7, search, 7, Some(SearchId(42)), 2, 0..10));
+    }
+
+    #[test]
+    fn root_slot_projects_exactly_one_docked_pane_or_detached_inline_preview() {
+        use super::file_search_root_slot as occupied;
+        assert!(occupied(true, false, false));
+        assert!(occupied(true, false, true));
+        assert!(occupied(true, true, true));
+        assert!(!occupied(true, true, false));
+        assert!(!occupied(false, true, true));
     }
 
     #[test]

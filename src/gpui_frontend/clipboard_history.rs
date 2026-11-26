@@ -1212,7 +1212,7 @@ impl RootWindow {
         index += usize::from(
             self.file_search
                 .as_ref()
-                .is_some_and(|view| view.read(cx).open),
+                .is_some_and(|view| view.read(cx).root_slot_occupied()),
         );
         #[cfg(windows)]
         {

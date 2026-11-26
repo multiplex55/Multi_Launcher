@@ -881,7 +881,7 @@ impl RootWindow {
     }
     pub(super) fn scroll_to_json(&self, cx: &App) {
         let index = self.file_search_scroll_item()
-            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open && !view.read(cx).popout))
+            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).root_slot_occupied()))
             + usize::from(self.downloads_triage_open(cx))
             + usize::from(self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open))
             + usize::from(self.activity_view.as_ref().is_some_and(|view| view.read(cx).open));

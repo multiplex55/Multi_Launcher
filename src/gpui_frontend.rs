@@ -3315,35 +3315,23 @@ fn intercept_root_pane_escape(
     {
         return false;
     }
-    let Some(root) = root.upgrade() else {
-        return false;
-    };
-    let root = root.read(cx);
-    if !root.root_visibility.active.load(Ordering::Acquire)
-        || !root.root_visibility.visible.load(Ordering::Acquire)
-        || !root
-            .root_window
-            .is_some_and(|handle| handle.window_id() == window.window_handle().window_id())
-        || !root.native_window.is_some_and(|native| {
-            receipt.hwnd == native.identity.hwnd
-                && native_window_is_valid(native)
-                && current_foreground_identity() == Some(native.identity)
-        })
-    {
-        return false;
-    }
+    let Some(root) = root.upgrade() else { return false; };
+    let state = root.read(cx);
+    if !state.root_visibility.active.load(Ordering::Acquire)
+        || !state.root_visibility.visible.load(Ordering::Acquire)
+        || !state.root_window.is_some_and(|handle| handle.window_id() == window.window_handle().window_id())
+        || !state.native_window.is_some_and(|native| receipt.hwnd == native.identity.hwnd
+            && native_window_is_valid(native) && current_foreground_identity() == Some(native.identity)) { return false; }
     if plugin_editor {
-        let view = root.plugin_editor.clone();
-        return view.is_some_and(|view| {
-            view.update(cx, |view, cx| view.handle_escape(window, cx, Some(receipt.held)))
-        });
+        let view = state.plugin_editor.clone();
+        return view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, Some(receipt.held))));
     }
-    let view = root.file_search.clone();
-    view.is_some_and(|view| {
-        view.update(cx, |view, cx| {
-            view.handle_escape(window, cx, Some(receipt.held))
-        })
-    })
+    let view = state.file_search.clone();
+    let detached = view.as_ref().is_some_and(|view| view.read(cx)
+        .detached_inline_preview(window.window_handle().window_id(), cx).is_some_and(|child| child.read(cx).owns_focus(window, cx)));
+    let handled = view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, Some(receipt.held))));
+    if detached && handled && !receipt.held { root.update(cx, |root, _| root.pane_escape_latched = true); }
+    handled
 }
 
 fn hash_menu_focus_is_owned(menu_open: bool, docked: bool, owns_focus: bool) -> bool {
@@ -4638,7 +4626,7 @@ async fn restore_root_search_focus_after_hash_close(
                         if may_leave_focus || view.read(cx).inspect_is_focused(window) {
                             let restored = view.update(cx, |view, cx| view.restore_receipt_focus(&receipt, cx.entity_id(), window, cx));
                             if restored {
-                                let index = root.file_search_scroll_item() + usize::from(root.file_search.as_ref().is_some_and(|view| view.read(cx).open && !view.read(cx).popout));
+                                let index = root.file_search_scroll_item() + usize::from(root.file_search.as_ref().is_some_and(|view| view.read(cx).root_slot_occupied()));
                                 root.root_scroll.scroll_to_top_of_item(index);
                             }
                             restored
@@ -4835,7 +4823,7 @@ impl RootWindow {
         {
             return;
         }
-        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| !view.read(cx).popout && view.read(cx).open) || self.downloads_triage_open(cx) || self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open) {
+        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| view.read(cx).root_slot_occupied()) || self.downloads_triage_open(cx) || self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open) {
             self.root_scroll
                 .scroll_to_top_of_item(self.docked_hash_scroll_item());
         } else {
@@ -7623,7 +7611,7 @@ impl RootWindow {
             view
         };
         view.update(cx, |view, cx| view.show(window, cx));
-        let index = self.file_search_scroll_item() + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open && !view.read(cx).popout));
+        let index = self.file_search_scroll_item() + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).root_slot_occupied()));
         self.root_scroll.scroll_to_top_of_item(index);
         self.query_history.reset();
         cx.notify();
@@ -7645,7 +7633,7 @@ impl RootWindow {
             view.focus_filter(session, window, cx);
         });
         let index = self.file_search_scroll_item()
-            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open && !view.read(cx).popout))
+            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).root_slot_occupied()))
             + usize::from(self.downloads_triage_open(cx));
         self.root_scroll.scroll_to_top_of_item(index);
         cx.notify();
@@ -11007,8 +10995,21 @@ impl Render for RootWindow {
         if let Some(panel) = app_editor_panel {
             root_scroll = root_scroll.child(div().flex_shrink_0().child(panel));
         }
-        if let Some(view) = self.file_search.as_ref().filter(|view| view.read(cx).open && !view.read(cx).popout) {
-            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        if let Some(view) = self.file_search.as_ref() {
+            let state = view.read(cx);
+            if state.open && !state.popout {
+                root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+            } else if let Some(child) = self.root_window.and_then(|root| state.detached_inline_preview(root.window_id(), cx)) {
+                let escape_view = view.downgrade();
+                root_scroll = root_scroll.child(div().id("detached-file-search-preview").key_context("FileSearchPane")
+                    .capture_action(cx.listener(move |root, _: &gpui_kit::base::input::Escape, window, cx| {
+                        if root.pane_escape_latched { cx.stop_propagation(); return; }
+                        if escape_view.update(cx, |view, cx| view.handle_escape(window, cx, None)).unwrap_or(false) {
+                            root.pane_escape_latched = true; cx.stop_propagation();
+                        }
+                    }))
+                    .flex_shrink_0().w_full().child(child));
+            }
         }
         #[cfg(windows)]
         if let Some(view) = self.downloads_triage.as_ref().filter(|view| view.read(cx).open) {
