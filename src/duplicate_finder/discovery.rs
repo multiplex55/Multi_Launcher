@@ -790,7 +790,7 @@ fn component_count(path: &Path) -> usize {
         .count()
 }
 
-fn path_bytes(path: &Path) -> usize {
+pub fn path_bytes(path: &Path) -> usize {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;

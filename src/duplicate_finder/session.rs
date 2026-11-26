@@ -19,7 +19,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DuplicateFinderSessionError {
+pub enum DuplicateFinderSessionError {
     Closed,
     WorkerRetiring,
     GenerationExhausted,

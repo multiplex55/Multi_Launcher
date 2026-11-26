@@ -224,6 +224,7 @@ pub(super) struct InstalledLauncherProviders {
     clipboard_modify: ClipboardModifyBare,
     file_search: FileSearchBarePlugin,
     folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
+    duplicate_finder: multi_launcher::plugins::duplicate_finder::DuplicateFinderPlugin,
     #[cfg(windows)]
     file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
     calculator: CalculatorMetadata,
@@ -296,6 +297,7 @@ impl InstalledLauncherProviders {
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
             folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
+            duplicate_finder: multi_launcher::plugins::duplicate_finder::DuplicateFinderPlugin,
             #[cfg(windows)]
             file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
             calculator: CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin::default()),
@@ -334,6 +336,7 @@ impl InstalledLauncherProviders {
             Some(&self.clipboard_modify as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.folder_size as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.duplicate_finder as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
             Some(&self.file_lock as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
@@ -634,6 +637,24 @@ mod tests {
         assert!(super::search_routed(providers.plugins(), "foldersize", Some(&HashSet::new()), None).is_empty());
         let disabled = HashMap::from([("folder_size".to_owned(), Vec::new())]);
         assert!(super::search_routed(providers.plugins(), "foldersize", Some(&enabled), Some(&disabled)).is_empty());
+    }
+
+    #[test]
+    fn installed_duplicate_finder_provider_obeys_exact_query_and_capabilities() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        let enabled = HashSet::from(["duplicate_finder".to_owned()]);
+        let rows = super::search_routed(providers.plugins(), "DFF", Some(&enabled), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "duplicate_finder");
+        assert!(super::super::duplicate_finder::current_provider("DFF", &rows[0].1, Some(&enabled), None));
+        let filtered = super::search_routed(providers.plugins(), "kind:dff dff", Some(&enabled), None);
+        assert_eq!(filtered.len(), 1);
+        assert!(super::super::duplicate_finder::current_provider("kind:dff dff", &filtered[0].1, Some(&enabled), None));
+        assert!(super::search_routed(providers.plugins(), "dff extra", Some(&enabled), None).is_empty());
+        assert!(super::search_routed(providers.plugins(), "dff", Some(&HashSet::new()), None).is_empty());
+        let disabled = HashMap::from([("duplicate_finder".to_owned(), Vec::new())]);
+        assert!(super::search_routed(providers.plugins(), "dff", Some(&enabled), Some(&disabled)).is_empty());
+        assert_eq!(providers.plugins().find(|plugin| plugin.name() == "duplicate_finder").unwrap().commands()[0].action, "query:dff");
     }
 
     #[cfg(windows)]

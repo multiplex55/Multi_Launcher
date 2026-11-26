@@ -1,3 +1,5 @@
+use crate::duplicate_finder::projection::{build_result_rows, ResultRow};
+use crate::duplicate_finder::encoded_root_path_bytes;
 use crate::duplicate_finder::{
     DiscoveryDiagnostic, DiscoverySnapshot, DiscoveryStage, DiscoveryStatus,
     DuplicateFinderSession, DuplicateFinderSessionError, RootScanStatus, VerifiedKnownFile,
@@ -14,7 +16,6 @@ const COPY_PATHS_BUTTON_WIDTH: f32 = 88.0;
 const OPEN_PATH_BUTTON_WIDTH: f32 = 64.0;
 const REVEAL_PATH_BUTTON_WIDTH: f32 = 76.0;
 const RESULT_SIZE_LABEL_WIDTH: f32 = 88.0;
-const MAX_RESULT_ROWS: usize = 350_000;
 const MAX_COPY_PATHS: usize = 256;
 const MAX_COPY_TEXT_BYTES: usize = 1024 * 1024;
 
@@ -94,14 +95,6 @@ impl DuplicateFinderActions for SystemDuplicateFinderActions {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ResultRow {
-    VerifiedHeader(usize),
-    VerifiedMember { group: usize, member: usize },
-    UnverifiedHeader(usize),
-    UnverifiedKnownMember { group: usize, member: usize },
-    UnverifiedPath { group: usize, path: usize },
-}
 
 #[derive(Clone, Copy, Debug)]
 struct TestWidgetResponse {
@@ -2167,11 +2160,11 @@ impl DuplicateFinderDialogState {
         if self.selected_roots.len() >= 32 {
             return Err("Select no more than 32 folder roots per scan.".into());
         }
-        let bytes = encoded_path_bytes(&path);
+        let bytes = encoded_root_path_bytes(&path);
         let existing = self
             .selected_roots
             .iter()
-            .map(|path| encoded_path_bytes(path.as_path()))
+            .map(|path| encoded_root_path_bytes(path.as_path()))
             .sum::<usize>();
         if existing.saturating_add(bytes) > 2 * 1024 * 1024 {
             return Err("Selected root paths exceed the 2 MiB selection limit.".into());
@@ -2194,39 +2187,7 @@ impl DuplicateFinderDialogState {
         {
             return;
         }
-        self.rows.clear();
-        self.rows_truncated = false;
-        let mut append = |row| {
-            if self.rows.len() < MAX_RESULT_ROWS {
-                self.rows.push(row);
-            } else {
-                self.rows_truncated = true;
-            }
-        };
-        for (group_index, group) in snapshot.verified_duplicate_groups.iter().enumerate() {
-            append(ResultRow::VerifiedHeader(group_index));
-            for member in 0..group.known_files.len() {
-                append(ResultRow::VerifiedMember {
-                    group: group_index,
-                    member,
-                });
-            }
-        }
-        for (group_index, group) in snapshot.identity_unverified_matches.iter().enumerate() {
-            append(ResultRow::UnverifiedHeader(group_index));
-            for member in 0..group.known_files.len() {
-                append(ResultRow::UnverifiedKnownMember {
-                    group: group_index,
-                    member,
-                });
-            }
-            for path in 0..group.unverified_path_indices.len() {
-                append(ResultRow::UnverifiedPath {
-                    group: group_index,
-                    path,
-                });
-            }
-        }
+        self.rows_truncated = build_result_rows(snapshot, &mut self.rows);
         self.rows_snapshot = Some(Arc::clone(snapshot));
     }
 
@@ -2455,54 +2416,6 @@ fn stage_name(stage: DiscoveryStage) -> &'static str {
     }
 }
 
-fn encoded_path_bytes(path: &Path) -> usize {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        path.as_os_str().encode_wide().count().saturating_mul(2)
-    }
-    #[cfg(not(windows))]
-    {
-        path.as_os_str().as_encoded_bytes().len()
-    }
-}
-
-fn build_result_rows(snapshot: &DiscoverySnapshot) -> (Vec<ResultRow>, bool) {
-    let mut rows = Vec::new();
-    let mut truncated = false;
-    let mut append = |row| {
-        if rows.len() < MAX_RESULT_ROWS {
-            rows.push(row);
-        } else {
-            truncated = true;
-        }
-    };
-    for (group_index, group) in snapshot.verified_duplicate_groups.iter().enumerate() {
-        append(ResultRow::VerifiedHeader(group_index));
-        for member in 0..group.known_files.len() {
-            append(ResultRow::VerifiedMember {
-                group: group_index,
-                member,
-            });
-        }
-    }
-    for (group_index, group) in snapshot.identity_unverified_matches.iter().enumerate() {
-        append(ResultRow::UnverifiedHeader(group_index));
-        for member in 0..group.known_files.len() {
-            append(ResultRow::UnverifiedKnownMember {
-                group: group_index,
-                member,
-            });
-        }
-        for path in 0..group.unverified_path_indices.len() {
-            append(ResultRow::UnverifiedPath {
-                group: group_index,
-                path,
-            });
-        }
-    }
-    (rows, truncated)
-}
 
 #[cfg(test)]
 mod tests {
@@ -2570,7 +2483,8 @@ mod tests {
             counts: Default::default(),
         };
 
-        let (rows, truncated) = build_result_rows(&snapshot);
+        let mut rows = Vec::new();
+        let truncated = build_result_rows(&snapshot, &mut rows);
         assert!(!truncated);
         assert!(matches!(rows[0], ResultRow::VerifiedHeader(0)));
         assert!(matches!(

@@ -39,7 +39,7 @@ pub mod dashboard;
 pub mod date_arithmetic;
 pub mod diagram;
 pub mod diff;
-pub(crate) mod duplicate_finder;
+pub mod duplicate_finder;
 pub mod explorer_tabs;
 pub mod file_lock;
 pub mod file_operations;
