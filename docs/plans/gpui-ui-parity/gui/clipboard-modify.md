@@ -30,4 +30,10 @@ The scoped implementation evidence is in the [checked effects checkpoint](../CHE
 
 `cm undo` runs through the guarded launcher effect owner even when Clipboard Modify is closed. It restores the exact previous text after a stamped protected preflight and consumes Undo only after the accepted writer succeeds. Success keeps Search state and requests Hide for the exact initiating scope. Refused or stale work preserves Undo and stays visible when the Search receipt is current.
 
-The scoped evidence is in the [Undo checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-typed-undo). Matched Windows replay, Pop Out, pins, Jump and the five other sections remain open.
+The scoped evidence is in the [Undo checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-typed-undo). Matched Windows replay remains open.
+
+## GPUI Templates, Saved Pipelines and Help
+
+`cm template`, `cm apply` and `cm help` share the Modify workspace's protected first Load and retained source. Templates and Saved Pipelines use current canonical identities and the shared preview coordinator. Apply Template and Execute require the completed current preview for a visible selected row, and use the same checked Apply and Overwrite review. Saved Pipelines display the stock bounded source card. Help filters the real registry data and preserves distinct row identities.
+
+The scoped evidence is in the [catalog checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-templates-saved-pipelines-and-help). Windows replay, management, named immediate execution, Settings, Pop Out, pins and Jump remain open.

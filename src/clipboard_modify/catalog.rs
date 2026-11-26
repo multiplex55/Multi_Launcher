@@ -541,6 +541,14 @@ pub fn normalize_name(input: &str) -> String {
     out
 }
 
+/// The stock Saved Pipelines source card shows at most 80 Unicode characters.
+pub fn capped_source_preview(source: &str) -> String {
+    let mut chars = source.chars();
+    let mut preview: String = chars.by_ref().take(80).collect();
+    if chars.next().is_some() { preview.push('…'); }
+    preview
+}
+
 pub fn reserved_names() -> BTreeSet<String> {
     let mut s = BTreeSet::new();
     for w in [

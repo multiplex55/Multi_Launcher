@@ -552,6 +552,59 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn named_intents_use_their_catalog_and_retire_old_completion() {
+        use super::{
+            CancellationToken, OperationId, PreviewCoordinator, PreviewEvent, PreviewState,
+            run_intent,
+        };
+        use crate::clipboard_modify::{defaults::default_catalog, parser::ClipboardModifyIntent};
+        use std::{
+            sync::{Arc, atomic::AtomicBool},
+            time::Duration,
+        };
+        let first = default_catalog();
+        let mut second = first.clone();
+        second
+            .templates
+            .iter_mut()
+            .find(|t| t.id == "markdown-quote")
+            .unwrap()
+            .template = "NEW: {{clipboard}}".into();
+        let intent = ClipboardModifyIntent::ApplyTemplate {
+            name: "markdown-quote".into(),
+        };
+        let cancel = AtomicBool::new(false);
+        assert_eq!(run_intent("é", &intent, &first, &cancel).unwrap(), "> é");
+        assert_eq!(
+            run_intent("é", &intent, &second, &cancel).unwrap(),
+            "NEW: é"
+        );
+        let pipeline = ClipboardModifyIntent::ApplySavedPipeline {
+            name: "clean-lines".into(),
+        };
+        assert_eq!(
+            run_intent(" x \nx", &pipeline, &first, &cancel).unwrap(),
+            "x"
+        );
+        let mut coordinator = PreviewCoordinator::new(Duration::from_secs(60));
+        let old = OperationId(91);
+        coordinator.active = Some((old, CancellationToken::new()));
+        let new = coordinator.request("é".into(), intent, Arc::new(second));
+        coordinator
+            .tx
+            .send(PreviewEvent::Completed {
+                id: old,
+                full: "> é".into(),
+            })
+            .unwrap();
+        coordinator.tick();
+        assert_eq!(
+            coordinator.state(),
+            &PreviewState::PendingDebounce { id: new }
+        );
+        assert!(coordinator.full_output().is_none());
+    }
+    #[test]
     fn checked_cancel_preserves_newer_preview() {
         use super::{PreviewCoordinator, PreviewState};
         use crate::clipboard_modify::{defaults::default_catalog, parser::ClipboardModifyIntent};

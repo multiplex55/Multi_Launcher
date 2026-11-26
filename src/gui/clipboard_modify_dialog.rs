@@ -2838,12 +2838,7 @@ pub fn result_preview_summary(bytes: usize, chars: usize, lines: usize, truncate
 }
 
 pub fn capped_current_source_preview(source: &str) -> String {
-    const CAP: usize = 80;
-    let mut preview: String = source.chars().take(CAP).collect();
-    if source.chars().nth(CAP).is_some() {
-        preview.push('…');
-    }
-    preview
+    crate::clipboard_modify::catalog::capped_source_preview(source)
 }
 
 pub fn external_clipboard_change_warning(cur: &ClipboardSummary) -> String {

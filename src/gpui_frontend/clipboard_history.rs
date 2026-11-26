@@ -1204,6 +1204,10 @@ impl RootWindow {
         cx.notify();
     }
     pub(super) fn scroll_to_clipboard(&self, host: WindowId, cx: &App) {
+        self.root_scroll
+            .scroll_to_top_of_item(self.clipboard_scroll_item(host, cx));
+    }
+    pub(super) fn clipboard_scroll_item(&self, host: WindowId, cx: &App) -> usize {
         let mut index = self.file_search_scroll_item();
         index += usize::from(
             self.file_search
@@ -1243,7 +1247,7 @@ impl RootWindow {
                 .as_ref()
                 .is_some_and(|view| view.read(cx).is_mounted_in(host, false)),
         );
-        self.root_scroll.scroll_to_top_of_item(index);
+        index
     }
 }
 #[cfg(test)]

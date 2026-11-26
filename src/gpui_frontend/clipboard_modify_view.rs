@@ -1,5 +1,6 @@
 //! Retained first Clipboard Modify workflow using the shared engine and service.
 use super::*;
+use gpui_kit::base::Selectable;
 use multi_launcher::clipboard_modify::{
     catalog::{self, ArgumentRequirements},
     clipboard::{CheckedClipboardEffect, CheckedClipboardOutcome, ClipboardReview},
@@ -9,6 +10,9 @@ use multi_launcher::clipboard_modify::{
     runtime::{self, ClipboardModifyRuntime},
 };
 use std::time::Duration;
+#[path = "clipboard_modify_sections.rs"]
+mod sections;
+use multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload as Section;
 fn redacted_read_error(
     error: multi_launcher::clipboard_modify::clipboard::ClipboardError,
 ) -> String {
@@ -35,11 +39,19 @@ enum EffectKind {
     ApplyClose,
     Copy,
 }
+fn section_allows_effect(section: Section, kind: EffectKind) -> bool {
+    match section {
+        Section::Modify => true,
+        Section::Templates | Section::SavedPipelines => kind == EffectKind::Apply,
+        _ => false,
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct EffectReceipt {
     source: u64,
     stages: u64,
     preview: multi_launcher::clipboard_modify::coordinator::OperationId,
+    section_revision: u64,
 }
 struct Review {
     id: u64,
@@ -91,11 +103,7 @@ pub(super) fn current_provider(
             == Some(action)
         && matches!(
             parse_action(action),
-            Ok(Command::ClipboardModify(
-                multi_launcher::commands::ClipboardModifyCommand::Open {
-                    section: multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Modify
-                }
-            ))
+            Ok(Command::ClipboardModify(multi_launcher::commands::ClipboardModifyCommand::Open { section: multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Modify | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Templates | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::SavedPipelines | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Help }))
         )
 }
 pub(super) fn current_undo_provider(
@@ -169,6 +177,9 @@ pub(super) struct ClipboardModifyView {
     next_stage: u64,
     picker: Option<u64>,
     stage_revision: u64,
+    section: Section,
+    section_revision: u64,
+    sections: sections::SectionState,
     catalog: Option<Arc<ClipboardModifierCatalog>>,
     runtime: Option<ClipboardModifyRuntime>,
     preview: PreviewCoordinator,
@@ -181,6 +192,97 @@ pub(super) struct ClipboardModifyView {
     _source_sub: Subscription,
 }
 impl ClipboardModifyView {
+    fn subscribe_source(
+        source: &Entity<TextareaState>,
+        receipt: utility_mount::MountReceipt,
+        section_revision: u64,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(
+            source,
+            move |view: &mut Self, input: Entity<TextareaState>, event: &InputEvent, cx| {
+                if receipt.is_current()
+                    && receipt.matches(&view.mount)
+                    && view.open
+                    && view.section == Section::Modify
+                    && view.section_revision == section_revision
+                    && input.entity_id() == view.source.entity_id()
+                    && matches!(event, InputEvent::Change)
+                {
+                    view.retire_effect_for_edit(cx);
+                    view.source_revision = view.source_revision.wrapping_add(1);
+                    view.read_revision = view.read_revision.wrapping_add(1);
+                    view.read_authority.fetch_add(1, Ordering::AcqRel);
+                    view.queued_read = None;
+                    view.resolved = true;
+                    view.large_allowed = false;
+                    view.schedule(cx);
+                }
+            },
+        )
+    }
+    fn subscribe_stage(
+        id: u64,
+        inputs: [&Entity<InputState>; 5],
+        receipt: utility_mount::MountReceipt,
+        section_revision: u64,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        inputs
+            .into_iter()
+            .zip([
+                Arg::Prefix,
+                Arg::Suffix,
+                Arg::Name,
+                Arg::Language,
+                Arg::Separator,
+            ])
+            .map(|(input, arg)| {
+                let receipt = receipt.clone();
+                cx.subscribe(
+                    input,
+                    move |view: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
+                        if !receipt.is_current()
+                            || !receipt.matches(&view.mount)
+                            || !view.open
+                            || view.section != Section::Modify
+                            || view.section_revision != section_revision
+                            || !matches!(event, InputEvent::Change)
+                        {
+                            return;
+                        }
+                        let value = input.read(cx).value().to_string();
+                        let Some(index) = view.stages.iter().position(|stage| stage.id == id)
+                        else {
+                            return;
+                        };
+                        let stage = &view.stages[index];
+                        let current = match arg {
+                            Arg::Prefix => &stage.prefix,
+                            Arg::Suffix => &stage.suffix,
+                            Arg::Name => &stage.name,
+                            Arg::Language => &stage.language,
+                            Arg::Separator => &stage.separator,
+                        };
+                        if current.entity_id() != input.entity_id() {
+                            return;
+                        }
+                        view.retire_effect_for_edit(cx);
+                        let arguments = &mut view.stages[index].spec.arguments;
+                        let field = match arg {
+                            Arg::Prefix => &mut arguments.prefix,
+                            Arg::Suffix => &mut arguments.suffix,
+                            Arg::Name => &mut arguments.name,
+                            Arg::Language => &mut arguments.language,
+                            Arg::Separator => &mut arguments.separator,
+                        };
+                        *field = Some(value);
+                        view.changed(cx);
+                    },
+                )
+            })
+            .collect()
+    }
     pub(super) fn retire_read_for_undo(&mut self) {
         self.read_revision = self.read_revision.wrapping_add(1);
         self.read_authority.fetch_add(1, Ordering::AcqRel);
@@ -200,26 +302,7 @@ impl ClipboardModifyView {
                 .auto_grow(6, 14)
                 .placeholder("Source text")
         });
-        let source_mount = mount.clone();
-        let source_sub = cx.subscribe(
-            &source,
-            move |view: &mut Self, _: Entity<TextareaState>, event: &InputEvent, cx| {
-                if source_mount.is_current()
-                    && source_mount.matches(&view.mount)
-                    && view.open
-                    && matches!(event, InputEvent::Change)
-                {
-                    view.retire_effect_for_edit(cx);
-                    view.source_revision = view.source_revision.wrapping_add(1);
-                    view.read_revision = view.read_revision.wrapping_add(1);
-                    view.read_authority.fetch_add(1, Ordering::AcqRel);
-                    view.queued_read = None;
-                    view.resolved = true;
-                    view.large_allowed = false;
-                    view.schedule(cx);
-                }
-            },
-        );
+        let source_sub = Self::subscribe_source(&source, mount.clone(), 0, cx);
         Self {
             open: false,
             root,
@@ -251,6 +334,9 @@ impl ClipboardModifyView {
             next_stage: 0,
             picker: None,
             stage_revision: 0,
+            section: Section::Modify,
+            section_revision: 0,
+            sections: sections::SectionState::new(window, cx),
             catalog: None,
             runtime: None,
             preview: PreviewCoordinator::default(),
@@ -270,37 +356,19 @@ impl ClipboardModifyView {
             } else if self.effect_pending.is_some() {
                 self.focus.focus(window, cx);
             } else {
-                self.source.focus_handle(cx).focus(window, cx);
+                self.focus_section(window, cx);
             }
             return;
         }
         if !self.mount.is_current() {
             self.mount = self.owner.attach();
-            let receipt = self.mount.clone();
             let source = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(6, 14)
                     .placeholder("Source text")
             });
-            self._source_sub = cx.subscribe(
-                &source,
-                move |view: &mut Self, _: Entity<TextareaState>, event: &InputEvent, cx| {
-                    if receipt.is_current()
-                        && receipt.matches(&view.mount)
-                        && view.open
-                        && matches!(event, InputEvent::Change)
-                    {
-                        view.retire_effect_for_edit(cx);
-                        view.source_revision = view.source_revision.wrapping_add(1);
-                        view.read_revision = view.read_revision.wrapping_add(1);
-                        view.read_authority.fetch_add(1, Ordering::AcqRel);
-                        view.queued_read = None;
-                        view.resolved = true;
-                        view.large_allowed = false;
-                        view.schedule(cx);
-                    }
-                },
-            );
+            self._source_sub =
+                Self::subscribe_source(&source, self.mount.clone(), self.section_revision, cx);
             self.source = source;
             self.focus = cx.focus_handle();
             self.review_focus = cx.focus_handle();
@@ -310,7 +378,8 @@ impl ClipboardModifyView {
             self.copy_focus = cx.focus_handle();
         }
         self.open = true;
-        self.source.focus_handle(cx).focus(window, cx);
+        self.sync_editor_readonly(cx);
+        self.focus_section(window, cx);
     }
     fn schedule(&mut self, cx: &mut Context<Self>) {
         if !self.resolved {
@@ -329,13 +398,28 @@ impl ClipboardModifyView {
             cx.notify();
             return;
         }
-        self.preview.request(
-            text,
-            ClipboardModifyIntent::Stages(
+        let intent = match self.section {
+            Section::Modify => Some(ClipboardModifyIntent::Stages(
                 self.stages.iter().map(|stage| stage.spec.clone()).collect(),
-            ),
-            catalog,
-        );
+            )),
+            Section::Templates => self
+                .sections
+                .template
+                .as_ref()
+                .map(|name| ClipboardModifyIntent::ApplyTemplate { name: name.clone() }),
+            Section::SavedPipelines => self
+                .sections
+                .pipeline
+                .as_ref()
+                .map(|name| ClipboardModifyIntent::ApplySavedPipeline { name: name.clone() }),
+            _ => None,
+        };
+        let Some(intent) = intent else {
+            self.preview.cancel_and_invalidate();
+            cx.notify();
+            return;
+        };
+        self.preview.request(text, intent, catalog);
         self.pump(cx);
         cx.notify();
     }
@@ -490,7 +574,7 @@ impl ClipboardModifyView {
                 if current { match result {
                     Ok(text) => { view.reset_source = text.clone(); view.reset_resolved = true; view.resolved = true; view.large_allowed = false;
                         view.source_revision = view.source_revision.wrapping_add(1); view.source.update(cx, |input, cx| input.set_value(text, window, cx));
-                        if initial { accepted_initial = true; view.preview.cancel_and_invalidate(); cx.notify(); } else { view.schedule(cx); }
+                        if initial { accepted_initial = true; if view.section == Section::Modify { view.preview.cancel_and_invalidate(); cx.notify(); } else { view.schedule(cx); } } else { view.schedule(cx); }
                     },
                     Err(error) => { view.feedback = Some(error); cx.notify(); }
                 } }
@@ -525,60 +609,13 @@ impl ClipboardModifyView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> StageEditor {
-        let mount = self.mount.clone();
         let prefix = cx.new(|cx| InputState::new(window, cx).placeholder("Prefix"));
         let suffix = cx.new(|cx| InputState::new(window, cx).placeholder("Suffix"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
         let language = cx.new(|cx| InputState::new(window, cx).placeholder("Language"));
         let separator = cx.new(|cx| InputState::new(window, cx).placeholder("Separator"));
-        let mut subs = Vec::new();
-        for (input, arg) in [
-            (&prefix, Arg::Prefix),
-            (&suffix, Arg::Suffix),
-            (&name, Arg::Name),
-            (&language, Arg::Language),
-            (&separator, Arg::Separator),
-        ] {
-            let receipt = mount.clone();
-            subs.push(cx.subscribe(
-                input,
-                move |view: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
-                    if !receipt.is_current()
-                        || !receipt.matches(&view.mount)
-                        || !view.open
-                        || !matches!(event, InputEvent::Change)
-                    {
-                        return;
-                    }
-                    let value = input.read(cx).value().to_string();
-                    let Some(index) = view.stages.iter().position(|stage| stage.id == id) else {
-                        return;
-                    };
-                    let stage = &view.stages[index];
-                    let current_input = match arg {
-                        Arg::Prefix => &stage.prefix,
-                        Arg::Suffix => &stage.suffix,
-                        Arg::Name => &stage.name,
-                        Arg::Language => &stage.language,
-                        Arg::Separator => &stage.separator,
-                    };
-                    if current_input.entity_id() != input.entity_id() {
-                        return;
-                    }
-                    view.retire_effect_for_edit(cx);
-                    let stage = &mut view.stages[index];
-                    let field = match arg {
-                        Arg::Prefix => &mut stage.spec.arguments.prefix,
-                        Arg::Suffix => &mut stage.spec.arguments.suffix,
-                        Arg::Name => &mut stage.spec.arguments.name,
-                        Arg::Language => &mut stage.spec.arguments.language,
-                        Arg::Separator => &mut stage.spec.arguments.separator,
-                    };
-                    *field = Some(value);
-                    view.changed(cx);
-                },
-            ));
-        }
+        let inputs = [&prefix, &suffix, &name, &language, &separator];
+        let subs = Self::subscribe_stage(id, inputs, self.mount.clone(), self.section_revision, cx);
         StageEditor {
             id,
             spec: StageSpec {
@@ -613,8 +650,16 @@ impl ClipboardModifyView {
     }
     fn sync_editor_readonly(&self, cx: &mut Context<Self>) {
         let readonly = self.blocked();
+        let modify_readonly = readonly || self.section != Section::Modify;
         self.source
-            .update(cx, |input, cx| input.set_readonly(readonly, cx));
+            .update(cx, |input, cx| input.set_readonly(modify_readonly, cx));
+        for input in [
+            &self.sections.template_filter,
+            &self.sections.pipeline_filter,
+            &self.sections.help_filter,
+        ] {
+            input.update(cx, |input, cx| input.set_readonly(readonly, cx));
+        }
         for stage in &self.stages {
             for input in [
                 &stage.prefix,
@@ -623,7 +668,7 @@ impl ClipboardModifyView {
                 &stage.language,
                 &stage.separator,
             ] {
-                input.update(cx, |input, cx| input.set_readonly(readonly, cx));
+                input.update(cx, |input, cx| input.set_readonly(modify_readonly, cx));
             }
         }
     }
@@ -645,6 +690,7 @@ impl ClipboardModifyView {
                 source: self.source_revision,
                 stages: self.stage_revision,
                 preview: *id,
+                section_revision: self.section_revision,
             }),
             _ => None,
         }
@@ -658,6 +704,8 @@ impl ClipboardModifyView {
         cx: &mut Context<Self>,
     ) {
         if !self.open
+            || !section_allows_effect(self.section, kind)
+            || !sections::selection_visible(self, cx)
             || self.effect_pending.is_some()
             || self.picker.is_some()
             || self.effect_receipt() != Some(expected)
@@ -848,7 +896,7 @@ impl ClipboardModifyView {
                     if view.review.is_some() {
                         view.review_cancel_focus.focus(window, cx);
                     } else {
-                        view.source.focus_handle(cx).focus(window, cx);
+                        view.focus_section(window, cx);
                     }
                 }
                 cx.notify();
@@ -914,6 +962,60 @@ impl ClipboardModifyView {
         });
         cx.notify();
     }
+    fn select_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked() {
+            return;
+        }
+        if self.section != section {
+            self.section = section;
+            self.section_revision = self.section_revision.wrapping_add(1);
+            self.picker = None;
+            if section == Section::Modify {
+                self._source_sub = Self::subscribe_source(
+                    &self.source,
+                    self.mount.clone(),
+                    self.section_revision,
+                    cx,
+                );
+                for stage in &mut self.stages {
+                    stage._subscriptions = Self::subscribe_stage(
+                        stage.id,
+                        [
+                            &stage.prefix,
+                            &stage.suffix,
+                            &stage.name,
+                            &stage.language,
+                            &stage.separator,
+                        ],
+                        self.mount.clone(),
+                        self.section_revision,
+                        cx,
+                    );
+                }
+            }
+            self.sync_editor_readonly(cx);
+            self.schedule(cx);
+        }
+        self.focus_section(window, cx);
+        cx.notify();
+    }
+    fn focus_section(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.section {
+            Section::Modify => self.source.focus_handle(cx).focus(window, cx),
+            Section::Templates => self
+                .sections
+                .template_filter
+                .focus_handle(cx)
+                .focus(window, cx),
+            Section::SavedPipelines => self
+                .sections
+                .pipeline_filter
+                .focus_handle(cx)
+                .focus(window, cx),
+            Section::Help => self.sections.help_filter.focus_handle(cx).focus(window, cx),
+            _ => {}
+        }
+    }
 }
 impl Render for ClipboardModifyView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -923,6 +1025,7 @@ impl Render for ClipboardModifyView {
             .upgrade()
             .is_some_and(|root| root.read(cx).external_launch.clipboard_undo_pending());
         let revision = self.stage_revision;
+        let section_revision = self.section_revision;
         let key_mount = mount.clone();
         let mut panel = div()
             .id("clipboard-modify")
@@ -985,6 +1088,7 @@ impl Render for ClipboardModifyView {
                     return;
                 }
                 if key == "r"
+                    && view.section == Section::Modify
                     && mods
                         == (Modifiers {
                             control: true,
@@ -1000,6 +1104,14 @@ impl Render for ClipboardModifyView {
                     return;
                 }
                 if key == "enter"
+                    && section_allows_effect(
+                        view.section,
+                        if mods.shift {
+                            EffectKind::ApplyClose
+                        } else {
+                            EffectKind::Apply
+                        },
+                    )
                     && mods
                         == (Modifiers {
                             control: true,
@@ -1031,7 +1143,13 @@ impl Render for ClipboardModifyView {
             .flex_col()
             .gap_2()
             .p_3()
-            .child(Label::new("Clipboard Modify — Modify"));
+            .child(Label::new(match self.section {
+                Section::Modify => "Clipboard Modify — Modify",
+                Section::Templates => "Clipboard Modify — Templates",
+                Section::SavedPipelines => "Clipboard Modify — Saved Pipelines",
+                Section::Help => "Clipboard Modify — Help",
+                _ => "Clipboard Modify",
+            }));
         if self.blocked() {
             if let Some(review) = &self.review {
                 let id = review.id;
@@ -1095,360 +1213,489 @@ impl Render for ClipboardModifyView {
             }
             return panel;
         }
-        panel = panel.child(Textarea::new(&self.source).aria_label("Clipboard Modify source"));
+        let mut tabs = div().flex().gap_2();
+        for (id, label, section) in [
+            ("cm-tab-modify", "Modify", Section::Modify),
+            ("cm-tab-template", "Templates", Section::Templates),
+            (
+                "cm-tab-pipeline",
+                "Saved Pipelines",
+                Section::SavedPipelines,
+            ),
+            ("cm-tab-help", "Help", Section::Help),
+        ] {
+            let receipt = mount.clone();
+            tabs = tabs.child(
+                Button::new(id)
+                    .label(label)
+                    .selected(self.section == section)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if receipt.is_current()
+                            && receipt.matches(&view.mount)
+                            && view.section_revision == section_revision
+                        {
+                            view.select_section(section, window, cx);
+                        }
+                    })),
+            );
+        }
+        panel = panel.child(tabs);
         if undo_pending {
             panel = panel.child(Label::new(UNDO_WAIT));
         }
-        let reload = mount.clone();
-        let reset = mount.clone();
-        panel = panel.child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    Button::new("cm-reload")
-                        .label("Reload clipboard")
-                        .disabled(self.reading || undo_pending)
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            if view.blocked() {
+        if self.section == Section::Modify {
+            panel = panel.child(Textarea::new(&self.source).aria_label("Clipboard Modify source"));
+            let reload = mount.clone();
+            let reset = mount.clone();
+            panel = panel.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("cm-reload")
+                            .label("Reload clipboard")
+                            .disabled(self.reading || undo_pending)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if view.blocked()
+                                    || view.section != Section::Modify
+                                    || view.section_revision != section_revision
+                                {
+                                    return;
+                                }
+                                if reload.is_current() && reload.matches(&view.mount) {
+                                    view.read_source(false, window, cx);
+                                }
+                            })),
+                    )
+                    .child(Button::new("cm-reset").label("Reset").on_click(cx.listener(
+                        move |view, _, window, cx| {
+                            if view.blocked()
+                                || view.section != Section::Modify
+                                || view.section_revision != section_revision
+                                || !reset.is_current()
+                                || !reset.matches(&view.mount)
+                                || !view.open
+                            {
                                 return;
                             }
-                            if reload.is_current() && reload.matches(&view.mount) {
-                                view.read_source(false, window, cx);
-                            }
-                        })),
-                )
-                .child(Button::new("cm-reset").label("Reset").on_click(cx.listener(
-                    move |view, _, window, cx| {
-                        if !reset.is_current() || !reset.matches(&view.mount) || !view.open {
-                            return;
-                        }
-                        view.read_revision = view.read_revision.wrapping_add(1);
-                        view.read_authority.fetch_add(1, Ordering::AcqRel);
-                        view.queued_read = None;
-                        view.resolved = view.reset_resolved;
-                        view.source_revision = view.source_revision.wrapping_add(1);
-                        view.source.update(cx, |input, cx| {
-                            input.set_value(view.reset_source.clone(), window, cx)
-                        });
-                        view.stages.clear();
-                        view.picker = None;
-                        view.large_allowed = false;
-                        view.changed(cx);
-                    },
-                ))),
-        );
+                            view.read_revision = view.read_revision.wrapping_add(1);
+                            view.read_authority.fetch_add(1, Ordering::AcqRel);
+                            view.queued_read = None;
+                            view.resolved = view.reset_resolved;
+                            view.source_revision = view.source_revision.wrapping_add(1);
+                            view.source.update(cx, |input, cx| {
+                                input.set_value(view.reset_source.clone(), window, cx)
+                            });
+                            view.stages.clear();
+                            view.picker = None;
+                            view.large_allowed = false;
+                            view.changed(cx);
+                        },
+                    ))),
+            );
+        }
         if let Some(feedback) = &self.catalog_feedback {
             panel = panel.child(Label::new(feedback.clone()));
         }
         if let Some(feedback) = &self.feedback {
             panel = panel.child(Label::new(feedback.clone()));
         }
-        for (index, stage) in self.stages.iter().enumerate() {
-            let id = stage.id;
-            let info = catalog::operation_by_id(stage.spec.operation);
-            let label = info.map_or("Unknown operation", |info| info.label);
-            let choose = mount.clone();
-            let up = mount.clone();
-            let down = mount.clone();
-            let remove = mount.clone();
-            let mut row = div()
-                .id(SharedString::from(format!("cm-stage-{id}")))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(Label::new(format!("{}: {label}", index + 1)))
-                        .child(
-                            Button::new(SharedString::from(format!("cm-change-{id}")))
-                                .label("Change operation")
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    if view.blocked() {
-                                        return;
-                                    }
-                                    if choose.is_current()
-                                        && choose.matches(&view.mount)
-                                        && view.stage_revision == revision
-                                    {
-                                        view.picker = if view.picker == Some(id) {
-                                            None
-                                        } else {
-                                            Some(id)
+        if self.section == Section::Modify {
+            for (index, stage) in self.stages.iter().enumerate() {
+                let id = stage.id;
+                let info = catalog::operation_by_id(stage.spec.operation);
+                let label = info.map_or("Unknown operation", |info| info.label);
+                let choose = mount.clone();
+                let up = mount.clone();
+                let down = mount.clone();
+                let remove = mount.clone();
+                let mut row = div()
+                    .id(SharedString::from(format!("cm-stage-{id}")))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Label::new(format!("{}: {label}", index + 1)))
+                            .child(
+                                Button::new(SharedString::from(format!("cm-change-{id}")))
+                                    .label("Change operation")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        if view.blocked()
+                                            || view.section != Section::Modify
+                                            || view.section_revision != section_revision
+                                        {
+                                            return;
+                                        }
+                                        if choose.is_current()
+                                            && choose.matches(&view.mount)
+                                            && view.stage_revision == revision
+                                        {
+                                            view.picker = if view.picker == Some(id) {
+                                                None
+                                            } else {
+                                                Some(id)
+                                            };
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("cm-up-{id}")))
+                                    .label("Move up")
+                                    .disabled(index == 0)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        if view.blocked()
+                                            || view.section != Section::Modify
+                                            || view.section_revision != section_revision
+                                        {
+                                            return;
+                                        }
+                                        if up.is_current()
+                                            && up.matches(&view.mount)
+                                            && view.stage_revision == revision
+                                        {
+                                            if let Some(index) =
+                                                view.stages.iter().position(|stage| stage.id == id)
+                                            {
+                                                if index > 0 {
+                                                    view.stages.swap(index, index - 1);
+                                                    view.changed(cx);
+                                                }
+                                            }
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("cm-down-{id}")))
+                                    .label("Move down")
+                                    .disabled(index + 1 == self.stages.len())
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        if view.blocked()
+                                            || view.section != Section::Modify
+                                            || view.section_revision != section_revision
+                                        {
+                                            return;
+                                        }
+                                        if down.is_current()
+                                            && down.matches(&view.mount)
+                                            && view.stage_revision == revision
+                                        {
+                                            if let Some(index) =
+                                                view.stages.iter().position(|stage| stage.id == id)
+                                            {
+                                                if index + 1 < view.stages.len() {
+                                                    view.stages.swap(index, index + 1);
+                                                    view.changed(cx);
+                                                }
+                                            }
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("cm-remove-{id}")))
+                                    .label("Remove stage")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        if view.blocked()
+                                            || view.section != Section::Modify
+                                            || view.section_revision != section_revision
+                                        {
+                                            return;
+                                        }
+                                        if remove.is_current()
+                                            && remove.matches(&view.mount)
+                                            && view.stage_revision == revision
+                                        {
+                                            if let Some(index) =
+                                                view.stages.iter().position(|stage| stage.id == id)
+                                            {
+                                                view.stages.remove(index);
+                                                view.picker = None;
+                                                view.changed(cx);
+                                            }
+                                        }
+                                    })),
+                            ),
+                    );
+                if let Some(info) = info {
+                    row = match info.argument_requirements {
+                        ArgumentRequirements::CustomWrap => row
+                            .child(Input::new(&stage.prefix).aria_label("Prefix"))
+                            .child(Input::new(&stage.suffix).aria_label("Suffix")),
+                        ArgumentRequirements::NamedWrap | ArgumentRequirements::Template => {
+                            row.child(Input::new(&stage.name).aria_label("Template or wrapper"))
+                        }
+                        ArgumentRequirements::CodeBlock => {
+                            row.child(Input::new(&stage.language).aria_label("Language"))
+                        }
+                        ArgumentRequirements::OptionalSeparator => {
+                            let receipt = mount.clone();
+                            let present = stage.spec.arguments.separator.is_some();
+                            let row =
+                                row.child(
+                                    Button::new(SharedString::from(format!(
+                                        "cm-separator-presence-{id}"
+                                    )))
+                                    .label(if present {
+                                        "Use default separator"
+                                    } else {
+                                        "Set separator"
+                                    })
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        if view.blocked()
+                                            || view.section != Section::Modify
+                                            || view.section_revision != section_revision
+                                        {
+                                            return;
+                                        }
+                                        if !receipt.is_current()
+                                            || !receipt.matches(&view.mount)
+                                            || view.stage_revision != revision
+                                        {
+                                            return;
+                                        }
+                                        let Some(stage) =
+                                            view.stages.iter_mut().find(|stage| stage.id == id)
+                                        else {
+                                            return;
                                         };
-                                        cx.notify();
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("cm-up-{id}")))
-                                .label("Move up")
-                                .disabled(index == 0)
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    if view.blocked() {
-                                        return;
-                                    }
-                                    if up.is_current()
-                                        && up.matches(&view.mount)
-                                        && view.stage_revision == revision
-                                    {
-                                        if let Some(index) =
-                                            view.stages.iter().position(|stage| stage.id == id)
-                                        {
-                                            if index > 0 {
-                                                view.stages.swap(index, index - 1);
-                                                view.changed(cx);
-                                            }
-                                        }
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("cm-down-{id}")))
-                                .label("Move down")
-                                .disabled(index + 1 == self.stages.len())
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    if view.blocked() {
-                                        return;
-                                    }
-                                    if down.is_current()
-                                        && down.matches(&view.mount)
-                                        && view.stage_revision == revision
-                                    {
-                                        if let Some(index) =
-                                            view.stages.iter().position(|stage| stage.id == id)
-                                        {
-                                            if index + 1 < view.stages.len() {
-                                                view.stages.swap(index, index + 1);
-                                                view.changed(cx);
-                                            }
-                                        }
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("cm-remove-{id}")))
-                                .label("Remove stage")
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    if view.blocked() {
-                                        return;
-                                    }
-                                    if remove.is_current()
-                                        && remove.matches(&view.mount)
-                                        && view.stage_revision == revision
-                                    {
-                                        if let Some(index) =
-                                            view.stages.iter().position(|stage| stage.id == id)
-                                        {
-                                            view.stages.remove(index);
-                                            view.picker = None;
-                                            view.changed(cx);
-                                        }
-                                    }
-                                })),
-                        ),
-                );
-            if let Some(info) = info {
-                row = match info.argument_requirements {
-                    ArgumentRequirements::CustomWrap => row
-                        .child(Input::new(&stage.prefix).aria_label("Prefix"))
-                        .child(Input::new(&stage.suffix).aria_label("Suffix")),
-                    ArgumentRequirements::NamedWrap | ArgumentRequirements::Template => {
-                        row.child(Input::new(&stage.name).aria_label("Template or wrapper"))
-                    }
-                    ArgumentRequirements::CodeBlock => {
-                        row.child(Input::new(&stage.language).aria_label("Language"))
-                    }
-                    ArgumentRequirements::OptionalSeparator => {
+                                        stage.spec.arguments.separator =
+                                            if present { None } else { Some(String::new()) };
+                                        stage.separator.update(cx, |input, cx| {
+                                            input.set_value("", window, cx)
+                                        });
+                                        view.changed(cx);
+                                    })),
+                                );
+                            if present {
+                                row.child(Input::new(&stage.separator).aria_label("Separator"))
+                            } else {
+                                row
+                            }
+                        }
+                        ArgumentRequirements::RequiredSeparator => {
+                            row.child(Input::new(&stage.separator).aria_label("Separator"))
+                        }
+                        ArgumentRequirements::None => row,
+                    };
+                }
+                if self.picker == Some(id) {
+                    let mut list = div()
+                        .id(SharedString::from(format!("cm-operations-{id}")))
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .max_h(px(170.))
+                        .overflow_y_scroll();
+                    for operation in catalog::operations()
+                        .iter()
+                        .filter(|op| op.pipeline_available)
+                    {
                         let receipt = mount.clone();
-                        let present = stage.spec.arguments.separator.is_some();
-                        let row = row.child(
-                            Button::new(SharedString::from(format!("cm-separator-presence-{id}")))
-                                .label(if present {
-                                    "Use default separator"
-                                } else {
-                                    "Set separator"
-                                })
+                        let op = operation.id;
+                        list = list.child(
+                            Button::new(SharedString::from(format!("cm-operation-{id}-{op:?}")))
+                                .label(operation.label)
                                 .on_click(cx.listener(move |view, _, window, cx| {
-                                    if view.blocked() {
+                                    if view.blocked()
+                                        || view.section != Section::Modify
+                                        || view.section_revision != section_revision
+                                    {
                                         return;
                                     }
                                     if !receipt.is_current()
                                         || !receipt.matches(&view.mount)
                                         || view.stage_revision != revision
+                                        || view.picker != Some(id)
                                     {
                                         return;
                                     }
-                                    let Some(stage) =
-                                        view.stages.iter_mut().find(|stage| stage.id == id)
+                                    let Some(index) =
+                                        view.stages.iter().position(|stage| stage.id == id)
                                     else {
                                         return;
                                     };
-                                    stage.spec.arguments.separator =
-                                        if present { None } else { Some(String::new()) };
-                                    stage
-                                        .separator
-                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                    if view.stages[index].spec.operation == op {
+                                        view.picker = None;
+                                        cx.notify();
+                                        return;
+                                    }
+                                    let stage = view.build_stage(id, op, window, cx);
+                                    view.stages[index] = stage;
+                                    view.picker = None;
                                     view.changed(cx);
                                 })),
                         );
-                        if present {
-                            row.child(Input::new(&stage.separator).aria_label("Separator"))
-                        } else {
-                            row
-                        }
                     }
-                    ArgumentRequirements::RequiredSeparator => {
-                        row.child(Input::new(&stage.separator).aria_label("Separator"))
-                    }
-                    ArgumentRequirements::None => row,
-                };
+                    row = row.child(list);
+                }
+                panel = panel.child(row);
             }
-            if self.picker == Some(id) {
-                let mut list = div()
-                    .id(SharedString::from(format!("cm-operations-{id}")))
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .max_h(px(170.))
-                    .overflow_y_scroll();
-                for operation in catalog::operations()
-                    .iter()
-                    .filter(|op| op.pipeline_available)
-                {
-                    let receipt = mount.clone();
-                    let op = operation.id;
-                    list = list.child(
-                        Button::new(SharedString::from(format!("cm-operation-{id}-{op:?}")))
-                            .label(operation.label)
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                if view.blocked() {
-                                    return;
-                                }
-                                if !receipt.is_current()
-                                    || !receipt.matches(&view.mount)
-                                    || view.stage_revision != revision
-                                    || view.picker != Some(id)
+            let add = mount.clone();
+            let wrap = mount.clone();
+            let allow = mount.clone();
+            let consent_revision = self.source_revision;
+            let cancel_preview = mount.clone();
+            let preview_operation = self.preview.current_operation();
+            let close = mount.clone();
+            panel =
+                panel.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Button::new("cm-add-stage").label("Add stage").on_click(
+                            cx.listener(move |view, _, window, cx| {
+                                if view.blocked()
+                                    || view.section != Section::Modify
+                                    || view.section_revision != section_revision
                                 {
                                     return;
                                 }
-                                let Some(index) =
-                                    view.stages.iter().position(|stage| stage.id == id)
-                                else {
-                                    return;
-                                };
-                                if view.stages[index].spec.operation == op {
-                                    view.picker = None;
-                                    cx.notify();
+                                if add.is_current() && add.matches(&view.mount) && view.open {
+                                    view.add_stage(window, cx);
+                                }
+                            }),
+                        ))
+                        .child(
+                            Button::new("cm-wrap-preview")
+                                .label(if self.wrap {
+                                    "Wrap preview: On"
+                                } else {
+                                    "Wrap preview: Off"
+                                })
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    if view.blocked()
+                                        || view.section != Section::Modify
+                                        || view.section_revision != section_revision
+                                    {
+                                        return;
+                                    }
+                                    if wrap.is_current() && wrap.matches(&view.mount) {
+                                        view.wrap = !view.wrap;
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("cm-cancel-preview")
+                                .label("Cancel Preview")
+                                .disabled(!self.preview.is_active())
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    if view.blocked()
+                                        || view.section != Section::Modify
+                                        || view.section_revision != section_revision
+                                    {
+                                        return;
+                                    }
+                                    if cancel_preview.is_current()
+                                        && cancel_preview.matches(&view.mount)
+                                        && preview_operation
+                                            .is_some_and(|id| view.preview.cancel_if_current(id))
+                                    {
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("cm-close")
+                                .label("Close")
+                                .disabled(self.initializing)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if view.blocked()
+                                        || view.section != Section::Modify
+                                        || view.section_revision != section_revision
+                                    {
+                                        return;
+                                    }
+                                    if close.is_current() && close.matches(&view.mount) {
+                                        view.close(window, cx);
+                                    }
+                                })),
+                        ),
+                );
+            if self.section != Section::Help
+                && self.source.read(cx).value().len() > LARGE_SOURCE
+                && !self.large_allowed
+            {
+                panel = panel
+                    .child(Label::new("Source exceeds 5 MiB. Preview may take longer."))
+                    .child(
+                        Button::new("cm-allow-large")
+                            .label("Preview large source")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if view.blocked()
+                                    || view.section != Section::Modify
+                                    || view.section_revision != section_revision
+                                {
                                     return;
                                 }
-                                let stage = view.build_stage(id, op, window, cx);
-                                view.stages[index] = stage;
-                                view.picker = None;
-                                view.changed(cx);
+                                if allow.is_current()
+                                    && allow.matches(&view.mount)
+                                    && consent_is_current(
+                                        consent_revision,
+                                        view.source_revision,
+                                        view.source.read(cx).value().len(),
+                                    )
+                                {
+                                    view.large_allowed = true;
+                                    view.schedule(cx);
+                                }
                             })),
                     );
-                }
-                row = row.child(list);
             }
-            panel = panel.child(row);
+        } else {
+            panel = sections::render(self, panel, cx);
+            let close = mount.clone();
+            let section = self.section;
+            panel = panel.child(
+                Button::new("cm-close-other")
+                    .label("Close")
+                    .disabled(self.initializing)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if !view.blocked()
+                            && view.section == section
+                            && view.section_revision == section_revision
+                            && close.is_current()
+                            && close.matches(&view.mount)
+                        {
+                            view.close(window, cx);
+                        }
+                    })),
+            );
+            if self.section != Section::Help
+                && self.source.read(cx).value().len() > LARGE_SOURCE
+                && !self.large_allowed
+            {
+                let allow = mount.clone();
+                let consent_revision = self.source_revision;
+                panel = panel
+                    .child(Label::new("Source exceeds 5 MiB. Preview may take longer."))
+                    .child(
+                        Button::new("cm-allow-large-other")
+                            .label("Preview large source")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if !view.blocked()
+                                    && view.section == section
+                                    && view.section_revision == section_revision
+                                    && allow.is_current()
+                                    && allow.matches(&view.mount)
+                                    && consent_is_current(
+                                        consent_revision,
+                                        view.source_revision,
+                                        view.source.read(cx).value().len(),
+                                    )
+                                {
+                                    view.large_allowed = true;
+                                    view.schedule(cx);
+                                }
+                            })),
+                    );
+            }
         }
-        let add = mount.clone();
-        let wrap = mount.clone();
-        let allow = mount.clone();
-        let consent_revision = self.source_revision;
-        let cancel_preview = mount.clone();
-        let preview_operation = self.preview.current_operation();
-        let close = mount.clone();
-        panel = panel.child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    Button::new("cm-add-stage")
-                        .label("Add stage")
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            if view.blocked() {
-                                return;
-                            }
-                            if add.is_current() && add.matches(&view.mount) && view.open {
-                                view.add_stage(window, cx);
-                            }
-                        })),
-                )
-                .child(
-                    Button::new("cm-wrap-preview")
-                        .label(if self.wrap {
-                            "Wrap preview: On"
-                        } else {
-                            "Wrap preview: Off"
-                        })
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            if view.blocked() {
-                                return;
-                            }
-                            if wrap.is_current() && wrap.matches(&view.mount) {
-                                view.wrap = !view.wrap;
-                                cx.notify();
-                            }
-                        })),
-                )
-                .child(
-                    Button::new("cm-cancel-preview")
-                        .label("Cancel Preview")
-                        .disabled(!self.preview.is_active())
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            if view.blocked() {
-                                return;
-                            }
-                            if cancel_preview.is_current()
-                                && cancel_preview.matches(&view.mount)
-                                && preview_operation
-                                    .is_some_and(|id| view.preview.cancel_if_current(id))
-                            {
-                                cx.notify();
-                            }
-                        })),
-                )
-                .child(
-                    Button::new("cm-close")
-                        .label("Close")
-                        .disabled(self.initializing)
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            if view.blocked() {
-                                return;
-                            }
-                            if close.is_current() && close.matches(&view.mount) {
-                                view.close(window, cx);
-                            }
-                        })),
-                ),
-        );
-        if self.source.read(cx).value().len() > LARGE_SOURCE && !self.large_allowed {
-            panel = panel
-                .child(Label::new("Source exceeds 5 MiB. Preview may take longer."))
-                .child(
-                    Button::new("cm-allow-large")
-                        .label("Preview large source")
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            if view.blocked() {
-                                return;
-                            }
-                            if allow.is_current()
-                                && allow.matches(&view.mount)
-                                && consent_is_current(
-                                    consent_revision,
-                                    view.source_revision,
-                                    view.source.read(cx).value().len(),
-                                )
-                            {
-                                view.large_allowed = true;
-                                view.schedule(cx);
-                            }
-                        })),
-                );
+        if self.section == Section::Help {
+            return panel;
         }
         let (text, summary) = match self.preview.state() {
             PreviewState::IdleMissing => ("Preview unavailable.".to_owned(), None),
@@ -1491,11 +1738,19 @@ impl Render for ClipboardModifyView {
         });
         let effect_receipt = self.effect_receipt();
         let available = effect_receipt.is_some() && self.picker.is_none() && !undo_pending;
+        let apply_label = match self.section {
+            Section::Templates => "Apply Template",
+            Section::SavedPipelines => "Execute",
+            _ => "Apply",
+        };
         for (id, label, kind) in [
-            ("cm-apply", "Apply", EffectKind::Apply),
+            ("cm-apply", apply_label, EffectKind::Apply),
             ("cm-apply-close", "Apply and Close", EffectKind::ApplyClose),
             ("cm-copy-result", "Copy Result", EffectKind::Copy),
         ] {
+            if self.section != Section::Modify {
+                continue;
+            }
             let receipt = mount.clone();
             let focus = match kind {
                 EffectKind::Apply => &self.apply_focus,
@@ -1520,7 +1775,12 @@ impl Render for ClipboardModifyView {
     }
 }
 impl RootWindow {
-    pub(super) fn open_clipboard_modify(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_clipboard_modify(
+        &mut self,
+        section: Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.restart_admission.is_fenced() {
             return;
         }
@@ -1540,7 +1800,10 @@ impl RootWindow {
             .clone()
             .unwrap_or_else(|| cx.new(|cx| ClipboardModifyView::new(window, cx, root)));
         let was_open = view.read(cx).open;
-        view.update(cx, |view, cx| view.reopen(window, cx));
+        view.update(cx, |view, cx| {
+            view.reopen(window, cx);
+            view.select_section(section, window, cx);
+        });
         self.clipboard_modify_view = Some(view.clone());
         if !was_open {
             let weak = view.downgrade();
@@ -1558,7 +1821,13 @@ impl RootWindow {
                 });
             });
         }
-        self.root_scroll.scroll_to_bottom();
+        let host = window.window_handle().window_id();
+        let history = self
+            .clipboard_history
+            .as_ref()
+            .is_some_and(|view| view.read(cx).is_mounted_in(host, false));
+        self.root_scroll
+            .scroll_to_top_of_item(self.clipboard_scroll_item(host, cx) + usize::from(history));
         cx.notify();
     }
 }
@@ -1577,13 +1846,15 @@ mod tests {
             source: 1,
             stages: 2,
             preview: OperationId(3),
+            section_revision: 1,
         };
         assert!(
             current
                 == EffectReceipt {
                     source: 1,
                     stages: 2,
-                    preview: OperationId(3)
+                    preview: OperationId(3),
+                    section_revision: 1
                 }
         );
         assert!(
@@ -1591,7 +1862,8 @@ mod tests {
                 != EffectReceipt {
                     source: 1,
                     stages: 2,
-                    preview: OperationId(4)
+                    preview: OperationId(4),
+                    section_revision: 1
                 }
         );
         assert!(
@@ -1599,7 +1871,17 @@ mod tests {
                 != EffectReceipt {
                     source: 2,
                     stages: 2,
-                    preview: OperationId(3)
+                    preview: OperationId(3),
+                    section_revision: 1
+                }
+        );
+        assert!(
+            current
+                != EffectReceipt {
+                    source: 1,
+                    stages: 2,
+                    preview: OperationId(3),
+                    section_revision: 2
                 }
         );
         assert!(current_completion(Some(7), 7));
@@ -1608,6 +1890,22 @@ mod tests {
         assert!(held_activation(true, Default::default(), "enter"));
         assert!(held_activation(true, Default::default(), "space"));
         assert!(!held_activation(false, Default::default(), "enter"));
+    }
+    #[test]
+    fn section_effect_scope_excludes_wrong_controls() {
+        use super::{EffectKind, Section, section_allows_effect};
+        assert!(section_allows_effect(Section::Modify, EffectKind::Copy));
+        assert!(section_allows_effect(Section::Templates, EffectKind::Apply));
+        assert!(section_allows_effect(
+            Section::SavedPipelines,
+            EffectKind::Apply
+        ));
+        assert!(!section_allows_effect(Section::Templates, EffectKind::Copy));
+        assert!(!section_allows_effect(
+            Section::SavedPipelines,
+            EffectKind::ApplyClose
+        ));
+        assert!(!section_allows_effect(Section::Help, EffectKind::Apply));
     }
     #[test]
     fn old_mount_pump_and_old_large_consent_are_rejected() {
@@ -1684,6 +1982,14 @@ mod tests {
         assert!(current_provider("cm modify", &modify, None, None));
         assert!(!current_provider("cm help", &root, None, None));
         assert!(!current_provider("cm modify", &root, None, None));
+        for query in ["cm template", "cm apply", "cm help"] {
+            let action =
+                multi_launcher::plugins::clipboard_modify::bare_modify_opener(query).unwrap();
+            assert!(current_provider(query, &action, None, None));
+            let mut forged = action.clone();
+            forged.label.push('!');
+            assert!(!current_provider(query, &forged, None, None));
+        }
     }
     #[test]
     fn undo_route_requires_exact_stock_action_query_and_enablement() {
@@ -1707,7 +2013,14 @@ mod tests {
                 .iter()
                 .map(|action| action.action.as_str())
                 .collect::<Vec<_>>(),
-            vec!["query:cm", "query:cm undo"]
+            vec![
+                "query:cm",
+                "query:cm modify",
+                "query:cm template",
+                "query:cm apply",
+                "query:cm help",
+                "query:cm undo"
+            ]
         );
     }
 }

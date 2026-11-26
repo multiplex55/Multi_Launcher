@@ -200,7 +200,17 @@ pub fn bare_modify_opener(query: &str) -> Option<Action> {
     if words.next().is_some_and(|word| word.eq_ignore_ascii_case("cm"))
         && words.next().is_some_and(|word| word.eq_ignore_ascii_case("modify")) && words.next().is_none() {
         Some(section_action(ModifySection::Modify))
-    } else { None }
+    } else {
+        let mut words = query.split_whitespace();
+        if !words.next().is_some_and(|word| word.eq_ignore_ascii_case("cm")) { return None; }
+        let section = match words.next()?.to_ascii_lowercase().as_str() {
+            "template" => ModifySection::Templates,
+            "apply" => ModifySection::SavedPipelines,
+            "help" => ModifySection::Help,
+            _ => return None,
+        };
+        words.next().is_none().then(|| section_action(section))
+    }
 }
 
 /// Admit the stock Undo action without constructing the catalog or runtime.
@@ -213,7 +223,7 @@ pub fn bare_undo_action(query: &str) -> Option<Action> {
 }
 
 pub fn admitted_modify_commands() -> Vec<Action> {
-    cm_static_commands().into_iter().filter(|action| matches!(action.action.as_str(), "query:cm" | "query:cm undo")).collect()
+    cm_static_commands().into_iter().filter(|action| matches!(action.action.as_str(), "query:cm" | "query:cm modify" | "query:cm template" | "query:cm apply" | "query:cm help" | "query:cm undo")).collect()
 }
 
 fn is_exact_cm_root_query(query: &str) -> bool {

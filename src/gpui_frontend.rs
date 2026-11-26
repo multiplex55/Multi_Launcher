@@ -2052,7 +2052,7 @@ enum InstalledSearchRoute {
     XmlUtility,
     RegexTester,
     ClipboardHistory,
-    ClipboardModify,
+    ClipboardModify(multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload),
     FavoritesBrowse,
     FavoritesNamed(String),
 }
@@ -8146,7 +8146,11 @@ impl RootWindow {
         let clipboard_open = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard")
             && clipboard_history::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref());
         let installed_invocation = match if modify_open {
-            parse_command(result.action, None, source).map(|invocation| InstalledSearchInvocation { invocation, route: InstalledSearchRoute::ClipboardModify }).map_err(|error| InstalledSearchActionError::Unsupported(error.to_string()))
+            parse_command(result.action, None, source).and_then(|invocation| {
+                let Command::ClipboardModify(multi_launcher::commands::ClipboardModifyCommand::Open { section }) = &invocation.command else { unreachable!() };
+                let section = *section;
+                Ok(InstalledSearchInvocation { invocation, route: InstalledSearchRoute::ClipboardModify(section) })
+            }).map_err(|error| InstalledSearchActionError::Unsupported(error.to_string()))
         } else if clipboard_open {
             parse_command(result.action, None, source).map(|invocation| InstalledSearchInvocation { invocation, route: InstalledSearchRoute::ClipboardHistory }).map_err(|error| InstalledSearchActionError::Unsupported(error.to_string()))
         } else { parse_installed_search_invocation(result.action, source) } {
@@ -8238,7 +8242,7 @@ impl RootWindow {
             InstalledSearchRoute::XmlUtility => { drop(operation); self.open_xml_toolkit(window, cx); }
             InstalledSearchRoute::RegexTester => { drop(operation); self.open_regex_tester(window, cx); }
             InstalledSearchRoute::ClipboardHistory => { drop(operation); self.open_clipboard_history(window, cx); }
-            InstalledSearchRoute::ClipboardModify => { drop(operation); self.open_clipboard_modify(window, cx); }
+            InstalledSearchRoute::ClipboardModify(section) => { drop(operation); self.open_clipboard_modify(section, window, cx); }
             InstalledSearchRoute::FavoritesBrowse => {
                 drop(operation);
                 let focus = Some(self.query.focus_handle(cx));

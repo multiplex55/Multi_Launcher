@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Clipboard Modify Undo is available through exact `cm undo` in Launcher Search, including with the pane closed. All 12 focused tests passed. Matched Windows replay remains open. Templates, Saved Pipelines and Help follow. [Undo checkpoint](CHECKPOINTS.md#g13-clipboard-modify-typed-undo)
+Clipboard Modify has Templates, Saved Pipelines and Help in one retained docked workspace. Template and pipeline actions use the exact completed preview. All 18 focused tests passed across two runs from one linked batch. Matched Windows replay remains open. Manage Templates and Manage Pipelines follow. [Catalog checkpoint](CHECKPOINTS.md#g13-clipboard-modify-templates-saved-pipelines-and-help)
+
+Clipboard Modify Undo is available through exact `cm undo` in Launcher Search, including with the pane closed. All 12 focused tests passed. Matched Windows replay remains open. [Undo checkpoint](CHECKPOINTS.md#g13-clipboard-modify-typed-undo)
 
 Docked Clipboard Modify supports checked Apply, Apply and Close, Copy Result and exact Overwrite review through the shared clipboard service. All 14 focused tests passed. Matched Windows replay remains open. [Checked effects checkpoint](CHECKPOINTS.md#g13-clipboard-modify-checked-clipboard-effects)
 
@@ -137,7 +139,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add Clipboard Modify Templates, Saved Pipelines and Help using one retained source and the shared checked pipeline. Matched Clipboard History and Modify replay, remaining structured text targets, and broader native acceptance stay open. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Implement checked Clipboard Modify Manage Templates and Manage Pipelines against the canonical catalog. Matched Clipboard History and Modify replay, remaining structured text targets, and broader native acceptance stay open. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
