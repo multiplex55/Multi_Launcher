@@ -85,21 +85,7 @@ pub(super) fn host_current(
     if window.has_active_dialog(cx) || !window.is_window_active() {
         return false;
     }
-    let Some(root) = view.root.upgrade() else {
-        return false;
-    };
-    let root = root.read(cx);
-    !root.restart_admission.is_fenced()
-        && root
-            .root_window
-            .is_some_and(|host| host.window_id() == window.window_handle().window_id())
-        && root
-            .clipboard_modify_view
-            .as_ref()
-            .is_some_and(|current| current.entity_id() == cx.entity().entity_id())
-        && root
-            .native_window
-            .is_some_and(|native| current_foreground_identity() == Some(native.identity))
+    host::HostAuthority::capture(view, window, cx).is_some()
 }
 pub(super) fn launcher_effect_pending(view: &ClipboardModifyView, cx: &App) -> bool {
     view.root
@@ -359,6 +345,18 @@ pub(super) fn ensure_templates(
     }
 }
 
+pub(super) fn remount(view: &mut ClipboardModifyView, window: &mut Window, cx: &mut Context<ClipboardModifyView>) {
+    let rows: Vec<_> = view.management.rows.iter().map(|row| (
+        row.token, row.persisted_id.clone(), Management::snapshot_row(row, cx), row.aliases.read(cx).value().to_string()
+    )).collect();
+    view.management.rows = rows.into_iter().map(|(token, persisted, value, aliases)| {
+        let mut row = make_row(&value, token, window, cx, view.mount.clone(), view.section_revision);
+        row.persisted_id = persisted;
+        row.aliases.update(cx, |input, cx| input.set_value(aliases, window, cx));
+        row
+    }).collect();
+}
+
 fn save_templates(
     view: &mut ClipboardModifyView,
     window: &mut Window,
@@ -387,28 +385,12 @@ fn save_templates(
         return;
     };
     let root = root.read(cx);
-    let Some(native) = root.native_window else {
-        return;
-    };
-    let host = window.window_handle();
-    if root.external_launch.clipboard_effect_pending()
-        || !root
-            .clipboard_modify_view
-            .as_ref()
-            .is_some_and(|current| current.entity_id() == cx.entity().entity_id())
-        || root
-            .root_window
-            .is_none_or(|root| root.window_id() != host.window_id())
-        || current_foreground_identity() != Some(native.identity)
-    {
-        return;
-    }
+    let Some(host_authority) = host::HostAuthority::capture(view, window, cx) else { return; };
+    let host = host_authority.host;
+    if root.external_launch.clipboard_effect_pending() { return; }
     let Some(permit) = root.restart_admission.admit() else {
         return;
     };
-    let admission = root.restart_admission.clone();
-    let visibility = root.root_visibility.clone();
-    let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
     let store = runtime.store.clone();
     let draft = view.management.snapshot(cx);
     let draft_tokens: Vec<_> = view.management.rows.iter().map(|row| row.token).collect();
@@ -419,21 +401,12 @@ fn save_templates(
     view.management.feedback = None;
     view.sync_editor_readonly(cx);
     let receipt = view.mount.clone();
-    let worker_mount = receipt.clone();
+    let worker_host = host_authority;
     let authority = view.management.authority.clone();
     let epoch = authority.load(Ordering::Acquire);
     let task = cx.background_executor().spawn(async move {
         let current = || {
-            worker_mount.is_current()
-                && authority.load(Ordering::Acquire) == epoch
-                && !admission.is_fenced()
-                && json_utility::native_host_current(
-                    &visibility,
-                    visibility_revision,
-                    Some(native),
-                    false,
-                )
-                && current_foreground_identity() == Some(native.identity)
+            authority.load(Ordering::Acquire) == epoch && worker_host.current()
         };
         store.save_checked(
             CheckedCatalogEdit::Templates {
@@ -510,20 +483,17 @@ fn discard_and_reload(
         return;
     };
     let root = root.read(cx);
-    let Some(native) = root.native_window else {
-        return;
-    };
+    let Some(host_authority) = host::HostAuthority::capture(view, window, cx) else { return; };
+    let native = host_authority.native;
     let Some(permit) = root.restart_admission.admit() else {
         return;
     };
     let admission = root.restart_admission.clone();
-    let visibility = root.root_visibility.clone();
-    let ack_visibility = visibility.clone();
     let ack_admission = admission.clone();
-    let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
-    let host = window.window_handle();
+    let host = host_authority.host;
+    let ack_host = host_authority.clone();
     let receipt = view.mount.clone();
-    let worker_mount = receipt.clone();
+    let worker_host = host_authority;
     let authority = view.management.authority.clone();
     let ack_authority = authority.clone();
     let epoch = authority.load(Ordering::Acquire);
@@ -535,16 +505,7 @@ fn discard_and_reload(
     view.sync_editor_readonly(cx);
     let task = cx.background_executor().spawn(async move {
         let current = || {
-            worker_mount.is_current()
-                && authority.load(Ordering::Acquire) == epoch
-                && !admission.is_fenced()
-                && json_utility::native_host_current(
-                    &visibility,
-                    visibility_revision,
-                    Some(native),
-                    false,
-                )
-                && current_foreground_identity() == Some(native.identity)
+            authority.load(Ordering::Acquire) == epoch && worker_host.current()
         };
         store.refresh_checked(&current)
     });
@@ -574,8 +535,7 @@ fn discard_and_reload(
                 ack_authority.load(Ordering::Acquire) == epoch && !ack_admission.is_fenced(),
                 host_current(view, window, cx) && window.window_handle().window_id() == host.window_id()
                     && current_foreground_identity() == Some(native.identity)
-                    && view.root.upgrade().is_some_and(|root| root.read(cx).native_window == Some(native))
-                    && json_utility::native_host_current(&ack_visibility, visibility_revision, Some(native), false),
+                    && ack_host.current_for(view, window, cx),
             );
             if !may_replace {
                 view.management.feedback = Some(if loaded { "Catalog refreshed; the draft was retained because its window or contents changed." } else { "Reload was superseded. Draft retained." }.into());

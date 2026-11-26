@@ -1,6 +1,6 @@
 # G13 — Clipboard history, Clipboard Modify, snippets, and temporary files
 
-**Status:** In progress. **Owner:** G13 implementer with clipboard/runtime/persistence owners. Clipboard History reaches checked Save, Copy, Remove and retained Dock and Pop Out. Docked Clipboard Modify has all six sections, checked clipboard writes, typed Undo, canonical catalog management and Direct Execute from Search. The remaining host and settings work follows. [Current checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-direct-execute)
+**Status:** In progress. **Owner:** G13 implementer with clipboard/runtime/persistence owners. Clipboard History reaches checked Save, Copy, Remove and retained Dock and Pop Out. Clipboard Modify has all six sections across the remembered hosts, checked clipboard writes, typed Undo, canonical catalog management and Direct Execute from Search. Retained Snippets is the next implementation. Clipboard settings, remaining host variants and matched replay remain open. [Current checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-remembered-dock-and-pop-out)
 
 ## Objective and dependencies
 

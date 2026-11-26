@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Clipboard Modify runs checked named templates, saved pipelines and inline stages directly from Search. The launcher owns one shared canonical catalog. All 26 focused tests passed across two runs from one linked batch. Matched Windows replay remains open. Remembered Dock and Pop Out follow. [Direct Execute checkpoint](CHECKPOINTS.md#g13-clipboard-modify-direct-execute)
+Clipboard Modify uses the shared remembered Dock and Pop Out host. Source, previews, management drafts and idle reviews move with the session. All 33 focused tests passed on the final source. Matched Windows replay remains open. The next G13 implementation is the retained Snippets editor. [Clipboard Modify host checkpoint](CHECKPOINTS.md#g13-clipboard-modify-remembered-dock-and-pop-out)
+
+Clipboard Modify runs checked named templates, saved pipelines and inline stages directly from Search. The launcher owns one shared canonical catalog. All 26 focused tests passed across two runs from one linked batch. Matched Windows replay remains open. [Direct Execute checkpoint](CHECKPOINTS.md#g13-clipboard-modify-direct-execute)
 
 Clipboard Modify includes Manage Templates and Manage Pipelines with checked canonical Save, stable drafts, reference checks, and exact Delete review. All 27 focused tests passed. Matched Windows replay remains open. [Management checkpoint](CHECKPOINTS.md#g13-clipboard-modify-catalog-management)
 

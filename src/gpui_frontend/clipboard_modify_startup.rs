@@ -55,9 +55,9 @@ impl RootWindow {
         {
             return;
         }
-        let Some(host) = self.root_window else {
+        if self.root_window.is_none() {
             return;
-        };
+        }
         let Some(permit) = self.restart_admission.admit() else {
             return;
         };
@@ -89,7 +89,8 @@ impl RootWindow {
                 cx.notify();
             });
             if let Some((view, runtime, diagnostic)) = ready {
-                if update_kit_window_content(host, &view, cx, |view, window, cx| view.install_startup(runtime, diagnostic, window, cx)).is_err() {
+                let current_host = cx.update(|app| view.read(app).host);
+                if update_kit_window_content(current_host, &view, cx, |view, window, cx| view.install_startup(runtime, diagnostic, window, cx)).is_err() {
                     let _ = view.update(cx, |view, cx| view.startup_delivery_failed(cx));
                 }
             }

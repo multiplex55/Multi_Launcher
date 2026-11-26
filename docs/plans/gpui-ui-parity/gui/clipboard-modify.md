@@ -48,4 +48,12 @@ The scoped evidence is in the [management checkpoint](../CHECKPOINTS.md#g13-clip
 
 The stock typed named and inline commands execute through the launcher-owned canonical catalog and the checked clipboard service. Search and activation share the same catalog receipt. Execution transforms the protected source, then captures the current replacement value for the exact write and Undo. Search records the original action and canonical history query only after success.
 
-The scoped evidence is in the [Direct Execute checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-direct-execute). Windows replay, Settings, Pop Out, pins and Jump remain open.
+The scoped evidence is in the [Direct Execute checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-direct-execute). Windows replay remains open.
+
+## GPUI remembered Dock and Pop Out
+
+All six sections move through the shared retained utility host. The current source, Reset baseline, stages, completed preview, management drafts and idle reviews stay with the session. The destination builds fresh editors for its window. Old callbacks lose their mount authority. Entering a pending review in the new host focuses Cancel.
+
+Clipboard Modify uses the canonical `clipboard-modify` presentation and native geometry key. A remembered Pop Out waits for the exact active host before starting its first protected Load. A docked fallback reveals the current pane when the launcher regains foreground. Repeated Search opens target the existing popup. Dock waits for the root focus acknowledgment before retiring the popup.
+
+Matched Windows replay, Settings parent behavior, pins, docked sizing and full scoped Jump remain open. [Retained host checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-remembered-dock-and-pop-out)

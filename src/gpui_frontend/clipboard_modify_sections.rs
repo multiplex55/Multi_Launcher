@@ -11,6 +11,20 @@ pub(super) struct SectionState {
     _subscriptions: Vec<Subscription>,
 }
 impl SectionState {
+    pub fn remount(&mut self, window: &mut Window, cx: &mut Context<ClipboardModifyView>) {
+        let template = self.template_filter.read(cx).value().to_string();
+        let pipeline = self.pipeline_filter.read(cx).value().to_string();
+        let help = self.help_filter.read(cx).value().to_string();
+        let selected_template = self.template.take();
+        let selected_pipeline = self.pipeline.take();
+        let mut replacement = Self::new(window, cx);
+        replacement.template_filter.update(cx, |input, cx| input.set_value(template, window, cx));
+        replacement.pipeline_filter.update(cx, |input, cx| input.set_value(pipeline, window, cx));
+        replacement.help_filter.update(cx, |input, cx| input.set_value(help, window, cx));
+        replacement.template = selected_template;
+        replacement.pipeline = selected_pipeline;
+        *self = replacement;
+    }
     pub fn new(window: &mut Window, cx: &mut Context<ClipboardModifyView>) -> Self {
         let template_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter templates"));

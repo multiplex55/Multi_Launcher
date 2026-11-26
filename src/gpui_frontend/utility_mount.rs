@@ -10,6 +10,7 @@ pub(super) enum UtilityKind {
     Xml,
     Regex,
     ClipboardHistory,
+    ClipboardModify,
 }
 
 pub(super) struct UtilityPopup {

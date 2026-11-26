@@ -161,6 +161,7 @@ impl PipelineManagement {
     pub fn focus_review(&self, window: &mut Window, cx: &mut Context<ClipboardModifyView>) {
         self.cancel_focus.focus(window, cx);
     }
+    pub fn review_cancel_is_focused(&self, window: &Window) -> bool { self.cancel_focus.is_focused(window) }
 }
 
 fn unique_id(base: &str, catalog: &ClipboardModifierCatalog, drafts: &[SavedPipeline]) -> String {
@@ -358,6 +359,28 @@ pub(super) fn ensure(
     }
 }
 
+pub(super) fn remount(view: &mut ClipboardModifyView, window: &mut Window, cx: &mut Context<ClipboardModifyView>) {
+    let rows: Vec<_> = view.pipelines.rows.iter().map(|row| (
+        row.token, row.id.read(cx).value().to_string(), row.label.read(cx).value().to_string(),
+        row.aliases.read(cx).value().to_string(),
+        row.stages.iter().map(|stage| (stage.id, stage.spec.clone())).collect::<Vec<_>>()
+    )).collect();
+    view.pipelines.focus = cx.focus_handle();
+    view.pipelines.cancel_focus = cx.focus_handle();
+    view.pipelines.rows = rows.into_iter().map(|(token, id_value, label_value, aliases_value, specs)| {
+        let id = cx.new(|cx| InputState::new(window, cx));
+        let label = cx.new(|cx| InputState::new(window, cx));
+        let aliases = cx.new(|cx| InputState::new(window, cx));
+        id.update(cx, |input, cx| input.set_value(id_value, window, cx));
+        label.update(cx, |input, cx| input.set_value(label_value, window, cx));
+        aliases.update(cx, |input, cx| input.set_value(aliases_value, window, cx));
+        let stages = specs.into_iter().map(|(id, spec)| view.build_stage_for(StageOwner::Pipeline(token), id, spec, window, cx)).collect();
+        let mut row = PipelineRow { token, id, label, aliases, stages, subscriptions: Vec::new() };
+        row.subscriptions = row_subscriptions(&row, view.mount.clone(), view.section_revision, cx);
+        row
+    }).collect();
+}
+
 fn submit(
     view: &mut ClipboardModifyView,
     reload: bool,
@@ -408,20 +431,17 @@ fn submit(
         return;
     };
     let root = root.read(cx);
-    let Some(native) = root.native_window else {
-        return;
-    };
+    let Some(host_authority) = host::HostAuthority::capture(view, window, cx) else { return; };
+    let native = host_authority.native;
     let Some(permit) = root.restart_admission.admit() else {
         return;
     };
     let admission = root.restart_admission.clone();
     let ack_admission = admission.clone();
-    let visibility = root.root_visibility.clone();
-    let ack_visibility = visibility.clone();
-    let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
-    let host = window.window_handle();
+    let ack_host = host_authority.clone();
+    let host = host_authority.host;
     let receipt = view.mount.clone();
-    let worker_receipt = receipt.clone();
+    let worker_host = host_authority;
     let authority = view.management.authority.clone();
     let ack_authority = authority.clone();
     let epoch = authority.load(Ordering::Acquire);
@@ -448,16 +468,7 @@ fn submit(
     }
     let task = cx.background_executor().spawn(async move {
         let current = || {
-            worker_receipt.is_current()
-                && authority.load(Ordering::Acquire) == epoch
-                && !admission.is_fenced()
-                && json_utility::native_host_current(
-                    &visibility,
-                    visibility_revision,
-                    Some(native),
-                    false,
-                )
-                && current_foreground_identity() == Some(native.identity)
+            authority.load(Ordering::Acquire) == epoch && worker_host.current()
         };
         if reload {
             Outcome::Reload(store.refresh_checked(&current))
@@ -498,7 +509,7 @@ fn submit(
                 Outcome::Save(Err(_)) => view.pipelines.feedback = Some("Pipelines could not be saved. Draft retained.".into()),
                 Outcome::Reload(Ok(CheckedCatalogRead::Loaded(catalog))) => {
                     view.catalog = Some(catalog); view.sections.template = None; view.sections.pipeline = None; view.preview.cancel_and_invalidate();
-                    let allowed = current && ack_authority.load(Ordering::Acquire) == epoch && !ack_admission.is_fenced() && manage::host_current(view, window, cx) && window.window_handle().window_id() == host.window_id() && current_foreground_identity() == Some(native.identity) && json_utility::native_host_current(&ack_visibility, visibility_revision, Some(native), false);
+                    let allowed = current && ack_authority.load(Ordering::Acquire) == epoch && !ack_admission.is_fenced() && manage::host_current(view, window, cx) && window.window_handle().window_id() == host.window_id() && current_foreground_identity() == Some(native.identity) && ack_host.current_for(view, window, cx);
                     if allowed { if view.focus.is_focused(window) || view.focus.contains_focused(window, cx) { view.focus.focus(window, cx); } view.pipelines.clear(); view.section_revision = view.section_revision.wrapping_add(1); ensure(view, window, cx); view.pipelines.feedback = Some("Reloaded pipelines from disk.".into()); }
                     else { view.pipelines.feedback = Some("Catalog refreshed; draft retained because its window or contents changed.".into()); }
                 }

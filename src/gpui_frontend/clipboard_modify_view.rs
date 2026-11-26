@@ -12,6 +12,8 @@ use multi_launcher::clipboard_modify::{
 use std::time::Duration;
 #[path = "clipboard_modify_manage.rs"]
 mod manage;
+#[path = "clipboard_modify_host.rs"]
+mod host;
 #[path = "clipboard_modify_pipelines.rs"]
 mod pipelines;
 #[path = "clipboard_modify_sections.rs"]
@@ -77,6 +79,19 @@ fn held_activation(held: bool, modifiers: Modifiers, key: &str) -> bool {
 }
 fn current_completion(pending: Option<u64>, serial: u64) -> bool {
     pending == Some(serial)
+}
+fn rehost_idle(open: bool, rehosting: bool, reading: bool, effect: bool, management: bool, same_mode: bool) -> bool {
+    open && !rehosting && !reading && !effect && !management && !same_mode
+}
+fn queued_read_can_start(queued: Option<bool>, reading: bool, runtime_ready: bool) -> bool {
+    queued.is_some() && !reading && runtime_ready
+}
+fn dock_reveal_is_current(
+    expected: &utility_mount::MountReceipt,
+    mounted: &utility_mount::MountReceipt,
+    popout: bool,
+) -> bool {
+    !popout && expected.is_current() && expected.matches(mounted)
 }
 fn pump_is_current(
     epoch: u64,
@@ -212,7 +227,17 @@ fn stage_receipt_current(
 }
 pub(super) struct ClipboardModifyView {
     pub open: bool,
-    root: WeakEntity<RootWindow>,
+    pub(super) popout: bool,
+    pub(super) rehosting: bool,
+    rehost_readonly: bool,
+    pending_dock_reveal: Option<utility_mount::MountReceipt>,
+    pub(super) presentation_error: Option<String>,
+    pub(super) geometry_error: Option<String>,
+    pub(super) host: AnyWindowHandle,
+    native: Option<NativeWindow>,
+    activation_revision: Arc<AtomicU64>,
+    pub(super) root: WeakEntity<RootWindow>,
+    pub(super) admission: Arc<RestartAdmission>,
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     focus: FocusHandle,
@@ -258,6 +283,167 @@ pub(super) struct ClipboardModifyView {
     _source_sub: Subscription,
 }
 impl ClipboardModifyView {
+    pub(super) fn mount_receipt(&self) -> utility_mount::MountReceipt {
+        self.mount.clone()
+    }
+    pub(super) fn focus_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_editor_readonly(cx);
+        if self.pipelines.review.is_some() {
+            self.pipelines.focus_review(window, cx);
+        } else if self.review.is_some() {
+            self.review_cancel_focus.focus(window, cx);
+        } else {
+            self.focus_section(window, cx);
+        }
+    }
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        let selected = if self.pipelines.review.is_some() {
+            self.pipelines.review_cancel_is_focused(window)
+        } else if self.review.is_some() {
+            self.review_cancel_focus.is_focused(window)
+        } else {
+            match self.section {
+                Section::Modify => self.source.focus_handle(cx).is_focused(window),
+                Section::Templates => self.sections.template_filter.focus_handle(cx).is_focused(window),
+                Section::SavedPipelines => self.sections.pipeline_filter.focus_handle(cx).is_focused(window),
+                Section::Help => self.sections.help_filter.focus_handle(cx).is_focused(window),
+                Section::ManageTemplates | Section::ManagePipelines => self.focus.is_focused(window),
+            }
+        };
+        selected || self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
+    }
+    pub(super) fn after_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() || host::HostAuthority::capture(self, window, cx).is_none() {
+            return;
+        }
+        self.focus_host(window, cx);
+        self.wake_pending_read(window, cx);
+    }
+    pub(super) fn wake_pending_read(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.wake_dock_reveal(window, cx);
+        if !window.is_window_active() || self.rehosting || host::HostAuthority::capture(self, window, cx).is_none() {
+            return;
+        }
+        if self.runtime.is_none() {
+            let ready = self.root.upgrade().and_then(|root| {
+                let root = root.read(cx);
+                root.clipboard_modify_startup.runtime.clone()
+                    .map(|runtime| (runtime, root.clipboard_modify_startup.diagnostic.clone()))
+            });
+            if let Some((runtime, diagnostic)) = ready {
+                self.install_startup(runtime, diagnostic, window, cx);
+            }
+        }
+        if queued_read_can_start(self.queued_read, self.reading, self.runtime.is_some()) {
+            if let Some(initial) = self.queued_read.take() {
+                self.read_source(initial, window, cx);
+            }
+        }
+    }
+    fn queue_dock_reveal(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.popout {
+            self.pending_dock_reveal = Some(self.mount.clone());
+            self.wake_dock_reveal(window, cx);
+        }
+    }
+    fn wake_dock_reveal(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(receipt) = self.pending_dock_reveal.as_ref() else { return; };
+        if !dock_reveal_is_current(receipt, &self.mount, self.popout) {
+            self.pending_dock_reveal = None;
+            return;
+        }
+        if self.reveal_current_dock(window, cx) {
+            self.pending_dock_reveal = None;
+        }
+    }
+    fn reveal_current_dock(&self, window: &Window, cx: &mut Context<Self>) -> bool {
+        if self.popout || !window.is_window_active()
+            || host::HostAuthority::capture(self, window, cx).is_none()
+        {
+            return false;
+        }
+        let id = window.window_handle().window_id();
+        self.root.update(cx, |root, cx| {
+            let history = root.clipboard_history.as_ref()
+                .is_some_and(|view| view.read(cx).is_mounted_in(id, false));
+            let item = root.clipboard_scroll_item(id, cx) + usize::from(history);
+            root.root_scroll.scroll_to_top_of_item(item);
+            cx.notify();
+        }).is_ok()
+    }
+    fn request_rehost(&mut self, popout: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !rehost_idle(self.open, self.rehosting, self.reading, self.effect_pending.is_some(), self.management.pending.is_some(), self.popout == popout) || window.has_active_dialog(cx)
+            || !window.is_window_active() || host::HostAuthority::capture(self, window, cx).is_none() { return false; }
+        let Some(native) = self.native else { return false; };
+        let Some(root) = self.root.upgrade() else { return false; };
+        let visibility_revision = root.read(cx).root_visibility.request_revision.load(Ordering::Acquire);
+        let gesture = Some(hash_dock::Gesture { source: native, foreground_authorized: true, visibility_revision });
+        let receipt = self.mount.clone();
+        self.rehosting = true;
+        self.pending_dock_reveal = None;
+        self.rehost_readonly = true;
+        self.sync_editor_readonly(cx);
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        self.focus.focus(window, cx);
+        let root = self.root.clone();
+        cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.start_clipboard_modify_rehost(popout, gesture, receipt, cx)); }).detach();
+        cx.notify();
+        true
+    }
+    pub(super) fn shutdown_host(&mut self) {
+        self.open = false;
+        self.pending_dock_reveal = None;
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        self.owner.retire();
+        self.read_revision = self.read_revision.wrapping_add(1);
+        self.read_authority.fetch_add(1, Ordering::AcqRel);
+        self.effect_epoch.fetch_add(1, Ordering::AcqRel);
+        self.queued_read = None;
+        self.initial_read_started = false;
+        self.resolved = false;
+        self.reset_resolved = false;
+        self.reset_source.clear();
+        self.stages.clear();
+        self.management.clear();
+        self.pipelines.clear();
+        self.review = None;
+        self.picker = None;
+        self.large_allowed = false;
+        self.feedback = None;
+        self.preview.cancel_and_invalidate();
+        self.pump_epoch = self.pump_epoch.wrapping_add(1);
+        self.pumping = false;
+    }
+    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool {
+        self.open && self.popout == popout && self.mount.is_current() && self.host.window_id() == id
+    }
+    pub(super) fn replace_mount(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, window: &mut Window, cx: &mut Context<Self>) {
+        let source = self.source.read(cx).value().to_string();
+        let stages: Vec<_> = self.stages.iter().map(|stage| (stage.id, stage.spec.clone())).collect();
+        let was_pumping = self.pumping;
+        self.pump_epoch = self.pump_epoch.wrapping_add(1);
+        self.pumping = false;
+        self.mount = self.owner.attach();
+        self.host = host;
+        self.native = native;
+        self.focus = cx.focus_handle();
+        self.review_focus = cx.focus_handle();
+        self.review_cancel_focus = cx.focus_handle();
+        self.apply_focus = cx.focus_handle();
+        self.apply_close_focus = cx.focus_handle();
+        self.copy_focus = cx.focus_handle();
+        self.source = cx.new(|cx| TextareaState::new(window, cx).auto_grow(6, 14).placeholder("Source text"));
+        self.source.update(cx, |input, cx| input.set_value(source, window, cx));
+        self._source_sub = Self::subscribe_source(&self.source, self.mount.clone(), self.section_revision, cx);
+        self.stages = stages.into_iter().map(|(id, spec)| self.build_stage_for(StageOwner::Modify, id, spec, window, cx)).collect();
+        self.sections.remount(window, cx);
+        manage::remount(self, window, cx);
+        pipelines::remount(self, window, cx);
+        self.sync_editor_readonly(cx);
+        self.focus.focus(window, cx);
+        if was_pumping { self.pump(cx); }
+        cx.notify();
+    }
     fn defer_initial_read(&mut self, cx: &mut Context<Self>) {
         if !self.open || !self.mount.is_current() || self.initial_read_started {
             return;
@@ -317,7 +503,7 @@ impl ClipboardModifyView {
             if self.resolved {
                 self.schedule(cx);
             }
-            if let Some(initial) = self.queued_read.take() {
+            if !self.rehosting { if let Some(initial) = self.queued_read.take() {
                 let receipt = self.mount.clone();
                 let source_revision = self.source_revision;
                 let weak = cx.entity().downgrade();
@@ -341,7 +527,7 @@ impl ClipboardModifyView {
                         view.read_source(initial, window, cx);
                     });
                 });
-            }
+            } }
         }
         cx.notify();
     }
@@ -470,7 +656,7 @@ impl ClipboardModifyView {
         }
         cx.notify();
     }
-    fn new(window: &mut Window, cx: &mut Context<Self>, root: WeakEntity<RootWindow>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>, root: WeakEntity<RootWindow>, native: Option<NativeWindow>, admission: Arc<RestartAdmission>) -> Self {
         let owner = utility_mount::MountOwner::default();
         let mount = owner.attach();
         let source = cx.new(|cx| {
@@ -481,7 +667,17 @@ impl ClipboardModifyView {
         let source_sub = Self::subscribe_source(&source, mount.clone(), 0, cx);
         Self {
             open: false,
+            popout: false,
+            rehosting: false,
+            rehost_readonly: false,
+            pending_dock_reveal: None,
+            presentation_error: None,
+            geometry_error: None,
+            host: window.window_handle(),
+            native,
+            activation_revision: Arc::new(AtomicU64::new(0)),
             root,
+            admission,
             owner,
             mount,
             focus: cx.focus_handle(),
@@ -697,7 +893,7 @@ impl ClipboardModifyView {
         {
             return;
         }
-        let Some(native) = root_state.native_window else {
+        let Some(host_authority) = host::HostAuthority::capture(self, window, cx) else {
             if initial {
                 self.defer_initial_read(cx);
             } else {
@@ -705,18 +901,6 @@ impl ClipboardModifyView {
             }
             return;
         };
-        if root_state
-            .root_window
-            .is_none_or(|host| host.window_id() != window.window_handle().window_id())
-            || current_foreground_identity() != Some(native.identity)
-        {
-            if initial && !self.initial_read_started {
-                self.defer_initial_read(cx);
-            } else if !initial {
-                self.defer_explicit_read(cx);
-            }
-            return;
-        }
         self.read_revision = self.read_revision.wrapping_add(1);
         self.read_authority.fetch_add(1, Ordering::AcqRel);
         if self.reading {
@@ -729,7 +913,6 @@ impl ClipboardModifyView {
             }
             return;
         }
-        let visibility = root_state.root_visibility.clone();
         let admission = root_state.restart_admission.clone();
         let Some(permit) = admission.admit() else {
             if initial {
@@ -741,29 +924,19 @@ impl ClipboardModifyView {
         };
         let initial = begin_read_intent(initial, &mut self.queued_read);
         self.initial_read_started = true;
-        let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
         let mount = self.mount.clone();
-        let worker_mount = mount.clone();
         let request = self.read_revision;
         let read_authority = self.read_authority.clone();
         let expected_authority = read_authority.load(Ordering::Acquire);
         let source_revision = self.source_revision;
-        let publication_visibility = visibility.clone();
-        let publication_admission = admission.clone();
+        let publication_host = host_authority.clone();
+        let worker_host = host_authority.clone();
         self.reading = true;
         self.active_read = Some(request);
         self.feedback = None;
         let task = cx.background_executor().spawn(async move {
-            let result = if worker_mount.is_current()
-                && read_authority.load(Ordering::Acquire) == expected_authority
-                && !admission.is_fenced()
-                && json_utility::native_host_current(
-                    &visibility,
-                    visibility_revision,
-                    Some(native),
-                    false,
-                )
-                && current_foreground_identity() == Some(native.identity)
+            let result = if read_authority.load(Ordering::Acquire) == expected_authority
+                && worker_host.current()
             {
                 ReadWork::Attempted(
                     runtime::clipboard_service()
@@ -775,7 +948,7 @@ impl ClipboardModifyView {
             };
             result
         });
-        let host = window.window_handle();
+        let host = host_authority.host;
         cx.spawn(async move |weak, cx| {
             let _permit = permit;
             let result = task.await;
@@ -810,16 +983,7 @@ impl ClipboardModifyView {
                         view.defer_explicit_read(cx);
                     }
                 }
-                let current = exact
-                    && window.is_window_active()
-                    && !publication_admission.is_fenced()
-                    && json_utility::native_host_current(
-                        &publication_visibility,
-                        visibility_revision,
-                        Some(native),
-                        false,
-                    )
-                    && current_foreground_identity() == Some(native.identity);
+                let current = exact && window.is_window_active() && publication_host.current();
                 if current {
                     match result {
                         ReadWork::NotStarted => {}
@@ -1010,7 +1174,7 @@ impl ClipboardModifyView {
             || self.pipelines.review.is_some()
     }
     fn blocked(&self) -> bool {
-        self.effect_pending.is_some()
+        self.rehosting || self.effect_pending.is_some()
             || self.review.is_some()
             || self.management.pending.is_some()
             || self.pipelines.review.is_some()
@@ -1106,28 +1270,16 @@ impl ClipboardModifyView {
         if root_state.external_launch.clipboard_effect_pending() {
             return;
         }
-        let Some(native) = root_state.native_window else {
+        let Some(host_authority) = host::HostAuthority::capture(self, window, cx) else {
             return;
         };
-        let host = window.window_handle();
-        if root_state
-            .root_window
-            .is_none_or(|w| w.window_id() != host.window_id())
-            || current_foreground_identity() != Some(native.identity)
-            || !root_state
-                .clipboard_modify_view
-                .as_ref()
-                .is_some_and(|v| v.entity_id() == cx.entity().entity_id())
-        {
-            return;
-        }
+        let native = host_authority.native;
+        let host = host_authority.host;
         let admission = root_state.restart_admission.clone();
         let Some(permit) = admission.admit() else {
             return;
         };
-        let visibility = root_state.root_visibility.clone();
-        let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
-        let ack_visibility = visibility.clone();
+        let ack_host = host_authority.clone();
         let Some(output) = self.preview.full_output().map(str::to_owned) else {
             return;
         };
@@ -1143,21 +1295,12 @@ impl ClipboardModifyView {
         self.sync_editor_readonly(cx);
         self.focus.focus(window, cx);
         let receipt = self.mount.clone();
-        let worker_mount = receipt.clone();
+        let worker_host = host_authority;
         let epoch = self.effect_epoch.clone();
         let expected_epoch = epoch.load(Ordering::Acquire);
         let task = cx.background_executor().spawn(async move {
             let current = || {
-                worker_mount.is_current()
-                    && epoch.load(Ordering::Acquire) == expected_epoch
-                    && !admission.is_fenced()
-                    && json_utility::native_host_current(
-                        &visibility,
-                        visibility_revision,
-                        Some(native),
-                        false,
-                    )
-                    && current_foreground_identity() == Some(native.identity)
+                epoch.load(Ordering::Acquire) == expected_epoch && worker_host.current()
             };
             let effect = match &review {
                 Some(review) => CheckedClipboardEffect::ReviewedOverwrite { review },
@@ -1201,12 +1344,7 @@ impl ClipboardModifyView {
                         if kind == EffectKind::ApplyClose
                             && window.is_window_active()
                             && current_foreground_identity() == Some(native.identity)
-                            && json_utility::native_host_current(
-                                &ack_visibility,
-                                visibility_revision,
-                                Some(native),
-                                false,
-                            )
+                            && ack_host.current_for(view, window, cx)
                             && !window.has_active_dialog(cx)
                         {
                             view.close(window, cx);
@@ -1215,12 +1353,7 @@ impl ClipboardModifyView {
                     Ok(CheckedClipboardOutcome::ReviewRequired(review)) => {
                         if !window.is_window_active()
                             || current_foreground_identity() != Some(native.identity)
-                            || !json_utility::native_host_current(
-                                &ack_visibility,
-                                visibility_revision,
-                                Some(native),
-                                false,
-                            )
+                            || !ack_host.current_for(view, window, cx)
                             || window.has_active_dialog(cx)
                         {
                             view.review = None;
@@ -1260,12 +1393,7 @@ impl ClipboardModifyView {
                     && owns_focus
                     && window.is_window_active()
                     && current_foreground_identity() == Some(native.identity)
-                    && json_utility::native_host_current(
-                        &ack_visibility,
-                        visibility_revision,
-                        Some(native),
-                        false,
-                    )
+                    && ack_host.current_for(view, window, cx)
                     && !window.has_active_dialog(cx)
                 {
                     if view.review.is_some() {
@@ -1309,9 +1437,13 @@ impl ClipboardModifyView {
         })
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.blocked() {
+        if !self.open || self.blocked() || self.rehosting || !self.is_mounted_in(window.window_handle().window_id(), self.popout) {
             return;
         }
+        let popout = self.popout;
+        self.pending_dock_reveal = None;
+        if popout { let _ = self.root.update(cx, |root, cx| root.drain_clipboard_modify_geometry(cx, true)); }
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
         let owns_focus = self.focus.is_focused(window) || self.focus.contains_focused(window, cx);
         self.open = false;
         self.initial_read_started = false;
@@ -1333,6 +1465,7 @@ impl ClipboardModifyView {
         self.preview.cancel_and_invalidate();
         self.pump_epoch = self.pump_epoch.wrapping_add(1);
         self.pumping = false;
+        if popout { window.remove_window(); cx.notify(); return; }
         let _ = self.root.update(cx, |root, cx| {
             if owns_focus
                 && window.is_window_active()
@@ -1412,7 +1545,21 @@ impl ClipboardModifyView {
     }
 }
 impl Render for ClipboardModifyView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.rehost_readonly && !self.rehosting {
+            self.rehost_readonly = false;
+            self.sync_editor_readonly(cx);
+            let mount = self.mount.clone();
+            let weak = cx.entity().downgrade();
+            window.defer(cx, move |window, app| {
+                let _ = weak.update(app, |view, cx| {
+                    if mount.is_current() && mount.matches(&view.mount) {
+                        view.queue_dock_reveal(window, cx);
+                        view.wake_pending_read(window, cx);
+                    }
+                });
+            });
+        }
         let mount = self.mount.clone();
         let launcher_effect_pending = self
             .root
@@ -1434,17 +1581,7 @@ impl Render for ClipboardModifyView {
                 {
                     return;
                 }
-                let Some(root) = view.root.upgrade() else {
-                    return;
-                };
-                let root = root.read(cx);
-                if root
-                    .root_window
-                    .is_none_or(|host| host.window_id() != window.window_handle().window_id())
-                    || !root.native_window.is_some_and(|native| {
-                        current_foreground_identity() == Some(native.identity)
-                    })
-                {
+                if host::HostAuthority::capture(view, window, cx).is_none() {
                     return;
                 }
                 let key = event.keystroke.key.as_str();
@@ -1552,6 +1689,17 @@ impl Render for ClipboardModifyView {
                 Section::ManageTemplates => "Clipboard Modify — Manage Templates",
                 Section::ManagePipelines => "Clipboard Modify — Manage Pipelines",
             }));
+        let rehost_mount = mount.clone();
+        panel = panel.child(Button::new("cm-rehost")
+            .label(if self.popout { "Dock" } else { "Pop Out" })
+            .disabled(self.rehosting || self.reading || self.effect_pending.is_some() || self.management.pending.is_some())
+            .on_click(cx.listener(move |view, _, window, cx| {
+                if rehost_mount.is_current() && rehost_mount.matches(&view.mount) {
+                    let _ = view.request_rehost(!view.popout, window, cx);
+                }
+            })));
+        if let Some(error) = &self.presentation_error { panel = panel.child(Label::new(error.clone())); }
+        if let Some(error) = &self.geometry_error { panel = panel.child(Label::new(error.clone())); }
         if self.blocked() && self.management.pending.is_none() && self.pipelines.review.is_none() {
             if let Some(review) = &self.review {
                 let id = review.id;
@@ -1576,11 +1724,12 @@ impl Render for ClipboardModifyView {
                             Button::new(SharedString::from(format!("cm-review-cancel-{id}")))
                                 .label("Cancel")
                                 .track_focus(&self.review_cancel_focus)
-                                .disabled(self.effect_pending.is_some())
+                                .disabled(self.effect_pending.is_some() || self.rehosting)
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     if cancel.is_current()
                                         && cancel.matches(&view.mount)
                                         && view.effect_pending.is_none()
+                                        && !view.rehosting
                                         && view
                                             .review
                                             .as_ref()
@@ -2210,16 +2359,66 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        if let (Some(popup), Some(view), Some(root_native)) = (
+            &self.clipboard_modify_popup,
+            &self.clipboard_modify_view,
+            self.native_window,
+        ) {
+            let Some(native) = popup.native else { return; };
+            if current_foreground_identity() != Some(root_native.identity) || view.read(cx).rehosting {
+                return;
+            }
+            let Some(permit) = self.restart_admission.admit() else { return; };
+            let popup_window = popup.window;
+            let view = view.clone();
+            let receipt = view.read(cx).mount.clone();
+            let worker_receipt = receipt.clone();
+            let visibility = self.root_visibility.clone();
+            let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
+            let admission = self.restart_admission.clone();
+            let guard = view.read(cx).activation_revision.clone();
+            let revision = guard.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+            let worker = guard.clone();
+            cx.spawn(async move |_, cx| {
+                let _permit = permit;
+                cx.background_executor().spawn(async move {
+                    activate_for_secondary_window_if(
+                        &worker, revision, native, Some(root_native.identity), &|| {
+                            worker_receipt.is_current()
+                                && !admission.is_fenced()
+                                && json_utility::native_host_current(
+                                    &visibility, visibility_revision, Some(root_native), false,
+                                )
+                        },
+                    );
+                }).await;
+                if !receipt.is_current() || guard.load(Ordering::Acquire) != revision
+                    || current_foreground_identity() != Some(native.identity)
+                {
+                    return;
+                }
+                let _ = update_kit_window_content(popup_window, &view, cx, |view, window, cx| {
+                    if view.is_mounted_in(window.window_handle().window_id(), true) && !view.rehosting {
+                        view.select_section(section, window, cx);
+                        view.after_host(window, cx);
+                    }
+                });
+            }).detach();
+            return;
+        }
         let root = cx.entity().downgrade();
+        let native = self.native_window;
+        let admission = self.restart_admission.clone();
         let view = self
             .clipboard_modify_view
             .clone()
-            .unwrap_or_else(|| cx.new(|cx| ClipboardModifyView::new(window, cx, root)));
+            .unwrap_or_else(|| cx.new(|cx| ClipboardModifyView::new(window, cx, root, native, admission)));
         let was_open = view.read(cx).open;
         let ready = self.clipboard_modify_startup.runtime.clone();
         let diagnostic = self.clipboard_modify_startup.diagnostic.clone();
         let waiting = self.clipboard_modify_startup.pending;
         view.update(cx, |view, cx| {
+            if !was_open { view.host = window.window_handle(); view.native = native; view.popout = false; }
             if let Some(runtime) = ready {
                 view.install_startup(runtime, diagnostic, window, cx);
             }
@@ -2231,11 +2430,37 @@ impl RootWindow {
             }
         });
         self.clipboard_modify_view = Some(view.clone());
+        if !was_open {
+            view.update(cx, |view, _| {
+                if view.queued_read.is_none() { view.queued_read = Some(true); }
+            });
+            let popout = multi_launcher::settings::UtilityToolKey::parse("clipboard-modify")
+                .ok()
+                .is_some_and(|key| self.utility_presentations.preference(key)
+                    == Some(multi_launcher::settings::RememberedPresentation::Popout));
+            if popout {
+                let weak = view.downgrade();
+                let mount = view.read(cx).mount.clone();
+                window.defer(cx, move |window, app| {
+                    let _ = weak.update(app, |view, cx| {
+                        if mount.is_current() && mount.matches(&view.mount)
+                            && !view.request_rehost(true, window, cx)
+                        {
+                            view.queue_dock_reveal(window, cx);
+                            view.wake_pending_read(window, cx);
+                        }
+                    });
+                });
+                cx.notify();
+                return;
+            }
+        }
         if !was_open
             || (view.read(cx).runtime.is_some()
                 && view.read(cx).queued_read.is_some()
                 && !view.read(cx).reading)
         {
+            if view.read(cx).rehosting { cx.notify(); return; }
             let weak = view.downgrade();
             let mount = view.read(cx).mount.clone();
             let source_revision = view.read(cx).source_revision;
@@ -2270,6 +2495,36 @@ mod tests {
         current_undo_provider, held_activation, pump_is_current, read_result_current,
         redacted_read_error,
     };
+    #[test]
+    fn rehost_requires_a_live_idle_mount_and_a_different_host() {
+        assert!(super::rehost_idle(true, false, false, false, false, false));
+        assert!(!super::rehost_idle(false, false, false, false, false, false));
+        assert!(!super::rehost_idle(true, true, false, false, false, false));
+        assert!(!super::rehost_idle(true, false, true, false, false, false));
+        assert!(!super::rehost_idle(true, false, false, true, false, false));
+        assert!(!super::rehost_idle(true, false, false, false, true, false));
+        assert!(!super::rehost_idle(true, false, false, false, false, true));
+    }
+    #[test]
+    fn queued_read_wakes_only_once_after_runtime_and_prior_read_are_ready() {
+        assert!(super::queued_read_can_start(Some(true), false, true));
+        assert!(super::queued_read_can_start(Some(false), false, true));
+        assert!(!super::queued_read_can_start(None, false, true));
+        assert!(!super::queued_read_can_start(Some(true), true, true));
+        assert!(!super::queued_read_can_start(Some(true), false, false));
+    }
+    #[test]
+    fn deferred_dock_reveal_rejects_retired_or_popup_mounts() {
+        let owner = MountOwner::default();
+        let first = owner.attach();
+        assert!(super::dock_reveal_is_current(&first, &first, false));
+        assert!(!super::dock_reveal_is_current(&first, &first, true));
+        let replacement = owner.attach();
+        assert!(!super::dock_reveal_is_current(&first, &replacement, false));
+        assert!(super::dock_reveal_is_current(&replacement, &replacement, false));
+        owner.retire();
+        assert!(!super::dock_reveal_is_current(&replacement, &replacement, false));
+    }
     #[test]
     fn effect_receipts_and_held_confirm_are_exact() {
         use multi_launcher::clipboard_modify::coordinator::OperationId;
