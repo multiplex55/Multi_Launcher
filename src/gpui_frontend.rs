@@ -2421,6 +2421,8 @@ struct RootWindow {
     file_search: Option<Entity<file_search::FileSearchView>>,
     folder_size_view: Option<Entity<folder_size::FolderSizeView>>,
     file_lock_view: Option<Entity<file_lock::FileLockView>>,
+    file_lock_popup: Option<utility_mount::UtilityPopup>,
+    file_lock_retiring: Vec<RetiringHashWindow>,
     folder_size_popup: Option<utility_mount::UtilityPopup>,
     folder_size_retiring: Vec<RetiringHashWindow>,
     file_search_popup: Option<utility_mount::UtilityPopup>,
@@ -3327,6 +3329,17 @@ fn intercept_root_pane_escape(
     }
     let Some(root) = root.upgrade() else { return false; };
     let state = root.read(cx);
+    if file_lock && state.file_lock_popup.as_ref().is_some_and(|popup| {
+        popup.window.window_id() == window.window_handle().window_id()
+            && popup.native.is_some_and(|native| native.identity.hwnd == receipt.hwnd
+                && native_window_is_valid(native) && current_foreground_identity() == Some(native.identity))
+    }) {
+        let view = state.file_lock_view.clone();
+        return view.is_some_and(|view| view.update(cx, |view, cx| {
+            if !view.is_mounted_in(window.window_handle().window_id(), true) { return false; }
+            view.handle_escape(window, cx, receipt.held)
+        }));
+    }
     if folder_size && state.folder_size_popup.as_ref().is_some_and(|popup| {
         popup.window.window_id() == window.window_handle().window_id()
             && popup.native.is_some_and(|native| native.identity.hwnd == receipt.hwnd
@@ -5268,7 +5281,7 @@ impl RootWindow {
     }
 
     fn poll_utility_size_writer(&mut self, cx: &mut Context<Self>) -> bool {
-        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged, clipboard_failure, clipboard_acknowledged, modify_failure, modify_acknowledged, search_failure, search_acknowledged, preview_failure, preview_acknowledged, folder_failure, folder_acknowledged) = {
+        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged, clipboard_failure, clipboard_acknowledged, modify_failure, modify_acknowledged, search_failure, search_acknowledged, preview_failure, preview_acknowledged, folder_failure, folder_acknowledged, lock_failure, lock_acknowledged) = {
             let mut store = self
                 .utility_size_store
                 .lock()
@@ -5288,12 +5301,15 @@ impl RootWindow {
             let modify_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == modify_key));
             let preview_key = UtilityToolKey::parse("file-preview").ok();
             let preview_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == preview_key));
+            let lock_key = UtilityToolKey::parse("file-lock").ok();
+            let lock_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == lock_key));
             let folder_key = UtilityToolKey::parse("folder-size").ok();
             let folder_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == folder_key));
             let search_key = UtilityToolKey::parse("file-search").ok();
             let search_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == search_key));
             let failures = store.take_new_write_failures();
             let preview_failure = failures.iter().find(|failure| Some(failure.key) == preview_key).map(|failure| failure.message.clone());
+            let lock_failure = failures.iter().find(|failure| Some(failure.key) == lock_key).map(|failure| failure.message.clone());
             let folder_failure = failures.iter().find(|failure| Some(failure.key) == folder_key).map(|failure| failure.message.clone());
             let search_failure = failures.iter().find(|failure| Some(failure.key) == search_key).map(|failure| failure.message.clone());
             let modify_failure = failures.iter().find(|failure| Some(failure.key) == modify_key).map(|failure| failure.message.clone());
@@ -5317,7 +5333,7 @@ impl RootWindow {
                 clipboard_acknowledged,
                 modify_failure,
                 modify_acknowledged,
-                search_failure, search_acknowledged, preview_failure, preview_acknowledged, folder_failure, folder_acknowledged,
+                search_failure, search_acknowledged, preview_failure, preview_acknowledged, folder_failure, folder_acknowledged, lock_failure, lock_acknowledged,
             )
         };
         if let Some(error) = poll_error {
@@ -5349,6 +5365,9 @@ impl RootWindow {
         else if modify_acknowledged { self.set_clipboard_modify_size_error(None, cx); }
         if let Some(error) = search_failure { self.set_file_search_size_error(Some(format!("Could not save File Search window geometry: {error}")), cx); }
         else if search_acknowledged { self.set_file_search_size_error(None, cx); }
+        if lock_failure.is_some() || lock_acknowledged {
+            if let Some(view) = self.file_lock_view.clone() { view.update(cx, |view, cx| { view.geometry_error = lock_failure; cx.notify(); }); }
+        }
         if folder_failure.is_some() || folder_acknowledged {
             if let Some(view) = self.folder_size_view.clone() { view.update(cx, |view, cx| { view.geometry_error = folder_failure; cx.notify(); }); }
         }
@@ -5566,6 +5585,7 @@ impl RootWindow {
         self.drain_regex_native_geometry(cx, false);
         self.drain_file_search_geometry(cx, false);
         self.drain_folder_size_geometry(cx, false);
+        self.drain_file_lock_geometry(cx, false);
         self.drain_file_preview_geometry(cx, false);
         self.drain_clipboard_native_geometry(cx, false);
         self.drain_clipboard_modify_geometry(cx, false);
@@ -5606,6 +5626,11 @@ impl RootWindow {
             let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
             if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The Regex Tester window geometry is still being saved.".to_owned()); }
             if let Some((_, error)) = status.failure { return Err(format!("The Regex Tester window geometry could not be saved: {error}")); }
+        }
+        if let Ok(key) = UtilityToolKey::parse("file-lock") {
+            let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
+            if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The File Lock window geometry is still being saved.".to_owned()); }
+            if let Some((_, error)) = status.failure { return Err(format!("The File Lock window geometry could not be saved: {error}")); }
         }
         if let Ok(key) = UtilityToolKey::parse("folder-size") {
             let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
@@ -5668,6 +5693,14 @@ impl RootWindow {
         if let Some(popup) = &self.clipboard_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Clipboard History window has no checked native handle.".to_owned()); } }
         if let Some(popup) = &self.clipboard_modify_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Clipboard Modify window has no checked native handle.".to_owned()); } }
 
+        if self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Err("File Lock is changing presentation.".to_owned()); }
+        self.file_lock_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
+        if !self.file_lock_retiring.is_empty() { return Err("A previous File Lock window has not retired.".to_owned()); }
+        if let Some(popup) = &self.file_lock_popup {
+            child_windows.push(popup.window);
+            if let Some(native) = popup.native { native_windows.push(native); }
+            else if cfg!(windows) { return Err("The File Lock window has no checked native handle.".to_owned()); }
+        }
         if self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Err("Folder Size is changing presentation.".to_owned()); }
         self.folder_size_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
         if !self.folder_size_retiring.is_empty() { return Err("A previous Folder Size window has not retired.".to_owned()); }
@@ -5993,6 +6026,7 @@ impl RootWindow {
         self.retire_search_jump_mode();
         self.drain_file_search_geometry(cx, true);
         self.drain_folder_size_geometry(cx, true);
+        self.drain_file_lock_geometry(cx, true);
         self.drain_file_preview_geometry(cx, true);
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| view.shutdown(cx)); }
         if let Some(view) = self.folder_size_view.clone() { view.update(cx, |view, _| view.shutdown()); }
@@ -10164,6 +10198,7 @@ impl RootWindow {
         self.drain_regex_native_geometry(cx, true);
         self.drain_file_search_geometry(cx, true);
         self.drain_folder_size_geometry(cx, true);
+        self.drain_file_lock_geometry(cx, true);
         self.drain_file_preview_geometry(cx, true);
         if let Some(view) = &self.file_search { view.update(cx, |view, cx| view.shutdown(cx)); }
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
@@ -10187,6 +10222,9 @@ impl RootWindow {
         retiring_search.extend(std::mem::take(&mut self.folder_size_retiring));
         if let Some(popup) = self.folder_size_popup.take() { retiring_search.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         if let Some(view) = &self.folder_size_view { view.update(cx, |view, _| view.shutdown()); }
+        retiring_search.extend(std::mem::take(&mut self.file_lock_retiring));
+        if let Some(popup) = self.file_lock_popup.take() { retiring_search.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
+        if let Some(view) = &self.file_lock_view { view.update(cx, |view, _| view.shutdown()); }
         let mut retiring_regex = std::mem::take(&mut self.regex_retiring);
         if let Some(popup) = self.regex_popup.take() { retiring_regex.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         let retiring = self.xml_popup.take().map(|popup| RetiringHashWindow { window: popup.window, native_window: popup.native });
@@ -10215,7 +10253,7 @@ impl RootWindow {
     ) -> Option<RootCloseBlocker> {
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
-        if self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::FileLock); }
+        if self.file_lock_retiring.iter().any(|window| window.native_window.is_none()) || self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FileLock); }
         if self.folder_size_retiring.iter().any(|window| window.native_window.is_none())
             || self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FolderSize); }
         if self.external_launch.auxiliary_effect_pending() || self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting || view.read(cx).host_effect_pending(cx)) { return Some(RootCloseBlocker::FileSearchEffect); }
@@ -11137,7 +11175,7 @@ impl Render for RootWindow {
         if let Some(view) = self.folder_size_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
-        if let Some(view) = self.file_lock_view.as_ref().filter(|view| view.read(cx).open) {
+        if let Some(view) = self.file_lock_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -12213,6 +12251,10 @@ impl RootWindow {
     }
     fn utility_destination_current(&self, kind: utility_mount::UtilityKind, receipt: &utility_mount::MountReceipt, window: WindowId, cx: &App) -> bool {
         match kind {
+            utility_mount::UtilityKind::FileLock => self.file_lock_view.as_ref().is_some_and(|view| {
+                let view = view.read(cx);
+                view.is_mounted_in(window, false) && receipt.matches(&view.mount) && receipt.is_current()
+            }),
             utility_mount::UtilityKind::FolderSize => self.folder_size_view.as_ref().is_some_and(|view| {
                 let view = view.read(cx);
                 view.is_mounted_in(window, false) && receipt.matches(&view.mount) && receipt.is_current()
@@ -12802,6 +12844,7 @@ pub(crate) fn run_foundation_window(
                     root.retire_search_jump_mode();
                     root.drain_file_search_geometry(cx, true);
                     root.drain_folder_size_geometry(cx, true);
+                    root.drain_file_lock_geometry(cx, true);
                     root.drain_file_preview_geometry(cx, true);
                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.shutdown(cx)); }
                     if let Some(view) = root.folder_size_view.clone() { view.update(cx, |view, _| view.shutdown()); }
@@ -13043,6 +13086,8 @@ pub(crate) fn run_foundation_window(
                 file_search: None,
                 folder_size_view: None,
                 file_lock_view: None,
+                file_lock_popup: None,
+                file_lock_retiring: Vec::new(),
                 folder_size_popup: None,
                 folder_size_retiring: Vec::new(),
                 file_search_popup: None,
@@ -13437,7 +13482,7 @@ pub(crate) fn run_foundation_window(
                 match blocker {
                     None => {
                         let deferred = root_for_window_close.update(app, |root, cx| {
-                            if root.xml_view.is_some() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                            if root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                         }).unwrap_or(true);
                         if deferred { return false; }
                         let _ = root_for_window_close.update(app, |root, cx| {
@@ -13471,7 +13516,7 @@ pub(crate) fn run_foundation_window(
                             .unwrap_or(false);
                         if close_now {
                             let deferred = root_for_window_close.update(app, |root, cx| {
-                                if root.xml_view.is_some() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                                if root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                             }).unwrap_or(true);
                             if deferred { return false; }
                             let _ = root_for_window_close.update(app, |root, cx| {
@@ -13659,6 +13704,7 @@ pub(crate) fn run_foundation_window(
                         root.drain_regex_native_geometry(cx, false);
                         root.drain_file_search_geometry(cx, false);
                         root.drain_folder_size_geometry(cx, false);
+                        root.drain_file_lock_geometry(cx, false);
                         root.drain_file_preview_geometry(cx, false);
                         root.drain_clipboard_native_geometry(cx, false);
                         root.drain_clipboard_modify_geometry(cx, false);
@@ -14051,6 +14097,7 @@ pub(crate) fn run_foundation_window(
                                     None
                                 };
                                 let utility = dock_reveal.as_ref().and_then(|(_, _, mount)| mount.as_ref()).filter(|(mount, kind)| root.utility_destination_current(*kind, mount, window.window_handle().window_id(), cx));
+                                let file_lock_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::FileLock).and_then(|_| root.file_lock_view.as_ref()).cloned();
                                 let folder_size_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::FolderSize).and_then(|_| root.folder_size_view.as_ref()).cloned();
                                 let file_search_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::FileSearch).and_then(|_| root.file_search.as_ref()).cloned();
                                 let json_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Json).and_then(|_| root.json_view.as_ref()).cloned();
@@ -14058,8 +14105,11 @@ pub(crate) fn run_foundation_window(
                                 let regex_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Regex).and_then(|_| root.regex_view.as_ref()).cloned();
                                 let clipboard_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::ClipboardHistory).and_then(|_| root.clipboard_history.as_ref()).cloned();
                                 let clipboard_modify_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::ClipboardModify).and_then(|_| root.clipboard_modify_view.as_ref()).cloned();
-                                search_focus_selected = folder_size_view.is_none() && file_search_view.is_none() && hash_view.is_none() && json_view.is_none() && xml_view.is_none() && regex_view.is_none() && clipboard_view.is_none() && clipboard_modify_view.is_none();
-                                if let Some(view) = folder_size_view {
+                                search_focus_selected = file_lock_view.is_none() && folder_size_view.is_none() && file_search_view.is_none() && hash_view.is_none() && json_view.is_none() && xml_view.is_none() && regex_view.is_none() && clipboard_view.is_none() && clipboard_modify_view.is_none();
+                                if let Some(view) = file_lock_view {
+                                    root.reveal_file_lock(window, cx);
+                                    utility_focus_delivered = view.update(cx, |tool, cx| { tool.focus_host(window, cx); tool.choose_focus.is_focused(window) });
+                                } else if let Some(view) = folder_size_view {
                                     root.reveal_folder_size(window, cx);
                                     utility_focus_delivered = view.update(cx, |tool, cx| { tool.focus_host(window, cx); tool.choose_focus.is_focused(window) });
                                 } else if let Some(view) = file_search_view {

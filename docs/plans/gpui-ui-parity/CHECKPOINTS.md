@@ -1718,3 +1718,11 @@ The installed Windows `filelock` provider opens the GPUI File Lock Inspector. Op
 Independent review cleared installed admission, exact submitted path and generation, picker authority and worker retirement. The final locked scoped launcher check passed in 12.12 s. One warm link took 22.74 s with no shared-library rebuild. Nextest run `24df16fc-fc1f-409a-ad1e-b28f3be38627` passed all five in 1.648 s, with 446 skipped. Reused stock provider, cancel, close and owned Windows holder tests passed all four in `9ec9ca30-806b-442b-8c73-cb5eefb00737` in 1.007 s. The Windows fixture observed the disposable holder before release. Matched GUI picker, keyboard and inspection replay remains open.
 
 Continue remembered File Lock hosting and exact File Search prefill. Copy snapshot, checked executable reveal and remaining G10 tool families retain their own criteria.
+
+### G10 remembered File Lock Dock and Pop Out
+
+File Lock remembers its `file-lock` presentation and native geometry. The stock initial popup size is 760 × 520 with a 520 × 340 minimum. Dock and Pop Out keep the chosen file, submitted inspection, selected process and report scroll. Mount-specific picker and focus receipts rotate. A pending picker blocks transfer. A live inspection can transfer and a true close cancels it. A fresh open keeps the prior file idle after the worker settles.
+
+Dock acknowledges the exact Choose file focus. A remembered Pop Out requires the original launcher window, focus and visibility before native show. A refused candidate restores the docked pane and refocuses Choose only while the issuing root still owns focus. Escape and Ctrl+W require the current pane. The native popup retains its inspection with the launcher hidden. Quit and Restart drain its exact geometry and window ownership.
+
+Independent review cleared scope, focus, scroll, rollback and retirement paths. The final locked scoped launcher check passed in 3.57 s. One warm link took 24.03 s with no shared-library rebuild. Nextest run `ad9d42cc-4f73-4af6-ab32-934a83a64067` passed all 10 in 3.750 s, with 442 skipped. Reused stock host and stale native action tests passed both in `85d6ad03-bd2a-4aad-a585-7769a877dc12` in 2.134 s. Matched Windows 1516 × 937 picker, retained work, root hide and geometry remain open. Continue the exact File Search file handoff.

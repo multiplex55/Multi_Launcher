@@ -13,6 +13,7 @@ pub(super) enum UtilityKind {
     ClipboardModify,
     FileSearch,
     FolderSize,
+    FileLock,
 }
 
 pub(super) struct UtilityPopup {

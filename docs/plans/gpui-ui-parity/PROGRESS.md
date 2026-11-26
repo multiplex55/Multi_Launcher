@@ -173,7 +173,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add remembered File Lock Dock and Pop Out, then checked File Search file prefill. The installed File Lock Inspector pane has [focused evidence](CHECKPOINTS.md#g10-file-lock-inspector-pane). Matched Settings, G01, G07, G10, G13 and G14 replay, automatic restore of minimized inherited Hash, mixed DPI and known-duration F2 remain open. |
+| Current next action | Add checked File Search file prefill for File Lock Inspector, then reported-user actions. Remembered File Lock Dock and Pop Out has [focused evidence](CHECKPOINTS.md#g10-remembered-file-lock-dock-and-pop-out). Matched Settings, G01, G07, G10, G13 and G14 replay, automatic restore of minimized inherited Hash, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

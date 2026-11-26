@@ -7,6 +7,14 @@ use std::path::PathBuf;
 
 pub(super) const WAIT: &str = "Wait for the File Lock inspection to finish.";
 
+#[derive(Clone)]
+pub(super) struct ColdOrigin {
+    pub(super) host: AnyWindowHandle,
+    pub(super) native: NativeWindow,
+    pub(super) focus: FocusHandle,
+    pub(super) revision: u64,
+}
+
 pub(super) fn current_provider(query: &str, action: &Action, enabled: Option<&HashSet<String>>,
     capabilities: Option<&HashMap<String, Vec<String>>>) -> bool {
     enabled.is_none_or(|set| set.contains("file_lock"))
@@ -27,6 +35,10 @@ fn attempt_current(mount: &utility_mount::MountReceipt, issued: u64, current: u6
 fn submission_current(submitted: Option<&(PathBuf, u64)>, selected: Option<&PathBuf>, generation: u64) -> bool {
     submitted.is_some_and(|(path, issued)| selected == Some(path) && *issued == generation)
 }
+fn rehost_allowed(open: bool, rehosting: bool, picker: bool, fenced: bool, popout: bool, target: bool,
+    mount: &utility_mount::MountReceipt) -> bool {
+    open && !rehosting && !picker && !fenced && popout != target && mount.is_current()
+}
 
 fn process_start(filetime: u64) -> String {
     let seconds = (filetime / 10_000_000) as i64 - 11_644_473_600;
@@ -38,13 +50,17 @@ fn process_start(filetime: u64) -> String {
 
 pub(super) struct FileLockView {
     pub(super) open: bool,
-    root: WeakEntity<RootWindow>,
+    pub(super) root: WeakEntity<RootWindow>,
     host: AnyWindowHandle,
-    native: Option<NativeWindow>,
+    pub(super) native: Option<NativeWindow>,
     visibility: RootVisibility,
-    admission: Arc<RestartAdmission>,
+    pub(super) admission: Arc<RestartAdmission>,
     owner: utility_mount::MountOwner,
-    mount: utility_mount::MountReceipt,
+    pub(super) popout: bool,
+    pub(super) rehosting: bool,
+    pub(super) presentation_error: Option<String>,
+    pub(super) geometry_error: Option<String>,
+    pub(super) mount: utility_mount::MountReceipt,
     session: FileLockSession,
     wake: Arc<HashWakeSignal>,
     selected_file: Option<PathBuf>,
@@ -54,7 +70,8 @@ pub(super) struct FileLockView {
     picker_attempt: u64,
     permit: Option<EffectPermit>,
     focus: FocusHandle,
-    choose_focus: FocusHandle,
+    pub(super) choose_focus: FocusHandle,
+    rows_scroll: ScrollHandle,
     message: Option<String>,
 }
 
@@ -83,26 +100,50 @@ impl FileLockView {
             }
         }).detach();
         Self { open: true, root, host: window.window_handle(), native, visibility, admission,
-            owner, mount, session, wake, selected_file: None, submitted: None, selected: None, picker: false,
-            picker_attempt: 0, permit: None, focus: cx.focus_handle(), choose_focus: cx.focus_handle(), message: None }
+            owner, mount, popout: false, rehosting: false, presentation_error: None, geometry_error: None, session, wake, selected_file: None, submitted: None, selected: None, picker: false,
+            picker_attempt: 0, permit: None, focus: cx.focus_handle(), choose_focus: cx.focus_handle(), rows_scroll: ScrollHandle::new(), message: None }
+    }
+    pub(super) fn host_close_blocked(&self) -> bool { self.picker || self.rehosting }
+    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool { self.open && self.popout == popout && self.mount.is_current() && self.host.window_id() == id }
+    pub(super) fn replace_mount(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, cx: &mut Context<Self>) {
+        self.mount = self.owner.attach(); self.host = host; self.native = native;
+        self.focus = cx.focus_handle(); self.choose_focus = cx.focus_handle();
+    }
+    pub(super) fn focus_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_mounted_in(window.window_handle().window_id(), self.popout) { self.choose_focus.focus(window, cx); }
+    }
+    fn request_rehost(&mut self, target: bool, cx: &mut Context<Self>) {
+        if !rehost_allowed(self.open, self.rehosting, self.picker, self.admission.is_fenced(), self.popout, target, &self.mount) { return; }
+        let Some(root) = self.root.upgrade() else { return; };
+        let revision = root.read(cx).root_visibility.request_revision.load(Ordering::Acquire);
+        let gesture = self.native.map(|source| hash_dock::Gesture { source, foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity), visibility_revision: revision });
+        self.rehosting = true; let mount = self.mount.clone(); let root = self.root.clone();
+        cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.start_file_lock_rehost(target, gesture, mount, cx)); }).detach(); cx.notify();
+    }
+    fn request_cold_rehost(&mut self, origin: ColdOrigin, cx: &mut Context<Self>) {
+        if !rehost_allowed(self.open, self.rehosting, self.picker, self.admission.is_fenced(), self.popout, true, &self.mount) { return; }
+        self.rehosting = true; let mount = self.mount.clone(); let root = self.root.clone();
+        cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.start_file_lock_cold_rehost(mount, origin, cx)); }).detach();
+        cx.notify();
     }
     pub(super) fn busy(&self) -> bool { self.picker || self.session.view().is_busy() }
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool { self.open && self.focus.contains_focused(window, cx) }
     pub(super) fn shutdown(&mut self) {
         self.owner.retire(); self.picker_attempt = self.picker_attempt.wrapping_add(1);
-        self.open = false; self.selected = None; self.session.close();
+        self.open = false; self.rehosting = false; self.selected = None; self.session.close();
     }
     fn current(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.open && self.mount.is_current() && !self.admission.is_fenced()
+        self.open && !self.rehosting && self.mount.is_current() && !self.admission.is_fenced()
             && self.host.window_id() == window.window_handle().window_id()
             && window.is_window_active() && !window.has_active_dialog(cx)
             && self.native.is_some_and(|native| current_foreground_identity() == Some(native.identity)
-                && json_utility::native_host_current(&self.visibility, self.visibility.request_revision.load(Ordering::Acquire), Some(native), false))
-            && self.root.upgrade().is_some_and(|root| root.read(cx).external_owner_is_current(window.focused(cx).as_ref(), window, cx))
+                && json_utility::native_host_current(&self.visibility, self.visibility.request_revision.load(Ordering::Acquire), Some(native), self.popout))
+            && (self.popout || self.root.upgrade().is_some_and(|root| root.read(cx).external_owner_is_current(window.focused(cx).as_ref(), window, cx)))
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.picker { self.message = Some(WAIT.into()); cx.notify(); return; }
         if !self.current(window, cx) { return; }
+        if self.popout { let _ = self.root.update(cx, |root, cx| root.drain_file_lock_geometry(cx, true)); self.shutdown(); window.remove_window(); return; }
         let owns = self.owns_focus(window, cx); let focus = self.focus.clone();
         let root = self.root.clone(); let owner = cx.entity_id(); let native = self.native;
         let revision = self.visibility.request_revision.load(Ordering::Acquire);
@@ -132,7 +173,8 @@ impl FileLockView {
             self.message = Some("Activate the launcher before choosing a file.".into()); cx.notify(); return;
         };
         let revision = self.visibility.request_revision.load(Ordering::Acquire);
-        if !json_utility::native_host_current(&self.visibility, revision, Some(native), false) { return; }
+        if !json_utility::native_host_current(&self.visibility, revision, Some(native), self.popout) { return; }
+        let popup = self.popout;
         let Some(permit) = self.admission.admit() else { return; };
         self.picker_attempt = self.picker_attempt.wrapping_add(1).max(1);
         let attempt = self.picker_attempt; let mount = self.mount.clone(); let worker_mount = mount.clone();
@@ -141,7 +183,7 @@ impl FileLockView {
         self.picker = true; self.message = None;
         let task = cx.background_executor().spawn(async move {
             if !worker_mount.is_current() || admission.is_fenced() || current_foreground_identity() != Some(native.identity)
-                || !json_utility::native_host_current(&visibility, revision, Some(native), false) { return None; }
+                || !json_utility::native_host_current(&visibility, revision, Some(native), popup) { return None; }
             Some(picker.pick_file())
         });
         let weak = cx.entity().downgrade(); let host = self.host;
@@ -153,7 +195,7 @@ impl FileLockView {
                 view.picker = false;
                 let current = attempt_current(&mount, attempt, view.picker_attempt, view.open && !view.admission.is_fenced(),
                     view.host.window_id() == window.window_handle().window_id() && view.native == Some(native)
-                    && json_utility::native_host_current(&view.visibility, revision, Some(native), false));
+                    && view.popout == popup && json_utility::native_host_current(&view.visibility, revision, Some(native), popup));
                 if current && let Some(path) = selected {
                     match multi_launcher::file_lock::validate_file_path(&path) {
                         Ok(()) => {
@@ -194,9 +236,20 @@ impl Render for FileLockView {
         let submitted = submission_current(self.submitted.as_ref(), self.selected_file.as_ref(), generation);
         let mount = self.mount.clone(); let picker_attempt = self.picker_attempt;
         let path = self.selected_file.clone();
+        let target = !self.popout; let rehost_mount = self.mount.clone();
+        let shortcut_mount = self.mount.clone();
         let mut panel = div().id("file-lock-pane").key_context("FileLockPane").track_focus(&self.focus)
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if !window.default_prevented() && shortcut_mount.is_current() && shortcut_mount.matches(&view.mount)
+                    && event.keystroke.key == "w" && event.keystroke.modifiers == (Modifiers { control: true, ..Modifiers::default() })
+                    && view.owns_focus(window, cx) && view.current(window, cx) {
+                    if !event.is_held { view.close(window, cx); } cx.stop_propagation();
+                }
+            }))
             .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Escape, window, cx| {
-                if view.owns_focus(window, cx) {
+                if view.owns_focus(window, cx) && view.popout {
+                    view.handle_escape(window, cx, false); cx.stop_propagation();
+                } else if view.owns_focus(window, cx) {
                     let root = view.root.clone();
                     let latched = root.update(cx, |root, _| { let was = root.pane_escape_latched; root.pane_escape_latched = true; was }).unwrap_or(true);
                     if !latched { view.handle_escape(window, cx, false); }
@@ -204,6 +257,10 @@ impl Render for FileLockView {
                 }
             })).flex().flex_col().gap_2().w_full().p_3()
             .child(Label::new("File Lock Inspector"))
+            .child(Button::new("file-lock-rehost").label(if self.popout { "Dock" } else { "Pop Out" }).disabled(self.picker || self.rehosting)
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    if rehost_mount.is_current() && rehost_mount.matches(&view.mount) && view.current(window, cx) { view.request_rehost(target, cx); }
+                })))
             .child(Label::new(self.selected_file.as_ref().map_or_else(|| "No file selected".into(), |path| path.display().to_string())))
             .child(div().flex().flex_wrap().gap_2()
                 .child(Button::new("file-lock-choose").label("Choose file").tab_stop(true).track_focus(&self.choose_focus).disabled(self.picker)
@@ -230,6 +287,7 @@ impl Render for FileLockView {
                 .child(Button::new("file-lock-close").label("Close").on_click({ let mount = mount.clone(); cx.listener(move |view, _, window, cx| {
                     if mount.is_current() && mount.matches(&view.mount) { view.close(window, cx); }
                 }) })));
+        if let Some(error) = self.presentation_error.as_ref().or(self.geometry_error.as_ref()) { panel = panel.child(Label::new(error.clone())); }
         if let Some(message) = &self.message { panel = panel.child(Label::new(message.clone())); }
         panel = panel.child(Label::new(if !submitted {
             if self.selected_file.is_some() { "Select Inspect to check this file.".to_owned() }
@@ -246,7 +304,7 @@ impl Render for FileLockView {
         if let Some(inspection) = view.inspection().filter(|inspection| submitted && view.inspection_is_current()
             && self.selected_file.as_ref() == Some(&inspection.path)) {
             if inspection.reports_no_processes() { panel = panel.child(Label::new("Windows reported no processes using this file.")); }
-            let mut rows = div().id("file-lock-processes").flex().flex_col().gap_1().max_h(px(300.0)).overflow_y_scroll();
+            let mut rows = div().id("file-lock-processes").flex().flex_col().gap_1().max_h(px(300.0)).overflow_y_scroll().track_scroll(&self.rows_scroll);
             for process in inspection.processes.iter().take(multi_launcher::file_lock::MAX_REPORTED_FILE_USERS) {
                 let key = ProcessKey { generation, pid: process.process_id, created: process.creation_filetime };
                 let label = if !process.application_name.is_empty() { process.application_name.clone() }
@@ -279,20 +337,79 @@ impl RootWindow {
         if self.restart_admission.is_fenced() || window.has_active_dialog(cx) || !window.is_window_active()
             || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
             || !self.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity)) { return; }
+        if self.file_lock_popup.is_some() { self.reveal_file_lock_popup(window, cx); return; }
+        if self.file_lock_retiring.iter().any(|window| window.native_window.is_none_or(native_window_is_valid)) { self.launcher_search_error = Some(WAIT.into()); cx.notify(); return; }
         if let Some(existing) = &self.file_lock_view {
+            if existing.read(cx).rehosting { return; }
             if existing.read(cx).open {
                 existing.update(cx, |view, cx| { view.choose_focus.focus(window, cx); cx.notify(); });
                 self.reveal_file_lock(window, cx); cx.notify(); return;
             }
             if existing.read(cx).busy() { self.launcher_search_error = Some(WAIT.into()); cx.notify(); return; }
         }
+        let retained_path = self.file_lock_view.as_ref().and_then(|view| view.read(cx).selected_file.clone());
         let root = cx.entity().downgrade(); let native = self.native_window;
         let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone();
         let view = cx.new(|cx| FileLockView::new(window, cx, root, native, visibility, admission));
-        view.update(cx, |view, cx| view.choose_focus.focus(window, cx));
-        self.file_lock_view = Some(view); self.query_history.reset(); self.reveal_file_lock(window, cx); cx.notify();
+        view.update(cx, |view, cx| { view.selected_file = retained_path; view.choose_focus.focus(window, cx); });
+        self.file_lock_view = Some(view.clone()); self.query_history.reset(); self.reveal_file_lock(window, cx);
+        let prefers_popup = multi_launcher::settings::UtilityToolKey::parse("file-lock").ok().is_some_and(|key|
+            self.utility_presentations.preference(key).unwrap_or(multi_launcher::settings::RememberedPresentation::Docked)
+                == multi_launcher::settings::RememberedPresentation::Popout);
+        if prefers_popup && let Some(native) = native {
+            let origin = ColdOrigin { host: window.window_handle(), native, focus: view.read(cx).choose_focus.clone(),
+                revision: self.root_visibility.request_revision.load(Ordering::Acquire) };
+            let weak = view.downgrade();
+            cx.spawn(async move |_, cx| { let _ = weak.update(cx, |view, cx| view.request_cold_rehost(origin, cx)); }).detach();
+        }
+        cx.notify();
     }
-    fn reveal_file_lock(&self, window: &Window, cx: &App) {
+    fn file_lock_reveal_origin_current(&self, focus: &FocusHandle, host: AnyWindowHandle, require_active: bool, cx: &mut Context<Self>) -> bool {
+        if self.root_window.is_none_or(|window| window.window_id() != host.window_id()) || self.restart_admission.is_fenced() { return false; }
+        host.update(cx, |_, window, app| (!require_active || window.is_window_active()) && !window.has_active_dialog(app)
+            && window.focused(app).as_ref() == Some(focus)
+            && self.external_owner_is_current(Some(focus), window, app)).unwrap_or(false)
+    }
+    pub(super) fn file_lock_cold_origin_current(&self, origin: &ColdOrigin, cx: &mut Context<Self>) -> bool {
+        self.native_window == Some(origin.native)
+            && current_foreground_identity() == Some(origin.native.identity)
+            && json_utility::native_host_current(&self.root_visibility, origin.revision, Some(origin.native), false)
+            && self.file_lock_reveal_origin_current(&origin.focus, origin.host, true, cx)
+    }
+    pub(super) fn file_lock_cold_origin_retained(&self, origin: &ColdOrigin, cx: &mut Context<Self>) -> bool {
+        self.native_window == Some(origin.native)
+            && json_utility::native_host_current(&self.root_visibility, origin.revision, Some(origin.native), false)
+            && self.file_lock_reveal_origin_current(&origin.focus, origin.host, false, cx)
+    }
+    fn reveal_file_lock_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(popup), Some(view), Some(source)) = (&self.file_lock_popup, &self.file_lock_view, self.native_window) else { return; };
+        let Some(native) = popup.native else { return; };
+        if view.read(cx).rehosting || !view.read(cx).is_mounted_in(popup.window.window_id(), true)
+            || !checked_hash_popup_visible(native) || current_foreground_identity() != Some(source.identity) { return; }
+        let Some(permit) = self.restart_admission.admit() else { return; };
+        let Some(focus) = window.focused(cx) else { return; }; let origin_host = window.window_handle();
+        let host = popup.window; let view = view.clone(); let mount = view.read(cx).mount.clone();
+        let worker_mount = mount.clone(); let visibility = self.root_visibility.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire); let admission = self.restart_admission.clone();
+        let root = cx.entity().downgrade(); let guard = Arc::new(AtomicU64::new(1));
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let current = root.update(cx, |root, cx| root.file_lock_reveal_origin_current(&focus, origin_host, true, cx)).unwrap_or(false);
+            if !current || current_foreground_identity() != Some(source.identity) { return; }
+            let accepted = activate_for_secondary_window_if(&guard, 1, native, Some(source.identity), &||
+                worker_mount.is_current() && !admission.is_fenced() && json_utility::native_host_current(&visibility, revision, Some(source), false));
+            if !accepted || !checked_hash_popup_visible(native) || current_foreground_identity() != Some(native.identity)
+                || !mount.is_current() || !json_utility::native_host_current(&visibility, revision, Some(source), false) { return; }
+            let current = root.update(cx, |root, cx| root.file_lock_popup.as_ref().is_some_and(|popup| popup.window.window_id() == host.window_id() && popup.native == Some(native))
+                && root.file_lock_view.as_ref().is_some_and(|v| v.entity_id() == view.entity_id()) && !root.restart_admission.is_fenced()
+                && view.read(cx).is_mounted_in(host.window_id(), true) && root.file_lock_reveal_origin_current(&focus, origin_host, false, cx)).unwrap_or(false);
+            if current { let _ = update_kit_window_content(host, &view, cx, |view, window, cx| {
+                if mount.is_current() && view.is_mounted_in(window.window_handle().window_id(), true)
+                    && current_foreground_identity() == Some(native.identity) && !window.has_active_dialog(cx) { view.focus_host(window, cx); cx.notify(); }
+            }); }
+        }).detach();
+    }
+    pub(super) fn reveal_file_lock(&self, window: &Window, cx: &App) {
         let id = window.window_handle().window_id();
         let history = self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
         let modify = self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
@@ -307,7 +424,7 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{attempt_current, current_provider, submission_current, ProcessKey};
+    use super::{attempt_current, current_provider, rehost_allowed, submission_current, ProcessKey};
     use multi_launcher::plugin::Plugin;
     #[test]
     fn exact_provider_and_stale_picker_receipts() {
@@ -337,5 +454,15 @@ mod tests {
         assert!(!submission_current(Some(&submitted), Some(&second), 7));
         assert!(!submission_current(Some(&submitted), Some(&first), 8));
         assert!(!submission_current(None, Some(&first), 7));
+    }
+    #[test]
+    fn picker_blocks_host_transfer_and_old_mount_is_retired() {
+        let owner = super::super::utility_mount::MountOwner::default();
+        let old = owner.attach();
+        assert!(rehost_allowed(true, false, false, false, false, true, &old));
+        assert!(!rehost_allowed(true, false, true, false, false, true, &old));
+        let replacement = owner.attach();
+        assert!(!rehost_allowed(true, false, false, false, false, true, &old));
+        assert!(rehost_allowed(true, false, false, false, true, false, &replacement));
     }
 }
