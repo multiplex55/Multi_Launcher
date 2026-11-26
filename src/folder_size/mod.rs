@@ -1,4 +1,5 @@
 mod model;
+pub mod report;
 mod scan;
 mod session;
 pub(crate) mod treemap;

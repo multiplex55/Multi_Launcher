@@ -1664,3 +1664,9 @@ The pane uses the shared `FolderSizeSession` and Activity Center. It shows progr
 Independent review covered installed routing, frozen requests, picker authority, Escape and worker retirement. The final scoped locked launcher check passed in 8.33 s. One warm link took 20.69 s with no shared-library rebuild. Nextest run `930371d9-37f6-4e90-af6d-adf74b32d7f5` passed all four in 1.923 s with 436 skipped. Reused Windows shared engine run `f35f5eed-6d8c-4632-82a1-13d452f59c12` passed both in 0.461 s, including hard-link names and cancel subtotal behavior.
 
 Matched Windows 1516 × 937 picker, scan and close replay remains open. The owned corpus has one 3-byte top-level file and one 5-byte nested file. Continue the shared table and treemap report boundary, then the GPUI report controls and remembered host and File Search prefill.
+
+### G10 shared Folder Size report extraction
+
+The shared report owns Result and Progress publications, measurements, sorted and filtered visible rows, directory navigation, selection and treemap layout caching. The egui dialog now uses that owner and retains its exact viewport and Arc publication guards, native actions and picker state. Drill and Up reconcile visible rows immediately. Checked path lookup requires a present matching root and the exact live and retained publication.
+
+Scoped locked library and launcher checks passed in 1 min 48 s, 26.53 s and 24.23 s. Independent review covered publication identity, frozen cancellation progress, navigation and the migrated egui callers. The new owned scan test and existing egui report tests are queued with the GPUI table and treemap for one grouped link. Linked report evidence and matched native replay remain open.

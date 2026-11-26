@@ -1,8 +1,15 @@
+use crate::folder_size::report::{
+    filter_matches, omission_label, row_measurement, FolderSizeProjection, FolderSizeReport,
+    FolderSizeRow, KindFilter, ProjectionKey, ProjectionVersion, SortColumn, SortDirection,
+};
+#[cfg(test)]
+use crate::folder_size::report::{child_indices, compare_rows, projection_contains_row, TreemapCache};
 use crate::batch_rename::ExplicitDirectoryRoot;
 use crate::folder_size::{
-    FolderSizeEntryKind, FolderSizeIssueKind, FolderSizeOmission, FolderSizeProgress,
-    FolderSizeResult, FolderSizeSession, FolderSizeSessionStatus, FolderSizeStatus,
+    FolderSizeEntryKind, FolderSizeIssueKind, FolderSizeSession, FolderSizeSessionStatus, FolderSizeStatus,
 };
+#[cfg(test)]
+use crate::folder_size::FolderSizeOmission;
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::gui::utility_host::ViewportPassProvenance;
 use eframe::egui;
@@ -41,16 +48,6 @@ pub(crate) struct FolderSizeRevealRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SortColumn { Name, Type, Size, Share, Status }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SortDirection { Ascending, Descending }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum KindFilter { All, Files, Folders }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct VisibleKey { projection: ProjectionKey, directory: usize, column: SortColumn, direction: SortDirection, filter: KindFilter }
-struct VisibleRows { key: VisibleKey, indices: Arc<Vec<usize>> }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FolderSizeRevealRoute { OpenRoot, RevealEntry }
 pub(crate) fn reveal_route(path: &Path) -> FolderSizeRevealRoute {
     if path.parent().is_none_or(|parent| parent.as_os_str().is_empty()) {
@@ -58,258 +55,6 @@ pub(crate) fn reveal_route(path: &Path) -> FolderSizeRevealRoute {
     } else { FolderSizeRevealRoute::RevealEntry }
 }
 
-#[derive(Clone)]
-enum ProjectionSource {
-    Progress(FolderSizeProgress),
-    Result(Arc<FolderSizeResult>),
-}
-
-impl ProjectionSource {
-    fn path_at(&self, target_index: usize) -> Option<PathBuf> {
-        match self {
-            Self::Result(result) => result
-                .entries()
-                .get(target_index)
-                .map(|entry| entry.path().to_path_buf()),
-            Self::Progress(progress) => {
-                let mut path = None;
-                let mut index = 0usize;
-                progress.for_each_entry(|entry| {
-                    if index == target_index {
-                        path = Some(entry.path().to_path_buf());
-                    }
-                    index = index.saturating_add(1);
-                });
-                path
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProjectionVersion {
-    Progress(u64),
-    Result,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ProjectionKey {
-    generation: u64,
-    version: ProjectionVersion,
-}
-
-#[derive(Clone)]
-struct FolderSizeRow {
-    parent_index: Option<usize>,
-    name: String,
-    sort_key: String,
-    kind: FolderSizeEntryKind,
-    logical_bytes: Option<u64>,
-    subtree_logical_bytes: u64,
-    complete: bool,
-}
-
-#[derive(Clone, Copy, Default)]
-struct FolderSizeCounts {
-    entries: usize,
-    files: usize,
-    directories: usize,
-    directories_admitted: Option<usize>,
-    scanned: usize,
-    reparse: usize,
-    cloud: usize,
-    inaccessible: usize,
-    issues: usize,
-    issues_truncated: bool,
-}
-
-#[derive(Clone)]
-struct FolderSizeProjection {
-    key: ProjectionKey,
-    source: ProjectionSource,
-    rows: Vec<FolderSizeRow>,
-    children: Vec<Vec<usize>>,
-    root_index: Option<usize>,
-    total_logical_bytes: u64,
-    counts: FolderSizeCounts,
-    status: Option<FolderSizeStatus>,
-    issues: Vec<(Option<PathBuf>, FolderSizeIssueKind, String)>,
-}
-
-impl FolderSizeProjection {
-    fn from_progress(progress: &FolderSizeProgress) -> Self {
-        let mut rows = Vec::new();
-        progress.for_each_entry(|entry| {
-            rows.push(project_row(
-                entry.path(),
-                entry.parent_index(),
-                entry.kind(),
-                entry.logical_bytes(),
-                entry.subtree_logical_bytes(),
-                entry.is_complete(),
-            ));
-        });
-        let mut projection = Self {
-            key: ProjectionKey {
-                generation: progress.generation(),
-                version: ProjectionVersion::Progress(progress.publication_id()),
-            },
-            source: ProjectionSource::Progress(progress.clone()),
-            children: vec![Vec::new(); rows.len()],
-            root_index: rows.iter().position(|row| row.parent_index.is_none()),
-            rows,
-            total_logical_bytes: progress.total_logical_bytes(),
-            counts: FolderSizeCounts {
-                entries: progress.entries_seen(),
-                files: progress.files_seen(),
-                directories: progress.directories_seen(),
-                directories_admitted: None,
-                scanned: progress.directories_scanned(),
-                reparse: progress.reparse_entries_excluded(),
-                cloud: progress.cloud_placeholders_excluded(),
-                inaccessible: progress.inaccessible_entries(),
-                ..FolderSizeCounts::default()
-            },
-            status: None,
-            issues: Vec::new(),
-        };
-        projection.finish_index();
-        projection
-    }
-
-    fn from_result(result: Arc<FolderSizeResult>) -> Self {
-        let rows = result
-            .entries()
-            .iter()
-            .map(|entry| {
-                project_row(
-                    entry.path(),
-                    entry.parent_index(),
-                    entry.kind(),
-                    entry.logical_bytes(),
-                    entry.subtree_logical_bytes(),
-                    entry.is_complete(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let summary = result.summary();
-        let mut projection = Self {
-            key: ProjectionKey {
-                generation: result.generation(),
-                version: ProjectionVersion::Result,
-            },
-            source: ProjectionSource::Result(Arc::clone(&result)),
-            children: vec![Vec::new(); rows.len()],
-            root_index: rows.iter().position(|row| row.parent_index.is_none()),
-            rows,
-            total_logical_bytes: result.total_logical_bytes(),
-            counts: FolderSizeCounts {
-                entries: summary.entries_seen(),
-                files: summary.files_seen(),
-                directories: summary.directories_seen(),
-                directories_admitted: Some(summary.directories_admitted()),
-                scanned: summary.directories_scanned(),
-                reparse: summary.reparse_entries_excluded(),
-                cloud: summary.cloud_placeholders_excluded(),
-                inaccessible: summary.inaccessible_entries(),
-                issues: summary.issue_count(),
-                issues_truncated: summary.issues_truncated(),
-            },
-            status: Some(result.status()),
-            issues: result
-                .issues()
-                .iter()
-                .map(|issue| {
-                    (
-                        issue.path().map(Path::to_path_buf),
-                        issue.kind(),
-                        issue.message().to_owned(),
-                    )
-                })
-                .collect(),
-        };
-        projection.finish_index();
-        projection
-    }
-
-    fn finish_index(&mut self) {
-        self.children = child_indices(&self.rows);
-    }
-
-    fn row(&self, index: usize) -> Option<&FolderSizeRow> {
-        self.rows.get(index)
-    }
-
-    fn contains_row(&self, generation: u64, index: usize) -> bool {
-        projection_contains_row(self.key, self.rows.len(), generation, index)
-    }
-}
-
-fn child_indices(rows: &[FolderSizeRow]) -> Vec<Vec<usize>> {
-    let mut children = vec![Vec::new(); rows.len()];
-    for (index, row) in rows.iter().enumerate() {
-        if let Some(parent) = row.parent_index.and_then(|p| children.get_mut(p)) { parent.push(index); }
-    }
-    children
-}
-
-fn kind_rank(kind: FolderSizeEntryKind) -> u8 {
-    match kind { FolderSizeEntryKind::File => 0, FolderSizeEntryKind::Directory => 1, FolderSizeEntryKind::Omitted(_) => 2 }
-}
-fn status_rank(row: &FolderSizeRow) -> (u8, &'static str) {
-    match row.kind {
-        FolderSizeEntryKind::Directory if row.complete => (0, ""),
-        FolderSizeEntryKind::Directory => (1, ""),
-        FolderSizeEntryKind::File => (2, ""),
-        FolderSizeEntryKind::Omitted(reason) => (3, omission_label(reason)),
-    }
-}
-fn row_sort_measurement(row: &FolderSizeRow) -> Option<u64> {
-    match row.kind {
-        FolderSizeEntryKind::Directory => Some(row.subtree_logical_bytes),
-        FolderSizeEntryKind::File => row.logical_bytes,
-        FolderSizeEntryKind::Omitted(_) => None,
-    }
-}
-fn compare_rows(rows: &[FolderSizeRow], left: usize, right: usize, column: SortColumn, direction: SortDirection, total: u64) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    let (a, b) = (&rows[left], &rows[right]);
-    let reverse = |value: Ordering| if direction == SortDirection::Descending { value.reverse() } else { value };
-    let primary = match column {
-        SortColumn::Name => reverse(a.sort_key.cmp(&b.sort_key).then_with(|| a.name.cmp(&b.name))),
-        SortColumn::Type => reverse(kind_rank(a.kind).cmp(&kind_rank(b.kind))),
-        SortColumn::Status => reverse(status_rank(a).cmp(&status_rank(b))),
-        SortColumn::Share if total == 0 => Ordering::Equal,
-        SortColumn::Size | SortColumn::Share => match (row_sort_measurement(a), row_sort_measurement(b)) {
-            (Some(a), Some(b)) => reverse(a.cmp(&b)),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        },
-    };
-    primary.then_with(|| a.sort_key.cmp(&b.sort_key)).then_with(|| a.name.cmp(&b.name)).then_with(|| left.cmp(&right))
-}
-fn filter_matches(filter: KindFilter, kind: FolderSizeEntryKind) -> bool {
-    match filter { KindFilter::All => true, KindFilter::Files => kind == FolderSizeEntryKind::File, KindFilter::Folders => kind == FolderSizeEntryKind::Directory }
-}
-
-fn projection_contains_row(
-    key: ProjectionKey,
-    row_count: usize,
-    generation: u64,
-    index: usize,
-) -> bool {
-    key.generation == generation && index < row_count
-}
-
-fn row_measurement(row: &FolderSizeRow, total_logical_bytes: u64) -> (Option<u64>, Option<f64>) {
-    let row_bytes = row_sort_measurement(row);
-    let share = (total_logical_bytes > 0)
-        .then_some(row_bytes)
-        .flatten()
-        .map(|bytes| (bytes as f64 / total_logical_bytes as f64) * 100.0);
-    (row_bytes, share)
-}
 
 fn row_name_width(available_width: f32) -> f32 {
     let reserved = ROW_TYPE_WIDTH + ROW_SIZE_WIDTH + ROW_SHARE_WIDTH + ROW_STATUS_WIDTH + ROW_COLUMN_GAP * 4.0;
@@ -333,29 +78,6 @@ fn status_label(status: FolderSizeSessionStatus) -> &'static str {
     }
 }
 
-fn project_row(
-    path: &Path,
-    parent_index: Option<usize>,
-    kind: FolderSizeEntryKind,
-    logical_bytes: Option<u64>,
-    subtree_logical_bytes: u64,
-    complete: bool,
-) -> FolderSizeRow {
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned();
-    FolderSizeRow {
-        parent_index,
-        sort_key: name.to_lowercase(),
-        name,
-        kind,
-        logical_bytes,
-        subtree_logical_bytes,
-        complete,
-    }
-}
 
 use super::utility_host::{HostedCopyCapture, HostedCopyReceipt};
 
@@ -444,65 +166,6 @@ struct PendingFolderSizePass {
     projection: Option<Arc<FolderSizeProjection>>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct TreemapKey {
-    projection: ProjectionKey,
-    directory: usize,
-    filter: KindFilter,
-    width: u64,
-    height: u64,
-}
-
-#[derive(Default)]
-struct TreemapCache {
-    value: Option<(TreemapKey, Arc<crate::folder_size::treemap::Layout>)>,
-}
-
-impl TreemapCache {
-    fn layout(
-        &mut self,
-        projection: ProjectionKey,
-        rows: &[FolderSizeRow],
-        children: &[Vec<usize>],
-        directory: usize,
-        filter: KindFilter,
-        width: f64,
-        height: f64,
-    ) -> Option<Arc<crate::folder_size::treemap::Layout>> {
-        use crate::folder_size::treemap::{self, Item, Measurement};
-        let key = TreemapKey {
-            projection,
-            directory,
-            filter,
-            width: width.to_bits(),
-            height: height.to_bits(),
-        };
-        if let Some((cached_key, layout)) = &self.value
-            && *cached_key == key
-        {
-            return Some(layout.clone());
-        }
-        let indices = children.get(directory)?;
-        let items = indices.iter().filter_map(|&index| {
-            let row = rows.get(index)?;
-            if !filter_matches(filter, row.kind) {
-                return None;
-            }
-            let measurement = match row.kind {
-                FolderSizeEntryKind::Omitted(_) => Measurement::Omitted,
-                _ => row_sort_measurement(row).map_or(Measurement::Unknown, Measurement::Bytes),
-            };
-            Some(Item {
-                row: index,
-                measurement,
-                provisional: matches!(row.kind, FolderSizeEntryKind::Directory) && !row.complete,
-            })
-        });
-        let layout = Arc::new(treemap::layout(items, width, height)?);
-        self.value = Some((key, layout.clone()));
-        Some(layout)
-    }
-}
 pub(crate) struct FolderSizeDialogState {
     pub(crate) open: bool,
     host: super::utility_host::UtilityHostState,
@@ -517,18 +180,9 @@ pub(crate) struct FolderSizeDialogState {
     selected_root: Option<ExplicitDirectoryRoot>,
     scan_root: Option<ExplicitDirectoryRoot>,
     recursive: bool,
-    current_directory: Option<(u64, usize)>,
-    current_directory_path: Option<PathBuf>,
-    selected_entry: Option<(u64, usize)>,
     keyboard_focus: Option<(u64, usize, super::utility_host::HostIdentity, u64, Option<(u64, usize)>)>,
     keyboard_reveal: bool,
     row_menu: Option<(ProjectionKey, usize, egui::Id, super::utility_host::HostIdentity, u64, Option<(u64, usize)>)>,
-    projection: Option<Arc<FolderSizeProjection>>,
-    sort_column: SortColumn,
-    sort_direction: SortDirection,
-    filter: KindFilter,
-    visible_rows: Option<VisibleRows>,
-    treemap_cache: TreemapCache,
     folder_view: FolderView,
     treemap_press: Option<TreemapPress>,
     pending: Option<PendingFolderSizePass>,
@@ -541,6 +195,7 @@ pub(crate) struct FolderSizeDialogState {
     test_action_rects: Vec<(String, egui::Rect, egui::Rect)>,
     #[cfg(test)]
     test_action_enabled: Vec<(&'static str, bool)>,
+    report: FolderSizeReport,
 }
 
 impl FolderSizeDialogState {
@@ -572,6 +227,7 @@ impl FolderSizeDialogState {
             }),
         };
         Self {
+            report: FolderSizeReport::default(),
             open: false,
             host: super::utility_host::UtilityHostState::docked(),
             presentation_prepared: false,
@@ -585,18 +241,9 @@ impl FolderSizeDialogState {
             selected_root: None,
             scan_root: None,
             recursive: true,
-            current_directory: None,
-            current_directory_path: None,
-            selected_entry: None,
             keyboard_focus: None,
             keyboard_reveal: false,
             row_menu: None,
-            projection: None,
-            sort_column: SortColumn::Size,
-            sort_direction: SortDirection::Descending,
-            filter: KindFilter::All,
-            visible_rows: None,
-            treemap_cache: TreemapCache::default(),
             folder_view: FolderView::Table,
             treemap_press: None,
             pending: None,
@@ -729,28 +376,28 @@ impl FolderSizeDialogState {
         let commit_allowed = pass_allowed && !egui::Popup::is_any_open(ctx);
         self.sync_visible_rows();
         let mut window_open = self.open;
-        let projection = self.projection.clone();
+        let projection = self.report.projection.clone();
         let selected_root = self.selected_root.clone();
         let scan_root = self.scan_root.clone();
-        let selected_entry = self.selected_entry;
-        let visible_indices = self.visible_rows.as_ref().map(|rows| Arc::clone(&rows.indices)).unwrap_or_default();
+        let selected_entry = self.report.selected_entry;
+        let visible_indices = self.report.visible_rows.as_ref().map(|rows| Arc::clone(&rows.indices)).unwrap_or_default();
         let keyboard_focus = self.keyboard_focus.filter(|(generation, index, host, epoch, directory)| {
             input_allowed && !egui::Popup::is_any_open(ctx) && *host == self.host.identity()
-                && *epoch == self.host_epoch && *directory == self.current_directory
+                && *epoch == self.host_epoch && *directory == self.report.current_directory
                 && *generation == view.generation() && visible_indices.contains(index)
         }).map(|(generation, index, _, _, _)| (generation, index));
         if keyboard_focus.is_none() { self.keyboard_focus = None; }
         let mut focus_delivered = false;
-        let sort_column = self.sort_column;
-        let sort_direction = self.sort_direction;
-        let filter = self.filter;
+        let sort_column = self.report.sort_column;
+        let sort_direction = self.report.sort_direction;
+        let filter = self.report.filter;
         let folder_view = self.folder_view;
         let host_identity = self.host.identity();
         let host_epoch = self.host_epoch;
         let previous_treemap_press = self.treemap_press;
         let owned_popup = self.row_menu.map(|(_, _, popup, _, _, _)| popup);
-        let current_directory = self.current_directory;
-        let current_directory_path = self.current_directory_path.clone();
+        let current_directory = self.report.current_directory;
+        let current_directory_path = self.report.current_directory_path.clone();
         let mut recursive = self.recursive;
         let original_recursive = recursive;
         let notice = self.notice.clone();
@@ -1102,12 +749,12 @@ impl FolderSizeDialogState {
     pub(super) fn owns_row_menu(&self, ctx: &egui::Context) -> bool {
         self.row_menu.is_some_and(|(key, index, popup, host, epoch, directory)| {
             self.open && self.host.identity() == host && self.host_epoch == epoch
-                && self.current_directory == directory
-                && self.projection.as_ref().is_some_and(|p| {
+                && self.report.current_directory == directory
+                && self.report.projection.as_ref().is_some_and(|p| {
                     p.contains_row(key.generation, index)
                         && p.row(index).is_some_and(|row| {
                             row.parent_index == directory.map(|(_, parent)| parent).or(p.root_index)
-                                && filter_matches(self.filter, row.kind)
+                                && filter_matches(self.report.filter, row.kind)
                         })
                 })
                 && egui::Popup::is_id_open(ctx, popup)
@@ -1409,7 +1056,7 @@ impl FolderSizeDialogState {
                     epoch: self.host_epoch,
                     native,
                     info,
-                    projection: self.projection.clone(),
+                    projection: self.report.projection.clone(),
                     actions,
                 });
             }
@@ -1535,8 +1182,7 @@ impl FolderSizeDialogState {
             );
             if row_action
                 && pending.projection.as_ref().is_some_and(|origin| {
-                    !self
-                        .projection
+                    !self.report.projection
                         .as_ref()
                         .is_some_and(|current| Arc::ptr_eq(origin, current))
                 })
@@ -1555,10 +1201,9 @@ impl FolderSizeDialogState {
                     if self.folder_view != FolderView::Table
                         && press.host == self.host.identity()
                         && press.epoch == self.host_epoch
-                        && press.directory == self.current_directory
-                        && press.filter == self.filter
-                        && self
-                            .projection
+                        && press.directory == self.report.current_directory
+                        && press.filter == self.report.filter
+                        && self.report.projection
                             .as_ref()
                             .is_some_and(|p| p.key == press.projection)
                     {
@@ -1570,14 +1215,12 @@ impl FolderSizeDialogState {
                         && self.folder_view != FolderView::Table
                         && press.host == self.host.identity()
                         && press.epoch == self.host_epoch
-                        && press.directory == self.current_directory
-                        && press.filter == self.filter
-                        && self
-                            .projection
+                        && press.directory == self.report.current_directory
+                        && press.filter == self.report.filter
+                        && self.report.projection
                             .as_ref()
                             .is_some_and(|p| p.key == press.projection)
-                        && self
-                            .visible_rows
+                        && self.report.visible_rows
                             .as_ref()
                             .is_some_and(|rows| rows.indices.contains(&press.row));
                     if accepted {
@@ -1684,10 +1327,10 @@ impl FolderSizeDialogState {
                     match self.session.refresh(root, recursive) {
                         Ok(_) => {
                             self.scan_root = self.selected_root.clone();
-                            self.current_directory = None;
-                            self.current_directory_path = None;
-                            self.selected_entry = None;
-                            self.projection = None;
+                            self.report.current_directory = None;
+                            self.report.current_directory_path = None;
+                            self.report.selected_entry = None;
+                            self.report.projection = None;
                             self.notice = None;
                         }
                         Err(error) => self.notice = Some(error.to_string()),
@@ -1706,90 +1349,59 @@ impl FolderSizeDialogState {
                         }
                     }
                 }
-                FolderSizeAction::SetSort(column) => {
-                    if self.sort_column == column {
-                        self.sort_direction = if self.sort_direction == SortDirection::Ascending { SortDirection::Descending } else { SortDirection::Ascending };
-                    } else {
-                        self.sort_column = column;
-                        self.sort_direction = SortDirection::Ascending;
-                    }
-                    self.visible_rows = None;
-                    self.sync_visible_rows();
-                }
-                FolderSizeAction::SetFilter(filter) => {
-                    self.filter = filter;
-                    self.visible_rows = None;
-                    self.sync_visible_rows();
-                }
+                FolderSizeAction::SetSort(column) => self.report.set_sort(column),
+                FolderSizeAction::SetFilter(filter) => self.report.set_filter(filter),
                 FolderSizeAction::OpenRowMenu { generation, index, popup } => {
-                    if let Some(projection) = self.projection.as_ref()
+                    if let Some(projection) = self.report.projection.as_ref()
                         && projection.contains_row(generation, index)
-                        && self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
+                        && self.report.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
                     {
-                        self.selected_entry = Some((generation, index));
-                        self.row_menu = Some((projection.key, index, popup, pending.host, pending.epoch, self.current_directory));
+                        self.report.selected_entry = Some((generation, index));
+                        self.row_menu = Some((projection.key, index, popup, pending.host, pending.epoch, self.report.current_directory));
                     }
                 }
                 FolderSizeAction::RevealRow { generation, index } => {
                     self.sync_visible_rows();
-                    if self.open && self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
-                        && let Some(projection) = self.projection.as_ref()
+                    if self.open && self.report.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
+                        && let Some(projection) = self.report.projection.as_ref()
                     {
                         if projection.source.path_at(index).is_none() {
                             self.notice = Some("Cannot reveal: this row has no retained path.".into());
                             continue;
                         }
-                        self.selected_entry = Some((generation, index));
+                        self.report.selected_entry = Some((generation, index));
                         effects.push(FolderSizeDialogEffect::Reveal(FolderSizeRevealRequest {
-                            key: projection.key, index, directory: self.current_directory,
+                            key: projection.key, index, directory: self.report.current_directory,
                             host: pending.host, epoch: pending.epoch,
                         }));
                     }
                 }
                 FolderSizeAction::Select { generation, index } => self.select_row(generation, index),
                 FolderSizeAction::MoveSelection { generation, index } => {
-                    if self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
-                        && self.projection.as_ref().is_some_and(|projection| projection.contains_row(generation, index)) {
+                    if self.report.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
+                        && self.report.projection.as_ref().is_some_and(|projection| projection.contains_row(generation, index)) {
                         self.select_row(generation, index);
-                        self.keyboard_focus = Some((generation, index, pending.host, pending.epoch, self.current_directory));
+                        self.keyboard_focus = Some((generation, index, pending.host, pending.epoch, self.report.current_directory));
                         self.keyboard_reveal = true;
                         ctx.request_repaint_of(pending.owner.viewport_id);
                     }
                 }
                 FolderSizeAction::FocusSelection { generation, index } => {
-                    if self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
-                        && self.projection.as_ref().is_some_and(|projection| projection.contains_row(generation, index)) {
+                    if self.report.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
+                        && self.report.projection.as_ref().is_some_and(|projection| projection.contains_row(generation, index)) {
                         self.select_row(generation, index);
-                        self.keyboard_focus = Some((generation, index, pending.host, pending.epoch, self.current_directory));
+                        self.keyboard_focus = Some((generation, index, pending.host, pending.epoch, self.report.current_directory));
                         self.keyboard_reveal = false;
                         ctx.request_repaint_of(pending.owner.viewport_id);
                     }
                 }
                 FolderSizeAction::FocusDelivered { generation, index } => {
-                    if self.keyboard_focus.is_some_and(|(g, i, host, epoch, directory)| g == generation && i == index && host == pending.host && epoch == pending.epoch && directory == self.current_directory) {
+                    if self.keyboard_focus.is_some_and(|(g, i, host, epoch, directory)| g == generation && i == index && host == pending.host && epoch == pending.epoch && directory == self.report.current_directory) {
                         self.keyboard_focus = None;
                     }
                 }
                 FolderSizeAction::Drill { generation, index } => self.drill_row(generation, index),
-                FolderSizeAction::Back { generation, index } => {
-                    if self.current_directory == Some((generation, index))
-                        && let Some(projection) = self.projection.as_ref()
-                        && projection.contains_row(generation, index)
-                    {
-                        self.current_directory = projection
-                            .row(index)
-                            .and_then(|row| row.parent_index)
-                            .map(|parent| (generation, parent));
-                        self.selected_entry = None;
-                        self.current_directory_path =
-                            self.current_directory
-                                .and_then(|(parent_generation, parent_index)| {
-                                    (parent_generation == generation)
-                                        .then(|| projection.source.path_at(parent_index))
-                                        .flatten()
-                                });
-                    }
-                }
+                FolderSizeAction::Back { generation, index } => { self.report.up(generation, index); }
                 FolderSizeAction::CopyRoot(root) => {
                     if self.selected_root.as_ref() == Some(&root) {
                         effects.push(FolderSizeDialogEffect::CopyPath(
@@ -1821,9 +1433,9 @@ impl FolderSizeDialogState {
                     }
                     self.retire_host(ctx);
                     self.open = false;
-                    self.selected_entry = None;
-                    self.current_directory = None;
-                    self.current_directory_path = None;
+                    self.report.selected_entry = None;
+                    self.report.current_directory = None;
+                    self.report.current_directory_path = None;
                     self.notice = None;
                 }
             }
@@ -1851,10 +1463,10 @@ impl FolderSizeDialogState {
             }
             self.scan_root = None;
             self.selected_root = Some(root);
-            self.current_directory = None;
-            self.current_directory_path = None;
-            self.selected_entry = None;
-            self.projection = None;
+            self.report.current_directory = None;
+            self.report.current_directory_path = None;
+            self.report.selected_entry = None;
+            self.report.projection = None;
             self.notice = None;
         }
     }
@@ -1874,65 +1486,21 @@ impl FolderSizeDialogState {
     }
 
     fn select_row(&mut self, generation: u64, index: usize) {
-        if self
-            .projection
-            .as_ref()
-            .is_some_and(|projection| projection.contains_row(generation, index))
-        {
-            self.selected_entry = Some((generation, index));
-        }
+        self.report.select(generation, index);
     }
 
     fn drill_row(&mut self, generation: u64, index: usize) {
-        if let Some(projection) = self.projection.as_ref()
-            && projection.contains_row(generation, index)
-            && projection
-                .row(index)
-                .is_some_and(|row| row.kind == FolderSizeEntryKind::Directory)
-            && let Some(path) = projection.source.path_at(index)
-        {
-            self.selected_entry = Some((generation, index));
-            self.current_directory = Some((generation, index));
-            self.current_directory_path = Some(path.clone());
+        if let Some(path) = self.report.drill(generation, index) {
             self.notice = Some(format!("Showing {}", path.display()));
         }
     }
 
-    // Called only when the treemap is requested; table rendering does no layout work.
-    fn treemap_layout(
-        &mut self,
-        width: f64,
-        height: f64,
-    ) -> Option<Arc<crate::folder_size::treemap::Layout>> {
-        let projection = self.projection.as_ref()?;
-        let directory = self
-            .current_directory
-            .filter(|(generation, _)| *generation == projection.key.generation)
-            .map(|(_, index)| index)
-            .or(projection.root_index)?;
-        self.treemap_cache.layout(
-            projection.key,
-            &projection.rows,
-            &projection.children,
-            directory,
-            self.filter,
-            width,
-            height,
-        )
+    fn treemap_layout(&mut self, width: f64, height: f64) -> Option<Arc<crate::folder_size::treemap::Layout>> {
+        self.report.treemap(width, height)
     }
+
     fn sync_visible_rows(&mut self) {
-        let Some(projection) = self.projection.as_ref() else { self.visible_rows = None; return; };
-        let Some(directory) = self.current_directory.filter(|(generation, _)| *generation == projection.key.generation)
-            .map(|(_, index)| index).or(projection.root_index) else { self.visible_rows = None; return; };
-        let key = VisibleKey { projection: projection.key, directory, column: self.sort_column, direction: self.sort_direction, filter: self.filter };
-        if self.visible_rows.as_ref().is_some_and(|cache| cache.key == key) { return; }
-        let mut indices = projection.children.get(directory).into_iter().flatten().copied()
-            .filter(|index| filter_matches(self.filter, projection.rows[*index].kind)).collect::<Vec<_>>();
-        indices.sort_by(|a, b| compare_rows(&projection.rows, *a, *b, self.sort_column, self.sort_direction, projection.total_logical_bytes));
-        if self.selected_entry.is_some_and(|(generation, index)| generation != key.projection.generation || (!indices.contains(&index) && self.current_directory != Some((generation, index)))) {
-            self.selected_entry = None;
-        }
-        self.visible_rows = Some(VisibleRows { key, indices: Arc::new(indices) });
+        self.report.sync_visible_rows();
     }
 
     pub(crate) fn take_reveal_path_for_dispatch(&mut self, request: &FolderSizeRevealRequest) -> Result<Option<PathBuf>, String> {
@@ -1940,12 +1508,12 @@ impl FolderSizeDialogState {
         self.sync_projection(&view);
         self.sync_visible_rows();
         if !self.open || self.host_epoch != request.epoch || self.host.identity() != request.host
-            || self.current_directory != request.directory || self.selected_entry != Some((request.key.generation, request.index))
-            || self.projection.as_ref().map(|p| p.key) != Some(request.key)
-            || !self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&request.index)) {
+            || self.report.current_directory != request.directory || self.report.selected_entry != Some((request.key.generation, request.index))
+            || self.report.projection.as_ref().map(|p| p.key) != Some(request.key)
+            || !self.report.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&request.index)) {
             return Ok(None);
         }
-        let Some(path) = self.current_row_path(&view, request.key.generation, request.index) else { return Ok(None); };
+        let Some(path) = self.report.path_for_current_row(&view, self.scan_root.as_ref(), self.selected_root.as_ref(), request.key, request.index) else { return Ok(None); };
         match path.try_exists() {
             Ok(true) => Ok(Some(path)),
             Ok(false) => Err(format!("Missing path: {}", path.display())),
@@ -1957,106 +1525,12 @@ impl FolderSizeDialogState {
         self.notice = Some(match result { Ok(()) => "Revealed in File Explorer.".into(), Err(error) => format!("Could not reveal selected path: {error}") });
     }
 
-    fn current_row_path(
-        &self,
-        view: &crate::folder_size::FolderSizeSessionView,
-        generation: u64,
-        index: usize,
-    ) -> Option<PathBuf> {
-        let published_generation = if view.result_is_current() {
-            Some(view.generation())
-        } else {
-            view.progress().and_then(|progress| {
-                (view.progress_is_current() || view.status() == FolderSizeSessionStatus::Cancelled)
-                    .then_some(progress.generation())
-            })
-        };
-        if published_generation != Some(generation)
-            || self.scan_root.as_ref() != self.selected_root.as_ref()
-        {
-            return None;
-        }
-        self.projection
-            .as_ref()
-            .filter(|projection| projection.contains_row(generation, index))
-            .and_then(|projection| projection.row(index))?;
-        self.projection
-            .as_ref()
-            .filter(|projection| projection.contains_row(generation, index))
-            .and_then(|projection| projection.source.path_at(index))
+    fn current_row_path(&self, view: &crate::folder_size::FolderSizeSessionView, generation: u64, index: usize) -> Option<PathBuf> {
+        self.report.path_for_current_row(view, self.scan_root.as_ref(), self.selected_root.as_ref(), self.report.projection.as_ref()?.key, index).filter(|_| self.report.projection.as_ref().is_some_and(|p| p.key.generation == generation))
     }
 
     fn sync_projection(&mut self, view: &crate::folder_size::FolderSizeSessionView) {
-        let next_key = if self.scan_root.as_ref() != self.selected_root.as_ref() {
-            None
-        } else if view.result_is_current() {
-            Some(ProjectionKey {
-                generation: view.generation(),
-                version: ProjectionVersion::Result,
-            })
-        } else if let Some(progress) = view.progress()
-            && (view.progress_is_current() || view.status() == FolderSizeSessionStatus::Cancelled)
-        {
-            Some(ProjectionKey {
-                generation: progress.generation(),
-                version: ProjectionVersion::Progress(progress.publication_id()),
-            })
-        } else {
-            None
-        };
-        if self.projection.as_ref().map(|projection| projection.key) == next_key {
-            return;
-        }
-        let old_generation = self
-            .projection
-            .as_ref()
-            .map(|projection| projection.key.generation);
-        let new_generation = next_key.map(|key| key.generation);
-        if old_generation != new_generation {
-            self.selected_entry = None;
-            self.current_directory = None;
-            self.current_directory_path = None;
-        }
-        self.projection = next_key.and_then(|key| {
-            if key.version == ProjectionVersion::Result {
-                view.result()
-                    .filter(|result| result.generation() == key.generation)
-                    .cloned()
-                    .map(FolderSizeProjection::from_result)
-                    .map(Arc::new)
-            } else {
-                view.progress()
-                    .filter(|progress| {
-                        progress.generation() == key.generation
-                            && progress.publication_id()
-                                == match key.version {
-                                    ProjectionVersion::Progress(publication_id) => publication_id,
-                                    ProjectionVersion::Result => 0,
-                                }
-                    })
-                    .map(FolderSizeProjection::from_progress)
-                    .map(Arc::new)
-            }
-        });
-        if let Some((generation, index)) = self.current_directory
-            && !self.projection.as_ref().is_some_and(|projection| {
-                projection.contains_row(generation, index)
-                    && projection
-                        .row(index)
-                        .is_some_and(|row| row.kind == FolderSizeEntryKind::Directory)
-            })
-        {
-            self.current_directory = None;
-            self.current_directory_path = None;
-        }
-        if let Some((generation, index)) = self.selected_entry
-            && !self
-                .projection
-                .as_ref()
-                .is_some_and(|projection| projection.contains_row(generation, index))
-        {
-            self.selected_entry = None;
-        }
+        self.report.sync(view, self.scan_root.as_ref(), self.selected_root.as_ref());
     }
 
     fn stage(&mut self, ctx: &egui::Context, actions: Vec<FolderSizeAction>) {
@@ -2167,7 +1641,7 @@ impl FolderSizeDialogState {
 
     #[cfg(test)]
     pub(crate) fn inject_long_issues_for_test(&mut self) {
-        let projection = Arc::make_mut(self.projection.as_mut().unwrap());
+        let projection = Arc::make_mut(self.report.projection.as_mut().unwrap());
         projection.counts.issues = 20;
         projection.counts.issues_truncated = true;
         projection.issues = (0..20).map(|index| (None, FolderSizeIssueKind::Inaccessible, format!("issue {index}: {}", "long detail ".repeat(30)))).collect();
@@ -2175,7 +1649,7 @@ impl FolderSizeDialogState {
 
     #[cfg(test)]
     pub(crate) fn visible_cache_for_test(&self) -> Option<Arc<Vec<usize>>> {
-        self.visible_rows.as_ref().map(|rows| Arc::clone(&rows.indices))
+        self.report.visible_rows.as_ref().map(|rows| Arc::clone(&rows.indices))
     }
 
     #[cfg(test)]
@@ -2219,15 +1693,15 @@ impl FolderSizeDialogState {
     ) {
         (
             self.recursive,
-            self.selected_entry,
-            self.current_directory,
-            self.current_directory_path.clone(),
+            self.report.selected_entry,
+            self.report.current_directory,
+            self.report.current_directory_path.clone(),
         )
     }
     #[cfg(test)]
     pub(crate) fn test_selected_row_path(&self) -> Option<PathBuf> {
-        let (generation, index) = self.selected_entry?;
-        let projection = self.projection.as_ref()?;
+        let (generation, index) = self.report.selected_entry?;
+        let projection = self.report.projection.as_ref()?;
         projection.contains_row(generation, index).then(|| projection.source.path_at(index)).flatten()
     }
     #[cfg(test)]
@@ -2707,16 +2181,6 @@ fn row_status(row: &FolderSizeRow) -> String {
     }
 }
 
-fn omission_label(omission: FolderSizeOmission) -> &'static str {
-    match omission {
-        FolderSizeOmission::ReparsePoint => "reparse point",
-        FolderSizeOmission::CloudPlaceholder => "cloud placeholder",
-        FolderSizeOmission::Inaccessible => "inaccessible",
-        FolderSizeOmission::UnsupportedEntry => "unsupported entry",
-        FolderSizeOmission::UnsupportedIdentity => "unsupported identity",
-        FolderSizeOmission::RepeatedDirectoryIdentity => "repeated directory identity",
-    }
-}
 
 fn issue_label(kind: FolderSizeIssueKind) -> &'static str {
     match kind {

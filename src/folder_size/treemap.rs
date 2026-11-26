@@ -15,7 +15,7 @@ pub(crate) struct Item {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Rect {
+pub struct Rect {
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -23,7 +23,7 @@ pub(crate) struct Rect {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Tile {
+pub struct Tile {
     pub row: usize,
     pub bytes: u64,
     pub provisional: bool,
@@ -31,7 +31,7 @@ pub(crate) struct Tile {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Layout {
+pub struct Layout {
     pub total: u128,
     pub tiles: Vec<Tile>,
     pub zero_count: usize,
