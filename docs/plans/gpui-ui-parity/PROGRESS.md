@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-The stock `regex` Search route opens a retained GPUI matcher with exact Pattern, flags, Test Text, match and capture byte ranges, and scoped F3 navigation. Shared Regex baseline tests passed from the existing linked library. GPUI tests are written for the next grouped run. Native hosting, history and advanced controls remain open. [Regex Tester](gui/regex-tester.md#gpui-retained-matcher)
+Regex uses the shared checked host for remembered Dock and Pop Out. The grouped launcher run passed all 19 tests, including the first matcher, mount, focus receipt and close policy. Windows replay remains pending. Automatic accepted history is next. [Regex host checkpoint](CHECKPOINTS.md#g14-c-shared-checked-regex-host)
+
+The stock `regex` Search route opens a retained GPUI matcher with exact Pattern, flags, Test Text, match and capture byte ranges, and scoped F3 navigation. Shared Regex baseline tests passed from the reused library. Advanced controls remain open. [Regex Tester](gui/regex-tester.md#gpui-retained-matcher)
 
 Merged the upstream Windows virtual-desktop restore and egui cloaked repaint changes. The locked check and all 20 focused activation tests passed. The required execution strategy is committed and linked from the Master Goal, Kickstart, and continuation records. Cross-desktop Windows replay remains pending. Current implementation continues with G14-C Regex Tester. [Integration checkpoint](CHECKPOINTS.md#upstream-master-integration) · [Execution Strategy](EXECUTION_STRATEGY.md)
 

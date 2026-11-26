@@ -22,6 +22,24 @@ pub(super) fn provider_is_current(
     .iter()
     .any(|(name, row)| name == "regex_tester" && row == action)
 }
+fn standalone_close_key(
+    popout: bool,
+    child_free: bool,
+    focused: bool,
+    key: &str,
+    modifiers: Modifiers,
+) -> bool {
+    popout
+        && child_free
+        && focused
+        && ((key == "escape" && modifiers == Modifiers::default())
+            || (key == "w"
+                && modifiers
+                    == (Modifiers {
+                        control: true,
+                        ..Modifiers::default()
+                    })))
+}
 fn timer_current(open: bool, current: u64, expected: u64) -> bool {
     open && current == expected
 }
@@ -48,27 +66,53 @@ fn preview(text: &str) -> String {
         output
     }
 }
-pub(super) struct RegexWorkspace {
-    pub open: bool,
-    root: WeakEntity<RootWindow>,
-    admission: Arc<RestartAdmission>,
-    session: RegexSession,
+pub(super) struct RegexMount {
+    receipt: utility_mount::MountReceipt,
+    window: AnyWindowHandle,
+    native: Option<NativeWindow>,
     pattern: Entity<InputState>,
     text: Entity<TextareaState>,
     focus: FocusHandle,
-    return_focus: Option<FocusHandle>,
-    _subscriptions: Vec<Subscription>,
-    generation: u64,
-    pumping: bool,
     scroll: gpui_kit::UniformListScrollHandle,
+    _subscriptions: Vec<Subscription>,
 }
-impl RegexWorkspace {
+pub(super) struct RegexWorkspace {
+    pub open: bool,
+    pub(super) popout: bool,
+    pub(super) rehosting: bool,
+    pub(super) presentation_error: Option<String>,
+    pub(super) geometry_error: Option<String>,
+    pub(super) root: WeakEntity<RootWindow>,
+    pub(super) admission: Arc<RestartAdmission>,
+    visibility: RootVisibility,
+    session: RegexSession,
+    mount_owner: utility_mount::MountOwner,
+    mount: RegexMount,
+    return_focus: Option<FocusHandle>,
+    generation: u64,
+    pub(super) activation_revision: Arc<AtomicU64>,
+    pumping: bool,
+}
+impl std::ops::Deref for RegexWorkspace {
+    type Target = RegexMount;
+    fn deref(&self) -> &Self::Target {
+        &self.mount
+    }
+}
+impl std::ops::DerefMut for RegexWorkspace {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.mount
+    }
+}
+impl RegexMount {
     fn new(
         window: &mut Window,
-        cx: &mut Context<Self>,
-        root: WeakEntity<RootWindow>,
-        admission: Arc<RestartAdmission>,
+        cx: &mut Context<RegexWorkspace>,
+        owner: &utility_mount::MountOwner,
+        host: AnyWindowHandle,
+        native: Option<NativeWindow>,
     ) -> Self {
+        let receipt = owner.attach();
         let pattern =
             cx.new(|cx| InputState::new(window, cx).placeholder("Enter a Rust regex pattern"));
         let text = cx.new(|cx| {
@@ -76,10 +120,16 @@ impl RegexWorkspace {
                 .auto_grow(5, 12)
                 .placeholder("Enter test text")
         });
+        let pattern_receipt = receipt.clone();
         let pattern_sub = cx.subscribe(
             &pattern,
-            |view: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
-                if view.open && !view.admission.is_fenced() && matches!(event, InputEvent::Change) {
+            move |view: &mut RegexWorkspace, input: Entity<InputState>, event: &InputEvent, cx| {
+                if pattern_receipt.is_current()
+                    && view.open
+                    && !view.rehosting
+                    && !view.admission.is_fenced()
+                    && matches!(event, InputEvent::Change)
+                {
                     let next = input.read(cx).value().to_string();
                     if next != view.session.draft.pattern {
                         view.session.draft.pattern = next;
@@ -88,10 +138,19 @@ impl RegexWorkspace {
                 }
             },
         );
+        let text_receipt = receipt.clone();
         let text_sub = cx.subscribe(
             &text,
-            |view: &mut Self, input: Entity<TextareaState>, event: &InputEvent, cx| {
-                if view.open && !view.admission.is_fenced() && matches!(event, InputEvent::Change) {
+            move |view: &mut RegexWorkspace,
+                  input: Entity<TextareaState>,
+                  event: &InputEvent,
+                  cx| {
+                if text_receipt.is_current()
+                    && view.open
+                    && !view.rehosting
+                    && !view.admission.is_fenced()
+                    && matches!(event, InputEvent::Change)
+                {
                     let next = input.read(cx).value().to_string();
                     if next != view.session.draft.test_text {
                         view.session.draft.test_text = next;
@@ -101,19 +160,120 @@ impl RegexWorkspace {
             },
         );
         Self {
-            open: false,
-            root,
-            admission,
-            session: RegexSession::default(),
+            receipt,
+            window: host,
+            native,
             pattern,
             text,
             focus: cx.focus_handle(),
-            return_focus: None,
-            _subscriptions: vec![pattern_sub, text_sub],
-            generation: 0,
-            pumping: false,
             scroll: Default::default(),
+            _subscriptions: vec![pattern_sub, text_sub],
         }
+    }
+}
+impl RegexWorkspace {
+    fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        root: WeakEntity<RootWindow>,
+        admission: Arc<RestartAdmission>,
+        visibility: RootVisibility,
+        host: AnyWindowHandle,
+        native: Option<NativeWindow>,
+    ) -> Self {
+        let mount_owner = utility_mount::MountOwner::default();
+        let mount = RegexMount::new(window, cx, &mount_owner, host, native);
+        Self {
+            open: false,
+            popout: false,
+            rehosting: false,
+            presentation_error: None,
+            geometry_error: None,
+            root,
+            admission,
+            visibility,
+            session: RegexSession::default(),
+            mount_owner,
+            mount,
+            return_focus: None,
+            generation: 0,
+            activation_revision: Arc::new(AtomicU64::new(0)),
+            pumping: false,
+        }
+    }
+    pub(super) fn replace_mount(
+        &mut self,
+        host: AnyWindowHandle,
+        native: Option<NativeWindow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mount = RegexMount::new(window, cx, &self.mount_owner, host, native);
+        let pattern = self.session.draft.pattern.clone();
+        let text = self.session.draft.test_text.clone();
+        mount
+            .pattern
+            .update(cx, |input, cx| input.set_value(pattern, window, cx));
+        mount
+            .text
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        self.mount = mount;
+    }
+    pub(super) fn mount_receipt(&self) -> utility_mount::MountReceipt {
+        self.mount.receipt.clone()
+    }
+    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool {
+        self.open
+            && self.popout == popout
+            && self.mount.receipt.is_current()
+            && self.mount.window.window_id() == id
+    }
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
+    }
+    pub(super) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting {
+            self.focus.focus(window, cx);
+        } else {
+            self.pattern.focus_handle(cx).focus(window, cx);
+        }
+    }
+    pub(super) fn finish_popout_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.is_focused(window) {
+            self.focus_editor(window, cx);
+        }
+    }
+    pub(super) fn finish_dock_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.is_focused(window)
+            && self
+                .mount
+                .native
+                .is_some_and(|native| current_foreground_identity() == Some(native.identity))
+        {
+            self.focus_editor(window, cx);
+        }
+    }
+    fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
+        if !self.open || self.rehosting || self.admission.is_fenced() || self.popout == popout {
+            return;
+        }
+        let source = self.mount.receipt.clone();
+        let gesture = self.mount.native.map(|source| hash_dock::Gesture {
+            source,
+            foreground_authorized: native_window_is_valid(source)
+                && current_foreground_identity() == Some(source.identity),
+            visibility_revision: self.visibility.request_revision.load(Ordering::Acquire),
+        });
+        self.rehosting = true;
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        let root = self.root.clone();
+        cx.spawn(async move |_, cx| {
+            let _ = root.update(cx, |root, cx| {
+                root.start_regex_rehost(popout, gesture, source, cx)
+            });
+        })
+        .detach();
+        cx.notify();
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.session.mark_changed(Instant::now());
@@ -163,6 +323,9 @@ impl RegexWorkspace {
     }
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>, origin: FocusHandle) {
         if !self.open {
+            if !self.mount.receipt.is_current() {
+                self.replace_mount(self.mount.window, self.mount.native, window, cx);
+            }
             self.generation = self.generation.wrapping_add(1);
             self.open = true;
             self.return_focus = Some(origin);
@@ -174,19 +337,47 @@ impl RegexWorkspace {
     }
     pub(super) fn shutdown(&mut self) {
         self.open = false;
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        self.mount_owner.retire();
         self.generation = self.generation.wrapping_add(1);
         self.pumping = false;
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open {
+        if !self.open || self.rehosting {
             return;
+        }
+        let popout = self.popout;
+        if popout {
+            let _ = self
+                .root
+                .update(cx, |root, cx| root.drain_regex_native_geometry(cx, true));
         }
         let restore = window.is_window_active() && self.focus.contains_focused(window, cx);
         self.shutdown();
-        let _ = self.root.update(cx, |root, _| {
-            panel_stack::retire(&mut root.panel_stack, Panel::RegexTesterDialog)
+        let _ = self.root.update(cx, |root, cx| {
+            panel_stack::retire(&mut root.panel_stack, Panel::RegexTesterDialog);
+            if popout {
+                if let Some(popup) = root.regex_popup.take() {
+                    let retiring = RetiringHashWindow {
+                        window: popup.window,
+                        native_window: popup.native,
+                    };
+                    root.regex_retiring.push(retiring);
+                    let weak = cx.entity().downgrade();
+                    cx.spawn(async move |_, cx| {
+                        if remove_and_wait_for_hash_window(cx, retiring).await {
+                            let _ = weak.update(cx, |root, _| {
+                                root.regex_retiring.retain(|item| {
+                                    item.window.window_id() != retiring.window.window_id()
+                                })
+                            });
+                        }
+                    })
+                    .detach();
+                }
+            }
         });
-        if restore {
+        if restore && !popout {
             if let Some(focus) = self.return_focus.take() {
                 focus.focus(window, cx);
             }
@@ -198,7 +389,7 @@ impl RegexWorkspace {
             .then(|| self.session.draft.clone())
     }
     fn navigate(&mut self, backwards: bool, cx: &mut Context<Self>) {
-        if self.admission.is_fenced() {
+        if self.rehosting || self.admission.is_fenced() {
             return;
         }
         if if backwards {
@@ -216,6 +407,13 @@ impl RegexWorkspace {
 }
 impl Render for RegexWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let render_receipt = self.mount.receipt.clone();
+        let escape_receipt = render_receipt.clone();
+        let key_receipt = render_receipt.clone();
+        let previous_receipt = render_receipt.clone();
+        let next_receipt = render_receipt.clone();
+        let close_receipt = render_receipt.clone();
+        let rehost_receipt = render_receipt.clone();
         let flags = self.session.draft.flags;
         let mut flag_row = div().flex().flex_wrap().gap_2();
         for (index, label, selected) in [
@@ -226,14 +424,19 @@ impl Render for RegexWorkspace {
             (4, "x · ignore whitespace", flags.ignore_whitespace),
         ] {
             let owner = cx.entity().downgrade();
+            let receipt = render_receipt.clone();
             flag_row = flag_row.child(
                 Checkbox::new(SharedString::from(format!("regex-flag-{index}")))
                     .checked(selected)
-                    .disabled(self.admission.is_fenced())
+                    .disabled(self.rehosting || self.admission.is_fenced())
                     .accessibility_label(label)
                     .on_change(move |state, _, _, app| {
                         let _ = owner.update(app, |view, cx| {
-                            if !view.open || view.admission.is_fenced() {
+                            if !receipt.is_current()
+                                || !view.open
+                                || view.rehosting
+                                || view.admission.is_fenced()
+                            {
                                 return;
                             }
                             let value = state == CheckboxState::Checked;
@@ -285,12 +488,13 @@ impl Render for RegexWorkspace {
         let revision = self.session.revision();
         let count = self.session.matches().len();
         let owner = cx.entity().downgrade();
+        let rows_receipt = render_receipt.clone();
         let rows = gpui_kit::uniform_list("regex-match-rows", count, move |range, _, app| {
             let Some(view) = owner.upgrade() else {
                 return Vec::<AnyElement>::new();
             };
             let state = view.read(app);
-            if !state.open || state.session.revision() != revision {
+            if !rows_receipt.is_current() || !state.open || state.session.revision() != revision {
                 return Vec::new();
             }
             range
@@ -304,6 +508,7 @@ impl Render for RegexWorkspace {
                         preview(&item.text)
                     );
                     let target = owner.clone();
+                    let receipt = rows_receipt.clone();
                     Some(
                         div()
                             .id(SharedString::from(format!(
@@ -319,7 +524,8 @@ impl Render for RegexWorkspace {
                                 .label(label)
                                 .on_click(move |_, _, app| {
                                     let _ = target.update(app, |view, cx| {
-                                        if view.open
+                                        if receipt.is_current()
+                                            && view.open
                                             && !view.admission.is_fenced()
                                             && view.session.revision() == revision
                                             && index < view.session.matches().len()
@@ -385,10 +591,11 @@ impl Render for RegexWorkspace {
             .flex_col()
             .gap_2()
             .p_3()
-            .capture_action(
-                cx.listener(|view, _: &gpui_kit::base::input::Escape, window, cx| {
+            .capture_action(cx.listener(
+                move |view, _: &gpui_kit::base::input::Escape, window, cx| {
                     let contexts = window.context_stack();
-                    if view.open
+                    if escape_receipt.is_current()
+                        && view.open
                         && view.focus.contains_focused(window, cx)
                         && !window.has_active_dialog(cx)
                         && !context_stack_has_primary(&contexts, "PopupMenu")
@@ -398,11 +605,37 @@ impl Render for RegexWorkspace {
                         view.close(window, cx);
                         cx.stop_propagation();
                     }
-                }),
-            )
-            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                },
+            ))
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
                 let contexts = window.context_stack();
-                if view.open
+                let child_free = !window.has_active_dialog(cx)
+                    && !context_stack_has_primary(&contexts, "PopupMenu")
+                    && !context_stack_has_primary(&contexts, "Dialog")
+                    && !context_stack_has_primary(&contexts, "AlertDialog");
+                let input_owns_escape = event.keystroke.key == "escape"
+                    && (view.pattern.focus_handle(cx).is_focused(window)
+                        || view.text.focus_handle(cx).is_focused(window));
+                if key_receipt.is_current()
+                    && !input_owns_escape
+                    && view.open
+                    && view.popout
+                    && !view.rehosting
+                    && !view.admission.is_fenced()
+                    && standalone_close_key(
+                        view.popout,
+                        child_free,
+                        view.contains_focus(window, cx),
+                        &event.keystroke.key,
+                        event.keystroke.modifiers,
+                    )
+                {
+                    view.close(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if key_receipt.is_current()
+                    && view.open
                     && !view.admission.is_fenced()
                     && !context_stack_has_primary(&contexts, "PopupMenu")
                     && !context_stack_has_primary(&contexts, "Dialog")
@@ -421,13 +654,13 @@ impl Render for RegexWorkspace {
             .child(Label::new("Regex Tester"))
             .child(
                 Input::new(&self.pattern)
-                    .disabled(self.admission.is_fenced())
+                    .disabled(self.rehosting || self.admission.is_fenced())
                     .aria_label("Pattern"),
             )
             .child(flag_row)
             .child(
                 Textarea::new(&self.text)
-                    .readonly(self.admission.is_fenced())
+                    .readonly(self.rehosting || self.admission.is_fenced())
                     .aria_label("Test Text"),
             )
             .child(div().id("regex-status").role(Role::Status).child(status))
@@ -439,19 +672,51 @@ impl Render for RegexWorkspace {
                         Button::new("regex-previous")
                             .label("Previous")
                             .disabled(count == 0)
-                            .on_click(cx.listener(|view, _, _, cx| view.navigate(true, cx))),
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if previous_receipt.is_current() {
+                                    view.navigate(true, cx);
+                                }
+                            })),
                     )
                     .child(
                         Button::new("regex-next")
                             .label("Next")
                             .disabled(count == 0)
-                            .on_click(cx.listener(|view, _, _, cx| view.navigate(false, cx))),
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if next_receipt.is_current() {
+                                    view.navigate(false, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("regex-rehost")
+                            .label(if self.popout { "Dock" } else { "Pop Out" })
+                            .disabled(self.rehosting)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if rehost_receipt.is_current() {
+                                    view.request_rehost(!view.popout, cx);
+                                }
+                            })),
                     )
                     .child(
                         Button::new("regex-close")
                             .label("Close")
-                            .on_click(cx.listener(|view, _, window, cx| view.close(window, cx))),
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if close_receipt.is_current() {
+                                    view.close(window, cx);
+                                }
+                            })),
                     ),
+            )
+            .children(
+                self.presentation_error
+                    .as_ref()
+                    .map(|message| Label::new(message.clone())),
+            )
+            .children(
+                self.geometry_error
+                    .as_ref()
+                    .map(|message| Label::new(message.clone())),
             )
             .child(rows)
             .children(details.map(|(index, rows)| {
@@ -470,19 +735,7 @@ impl Render for RegexWorkspace {
     }
 }
 impl RootWindow {
-    pub(super) fn open_regex_tester(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.restart_admission.is_fenced() {
-            return;
-        }
-        let root = cx.entity().downgrade();
-        let admission = self.restart_admission.clone();
-        let view = self
-            .regex_view
-            .clone()
-            .unwrap_or_else(|| cx.new(|cx| RegexWorkspace::new(window, cx, root, admission)));
-        let origin = self.query.focus_handle(cx);
-        view.update(cx, |view, cx| view.reopen(window, cx, origin));
-        self.regex_view = Some(view);
+    pub(super) fn scroll_to_regex(&self, cx: &App) {
         let index = self.file_search_scroll_item()
             + usize::from(
                 self.file_search
@@ -511,17 +764,164 @@ impl RootWindow {
                     .is_some_and(|view| view.read(cx).is_mounted_in(root.window_id(), false))
             }));
         self.root_scroll.scroll_to_top_of_item(index);
+    }
+    pub(super) fn open_regex_tester(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.restart_admission.is_fenced()
+            || self
+                .regex_view
+                .as_ref()
+                .is_some_and(|view| view.read(cx).rehosting)
+        {
+            return;
+        }
+        if let (Some(popup), Some(view), Some(root_native)) =
+            (&self.regex_popup, &self.regex_view, self.native_window)
+        {
+            let Some(native) = popup.native else {
+                return;
+            };
+            if current_foreground_identity() != Some(root_native.identity) {
+                return;
+            }
+            let Some(permit) = self.restart_admission.admit() else {
+                return;
+            };
+            let popup_window = popup.window;
+            let view = view.clone();
+            let receipt = view.read(cx).mount_receipt();
+            let guard = view.read(cx).activation_revision.clone();
+            let revision = guard.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+            let worker = guard.clone();
+            cx.spawn(async move |_, cx| {
+                let _permit = permit;
+                cx.background_executor()
+                    .spawn(async move {
+                        activate_for_secondary_window(
+                            &worker,
+                            revision,
+                            native,
+                            Some(root_native.identity),
+                        );
+                    })
+                    .await;
+                if !receipt.is_current()
+                    || guard.load(Ordering::Acquire) != revision
+                    || current_foreground_identity() != Some(native.identity)
+                {
+                    return;
+                }
+                let _ = update_kit_window_content(popup_window, &view, cx, |view, window, cx| {
+                    if receipt.is_current() && view.popout && !view.rehosting {
+                        view.focus_editor(window, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+        let Some(root_window) = self.root_window else {
+            return;
+        };
+        let root = cx.entity().downgrade();
+        let admission = self.restart_admission.clone();
+        let visibility = self.root_visibility.clone();
+        let native = self.native_window;
+        let view = self.regex_view.clone().unwrap_or_else(|| {
+            cx.new(|cx| {
+                RegexWorkspace::new(window, cx, root, admission, visibility, root_window, native)
+            })
+        });
+        let origin = self.query.focus_handle(cx);
+        let was_open = view.read(cx).open;
+        view.update(cx, |view, cx| {
+            if !view.open {
+                view.popout = false;
+                view.replace_mount(root_window, native, window, cx);
+            }
+            view.reopen(window, cx, origin);
+        });
+        self.regex_view = Some(view.clone());
+        let popout = multi_launcher::settings::UtilityToolKey::parse("regex-tester")
+            .ok()
+            .map(|key| {
+                self.utility_presentations
+                    .preference(key)
+                    .unwrap_or(RememberedPresentation::Popout)
+                    == RememberedPresentation::Popout
+            })
+            .unwrap_or(true);
+        if !was_open && popout {
+            view.update(cx, |view, cx| view.request_rehost(true, cx));
+        }
+        self.scroll_to_regex(cx);
         panel_stack::promote(&mut self.panel_stack, Panel::RegexTesterDialog);
         cx.notify();
     }
 }
+
 #[cfg(test)]
 mod tests {
-    use super::{pending_timer, preview, provider_is_current, timer_current};
+    use super::{
+        Modifiers, pending_timer, preview, provider_is_current, standalone_close_key, timer_current,
+    };
     use multi_launcher::plugin::Plugin;
     use multi_launcher::plugins::regex_tester::RegexTesterPlugin;
     use multi_launcher::regex_tester::{CaptureValue, EvaluationResult, RegexSession};
     use std::time::{Duration, Instant};
+    #[test]
+    fn standalone_close_keys_respect_child_and_exact_modifiers() {
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        assert!(standalone_close_key(
+            true,
+            true,
+            true,
+            "escape",
+            Modifiers::default()
+        ));
+        assert!(!standalone_close_key(true, true, true, "escape", ctrl));
+        assert!(!standalone_close_key(
+            true,
+            false,
+            true,
+            "escape",
+            Modifiers::default()
+        ));
+        assert!(standalone_close_key(true, true, true, "w", ctrl));
+        assert!(!standalone_close_key(false, true, true, "w", ctrl));
+        assert!(!standalone_close_key(true, false, true, "w", ctrl));
+        assert!(!standalone_close_key(true, true, false, "w", ctrl));
+        assert!(!standalone_close_key(
+            true,
+            true,
+            true,
+            "w",
+            Modifiers {
+                shift: true,
+                ..ctrl
+            }
+        ));
+    }
+    #[test]
+    fn retained_regex_session_survives_mount_replacement() {
+        let owner = super::utility_mount::MountOwner::default();
+        let first = owner.attach();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "(é)".into();
+        session.draft.test_text = "é".into();
+        let now = Instant::now();
+        session.mark_changed(now);
+        let revision = session.revision();
+        let replacement = owner.attach();
+        assert!(!first.is_current());
+        assert!(replacement.is_current());
+        assert_eq!(session.revision(), revision);
+        assert!(session.tick(now + Duration::from_millis(200)));
+        assert_eq!(session.matches()[0].text, "é");
+        assert_eq!(session.draft.pattern, "(é)");
+    }
     #[test]
     fn exact_regex_provider_respects_query_action_and_capabilities() {
         let plugin = RegexTesterPlugin;

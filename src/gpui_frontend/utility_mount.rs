@@ -8,13 +8,14 @@ use std::sync::{
 pub(super) enum UtilityKind {
     Json,
     Xml,
+    Regex,
 }
 
 pub(super) struct UtilityPopup {
     pub window: super::AnyWindowHandle,
     pub native: Option<super::NativeWindow>,
     pub _subscription: super::Subscription,
-    pub geometry: Option<super::json_host::ShellGeometry>,
+    pub geometry: Option<super::utility_host::ShellGeometry>,
 }
 
 pub(super) fn transfer_source_is_owned<T: PartialEq>(
@@ -45,6 +46,9 @@ impl MountOwner {
     }
 }
 impl MountReceipt {
+    pub fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner.0, &other.owner.0) && self.generation == other.generation
+    }
     pub fn is_current(&self) -> bool {
         self.owner.0.load(Ordering::Acquire) == self.generation
     }
@@ -67,6 +71,10 @@ mod tests {
         let second = owner.attach();
         assert!(!first.is_current());
         assert!(second.is_current());
+        assert!(!first.matches(&second));
+        assert!(second.matches(&second.clone()));
+        let unrelated = MountOwner::default().attach();
+        assert!(!second.matches(&unrelated));
         owner.retire();
         assert!(!second.is_current());
     }

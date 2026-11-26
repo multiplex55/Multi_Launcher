@@ -365,7 +365,7 @@ impl XmlWorkspace {
         self.mount = receipt;
         self.mount_xpath_editors(window, cx);
     }
-    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool { self.focus.contains_focused(window, cx) }
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool { self.focus.is_focused(window) || self.focus.contains_focused(window, cx) }
     pub(super) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rehosting {
             self.focus.focus(window, cx);

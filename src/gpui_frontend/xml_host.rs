@@ -1,5 +1,5 @@
 //! Checked native presentation for the retained XML workspace.
-use super::json_host::{
+use super::utility_host::{
     ShellGeometry, retire_failed_utility_candidate, shell_geometry_mount_is_current,
 };
 use super::utility_mount::UtilityPopup;

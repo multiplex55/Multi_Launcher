@@ -240,10 +240,17 @@ impl JsonWorkspace {
         mount.tree_search.update(cx, |input, cx| input.set_value(query, window, cx));
         self.mount = mount;
     }
-    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool { self.focus.contains_focused(window, cx) }
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool { self.focus.is_focused(window) || self.focus.contains_focused(window, cx) }
     pub(super) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting { self.focus.focus(window, cx); return; }
         if self.tree_mode { self.tree_search.focus_handle(cx).focus(window, cx); }
         else { self.input.focus_handle(cx).focus(window, cx); }
+    }
+    pub(super) fn finish_dock_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.is_focused(window) && self.native.is_some_and(|native| current_foreground_identity() == Some(native.identity)) { self.focus_editor(window, cx); }
+    }
+    pub(super) fn finish_popout_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.is_focused(window) { self.focus_editor(window, cx); }
     }
     pub(super) fn can_rehost(&self) -> bool {
         self.open && !self.rehosting && !self.lane.active && self.checking.is_none() && !self.admission.is_fenced()

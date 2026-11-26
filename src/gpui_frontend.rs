@@ -32,7 +32,7 @@ mod xml_xpath;
 mod xml_schema;
 mod xml_save;
 mod json_tree;
-mod json_host;
+mod utility_host;
 mod utility_mount;
 use wake::HashWakeSignal;
 mod indexed_applications;
@@ -2666,6 +2666,8 @@ struct RootWindow {
     xml_view: Option<Entity<xml_utility::XmlWorkspace>>,
     regex_view: Option<Entity<regex_tester::RegexWorkspace>>,
     xml_popup: Option<utility_mount::UtilityPopup>,
+    regex_popup: Option<utility_mount::UtilityPopup>,
+    regex_retiring: Vec<RetiringHashWindow>,
     xml_retiring: Vec<RetiringHashWindow>,
     xml_terminal_quit: bool,
     json_popup: Option<utility_mount::UtilityPopup>,
@@ -3773,6 +3775,7 @@ enum RootCloseBlocker {
     FavoritesWrite,
     HashPinWrite,
     StructuredPinWrite,
+    RegexRehost,
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -5391,7 +5394,7 @@ impl RootWindow {
     }
 
     fn poll_utility_size_writer(&mut self, cx: &mut Context<Self>) -> bool {
-        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged) = {
+        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged) = {
             let mut store = self
                 .utility_size_store
                 .lock()
@@ -5403,7 +5406,10 @@ impl RootWindow {
             let json_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == json_key));
             let xml_key = UtilityToolKey::parse("xml-toolkit").ok();
             let xml_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == xml_key));
+            let regex_key = UtilityToolKey::parse("regex-tester").ok();
+            let regex_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == regex_key));
             let failures = store.take_new_write_failures();
+            let regex_failure = failures.iter().find(|failure| Some(failure.key) == regex_key).map(|failure| failure.message.clone());
             let xml_failure = failures.iter().find(|failure| Some(failure.key) == xml_key).map(|failure| failure.message.clone());
             let write_failure = failures.iter().find(|failure| failure.key == self.hash_tool_key).map(|failure| failure.message.clone());
             let json_failure = failures.into_iter().find(|failure| Some(failure.key) == json_key).map(|failure| failure.message);
@@ -5416,6 +5422,8 @@ impl RootWindow {
                 json_acknowledged,
                 xml_failure,
                 xml_acknowledged,
+                regex_failure,
+                regex_acknowledged,
             )
         };
         if let Some(error) = poll_error {
@@ -5439,6 +5447,8 @@ impl RootWindow {
         else if json_acknowledged { self.set_json_size_error(None, cx); }
         if let Some(error) = xml_failure { self.set_xml_size_error(Some(format!("Could not save XML Toolkit window geometry: {error}")), cx); }
         else if xml_acknowledged { self.set_xml_size_error(None, cx); }
+        if let Some(error) = regex_failure { self.set_regex_size_error(Some(format!("Could not save Regex Tester window geometry: {error}")), cx); }
+        else if regex_acknowledged { self.set_regex_size_error(None, cx); }
         if !pending {
             self.utility_size_polling.store(false, Ordering::Release);
         }
@@ -5642,6 +5652,7 @@ impl RootWindow {
         self.drain_hash_native_geometry(cx, false);
         self.drain_json_native_geometry(cx, false);
         self.drain_xml_native_geometry(cx, false);
+        self.drain_regex_native_geometry(cx, false);
         let _ = self.poll_utility_size_writer(cx);
         let size_status = self
             .utility_size_store
@@ -5674,6 +5685,11 @@ impl RootWindow {
             let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
             if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The XML Toolkit window geometry is still being saved.".to_owned()); }
             if let Some((_, error)) = status.failure { return Err(format!("The XML Toolkit window geometry could not be saved: {error}")); }
+        }
+        if let Ok(key) = UtilityToolKey::parse("regex-tester") {
+            let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
+            if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The Regex Tester window geometry is still being saved.".to_owned()); }
+            if let Some((_, error)) = status.failure { return Err(format!("The Regex Tester window geometry could not be saved: {error}")); }
         }
         if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
             return Err(format!("{message} Then retry the egui restart."));
@@ -5730,6 +5746,14 @@ impl RootWindow {
             child_windows.push(popup.window);
             if let Some(native) = popup.native { native_windows.push(native); }
             else if cfg!(windows) { return Err("The XML window has no checked native handle.".to_owned()); }
+        }
+        if self.regex_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Err("Regex Tester is changing presentation. Wait for it to finish before restarting.".to_owned()); }
+        self.regex_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
+        if !self.regex_retiring.is_empty() { return Err("A previous Regex Tester window has not retired.".to_owned()); }
+        if let Some(popup) = &self.regex_popup {
+            child_windows.push(popup.window);
+            if let Some(native) = popup.native { native_windows.push(native); }
+            else if cfg!(windows) { return Err("The Regex Tester window has no checked native handle.".to_owned()); }
         }
         let utility = match &self.secondary {
             SecondaryWindowState::Closed => None,
@@ -6007,6 +6031,7 @@ impl RootWindow {
         self.retire_search_jump_mode();
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.retire_json_workspace(cx);
+        self.drain_regex_native_geometry(cx, true);
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         if let Some(view) = &self.xml_view { view.update(cx, |view, cx| view.shutdown(cx)); }
         #[cfg(windows)]
@@ -9876,6 +9901,7 @@ impl RootWindow {
             Some(RootCloseBlocker::FavoritesWrite) => {
                 self.restart_status = Some(FAVORITES_WRITE_PENDING.to_owned());
             }
+            Some(RootCloseBlocker::RegexRehost) => { self.restart_status = Some("Wait for Regex Tester to finish changing windows before quitting.".to_owned()); }
             Some(RootCloseBlocker::StructuredPinWrite) => {
                 self.restart_status = Some("Wait for the utility pin update to finish before quitting Multi Launcher.".to_owned());
             }
@@ -9915,6 +9941,7 @@ impl RootWindow {
         self.root_visibility.deactivate();
         if let Some(view) = &self.file_search { view.read(cx).retire_explorer(); }
         self.retire_json_workspace(cx);
+        self.drain_regex_native_geometry(cx, true);
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         self.window_search.retire();
         self.file_search_probe.retire();
@@ -9922,10 +9949,13 @@ impl RootWindow {
         self.hash_docked_resize.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         self.drain_hash_native_geometry(cx, true);
         self.drain_xml_native_geometry(cx, true);
+        let mut retiring_regex = std::mem::take(&mut self.regex_retiring);
+        if let Some(popup) = self.regex_popup.take() { retiring_regex.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         let retiring = self.xml_popup.take().map(|popup| RetiringHashWindow { window: popup.window, native_window: popup.native });
         let view = self.xml_view.clone();
         if let Some(view) = &view { view.update(cx, |view, cx| view.shutdown(cx)); }
         cx.spawn(async move |_, cx| {
+            for retiring in retiring_regex { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             if let Some(retiring) = retiring { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             if let Some(view) = view {
                 loop {
@@ -9944,6 +9974,7 @@ impl RootWindow {
         cx: &App,
     ) -> Option<RootCloseBlocker> {
         if self.structured_pins.busy() { return Some(RootCloseBlocker::StructuredPinWrite); }
+        if self.regex_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Some(RootCloseBlocker::RegexRehost); }
         if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending() || view.read(cx).rehosting || view.read(cx).save_review_pending()) { return Some(RootCloseBlocker::XmlFilePicker); }
         if self.calculator_search.active {
             return Some(RootCloseBlocker::CalculatorSearch);
@@ -10814,7 +10845,7 @@ impl Render for RootWindow {
         if let Some(view) = self.xml_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
-        if let Some(view) = self.regex_view.as_ref().filter(|view| view.read(cx).open) {
+        if let Some(view) = self.regex_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -11837,8 +11868,7 @@ struct RootVisibility {
 
 enum RootVisibilityRequest {
     DockHash(hash_dock::Reveal),
-    DockJson(hash_dock::UtilityReveal),
-    DockXml(hash_dock::UtilityReveal),
+    DockUtility(utility_mount::UtilityKind, hash_dock::UtilityReveal),
     HideAfterExternalLaunch(u64),
     HideAfterWindowSwitch(u64, ForegroundIdentity, Arc<str>),
     HideAfterWindowClose(u64, ForegroundIdentity, ForegroundIdentity, Arc<str>),
@@ -11861,11 +11891,42 @@ fn window_close_hide_is_current(expected_root: ForegroundIdentity, foreground: O
     foreground == Some(expected_root) && live_query == Some(expected_query)
 }
 
+fn utility_dock_focus_allowed(action_sheet: bool, dialog: bool, popup: bool) -> bool {
+    !action_sheet && !dialog && !popup
+}
+fn utility_dock_ack_allowed(activated: bool, delivered: bool, current: bool) -> bool {
+    activated && delivered && current
+}
+
+impl RootWindow {
+    fn utility_dock_focus_available(&self, window: &mut Window, cx: &mut App) -> bool {
+        let contexts = window.context_stack();
+        utility_dock_focus_allowed(self.action_sheet.is_some(), window.has_active_dialog(cx),
+            context_stack_has_primary(&contexts, "PopupMenu") || context_stack_has_primary(&contexts, "Dialog") || context_stack_has_primary(&contexts, "AlertDialog"))
+    }
+    fn utility_destination_current(&self, kind: utility_mount::UtilityKind, receipt: &utility_mount::MountReceipt, window: WindowId, cx: &App) -> bool {
+        match kind {
+            utility_mount::UtilityKind::Json => self.json_view.as_ref().is_some_and(|view| {
+                let view = view.read(cx);
+                view.is_mounted_in(window, false) && receipt.matches(&view.mount_receipt()) && receipt.is_current()
+            }),
+            utility_mount::UtilityKind::Xml => self.xml_view.as_ref().is_some_and(|view| {
+                let view = view.read(cx);
+                view.is_mounted_in(window, false) && receipt.matches(&view.mount_receipt()) && receipt.is_current()
+            }),
+            utility_mount::UtilityKind::Regex => self.regex_view.as_ref().is_some_and(|view| {
+                let view = view.read(cx);
+                view.is_mounted_in(window, false) && receipt.matches(&view.mount_receipt()) && receipt.is_current()
+            }),
+        }
+    }
+}
+
 impl RootVisibilityRequest {
     fn is_current(&self, revision: u64, visible: bool, newer_pending: bool) -> bool {
         match self {
             Self::DockHash(reveal) => reveal.gesture.visibility_revision == revision && !newer_pending,
-            Self::DockJson(reveal) | Self::DockXml(reveal) => reveal.gesture.visibility_revision == revision && reveal.mount.is_current() && !newer_pending,
+            Self::DockUtility(_, reveal) => reveal.gesture.visibility_revision == revision && reveal.mount.is_current() && !newer_pending,
             Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _)
                 | Self::HideAfterWindowClose(expected, _, _, _) => {
                 *expected == revision && visible && !newer_pending
@@ -11983,7 +12044,7 @@ impl RootVisibility {
             let Ok(mut pending) = self.requested_visible.lock() else {
                 return false;
             };
-            let supersedes_dock = matches!(pending.as_ref(), Some(RootVisibilityRequest::DockHash(_) | RootVisibilityRequest::DockJson(_) | RootVisibilityRequest::DockXml(_)))
+            let supersedes_dock = matches!(pending.as_ref(), Some(RootVisibilityRequest::DockHash(_) | RootVisibilityRequest::DockUtility(_, _)))
                 && matches!(&request, RootVisibilityRequest::HideAfterExternalLaunch(_)
                     | RootVisibilityRequest::HideAfterWindowSwitch(_, _, _)
                     | RootVisibilityRequest::HideAfterWindowClose(_, _, _, _));
@@ -12018,14 +12079,8 @@ impl RootVisibility {
         let accepted = Arc::new(AtomicU64::new(0));
         let acknowledgement = hash_dock::UtilityAcknowledgement { signal: receiver.clone(), accepted_revision: accepted.clone() };
         let reveal = hash_dock::UtilityReveal { gesture, mount, acknowledgement };
-        let request = match kind {
-            utility_mount::UtilityKind::Json => RootVisibilityRequest::DockJson(reveal),
-            utility_mount::UtilityKind::Xml => RootVisibilityRequest::DockXml(reveal),
-        };
+        let request = RootVisibilityRequest::DockUtility(kind, reveal);
         self.queue_visible(request).then_some((receiver, accepted))
-    }
-    fn request_json_visible(&self, gesture: hash_dock::Gesture, mount: utility_mount::MountReceipt) -> Option<(Arc<HashWakeSignal>, Arc<AtomicU64>)> {
-        self.request_utility_visible(utility_mount::UtilityKind::Json, gesture, mount)
     }
     fn request_xml_visible(&self, gesture: hash_dock::Gesture, mount: utility_mount::MountReceipt) -> Option<(Arc<HashWakeSignal>, Arc<AtomicU64>)> {
         self.request_utility_visible(utility_mount::UtilityKind::Xml, gesture, mount)
@@ -12053,7 +12108,7 @@ impl RootVisibility {
         }
         let visible = match request {
             RootVisibilityRequest::DockHash(_) => true,
-            RootVisibilityRequest::DockJson(_) | RootVisibilityRequest::DockXml(_) => true,
+            RootVisibilityRequest::DockUtility(_, _) => true,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
             RootVisibilityRequest::HideAfterWindowClose(_, _, _, _) => false,
             RootVisibilityRequest::HideAfterWindowSwitch(_, target, _) => {
@@ -12371,6 +12426,7 @@ pub(crate) fn run_foundation_window(
                     root.retire_search_jump_mode();
                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.retire_json_workspace(cx);
+                    root.drain_regex_native_geometry(cx, true);
                     if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
                     #[cfg(windows)]
                     if let Some(view) = root.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
@@ -12573,6 +12629,8 @@ pub(crate) fn run_foundation_window(
                 xml_view: None,
                 regex_view: None,
                 xml_popup: None,
+                regex_popup: None,
+                regex_retiring: Vec::new(),
                 xml_retiring: Vec::new(),
                 xml_terminal_quit: false,
                 json_popup: None,
@@ -12918,7 +12976,7 @@ pub(crate) fn run_foundation_window(
                 match blocker {
                     None => {
                         let deferred = root_for_window_close.update(app, |root, cx| {
-                            if root.xml_view.is_some() { root.quit_after_xml_drain(cx); true } else { false }
+                            if root.xml_view.is_some() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                         }).unwrap_or(true);
                         if deferred { return false; }
                         let _ = root_for_window_close.update(app, |root, cx| {
@@ -12952,7 +13010,7 @@ pub(crate) fn run_foundation_window(
                             .unwrap_or(false);
                         if close_now {
                             let deferred = root_for_window_close.update(app, |root, cx| {
-                                if root.xml_view.is_some() { root.quit_after_xml_drain(cx); true } else { false }
+                                if root.xml_view.is_some() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                             }).unwrap_or(true);
                             if deferred { return false; }
                             let _ = root_for_window_close.update(app, |root, cx| {
@@ -13017,6 +13075,7 @@ pub(crate) fn run_foundation_window(
                         });
                         false
                     }
+                    Some(RootCloseBlocker::RegexRehost) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for Regex Tester to finish changing windows before closing.".to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::StructuredPinWrite) => {
                         let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for the utility pin update to finish before closing Multi Launcher.".to_owned()); cx.notify(); });
                         false
@@ -13124,6 +13183,7 @@ pub(crate) fn run_foundation_window(
                         root.drain_hash_native_geometry(cx, false);
                         root.drain_json_native_geometry(cx, false);
                         root.drain_xml_native_geometry(cx, false);
+                        root.drain_regex_native_geometry(cx, false);
                         root.hash_session
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -13297,7 +13357,7 @@ pub(crate) fn run_foundation_window(
                         );
                     }
 
-                    let was_visible = if matches!(requested_visible.as_ref(), Some(RootVisibilityRequest::DockJson(_) | RootVisibilityRequest::DockXml(_))) {
+                    let was_visible = if matches!(requested_visible.as_ref(), Some(RootVisibilityRequest::DockUtility(_, _))) {
                         visibility.current_visible_revision(native_window).is_some()
                     } else { visibility.visible.load(Ordering::Acquire) };
                     let hotkey_for_conditional = requested_visible.as_ref()
@@ -13321,9 +13381,15 @@ pub(crate) fn run_foundation_window(
                     });
                     let dock_reveal = requested_visible.as_ref().and_then(|request| match request {
                         RootVisibilityRequest::DockHash(reveal) => Some((reveal.gesture, Some(reveal.mount_generation), None)),
-                        RootVisibilityRequest::DockJson(reveal) => Some((reveal.gesture, None, Some((reveal.mount.clone(), utility_mount::UtilityKind::Json)))),
-                        RootVisibilityRequest::DockXml(reveal) => Some((reveal.gesture, None, Some((reveal.mount.clone(), utility_mount::UtilityKind::Xml)))),
+                        RootVisibilityRequest::DockUtility(kind, reveal) => Some((reveal.gesture, None, Some((reveal.mount.clone(), *kind)))),
                         _ => None,
+                    });
+                    let utility_destination_current = dock_reveal.as_ref().and_then(|(_, _, utility)| utility.as_ref()).is_none_or(|(receipt, kind)| {
+                        update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, app| {
+                            root.native_window == Some(native_window)
+                                && root.utility_dock_focus_available(window, app)
+                                && root.utility_destination_current(*kind, receipt, window.window_handle().window_id(), app)
+                        }).unwrap_or(false)
                     });
                     let dock_current = dock_reveal.as_ref().is_none_or(|(gesture, generation, utility_mount_receipt)| {
                         generation.is_none_or(|generation| dock_mount_generation.load(Ordering::Acquire) == generation)
@@ -13332,7 +13398,7 @@ pub(crate) fn run_foundation_window(
                             && native_window_is_valid(gesture.source)
                             && !restart_admission_for_hotkey.is_fenced()
                     });
-                    let accepted_visible = if hotkey_for_conditional || !switch_query_current || !close_current || !dock_current {
+                    let accepted_visible = if hotkey_for_conditional || !switch_query_current || !close_current || !dock_current || !utility_destination_current {
                         None
                     } else {
                         requested_visible.as_ref().and_then(|request| visibility.accept_requested_visible(request))
@@ -13393,6 +13459,7 @@ pub(crate) fn run_foundation_window(
                                 }
                             }
                             let mut search_focus_selected = false;
+                            let mut utility_focus_delivered = false;
                             if desired_visible {
                                 root.remount_pinned_hash_if_ready(window, cx);
                                 if let Some(view) = root.activity_view.clone().filter(|view| view.read(cx).open) {
@@ -13407,7 +13474,9 @@ pub(crate) fn run_foundation_window(
                                     root.refresh_launcher_results_with_viewport(query, false, cx);
                                 }
                             }
-                            if desired_visible && root.action_sheet.is_none()
+                            let utility_requested = dock_reveal.as_ref().is_some_and(|(_, _, utility)| utility.is_some());
+                            let utility_focus_available = !utility_requested || root.utility_dock_focus_available(window, cx);
+                            if desired_visible && root.action_sheet.is_none() && utility_focus_available
                                 && visibility.is_current(revision, true)
                                 && root.native_window == Some(native_window)
                                 && !root.restart_admission.is_fenced()
@@ -13427,16 +13496,20 @@ pub(crate) fn run_foundation_window(
                                 } else {
                                     None
                                 };
-                                let utility = dock_reveal.as_ref().and_then(|(_, _, mount)| mount.as_ref()).filter(|(mount, _)| mount.is_current());
+                                let utility = dock_reveal.as_ref().and_then(|(_, _, mount)| mount.as_ref()).filter(|(mount, kind)| root.utility_destination_current(*kind, mount, window.window_handle().window_id(), cx));
                                 let json_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Json).and_then(|_| root.json_view.as_ref()).cloned();
                                 let xml_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Xml).and_then(|_| root.xml_view.as_ref()).cloned();
-                                search_focus_selected = hash_view.is_none() && json_view.is_none() && xml_view.is_none();
-                                if let Some(view) = xml_view {
+                                let regex_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Regex).and_then(|_| root.regex_view.as_ref()).cloned();
+                                search_focus_selected = hash_view.is_none() && json_view.is_none() && xml_view.is_none() && regex_view.is_none();
+                                if let Some(view) = regex_view {
+                                    root.scroll_to_regex(cx);
+                                    utility_focus_delivered = view.update(cx, |tool, cx| { tool.focus_editor(window, cx); tool.contains_focus(window, cx) });
+                                } else if let Some(view) = xml_view {
                                     root.scroll_to_xml(cx);
-                                    view.update(cx, |tool, cx| tool.focus_editor(window, cx));
+                                    utility_focus_delivered = view.update(cx, |tool, cx| { tool.focus_editor(window, cx); tool.contains_focus(window, cx) });
                                 } else if let Some(view) = json_view {
                                     root.scroll_to_json(cx);
-                                    view.update(cx, |tool, cx| tool.focus_editor(window, cx));
+                                    utility_focus_delivered = view.update(cx, |tool, cx| { tool.focus_editor(window, cx); tool.contains_focus(window, cx) });
                                 } else if let Some(view) = hash_view {
                                     view.update(cx, |tool, cx| {
                                         tool.focus_editable(window, cx);
@@ -13447,12 +13520,12 @@ pub(crate) fn run_foundation_window(
                             } else if !desired_visible && !guarded_hide {
                                 root.cancel_docked_hash_preview();
                             }
-                            (root.native_window, search_focus_selected)
+                            (root.native_window, search_focus_selected, utility_focus_delivered)
                         },
                     );
-                    let search_focus_selected = match query_window {
-                        Ok((Some(current), search_focus_selected)) if current == native_window => {
-                            search_focus_selected
+                    let (search_focus_selected, utility_focus_delivered) = match query_window {
+                        Ok((Some(current), search_focus_selected, utility_focus_delivered)) if current == native_window => {
+                            (search_focus_selected, utility_focus_delivered)
                         }
                         _ => {
                             tracing::warn!("GPUI root window closed before hotkey presentation");
@@ -13549,6 +13622,7 @@ pub(crate) fn run_foundation_window(
                         let current = visibility.is_current(revision, true)
                             && generation.is_none_or(|generation| dock_mount_generation.load(Ordering::Acquire) == generation)
                             && utility_mount_receipt.as_ref().is_none_or(|(mount, _)| mount.is_current())
+                            && (utility_mount_receipt.is_none() || utility_focus_delivered)
                             && !restart_admission_for_hotkey.is_fenced()
                             && native_window_is_valid(native_window)
                             && native_window_is_valid(gesture.source);
@@ -13560,10 +13634,16 @@ pub(crate) fn run_foundation_window(
                                 activated = true;
                             }
                         }
+                        let destination_current = utility_mount_receipt.as_ref().is_none_or(|(receipt, kind)| {
+                            update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, app| {
+                                root.native_window == Some(native_window)
+                                    && root.utility_destination_current(*kind, receipt, window.window_handle().window_id(), app)
+                            }).unwrap_or(false)
+                        });
                         match requested_visible.take() {
                             Some(RootVisibilityRequest::DockHash(reveal)) => drop(reveal.acknowledgement),
-                            Some(RootVisibilityRequest::DockJson(reveal) | RootVisibilityRequest::DockXml(reveal)) => {
-                                if activated && reveal.mount.is_current() && visibility.is_current(revision, true)
+                            Some(RootVisibilityRequest::DockUtility(_, reveal)) => {
+                                if utility_dock_ack_allowed(activated, utility_focus_delivered, destination_current) && reveal.mount.is_current() && visibility.is_current(revision, true)
                                     && native_window_is_valid(gesture.source)
                                     && current_foreground_identity() == Some(native_window.identity)
                                     && !restart_admission_for_hotkey.is_fenced() {
@@ -14961,6 +15041,18 @@ mod tests {
         assert!(pending.take_requested_visible().is_none());
         assert!(acknowledgement.state.lock().unwrap().closed);
         assert!(!pending.request_external_hide(0));
+    }
+
+    #[test]
+    fn utility_dock_refuses_modal_ownership_and_requires_delivered_focus() {
+        assert!(super::utility_dock_focus_allowed(false, false, false));
+        assert!(!super::utility_dock_focus_allowed(true, false, false));
+        assert!(!super::utility_dock_focus_allowed(false, true, false));
+        assert!(!super::utility_dock_focus_allowed(false, false, true));
+        assert!(super::utility_dock_ack_allowed(true, true, true));
+        assert!(!super::utility_dock_ack_allowed(true, false, true));
+        assert!(!super::utility_dock_ack_allowed(true, true, false));
+        assert!(!super::utility_dock_ack_allowed(false, true, true));
     }
 
     #[cfg(windows)]
