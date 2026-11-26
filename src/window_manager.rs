@@ -491,6 +491,11 @@ fn enqueue_launcher_restore_with_queue(
 }
 
 fn run_launcher_restore(request: LauncherRestoreRequest) {
+    tracing::debug!(
+        hwnd = request.hwnd_value,
+        revision = request.fence.request_revision,
+        "attempting launcher window restore"
+    );
     let result = crate::window_activation::activate_window_if_current(
         request.request,
         request.fence.clone(),
@@ -511,7 +516,14 @@ fn complete_launcher_restore(
                 error.kind,
                 crate::window_activation::WindowActivationErrorKind::Superseded
             ) {
-                tracing::warn!(error = %error, "failed to restore launcher window");
+                tracing::warn!(
+                    hwnd = request.hwnd_value,
+                    revision = request.fence.request_revision,
+                    kind = ?error.kind,
+                    context = ?error.context,
+                    error = %error,
+                    "failed to restore launcher window"
+                );
             }
         }
         Ok(()) => {

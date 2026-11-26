@@ -177,6 +177,11 @@ trait ActivationBackend {
     fn current_desktop(&mut self) -> Result<VirtualDesktopId, VirtualDesktopError>;
     fn is_window_on_current(&mut self, hwnd: usize) -> Result<bool, VirtualDesktopError>;
     fn switch_desktop(&mut self, desktop: &VirtualDesktopId) -> Result<(), VirtualDesktopError>;
+    fn try_move_owned_window_public(
+        &mut self,
+        hwnd: usize,
+        desktop: &VirtualDesktopId,
+    ) -> Option<Result<(), VirtualDesktopError>>;
     fn move_window(
         &mut self,
         hwnd: usize,
@@ -1776,10 +1781,33 @@ fn prepare_desktop(
                 let current = backend
                     .current_desktop()
                     .map_err(|error| desktop_error(error, request))?;
-                authorize(backend, fence, request.hwnd, effects, |backend| {
-                    backend.move_window(request.hwnd, &current)
-                })?
-                .map_err(|error| desktop_error(error, request))?;
+                let public_move = authorize(backend, fence, request.hwnd, effects, |backend| {
+                    backend.try_move_owned_window_public(request.hwnd, &current)
+                })?;
+                if !matches!(&public_move, Some(Ok(()))) {
+                    if let Some(Err(error)) = &public_move {
+                        tracing::debug!(
+                            error = %error,
+                            context = ?error.context,
+                            "public launcher desktop move failed; trying internal backend"
+                        );
+                    }
+                    // Each native move has its own revision/HWND check. A new
+                    // hide/show request must be able to cancel the fallback.
+                    authorize(backend, fence, request.hwnd, effects, |backend| {
+                        backend.move_window(request.hwnd, &current)
+                    })?
+                    .map_err(|error| {
+                        let error = desktop_error(error, request);
+                        if let Some(Err(public_error)) = public_move {
+                            error
+                                .context("public_move_error", public_error.message)
+                                .context("public_move_context", format!("{:?}", public_error.context))
+                        } else {
+                            error
+                        }
+                    })?;
+                }
                 if !wait_until_fenced(
                     backend,
                     &DESKTOP_TRANSITION_DELAYS,
@@ -1920,7 +1948,7 @@ impl ActivationBackend for WindowsActivationBackend {
     }
 
     fn current_desktop(&mut self) -> Result<VirtualDesktopId, VirtualDesktopError> {
-        VirtualDesktopService.current().map(|desktop| desktop.id)
+        VirtualDesktopService.current_for_launcher_restore()
     }
 
     fn is_window_on_current(&mut self, hwnd: usize) -> Result<bool, VirtualDesktopError> {
@@ -1930,6 +1958,15 @@ impl ActivationBackend for WindowsActivationBackend {
 
     fn switch_desktop(&mut self, desktop: &VirtualDesktopId) -> Result<(), VirtualDesktopError> {
         VirtualDesktopService.switch_to_id(desktop)
+    }
+
+    fn try_move_owned_window_public(
+        &mut self,
+        hwnd: usize,
+        desktop: &VirtualDesktopId,
+    ) -> Option<Result<(), VirtualDesktopError>> {
+        use windows::Win32::Foundation::HWND;
+        VirtualDesktopService.try_move_owned_window_public(HWND(hwnd as *mut _), desktop)
     }
 
     fn move_window(
@@ -2067,6 +2104,7 @@ mod tests {
         attempts: usize,
         attach_fail_at: Option<(u32, u32)>,
         detach_fail_at: Option<(u32, u32)>,
+        public_move_result: Option<Result<(), VirtualDesktopError>>,
         transition_delay_after_action: usize,
         transition_checks_remaining: usize,
         minimized: bool,
@@ -2110,6 +2148,7 @@ mod tests {
                 attempts: 0,
                 attach_fail_at: None,
                 detach_fail_at: None,
+                public_move_result: None,
                 transition_delay_after_action: 0,
                 transition_checks_remaining: 0,
                 minimized: false,
@@ -2238,6 +2277,20 @@ mod tests {
             self.on_current = true;
             self.transition_checks_remaining = self.transition_delay_after_action;
             Ok(())
+        }
+        fn try_move_owned_window_public(
+            &mut self,
+            _: usize,
+            desktop: &VirtualDesktopId,
+        ) -> Option<Result<(), VirtualDesktopError>> {
+            let result = self.public_move_result.take()?;
+            self.events.push(format!("public_move:{desktop}"));
+            if result.is_ok() {
+                self.target = desktop.clone();
+                self.on_current = true;
+                self.transition_checks_remaining = self.transition_delay_after_action;
+            }
+            Some(result)
         }
         fn move_window(
             &mut self,
@@ -3620,6 +3673,78 @@ mod tests {
                 .iter()
                 .any(|event| event.starts_with("switch:"))
         );
+    }
+
+    #[test]
+    fn launcher_restore_prefers_public_owned_window_move() {
+        let mut backend = FakeBackend::new();
+        backend.public_move_result = Some(Ok(()));
+        activate_with(
+            &mut backend,
+            WindowActivationRequest::move_to_current_desktop(42),
+        )
+        .unwrap();
+        assert!(backend.events.contains(&format!("public_move:{}", id(1))));
+        assert!(!backend.events.iter().any(|event| event.starts_with("move:")));
+    }
+
+    #[test]
+    fn launcher_restore_falls_back_after_public_move_failure() {
+        let mut backend = FakeBackend::new();
+        backend.public_move_result = Some(Err(VirtualDesktopError::new(
+            crate::virtual_desktop::VirtualDesktopErrorKind::Native,
+            "public move",
+            "denied",
+        )));
+        activate_with(
+            &mut backend,
+            WindowActivationRequest::move_to_current_desktop(42),
+        )
+        .unwrap();
+        let public = backend
+            .events
+            .iter()
+            .position(|event| event.starts_with("public_move:"))
+            .unwrap();
+        let internal = backend
+            .events
+            .iter()
+            .position(|event| event.starts_with("move:"))
+            .unwrap();
+        let focus = backend
+            .events
+            .iter()
+            .position(|event| event == "set:42")
+            .unwrap();
+        assert!(public < internal && internal < focus);
+    }
+
+    #[test]
+    fn launcher_restore_on_current_desktop_does_not_relocate() {
+        let mut backend = FakeBackend::new();
+        backend.on_current = true;
+        activate_with(
+            &mut backend,
+            WindowActivationRequest::move_to_current_desktop(42),
+        )
+        .unwrap();
+        assert!(!backend.events.iter().any(|event| {
+            event == "current_desktop" || event.starts_with("move:") || event.starts_with("switch:")
+        }));
+    }
+
+    #[test]
+    fn launcher_restore_never_focuses_before_desktop_membership_is_verified() {
+        let mut backend = FakeBackend::new();
+        backend.transition_delay_after_action = usize::MAX;
+        let error = activate_with(
+            &mut backend,
+            WindowActivationRequest::move_to_current_desktop(42),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, WindowActivationErrorKind::Desktop);
+        assert!(!backend.events.iter().any(|event| event.starts_with("set:")));
+        assert!(!backend.events.iter().any(|event| event.starts_with("switch:")));
     }
 
     #[test]

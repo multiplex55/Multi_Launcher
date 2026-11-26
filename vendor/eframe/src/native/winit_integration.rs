@@ -9,12 +9,50 @@ use egui::ViewportId;
 #[cfg(feature = "accesskit")]
 use egui_winit::accesskit_winit;
 
-/// Returns `true` if the window is invisible or minimized.
+/// Returns `true` if a window needs the non-drawable repaint path.
 ///
-/// These windows don't receive `RedrawRequested` events on Windows,
-/// so they need special handling to keep processing viewport commands.
-pub fn is_invisible_or_minimized(window: &Window) -> bool {
-    window.is_visible() == Some(false) || window.is_minimized() == Some(true)
+/// On Windows a window on an inactive virtual desktop can retain WS_VISIBLE
+/// without receiving RedrawRequested. DWM cloaking is separate from ordinary
+/// visibility and minimization; process queued viewport commands in that case too.
+pub fn needs_direct_repaint(window: &Window) -> bool {
+    if window.is_visible() == Some(false) || window.is_minimized() == Some(true) {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        is_dwm_cloaked(window)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[expect(unsafe_code)]
+fn is_dwm_cloaked(window: &Window) -> bool {
+    use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return false;
+    };
+    let mut cloaked = 0u32;
+    // SAFETY: the handle is borrowed from the live winit Window, and the
+    // output buffer has the DWORD size required by DWMWA_CLOAKED.
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            handle.hwnd.get() as HWND,
+            DWMWA_CLOAKED as u32,
+            (&mut cloaked as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    result >= 0 && cloaked != 0
 }
 
 /// On Mac, a minimized window uses up all CPU:
@@ -25,7 +63,7 @@ pub fn is_invisible_or_minimized(window: &Window) -> bool {
 /// viewports while the hidden root is being repainted.
 pub fn sleep_if_invisible_or_minimized(window: Option<&Window>) {
     #[cfg(not(target_os = "windows"))]
-    if window.is_some_and(is_invisible_or_minimized) {
+    if window.is_some_and(needs_direct_repaint) {
         profiling::scope!("minimized_sleep");
         std::thread::sleep(core::time::Duration::from_millis(10));
     }
