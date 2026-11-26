@@ -99,18 +99,58 @@ impl multi_launcher::plugin::Plugin for ClipboardBare {
     fn commands(&self) -> Vec<Action> { vec![Action { label: "cb".into(), desc: "Clipboard".into(), action: "query:cb".into(), args: None }] }
 }
 
-struct SnippetsBare;
+#[derive(Default)]
+struct SnippetsBare {
+    owner: std::sync::Mutex<Option<Arc<multi_launcher::plugins::snippets::SnippetSearchOwner>>>,
+    projected: std::sync::Mutex<Option<(String, multi_launcher::plugins::snippets::SnippetSearchSnapshot)>>,
+}
 impl multi_launcher::plugin::Plugin for SnippetsBare {
     fn name(&self) -> &str { "snippets" }
     fn description(&self) -> &str { "Search saved text snippets (prefix: `cs`)" }
     fn capabilities(&self) -> &[&str] { &["search"] }
     fn query_prefixes(&self) -> &[&str] { &["cs"] }
     fn search(&self, query: &str) -> Vec<Action> {
-        multi_launcher::plugins::snippets::bare_dialog_opener(query).into_iter().collect()
+        if let Some(action) = multi_launcher::plugins::snippets::bare_dialog_opener(query) { return vec![action]; }
+        let Some(owner) = self.owner.lock().ok().and_then(|owner| owner.clone()) else { return Vec::new(); };
+        let snapshot = owner.snapshot();
+        if !snapshot.healthy { return Vec::new(); }
+        let rows = projected_snippet_edits(query, &snapshot.entries);
+        if let Ok(mut projected) = self.projected.lock() { *projected = Some((query.to_owned(), snapshot)); }
+        rows
     }
     fn commands(&self) -> Vec<Action> {
         vec![Action { label: "cs".into(), desc: "Snippet".into(), action: "query:cs".into(), args: None }]
     }
+}
+
+fn projected_snippet_edits(query: &str, entries: &[multi_launcher::plugins::snippets::SnippetEntry]) -> Vec<Action> {
+    let mut counts = std::collections::HashMap::<&str, usize>::new();
+    for entry in entries { *counts.entry(&entry.alias).or_default() += 1; }
+    multi_launcher::plugins::snippets::search_with_entries(query, entries)
+        .into_iter()
+        .filter(|action| match multi_launcher::commands::parse_action(action) {
+            Ok(multi_launcher::commands::Command::Storage(multi_launcher::commands::StorageCommand::SnippetEdit(alias))) => {
+                counts.get(alias.as_str()) == Some(&1)
+            }
+            _ => false,
+        })
+        .collect()
+}
+
+struct SnippetsProjection<'a>(&'a [multi_launcher::plugins::snippets::SnippetEntry]);
+impl multi_launcher::plugin::Plugin for SnippetsProjection<'_> {
+    fn name(&self) -> &str { "snippets" }
+    fn description(&self) -> &str { "Search saved text snippets (prefix: `cs`)" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["cs"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        projected_snippet_edits(query, self.0)
+    }
+}
+
+pub(super) fn snippets_named_rows(query: &str, entries: &[multi_launcher::plugins::snippets::SnippetEntry], enabled: Option<&HashSet<String>>, caps: Option<&std::collections::HashMap<String, Vec<String>>>) -> Vec<Action> {
+    let projection = SnippetsProjection(entries);
+    search_routed([&projection as &dyn multi_launcher::plugin::Plugin], query, enabled, caps).into_iter().map(|(_, action)| action).collect()
 }
 
 pub(super) fn snippets_rows(
@@ -118,7 +158,7 @@ pub(super) fn snippets_rows(
     enabled: Option<&HashSet<String>>,
     caps: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> Vec<Action> {
-    search_routed([&SnippetsBare as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
+    search_routed([&SnippetsBare::default() as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
         .into_iter().map(|(_, action)| action).collect()
 }
 
@@ -149,6 +189,15 @@ pub(super) struct InstalledLauncherProviders {
 }
 
 impl InstalledLauncherProviders {
+    pub(super) fn install_snippets_owner(&self, owner: Arc<multi_launcher::plugins::snippets::SnippetSearchOwner>) {
+        if let Ok(mut current) = self.snippets.owner.lock() { *current = Some(owner); }
+    }
+    pub(super) fn snippets_owner(&self) -> Option<Arc<multi_launcher::plugins::snippets::SnippetSearchOwner>> {
+        self.snippets.owner.lock().ok()?.clone()
+    }
+    pub(super) fn take_snippets_projection(&self) -> Option<(String, multi_launcher::plugins::snippets::SnippetSearchSnapshot)> {
+        self.snippets.projected.lock().ok()?.take()
+    }
     pub(super) fn clipboard_modify_ready(&self) {
         self.clipboard_modify.ready.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -186,7 +235,7 @@ impl InstalledLauncherProviders {
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             clipboard: ClipboardBare,
-            snippets: SnippetsBare,
+            snippets: SnippetsBare::default(),
             clipboard_modify: ClipboardModifyBare {
                 catalog: multi_launcher::clipboard_modify::runtime::shared_default_catalog(),
                 ready: std::sync::atomic::AtomicBool::new(false),
@@ -414,6 +463,29 @@ mod tests {
         }
         let no_search = HashMap::from([("snippets".to_owned(), Vec::new())]);
         assert!(super::search_routed(providers.plugins(), "cs", Some(&enabled), Some(&no_search)).is_empty());
+    }
+
+    #[test]
+    fn snippets_named_projection_keeps_stock_filters_and_rejects_mutating_overload() {
+        use multi_launcher::plugins::snippets::SnippetEntry;
+        let rows = vec![SnippetEntry { alias: "alpha".into(), text: "text".into(), hide_contents: false,
+            prompt_for_fields: false, fields: Vec::new(), tags: vec!["work".into()] }];
+        let enabled = HashSet::from(["snippets".to_owned()]);
+        let projected = super::snippets_named_rows("cs edit tag:work !tag:private -id:unrelated", &rows, Some(&enabled), None);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].action, "snippet:edit:alpha");
+        assert!(super::snippets_named_rows("cs edit alpha replacement", &rows, Some(&enabled), None).is_empty());
+        assert!(super::snippets_named_rows("cs edit alpha", &rows, Some(&HashSet::new()), None).is_empty());
+    }
+
+    #[test]
+    fn snippets_named_projection_excludes_duplicates_even_if_only_one_matches_filter() {
+        use multi_launcher::plugins::snippets::SnippetEntry;
+        let rows = vec![
+            SnippetEntry { alias: "same".into(), text: "first".into(), hide_contents: false, prompt_for_fields: false, fields: Vec::new(), tags: vec!["work".into()] },
+            SnippetEntry { alias: "same".into(), text: "second".into(), hide_contents: false, prompt_for_fields: false, fields: Vec::new(), tags: vec!["other".into()] },
+        ];
+        assert!(super::snippets_named_rows("cs edit tag:work", &rows, None, None).is_empty());
     }
 
     #[test]

@@ -163,6 +163,20 @@ Run native checks in an interactive Windows environment with controlled syntheti
 
 For each GUI specification, identify which native properties actually apply: opening/closing, keyboard/pointer interaction, focus return, modal confirmation, cancel/discard, child/popout lifecycle, resize/scroll, DPI/monitor behavior, hotkeys, selection/caret/IME, drag-and-drop, tray or Windows integration. Do not require every property for every static surface.
 
+### Reusable utility replay
+
+For a related GUI batch, record one candidate identity, then supply each utility's typed route, starting presentation, fixture, expected state and effect receipt. Run the applicable steps in both frontends at the matched primary dimensions. Reuse the owned fixture and candidate across the scenarios where the expected effects permit it.
+
+| Scenario | Steps and evidence |
+| --- | --- |
+| Search and action | Open the typed result with the keyboard and pointer. Observe the exact pane, initial focus and anchored query. Exercise the utility's applicable Jump targets and confirm the chosen controls own the actions. |
+| Retained window | Start with a recognizable draft. Pop out, resize and reopen, then dock with the launcher visible and parked when applicable. Check one active host, draft and focus transfer, remembered geometry and pin behavior. |
+| Close and focus | Use Escape, Close and the title-bar close where applicable. Verify the exact eligible owner closes, current focus returns correctly, and reopening starts or restores the session required by that utility. |
+| Checked effect | Use a synthetic clipboard item or an owned canonical store. Verify the expected write or read, then run the applicable refusal or Cancel case and compare the exact resulting state. |
+| Pending work | Start a representative operation, then use Cancel or replace its owning context where supported. Record progress, retirement and the outcome of any late result. |
+
+Record which scenarios remain queued for the next shared Windows candidate. Group related defects for correction when their risk allows it. Keep per-GUI acceptance open until the applicable native observations are recorded.
+
 Record actual frontend, artifact/source identity, fixture, Windows/display environment, steps, expected outcome, observed outcome, capture/log links and cleanup. Screenshots establish presentation; concise event/state observations establish behavior. Pixel-identical output across frameworks is not required. Control/feature/interaction parity is.
 
 Native controller owns only the app/test processes and fixtures it started. Do not kill unrelated user processes or launch competing hooks. Clipboard tests requiring real system access run in a disposable/isolated session with synthetic content; store redacted diagnostics rather than clipboard payloads.

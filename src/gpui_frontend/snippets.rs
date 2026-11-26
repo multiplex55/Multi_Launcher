@@ -5,11 +5,41 @@ use multi_launcher::common::persistence::LoadState;
 use multi_launcher::plugins::snippets::{self, SnippetEntry};
 pub(super) const SAVE_WAIT: &str = "Finish or cancel the Snippets review, or wait for its save.";
 
+#[derive(Default)]
+pub(super) struct SearchState {
+    pub pending: bool,
+    pub wake: Arc<HashWakeSignal>,
+    pub projection: Option<(String, String, snippets::SnippetSearchSnapshot)>,
+    pub published: Option<(String, String, u64, snippets::SnippetSearchSnapshot)>,
+    pub request_epoch: Arc<AtomicU64>,
+}
+
+pub(super) fn search_snapshot_current(owner: &snippets::SnippetSearchOwner, expected: &snippets::SnippetSearchSnapshot) -> bool {
+    let current = owner.snapshot();
+    current.healthy && current.generation == expected.generation && Arc::ptr_eq(&current.entries, &expected.entries)
+}
+pub(super) fn named_row_is_current(
+    _query: &str, action: &Action, snapshot: &snippets::SnippetSearchSnapshot,
+    owner: Option<&snippets::SnippetSearchOwner>, enabled: Option<&HashSet<String>>,
+    caps: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
+    enabled.is_none_or(|enabled| enabled.contains("snippets"))
+        && multi_launcher::settings::provider_search_capability_enabled(caps, "snippets")
+        && owner.is_some_and(|owner| search_snapshot_current(owner, snapshot))
+        && matches!(parse_action(action), Ok(Command::Storage(multi_launcher::commands::StorageCommand::SnippetEdit(_))))
+}
+
 fn edit_is_current(edit: &EditDraft, generation: u64, rows: &Arc<Vec<SnippetEntry>>, instance: u64) -> bool {
     edit.instance == instance && edit.generation == generation && Arc::ptr_eq(&edit.snapshot, rows)
 }
 fn edited_alias(original: &str, initial_display: &str, current_display: &str) -> String {
     if initial_display == current_display { original.to_owned() } else { current_display.to_owned() }
+}
+fn exact_named_index(rows: &[SnippetEntry], expected: &[SnippetEntry], alias: &str) -> Option<usize> {
+    if rows != expected { return None; }
+    let mut matches = rows.iter().enumerate().filter(|(_, row)| row.alias == alias);
+    let (index, _) = matches.next()?;
+    matches.next().is_none().then_some(index)
 }
 
 struct EditDraft {
@@ -605,6 +635,133 @@ impl Render for SnippetsView {
 }
 
 impl RootWindow {
+    pub(super) fn start_snippets_search(&mut self, cx: &mut Context<Self>) {
+        if self.snippets_search.pending || self.search_catalog.providers.snippets_owner().is_some() { return; }
+        let Some(permit) = self.restart_admission.admit() else { return; };
+        self.snippets_search.pending = true;
+        #[cfg(windows)]
+        let path = self.app_data_root.path().join(snippets::SNIPPETS_FILE);
+        #[cfg(not(windows))]
+        let path = PathBuf::from(snippets::SNIPPETS_FILE);
+        let wake = self.snippets_search.wake.clone();
+        let notify = wake.clone();
+        let task = cx.background_executor().spawn(async move {
+            snippets::SnippetSearchOwner::open(path, Arc::new(move || notify.notify()))
+        });
+        cx.spawn(async move |weak, cx| {
+            let owner = task.await;
+            let _ = weak.update(cx, |root, cx| {
+                if !root.snippets_search.pending { return; }
+                root.snippets_search.pending = false;
+                root.search_catalog.providers.install_snippets_owner(owner);
+                let query = root.query.read(cx).value().to_string();
+                let (effective, _) = multi_launcher::common::query::split_action_filters(&query);
+                if effective.split_whitespace().next().is_some_and(|head| head.eq_ignore_ascii_case("cs")) {
+                    root.refresh_launcher_results_with_viewport(query, false, cx);
+                }
+                cx.notify();
+            });
+            drop(permit);
+            while wake.wait().await {
+                if weak.update(cx, |root, cx| {
+                    let query = root.query.read(cx).value().to_string();
+                    let (effective, _) = multi_launcher::common::query::split_action_filters(&query);
+                    if effective.split_whitespace().next().is_some_and(|head| head.eq_ignore_ascii_case("cs")) {
+                        root.refresh_launcher_results_with_viewport(query, false, cx);
+                        cx.notify();
+                    }
+                }).is_err() { break; }
+            }
+        }).detach();
+    }
+
+    pub(super) fn start_named_snippet(&mut self, alias: String, query: String, generation: u64,
+        snapshot: snippets::SnippetSearchSnapshot, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) || !window.is_window_active()
+            || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+            || self.snippets_view.as_ref().is_some_and(|view| {
+                let view = view.read(cx);
+                view.loading || view.pending || view.edit.is_some() || view.removal.is_some()
+            }) { return; }
+        let Some(owner) = self.search_catalog.providers.snippets_owner() else { return; };
+        if !search_snapshot_current(&owner, &snapshot) { return; }
+        let Some(host) = self.root_window else { return; };
+        let Some(native) = self.native_window else { return; };
+        if host.window_id() != window.window_handle().window_id() || current_foreground_identity() != Some(native.identity) { return; }
+        let Some(permit) = self.restart_admission.admit() else { return; };
+        let admission = self.restart_admission.clone();
+        let visibility = self.root_visibility.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire);
+        let epoch = self.snippets_search.request_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let authority = self.snippets_search.request_epoch.clone();
+        let worker_authority = authority.clone();
+        let worker_owner = owner.clone();
+        let worker_snapshot = snapshot.clone();
+        let worker_alias = alias.clone();
+        let focus = window.focused(cx);
+        #[cfg(windows)]
+        let path = self.app_data_root.path().join(snippets::SNIPPETS_FILE);
+        #[cfg(not(windows))]
+        let path = PathBuf::from(snippets::SNIPPETS_FILE);
+        let task = cx.background_executor().spawn(async move {
+            let current = || worker_authority.load(Ordering::Acquire) == epoch && !admission.is_fenced()
+                && search_snapshot_current(&worker_owner, &worker_snapshot)
+                && json_utility::native_host_current(&visibility, revision, Some(native), false)
+                && current_foreground_identity() == Some(native.identity);
+            if !current() { return None; }
+            let rows = match snippets::load_snippets_for_reload(&path) {
+                Ok(LoadState::Loaded(rows)) => rows,
+                _ => return None,
+            };
+            if !current() { return None; }
+            let index = exact_named_index(&rows, &worker_snapshot.entries, &worker_alias)?;
+            Some((rows, index, path))
+        });
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let loaded = task.await;
+            let _ = host.update(cx, |_, window, app| {
+                let _ = root.update(app, |root, cx| {
+                    let valid = authority.load(Ordering::Acquire) == epoch
+                        && !root.restart_admission.is_fenced()
+                        && root.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("snippets"))
+                        && multi_launcher::settings::provider_search_capability_enabled(root.enabled_capabilities.as_ref(), "snippets")
+                        && root.launcher_results.generation == generation
+                        && root.query.read(cx).value().as_str() == query
+                        && root.root_window.is_some_and(|current| current.window_id() == host.window_id())
+                        && root.native_window == Some(native) && window.is_window_active()
+                        && !window.has_active_dialog(cx) && root.external_owner_is_current(focus.as_ref(), window, cx)
+                        && json_utility::native_host_current(&root.root_visibility, revision, Some(native), false)
+                        && current_foreground_identity() == Some(native.identity) && search_snapshot_current(&owner, &snapshot);
+                    if !valid { return; }
+                    let Some((rows, index, path)) = loaded else {
+                        root.launcher_search_error = Some("Snippet is unavailable or changed. Refresh and try again.".into()); cx.notify(); return;
+                    };
+                    let weak = cx.entity().downgrade();
+                    let view = root.snippets_view.clone().unwrap_or_else(|| cx.new(|cx| SnippetsView::new(window, cx, weak, path)));
+                    let opened = view.update(cx, |view, cx| {
+                        if view.loading || view.pending || view.edit.is_some() || view.removal.is_some() { return false; }
+                        if !view.mount.is_current() { view.mount = view.owner.attach(); }
+                        view.open = true; view.host = window.window_handle(); view.rows = Arc::new(rows);
+                        view.generation = view.generation.wrapping_add(1); view.diagnostic = None;
+                        view.selected = Some((view.generation, index));
+                        view.begin_edit(view.generation, index, window, cx);
+                        view.edit.is_some()
+                    });
+                    if opened {
+                        root.snippets_view = Some(view);
+                        let id = window.window_handle().window_id();
+                        let history = root.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
+                        let modify = root.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
+                        root.root_scroll.scroll_to_top_of_item(root.clipboard_scroll_item(id, cx) + usize::from(history) + usize::from(modify));
+                        cx.notify();
+                    }
+                });
+            });
+        }).detach();
+    }
+
     pub(super) fn open_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.restart_admission.is_fenced() { return; }
         #[cfg(windows)]
@@ -661,5 +818,15 @@ mod tests {
         assert_eq!(multi_launcher::plugins::snippets::snapshot_edit_decision(&rows, &rows, &candidate, Some((None, "Exact"))), Err(multi_launcher::plugins::snippets::SnapshotRejection::DuplicateAlias));
         let mut changed = rows.clone(); changed.push(entry("new", "external"));
         assert_eq!(multi_launcher::plugins::snippets::snapshot_edit_decision(&changed, &rows, &candidate, Some((None, "Exact"))), Err(multi_launcher::plugins::snippets::SnapshotRejection::StaleSnapshot));
+    }
+    #[test]
+    fn named_open_requires_unique_exact_alias_and_complete_snapshot() {
+        let rows = vec![entry("Case", "one"), entry("other", "two")];
+        assert_eq!(super::exact_named_index(&rows, &rows, "Case"), Some(0));
+        assert_eq!(super::exact_named_index(&rows, &rows, "case"), None);
+        let mut changed = rows.clone(); changed[1].text = "external".into();
+        assert_eq!(super::exact_named_index(&changed, &rows, "Case"), None);
+        let mut duplicate = rows.clone(); duplicate.push(entry("Case", "two"));
+        assert_eq!(super::exact_named_index(&duplicate, &duplicate, "Case"), None);
     }
 }

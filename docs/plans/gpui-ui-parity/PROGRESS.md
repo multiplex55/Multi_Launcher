@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Snippets supports Add and exact Remove review through the existing checked store. All five launcher tests and three reused stock tests passed. Matched Windows replay remains open. The next G13 increment is a canonical Search snapshot and named Edit. [Snippets mutation checkpoint](CHECKPOINTS.md#g13-snippets-add-and-exact-remove-review)
+Cold named Snippets Edit opens the exact saved row through a canonical watched Search snapshot. All 15 focused tests passed. The same build supplied the bounded performance measurements. Matched Windows replay remains open. The next G13 batch shares the prompt contract across Fill, Run and editor Preview. [Named Edit and build receipt](CHECKPOINTS.md#g13-canonical-snippets-search-and-named-edit)
+
+Snippets supports Add and exact Remove review through the existing checked store. All five launcher tests and three reused stock tests passed. Matched Windows replay remains open. [Snippets mutation checkpoint](CHECKPOINTS.md#g13-snippets-add-and-exact-remove-review)
 
 Bare `cs` opens the retained GPUI Snippets editor. The saved list has stock filters and masked hidden previews. Checked Edit, Save and Cancel use the canonical store and exact row occurrence. All 24 focused tests passed. Matched Windows replay remains open. [Snippets editor checkpoint](CHECKPOINTS.md#g13-retained-snippets-editor)
 

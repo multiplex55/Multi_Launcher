@@ -19,4 +19,6 @@ Edit binds the exact occurrence in the loaded snapshot. The form supports alias,
 
 Add opens the same editor with a blank draft. Its Save appends to the exact captured list and refuses duplicates or changes made on disk since the draft opened. Remove stages a separate inline review for one exact occurrence. Cancel does not write, and recovery preserves the review only while its authority can still be used. [Add and Remove checkpoint](../CHECKPOINTS.md#g13-snippets-add-and-exact-remove-review)
 
-Matched native replay, named Edit and Run, field authoring, Preview, remembered presentation and scoped Jump remain open. [Retained editor checkpoint](../CHECKPOINTS.md#g13-retained-snippets-editor)
+Named `cs edit` uses a watched snapshot of the canonical file. Stock action and tag filters select the candidates. Exact duplicate aliases remain editable by occurrence through Browse. Before opening a named draft, a worker checks the whole current file and the exact unique alias, then returns to the current Search, root and foreground owner. [Named Edit checkpoint](../CHECKPOINTS.md#g13-canonical-snippets-search-and-named-edit)
+
+Matched native replay, Run, field authoring, Preview, remembered presentation and scoped Jump remain open. [Retained editor checkpoint](../CHECKPOINTS.md#g13-retained-snippets-editor)

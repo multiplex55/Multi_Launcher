@@ -11,11 +11,11 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex, MutexGuard,
+    Arc, Mutex, MutexGuard, Weak,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -27,6 +27,98 @@ const SNIPPET_RUN_PREFIX: &str = "snippet:run:";
 
 static SNIPPETS_VERSION: AtomicU64 = AtomicU64::new(0);
 static SNIPPETS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static SEARCH_OWNERS: Lazy<Mutex<HashMap<PathBuf, Weak<SnippetSearchOwner>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone)]
+pub struct SnippetSearchSnapshot {
+    pub entries: Arc<Vec<SnippetEntry>>,
+    pub healthy: bool,
+    pub generation: u64,
+}
+
+/// A canonical, watched, last-good search snapshot for one snippets path.
+pub struct SnippetSearchOwner {
+    core: Arc<SnippetSearchCore>,
+    watcher: Option<JsonWatcher>,
+}
+
+struct SnippetSearchCore {
+    path: PathBuf,
+    snapshot: Mutex<SnippetSearchSnapshot>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl SnippetSearchOwner {
+    /// Call off the UI thread: registering and reading the watched file can block.
+    pub fn open(path: impl AsRef<Path>, wake: Arc<dyn Fn() + Send + Sync>) -> Arc<Self> {
+        let path = super::live_snapshot::normalized_path(path.as_ref());
+        let mut owners = SEARCH_OWNERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(owner) = owners.get(&path).and_then(Weak::upgrade) { return owner; }
+        let core = Arc::new(SnippetSearchCore {
+            path: path.clone(),
+            snapshot: Mutex::new(SnippetSearchSnapshot { entries: Arc::new(Vec::new()), healthy: false, generation: 0 }),
+            wake,
+        });
+        let weak = Arc::downgrade(&core);
+        let watcher = watch_json(&path, move || {
+            if let Some(core) = weak.upgrade() { core.refresh(); }
+        }).ok();
+        let owner = Arc::new(Self { core, watcher });
+        owners.insert(path.clone(), Arc::downgrade(&owner));
+        drop(owners);
+        if owner.watcher.is_some() { owner.core.refresh(); }
+        owner
+    }
+
+    pub fn snapshot(&self) -> SnippetSearchSnapshot {
+        self.core.snapshot()
+    }
+}
+
+impl SnippetSearchCore {
+    fn snapshot(&self) -> SnippetSearchSnapshot {
+        self.snapshot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+    fn update(&self, rows: Option<Vec<SnippetEntry>>) -> bool {
+        let mut state = self.snapshot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let healthy = rows.is_some();
+        let changed = state.healthy != healthy || rows.as_ref().is_some_and(|rows| rows != state.entries.as_ref());
+        if changed {
+            if let Some(rows) = rows { state.entries = Arc::new(rows); }
+            state.healthy = healthy;
+            state.generation = state.generation.wrapping_add(1).max(1);
+        }
+        changed
+    }
+
+    fn refresh(&self) {
+        let transaction = snippets_transaction_guard();
+        let rows = match load_snippets_typed(&self.path) {
+            Ok(LoadState::Empty) => Some(Vec::new()),
+            Ok(LoadState::Loaded(rows)) => Some(rows),
+            Ok(LoadState::Missing) | Err(_) => None,
+        };
+        if let Some(rows) = &rows {
+            let previous = self.snapshot();
+            if !previous.healthy || rows != previous.entries.as_ref() {
+                LIVE_SNIPPETS.publish(&self.path, rows);
+                bump_for_external_snippets(&self.path, rows);
+            }
+        }
+        let changed = self.update(rows);
+        drop(transaction);
+        if changed { (self.wake)(); }
+    }
+}
+
+fn update_search_owner(path: &Path, rows: &[SnippetEntry]) -> Option<(Arc<SnippetSearchOwner>, bool)> {
+    let key = super::live_snapshot::normalized_path(path);
+    let owner = SEARCH_OWNERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key).and_then(Weak::upgrade)?;
+    let changed = owner.watcher.is_some() && owner.core.update(Some(rows.to_vec()));
+    Some((owner, changed))
+}
 
 /// Stock bare editor opener, without creating a watcher or reading the store.
 pub fn bare_dialog_opener(query: &str) -> Option<Action> {
@@ -659,7 +751,7 @@ pub fn update_snapshot_checked(
     use std::cell::Cell;
     use std::io::ErrorKind;
     let path = path.as_ref();
-    let _transaction = snippets_transaction_guard();
+    let transaction = snippets_transaction_guard();
     if !current() { return Ok(CheckedSnapshotUpdate::Superseded); }
     let read = || -> Result<Option<Vec<u8>>, PersistenceError> {
         match std::fs::read(path) {
@@ -700,6 +792,9 @@ pub fn update_snapshot_checked(
     write.map_err(|source| PersistenceError::AtomicWrite { path: path.to_owned(), source })?;
     LIVE_SNIPPETS.publish(path, &candidate);
     record_versioned_snippets(path, &candidate);
+    let notify = update_search_owner(path, &candidate);
+    drop(transaction);
+    if let Some((owner, changed)) = notify { if changed { (owner.core.wake)(); } }
     Ok(CheckedSnapshotUpdate::Saved(candidate))
 }
 
@@ -708,14 +803,18 @@ fn update_snippets_with_save(
     mutate: impl FnOnce(&mut Vec<SnippetEntry>) -> anyhow::Result<bool>,
     save: impl FnOnce(&str, &[SnippetEntry]) -> anyhow::Result<()>,
 ) -> anyhow::Result<Vec<SnippetEntry>> {
-    let _transaction = snippets_transaction_guard();
+    let transaction = snippets_transaction_guard();
     let mut snippets = load_snippets(path)?;
+    let mut notify = None;
     if mutate(&mut snippets)? {
         normalize_snippet_entries(&mut snippets)?;
         save(path, &snippets)?;
         LIVE_SNIPPETS.publish(path, &snippets);
         record_versioned_snippets(path, &snippets);
+        notify = update_search_owner(Path::new(path), &snippets);
     }
+    drop(transaction);
+    if let Some((owner, changed)) = notify { if changed { (owner.core.wake)(); } }
     Ok(snippets)
 }
 
@@ -776,21 +875,22 @@ fn record_versioned_snippets(path: impl AsRef<Path>, snippets: &[SnippetEntry]) 
     *VERSIONED_SNIPPETS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((path.as_ref().to_path_buf(), snippets.to_vec()));
+        Some((super::live_snapshot::normalized_path(path.as_ref()), snippets.to_vec()));
     bump_snippets_version();
 }
 
-fn bump_for_external_snippets(path: &str, snippets: &[SnippetEntry]) {
+fn bump_for_external_snippets(path: impl AsRef<Path>, snippets: &[SnippetEntry]) {
+    let path = super::live_snapshot::normalized_path(path.as_ref());
     let mut versioned = VERSIONED_SNIPPETS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if versioned
         .as_ref()
-        .is_some_and(|(saved_path, saved)| saved_path == Path::new(path) && saved == snippets)
+        .is_some_and(|(saved_path, saved)| saved_path == &path && saved == snippets)
     {
         return;
     }
-    *versioned = Some((PathBuf::from(path), snippets.to_vec()));
+    *versioned = Some((path, snippets.to_vec()));
     bump_snippets_version();
 }
 
@@ -822,7 +922,7 @@ impl SnippetsPlugin {
                 *VERSIONED_SNIPPETS
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some((PathBuf::from(path), startup));
+                    Some((super::live_snapshot::normalized_path(Path::new(path)), startup));
             }
             data
         };
@@ -870,8 +970,11 @@ impl Default for SnippetsPlugin {
     }
 }
 
-impl Plugin for SnippetsPlugin {
-    fn search(&self, query: &str) -> Vec<Action> {
+pub fn search_with_entries(query: &str, entries: &[SnippetEntry]) -> Vec<Action> {
+    search_with_matcher(query, entries, &SkimMatcherV2::default())
+}
+
+fn search_with_matcher(query: &str, entries: &[SnippetEntry], matcher: &SkimMatcherV2) -> Vec<Action> {
         let trimmed = query.trim();
         if let Some(action) = bare_dialog_opener(query) {
             return vec![action];
@@ -879,13 +982,10 @@ impl Plugin for SnippetsPlugin {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs rm") {
             let filter = rest.trim();
             let filters = parse_snippet_query_filters(filter);
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
+            let guard = entries;
             return guard
                 .iter()
-                .filter(|snippet| snippet_matches_query(&self.matcher, snippet, &filters))
+                .filter(|snippet| snippet_matches_query(matcher, snippet, &filters))
                 .map(|s| Action {
                     label: format!("Remove snippet {}", s.alias.clone()),
                     desc: "Snippet".into(),
@@ -927,13 +1027,10 @@ impl Plugin for SnippetsPlugin {
             }
             let filter = rest;
             let filters = parse_snippet_query_filters(filter);
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
+            let guard = entries;
             return guard
                 .iter()
-                .filter(|snippet| snippet_matches_query(&self.matcher, snippet, &filters))
+                .filter(|snippet| snippet_matches_query(matcher, snippet, &filters))
                 .map(|s| Action {
                     label: format!("Edit snippet {}", s.alias.clone()),
                     desc: "Snippet".into(),
@@ -946,13 +1043,10 @@ impl Plugin for SnippetsPlugin {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs list") {
             let filter = rest.trim();
             let filters = parse_snippet_query_filters(filter);
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
+            let guard = entries;
             return guard
                 .iter()
-                .filter(|snippet| snippet_matches_query(&self.matcher, snippet, &filters))
+                .filter(|snippet| snippet_matches_query(matcher, snippet, &filters))
                 .map(|s| Action {
                     label: s.alias.clone(),
                     desc: "Snippet".into(),
@@ -965,13 +1059,10 @@ impl Plugin for SnippetsPlugin {
         if let Some(filter) = crate::common::strip_prefix_ci(trimmed, "cs") {
             let filter = filter.trim();
             let filters = parse_snippet_query_filters(filter);
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
+            let guard = entries;
             return guard
                 .iter()
-                .filter(|snippet| snippet_matches_query(&self.matcher, snippet, &filters))
+                .filter(|snippet| snippet_matches_query(matcher, snippet, &filters))
                 .map(|s| Action {
                     label: s.alias.clone(),
                     desc: "Snippet".into(),
@@ -981,6 +1072,14 @@ impl Plugin for SnippetsPlugin {
                 .collect();
         }
         Vec::new()
+    }
+
+
+impl Plugin for SnippetsPlugin {
+    fn search(&self, query: &str) -> Vec<Action> {
+        if let Some(action) = bare_dialog_opener(query) { return vec![action]; }
+        let Ok(entries) = self.data.lock() else { return Vec::new(); };
+        search_with_matcher(query, &entries, &self.matcher)
     }
 
     fn name(&self) -> &str {
@@ -1103,6 +1202,52 @@ mod persistence_tests {
         assert!(snippet_matches_list_filter(&entry, "Ω TEXT", &["work".into(), "REVIEW".into()]));
         assert!(!snippet_matches_list_filter(&entry, "Ω TEXT", &["work".into(), "missing".into()]));
         assert_eq!(snippet_preview_text(&entry), "******");
+    }
+
+    #[test]
+    fn pure_named_projection_preserves_stock_tags_and_mutating_overload() {
+        let mut first = snippet("alpha", "body");
+        first.tags = vec!["work".into()];
+        let mut second = snippet("beta", "body");
+        second.tags = vec!["work".into(), "private".into()];
+        let rows = search_with_entries("cs edit tag:work !tag:private", &[first, second]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "snippet:edit:alpha");
+        assert_eq!(search_with_entries("cs edit alpha replacement", &[])[0].action, "snippet:add:alpha|replacement");
+    }
+
+    #[test]
+    fn search_snapshot_retains_last_good_and_recovers_without_echo_generation() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let wake_count = Arc::new(AtomicU64::new(0));
+        let notified = wake_count.clone();
+        let owner = SnippetSearchCore {
+            path: path.clone(), wake: Arc::new(move || { notified.fetch_add(1, Ordering::SeqCst); }),
+            snapshot: Mutex::new(SnippetSearchSnapshot { entries: Arc::new(Vec::new()), healthy: false, generation: 0 }),
+        };
+        let rows = vec![snippet("custom", "one")];
+        std::fs::write(&path, serde_json::to_vec(&rows).unwrap()).unwrap();
+        owner.refresh();
+        let first = owner.snapshot();
+        assert!(first.healthy);
+        assert_eq!(first.entries.as_ref(), &rows);
+        owner.refresh();
+        assert_eq!(owner.snapshot().generation, first.generation);
+        std::fs::write(&path, b"{invalid").unwrap();
+        owner.refresh();
+        let invalid = owner.snapshot();
+        assert!(!invalid.healthy);
+        assert!(Arc::ptr_eq(&first.entries, &invalid.entries));
+        std::fs::remove_file(&path).unwrap();
+        owner.refresh();
+        assert_eq!(owner.snapshot().generation, invalid.generation);
+        std::fs::write(&path, serde_json::to_vec(&rows).unwrap()).unwrap();
+        owner.refresh();
+        assert!(owner.snapshot().healthy);
+        assert!(owner.snapshot().generation > invalid.generation);
+        assert_eq!(wake_count.load(Ordering::SeqCst), 3);
     }
 
     #[test]

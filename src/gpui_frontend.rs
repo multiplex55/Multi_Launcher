@@ -2686,6 +2686,7 @@ struct RootWindow {
     regex_view: Option<Entity<regex_tester::RegexWorkspace>>,
     clipboard_history: Option<Entity<clipboard_history::ClipboardHistory>>,
     snippets_view: Option<Entity<snippets::SnippetsView>>,
+    snippets_search: snippets::SearchState,
     clipboard_modify_view: Option<Entity<clipboard_modify_view::ClipboardModifyView>>,
     clipboard_modify_startup: clipboard_modify_startup::Owner,
     clipboard_popup: Option<utility_mount::UtilityPopup>,
@@ -6096,6 +6097,7 @@ impl RootWindow {
             session.set_algorithm(snapshot.drafts.hash.algorithm);
         }
         self.root_visibility.deactivate();
+        self.snippets_search.wake.close();
         self.window_search.retire();
         self.file_search_probe.retire();
         self.indexed_applications.retire();
@@ -7175,6 +7177,10 @@ impl RootWindow {
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
         self.external_launch.retire_clipboard_effect();
+        self.snippets_search.request_epoch.fetch_add(1, Ordering::AcqRel);
+        self.snippets_search.projection = None;
+        self.snippets_search.published = None;
+        self.search_catalog.providers.take_snippets_projection();
         self.clipboard_modify_startup.projection = None;
         self.clipboard_modify_startup.published = None;
         self.search_catalog.providers.take_clipboard_modify_projection();
@@ -7196,6 +7202,8 @@ impl RootWindow {
         );
         self.clipboard_modify_startup.projection = self.search_catalog.providers
             .take_clipboard_modify_projection().map(|(effective, catalog)| (query.clone(), effective, catalog));
+        self.snippets_search.projection = self.search_catalog.providers.take_snippets_projection()
+            .map(|(effective, snapshot)| (query.clone(), effective, snapshot));
         if file_search::typed_query(&query) && file_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             self.start_file_search_probe(query, raw_provider_actions, scroll_to_search, cx);
             return;
@@ -7259,6 +7267,10 @@ impl RootWindow {
                     clipboard_history::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "snippets" {
                     snippets::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                        || self.snippets_search.projection.as_ref().is_some_and(|(raw, _, snapshot)| {
+                            raw == &query && snippets::named_row_is_current(&query, action, snapshot,
+                                self.search_catalog.providers.snippets_owner().as_deref(), self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                        })
                 } else if provider == "favorites" {
                     favorite_search::is_executable(action) || is_supported_launcher_search_action(action)
                 } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
@@ -7299,6 +7311,9 @@ impl RootWindow {
                 && self.search_catalog.providers.clipboard_modify_catalog().read().ok()
                     .is_some_and(|current| Arc::ptr_eq(&current, catalog)))
             .map(|(query, effective, catalog)| (query, effective, self.launcher_results.generation, catalog));
+        self.snippets_search.published = self.snippets_search.projection.take()
+            .filter(|(raw, _, snapshot)| raw == &query && self.search_catalog.providers.snippets_owner().is_some_and(|owner| snippets::search_snapshot_current(&owner, snapshot)))
+            .map(|(raw, effective, snapshot)| (raw, effective, self.launcher_results.generation, snapshot));
         self.fresh_search_enter = None;
         self.launcher_results_scroll = ScrollHandle::new();
         // Query replacement can change the list height while the root is
@@ -8133,6 +8148,24 @@ impl RootWindow {
                 && snippets::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
             {
                 self.open_snippets(window, cx);
+            }
+            return;
+        }
+        if result.action.action.starts_with("snippet:edit:") {
+            if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "snippets") {
+                if let Some((raw, effective, generation, snapshot)) = &self.snippets_search.published {
+                    if raw == &query && *generation == self.launcher_results.generation
+                        && multi_launcher::common::query::split_action_filters(&query).0 == *effective
+                        && snippets::named_row_is_current(&query, &result.action, snapshot, self.search_catalog.providers.snippets_owner().as_deref(), self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                        && search_providers::snippets_named_rows(&query, &snapshot.entries, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()).contains(&result.action)
+                    {
+                        if let Ok(Command::Storage(multi_launcher::commands::StorageCommand::SnippetEdit(alias))) = parse_action(&result.action) {
+                            let generation = *generation;
+                            let snapshot = snapshot.clone();
+                            self.start_named_snippet(alias, query, generation, snapshot, window, cx);
+                        }
+                    }
+                }
             }
             return;
         }
@@ -10105,6 +10138,7 @@ impl RootWindow {
     fn quit_after_xml_drain(&mut self, cx: &mut Context<Self>) {
         if self.xml_terminal_quit { return; }
         self.xml_terminal_quit = true;
+        self.snippets_search.wake.close();
         self.restart_admission.fence();
         self.root_visibility.deactivate();
         if let Some(view) = &self.file_search { view.read(cx).retire_explorer(); }
@@ -12651,6 +12685,7 @@ pub(crate) fn run_foundation_window(
         let quit_subscription = cx.on_app_quit(move |app| {
             if let Some(root) = root_for_quit_callback.borrow().clone() {
                 let _ = root.update(app, |root, cx| {
+                    root.snippets_search.wake.close();
                     if let Some(token) = root.settings_save_token.as_ref() {
                         token.request_cancel();
                     }
@@ -12865,6 +12900,7 @@ pub(crate) fn run_foundation_window(
                 regex_view: None,
                 clipboard_history: None,
                 snippets_view: None,
+                snippets_search: snippets::SearchState::default(),
                 clipboard_modify_view: None,
                 clipboard_modify_startup: clipboard_modify_startup::Owner::default(),
                 clipboard_popup: None,
@@ -13541,7 +13577,7 @@ pub(crate) fn run_foundation_window(
                 cx.quit();
                 return;
             }
-            root_view.update(cx, |root, cx| root.start_clipboard_modify_catalog(cx));
+            root_view.update(cx, |root, cx| { root.start_clipboard_modify_catalog(cx); root.start_snippets_search(cx); });
 
             let root_window = root_window;
             let root_view = root_view;
@@ -14023,7 +14059,7 @@ pub(crate) fn run_foundation_window(
 
         #[cfg(not(windows))]
         {
-            root_view.update(cx, |root, cx| root.start_clipboard_modify_catalog(cx));
+            root_view.update(cx, |root, cx| { root.start_clipboard_modify_catalog(cx); root.start_snippets_search(cx); });
             let _ = (native_window, hotkey, initial_return_target);
         }
     });
