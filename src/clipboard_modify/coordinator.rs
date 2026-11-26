@@ -172,6 +172,9 @@ impl PreviewCoordinator {
         catalog: Arc<ClipboardModifierCatalog>,
     ) -> OperationId {
         self.cancel_active();
+        // A cancelled worker may still complete during the new debounce window.
+        // Retire its publication authority immediately, before installing pending work.
+        self.active = None;
         self.full_output = None;
         let id = OperationId(self.next_id);
         self.next_id += 1;
@@ -183,6 +186,36 @@ impl PreviewCoordinator {
         if let Some((_, t)) = &self.active {
             t.cancel();
         }
+    }
+    /// Cancel the current pending or running preview and retire its publication identity.
+    pub fn cancel(&mut self) -> bool {
+        let id = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.0)
+            .or_else(|| self.active.as_ref().map(|active| active.0));
+        let Some(id) = id else {
+            return false;
+        };
+        self.cancel_active();
+        self.active = None;
+        self.pending = None;
+        self.full_output = None;
+        self.state = PreviewState::Cancelled { id };
+        true
+    }
+    /// Cancel only the operation that was presented to the caller.
+    pub fn cancel_if_current(&mut self, expected: OperationId) -> bool {
+        if self.current_operation() != Some(expected) {
+            return false;
+        }
+        self.cancel()
+    }
+    pub fn current_operation(&self) -> Option<OperationId> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.0)
+            .or_else(|| self.active.as_ref().map(|active| active.0))
     }
     pub fn cancel_and_invalidate(&mut self) {
         self.cancel_active();
@@ -518,6 +551,96 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_cancel_preserves_newer_preview() {
+        use super::{PreviewCoordinator, PreviewState};
+        use crate::clipboard_modify::{defaults::default_catalog, parser::ClipboardModifyIntent};
+        use std::{sync::Arc, time::Duration};
+        let mut coordinator = PreviewCoordinator::new(Duration::from_secs(60));
+        let catalog = Arc::new(default_catalog());
+        let old = coordinator.request(
+            "old".into(),
+            ClipboardModifyIntent::Stages(Vec::new()),
+            catalog.clone(),
+        );
+        let new = coordinator.request(
+            "new".into(),
+            ClipboardModifyIntent::Stages(Vec::new()),
+            catalog,
+        );
+        assert!(!coordinator.cancel_if_current(old));
+        assert_eq!(
+            coordinator.state(),
+            &PreviewState::PendingDebounce { id: new }
+        );
+        assert!(coordinator.cancel_if_current(new));
+        assert_eq!(coordinator.state(), &PreviewState::Cancelled { id: new });
+    }
+    #[test]
+    fn explicit_cancel_retires_pending_and_running_publication() {
+        use super::{
+            CancellationToken, OperationId, PreviewCoordinator, PreviewEvent, PreviewState,
+        };
+        use crate::clipboard_modify::{defaults::default_catalog, parser::ClipboardModifyIntent};
+        use std::{sync::Arc, time::Duration};
+        let mut coordinator = PreviewCoordinator::new(Duration::from_secs(60));
+        let id = coordinator.request(
+            "source".into(),
+            ClipboardModifyIntent::Stages(Vec::new()),
+            Arc::new(default_catalog()),
+        );
+        assert!(coordinator.cancel());
+        assert_eq!(coordinator.state(), &PreviewState::Cancelled { id });
+        let running = OperationId(77);
+        coordinator.active = Some((running, CancellationToken::new()));
+        coordinator.state = PreviewState::Running { id: running };
+        assert!(coordinator.cancel());
+        coordinator
+            .tx
+            .send(PreviewEvent::Completed {
+                id: running,
+                full: "old".into(),
+            })
+            .unwrap();
+        coordinator.tick();
+        assert_eq!(
+            coordinator.state(),
+            &PreviewState::Cancelled { id: running }
+        );
+        assert!(coordinator.full_output().is_none());
+    }
+    #[test]
+    fn old_worker_completion_cannot_publish_during_new_debounce() {
+        use super::{
+            CancellationToken, OperationId, PreviewCoordinator, PreviewEvent, PreviewState,
+        };
+        use crate::clipboard_modify::{defaults::default_catalog, parser::ClipboardModifyIntent};
+        use std::{sync::Arc, time::Duration};
+        let mut coordinator = PreviewCoordinator::new(Duration::from_secs(60));
+        let old = OperationId(91);
+        let token = CancellationToken::new();
+        coordinator.active = Some((old, token.clone()));
+        let new = coordinator.request(
+            "new".into(),
+            ClipboardModifyIntent::Stages(Vec::new()),
+            Arc::new(default_catalog()),
+        );
+        assert!(token.is_cancelled());
+        coordinator
+            .tx
+            .send(PreviewEvent::Completed {
+                id: old,
+                full: "stale".into(),
+            })
+            .unwrap();
+        coordinator.tick();
+        assert_eq!(
+            coordinator.state(),
+            &PreviewState::PendingDebounce { id: new }
+        );
+        assert!(coordinator.full_output().is_none());
+    }
+
     use super::*;
     use crate::clipboard_modify::clipboard::{
         ClipboardService,

@@ -58,6 +58,16 @@ impl multi_launcher::plugin::Plugin for FileSearchBarePlugin {
     }
 }
 
+struct ClipboardModifyBare;
+impl multi_launcher::plugin::Plugin for ClipboardModifyBare {
+    fn name(&self) -> &str { "clipboard_modify" }
+    fn description(&self) -> &str { "Builds clipboard modification pipelines with prefix `cm`" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["cm"] }
+    fn search(&self, query: &str) -> Vec<Action> { multi_launcher::plugins::clipboard_modify::bare_modify_opener(query).into_iter().collect() }
+    fn commands(&self) -> Vec<Action> { vec![Action { label: "cm".into(), desc: "Clipboard Modify".into(), action: "query:cm".into(), args: None }] }
+}
+
 struct ClipboardBare;
 impl multi_launcher::plugin::Plugin for ClipboardBare {
     fn name(&self) -> &str { "clipboard" }
@@ -79,6 +89,7 @@ pub(super) struct InstalledLauncherProviders {
     xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
     regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
     clipboard: ClipboardBare,
+    clipboard_modify: ClipboardModifyBare,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
     #[cfg(windows)]
@@ -121,6 +132,7 @@ impl InstalledLauncherProviders {
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             clipboard: ClipboardBare,
+            clipboard_modify: ClipboardModifyBare,
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
@@ -155,6 +167,7 @@ impl InstalledLauncherProviders {
             Some(&self.xml_toolkit as &dyn multi_launcher::plugin::Plugin),
             Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.clipboard_modify as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]

@@ -193,6 +193,16 @@ impl Plugin for ClipboardModifyPlugin {
     }
 }
 
+/// Return only the two stock Modify openers without constructing a runtime.
+pub fn bare_modify_opener(query: &str) -> Option<Action> {
+    if is_exact_cm_root_query(query) { return Some(root_open_modify_action()); }
+    let mut words = query.split_whitespace();
+    if words.next().is_some_and(|word| word.eq_ignore_ascii_case("cm"))
+        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("modify")) && words.next().is_none() {
+        Some(section_action(ModifySection::Modify))
+    } else { None }
+}
+
 fn is_exact_cm_root_query(query: &str) -> bool {
     query.trim().eq_ignore_ascii_case("cm")
 }

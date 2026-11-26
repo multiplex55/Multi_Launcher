@@ -1,6 +1,6 @@
 # G13 — Clipboard history, Clipboard Modify, snippets, and temporary files
 
-**Status:** In progress. **Owner:** G13 implementer with clipboard/runtime/persistence owners. The first docked Clipboard History workflow has locked check and source review evidence. Work remains on the single migration branch. [Checkpoint](../CHECKPOINTS.md#g13-clipboard-history-browse-edit-and-cancel)
+**Status:** In progress. **Owner:** G13 implementer with clipboard/runtime/persistence owners. Clipboard History reaches checked Save, Copy, Remove and retained Dock and Pop Out. The docked Clipboard Modify workspace reaches protected Load and Reload and cancellable preview. The next slice adds checked clipboard effects and overwrite review. [Current checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-protected-source-and-preview)
 
 ## Objective and dependencies
 

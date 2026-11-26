@@ -170,7 +170,7 @@ impl<B: ClipboardBackend> ClipboardService<B> {
 
     /// Skip service-level backoff for GUI-owned reads so the next user action
     /// can retry. The platform backend may still incur its own bounded wait.
-    pub(crate) fn read_text_for_modify_once(&self) -> Result<String, ClipboardError> {
+    pub fn read_text_for_modify_once(&self) -> Result<String, ClipboardError> {
         self.read_with_policy(RetryPolicy::SingleAttempt)
     }
 

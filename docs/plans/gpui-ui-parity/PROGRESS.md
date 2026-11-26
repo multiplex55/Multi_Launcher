@@ -2,13 +2,15 @@
 
 ## Current checkpoint
 
-Clipboard History uses the checked shared Dock and Pop Out host, retaining the draft and review across moves. All 15 focused host and effects tests passed. Matched Windows, pins, docked sizing and full Jump remain open. Clipboard Modify is next. [Clipboard History host checkpoint](CHECKPOINTS.md#g13-retained-clipboard-history-host)
+Clipboard Modify opens from `cm` in Dock with protected Load and Reload, a multiline source, typed ordered stages and cancellable preview. All 16 focused tests passed. Matched Windows replay remains open. Checked clipboard effects and overwrite review follow. [Clipboard Modify checkpoint](CHECKPOINTS.md#g13-clipboard-modify-protected-source-and-preview)
+
+Clipboard History uses the checked shared Dock and Pop Out host, retaining the draft and review across moves. All 15 focused host and effects tests passed. Matched Windows, pins, docked sizing and full Jump remain open. [Clipboard History host checkpoint](CHECKPOINTS.md#g13-retained-clipboard-history-host)
 
 Clipboard History supports checked Save, full Copy and exact Remove confirmation. All 15 grouped cases passed. [Checked effects checkpoint](CHECKPOINTS.md#g13-checked-clipboard-history-save-copy-and-remove)
 
 Bare `cb` opens docked Clipboard History with ordered selectable rows, full multiline Edit and Cancel through the canonical disk loader. Focused cases passed in the checked effects batch. [Clipboard History checkpoint](CHECKPOINTS.md#g13-clipboard-history-browse-edit-and-cancel)
 
-Regex workspace Jump focuses Pattern, Test Text and navigation and selects the exact visible Match row. All seven focused tests passed. Matched Windows and additional scoped targets remain open. The next source slice is disk-backed Clipboard History Browse, Edit and Cancel. [Regex Jump checkpoint](CHECKPOINTS.md#g14-d-regex-workspace-jump)
+Regex workspace Jump focuses Pattern, Test Text and navigation and selects the exact visible Match row. All seven focused tests passed. Matched Windows and additional scoped targets remain open. [Regex Jump checkpoint](CHECKPOINTS.md#g14-d-regex-workspace-jump)
 
 XML Overwrite Jump focuses Cancel, Replace and Dock or Pop Out in the exact current review. All five focused tests passed. Matched Windows key, focus and file checks remain open. [Overwrite Jump checkpoint](CHECKPOINTS.md#g14-d-xml-overwrite-child-jump)
 
@@ -16,11 +18,11 @@ XML workspace Jump focuses Source, the XPath tab and expression, Run XPath and S
 
 JSON Jump targets Source, Format, Tree Search and visible Tree rows through the existing native interceptor in Dock and Pop Out. All seven focused launcher tests passed, including Search and Hash regressions. Matched Windows replay remains open. [Scoped JSON Jump checkpoint](CHECKPOINTS.md#g14-d-first-scoped-json-jump-targets)
 
-Regex Syntax Structure presents the accepted tree, checked editor selection and source reveal, related explanations and shared constructors. All 11 grouped inspector and syntax cases passed. Matched Windows replay remains open. G14-D scoped JSON Jump follows. [Syntax checkpoint](CHECKPOINTS.md#g14-c-regex-syntax-structure-and-constructors)
+Regex Syntax Structure presents the accepted tree, checked editor selection and source reveal, related explanations and shared constructors. All 11 grouped inspector and syntax cases passed. Matched Windows replay remains open. [Syntax checkpoint](CHECKPOINTS.md#g14-c-regex-syntax-structure-and-constructors)
 
 Regex offers Explanation, Reference and Examples through the shared session and catalogs. The new inspector and clipboard authority tests passed in the Syntax Structure batch. [Regex inspectors checkpoint](CHECKPOINTS.md#g14-c-regex-explanation-reference-and-examples)
 
-Regex Presets supports the canonical saved list, explicit Load, Save, Rename, Update, Reload and checked Delete. All 15 grouped History and Presets cases passed. Matched Windows replay remains pending. Explanation, Reference and Examples are next. [Regex Presets checkpoint](CHECKPOINTS.md#g14-c-saved-regex-presets)
+Regex Presets supports the canonical saved list, explicit Load, Save, Rename, Update, Reload and checked Delete. All 15 grouped History and Presets cases passed. Matched Windows replay remains pending. [Regex Presets checkpoint](CHECKPOINTS.md#g14-c-saved-regex-presets)
 
 Regex History now displays persisted rows and supports checked Load, Reload and Retry through the canonical store. Seven cases passed in the Presets batch. [Regex History checkpoint](CHECKPOINTS.md#g14-c-live-regex-history-controls)
 
@@ -34,7 +36,7 @@ Regex uses the shared checked host for remembered Dock and Pop Out. The grouped 
 
 The stock `regex` Search route opens a retained GPUI matcher with exact Pattern, flags, Test Text, match and capture byte ranges, and scoped F3 navigation. Shared Regex baseline tests passed from the reused library. Advanced controls remain open. [Regex Tester](gui/regex-tester.md#gpui-retained-matcher)
 
-Merged the upstream Windows virtual-desktop restore and egui cloaked repaint changes. The locked check and all 20 focused activation tests passed. The required execution strategy is committed and linked from the Master Goal, Kickstart, and continuation records. Cross-desktop Windows replay remains pending. Current implementation continues with G14-C Regex Tester. [Integration checkpoint](CHECKPOINTS.md#upstream-master-integration) · [Execution Strategy](EXECUTION_STRATEGY.md)
+Merged the upstream Windows virtual-desktop restore and egui cloaked repaint changes. The locked check and all 20 focused activation tests passed. The required execution strategy is committed and linked from the Master Goal, Kickstart, and continuation records. Cross-desktop Windows replay remains pending. [Integration checkpoint](CHECKPOINTS.md#upstream-master-integration) · [Execution Strategy](EXECUTION_STRATEGY.md)
 
 Saved JSON and XML pins now restore their remembered hosts passively. The toolbar focuses an exact live host or unpins the top panel through the canonical checked Settings write. Twelve grouped tests passed. The matched Windows replay and scoped Jump evidence remain pending. [Structured utility pins checkpoint](CHECKPOINTS.md#saved-json-and-xml-pins)
 
@@ -121,17 +123,17 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Goals with active or completed work | G00–G07, G11 Downloads Triage, G14 structured text and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11, G14 and G23 have open criteria. |
+| Goals with active or completed work | G00–G07, G11 Downloads Triage, G13 Clipboard History and Clipboard Modify, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11, G13, G14 and G23 have open criteria. |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 198 Specified, 20 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 197 Specified, 21 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Reuse the checked native utility host for XML Pop Out and Dock, then transfer the exact overwrite review across mounts and restore saved JSON and XML pins. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Complete checked Clipboard Modify Apply, Apply and Close, Copy Result and overwrite review, then admit typed Undo. Matched Clipboard History and Modify replay, remaining structured text targets, and broader native acceptance stay open. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
