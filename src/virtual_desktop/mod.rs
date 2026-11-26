@@ -198,6 +198,23 @@ impl VirtualDesktopService {
         windows::is_window_on_current_desktop(hwnd)
     }
 
+    /// Current desktop for launcher relocation, with a public-API fallback.
+    #[cfg(windows)]
+    pub(crate) fn current_for_launcher_restore(&self) -> Result<VirtualDesktopId, VirtualDesktopError> {
+        windows::current_for_launcher_restore()
+    }
+
+    /// Try the public API only for this process's own window. The activation
+    /// owner decides whether to retry through the internal movement service.
+    #[cfg(windows)]
+    pub(crate) fn try_move_owned_window_public(
+        &self,
+        hwnd: ::windows::Win32::Foundation::HWND,
+        desktop: &VirtualDesktopId,
+    ) -> Option<Result<(), VirtualDesktopError>> {
+        windows::try_move_owned_window_public(hwnd, desktop)
+    }
+
     #[cfg(windows)]
     pub fn move_window_to_desktop(
         &self,

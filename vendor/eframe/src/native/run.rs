@@ -14,14 +14,14 @@ use crate::{
     Result, epi,
     native::{
         event_loop_context,
-        winit_integration::{EventResult, is_invisible_or_minimized},
+        winit_integration::{EventResult, needs_direct_repaint},
     },
 };
 
-/// Minimum interval between repaints for invisible windows.
+/// Minimum interval between repaints for invisible or cloaked windows.
 ///
-/// On Windows, invisible windows don't receive `RedrawRequested` events,
-/// so we throttle their repaints to avoid busy-looping while still
+/// On Windows, invisible or DWM-cloaked windows may not receive `RedrawRequested`
+/// events, so we throttle their repaints to avoid busy-looping while still
 /// processing viewport commands like `Visible(true)`.
 /// See <https://github.com/emilk/egui/issues/7776>.
 const INVISIBLE_WINDOW_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
@@ -198,12 +198,12 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                 }
 
                 if let Some(window) = self.winit_app.window(*window_id) {
-                    // On Windows, invisible windows don't receive RedrawRequested
-                    // events, so pending viewport commands (e.g. Visible(true)) would
+                    // On Windows, invisible or DWM-cloaked windows may not receive
+                    // RedrawRequested, so pending viewport commands (e.g. Visible(true)) would
                     // never be processed. We collect these windows to paint them
                     // directly below.
                     // See: https://github.com/emilk/egui/issues/5229
-                    if is_invisible_or_minimized(&window) {
+                    if needs_direct_repaint(&window) {
                         invisible_window_ids.push(*window_id);
                     } else {
                         log::trace!("request_redraw for {window_id:?}");
@@ -221,7 +221,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                 false
             });
 
-        // Paint invisible windows directly, since they won't receive
+        // Process non-drawable windows directly, since they may not receive
         // RedrawRequested events on Windows. This ensures that viewport
         // commands like Visible(true) are still processed.
         for window_id in &invisible_window_ids {
@@ -328,7 +328,7 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
                             // high CPU usage on Windows.
                             // See: https://github.com/emilk/egui/issues/7776
                             let when = if let Some(window) = self.winit_app.window(window_id)
-                                && is_invisible_or_minimized(&window)
+                                && needs_direct_repaint(&window)
                             {
                                 when.max(Instant::now() + INVISIBLE_WINDOW_REPAINT_INTERVAL)
                             } else {

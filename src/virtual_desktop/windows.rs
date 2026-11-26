@@ -993,6 +993,86 @@ pub(super) fn is_window_on_current_desktop(hwnd: HWND) -> Result<bool, VirtualDe
         .map(|x| x.as_bool())
         .map_err(|e| native_error("check window desktop", e))
 }
+/// Keep both failure reasons when the compatibility path also fails.
+fn restore_with_fallback<T>(
+    primary: Result<T, VirtualDesktopError>,
+    fallback: impl FnOnce() -> Result<T, VirtualDesktopError>,
+) -> Result<T, VirtualDesktopError> {
+    primary.or_else(|error| {
+        tracing::debug!(
+            operation = error.operation,
+            error = %error,
+            context = ?error.context,
+            "launcher desktop restore using fallback"
+        );
+        fallback().map_err(|fallback_error| {
+            fallback_error
+                .context("primary_operation", error.operation)
+                .context("primary_error", error.message)
+                .context("primary_context", format!("{:?}", error.context))
+        })
+    })
+}
+
+pub(super) fn current_for_launcher_restore() -> Result<VirtualDesktopId, VirtualDesktopError> {
+    // Prefer the actual current desktop GUID when the shell ABI is supported.
+    // The old launcher used the foreground window's GUID instead; retain that
+    // compatibility path without making the internal ABI a hard requirement.
+    restore_with_fallback(
+        snapshot().and_then(|snapshot| snapshot.current().map(|desktop| desktop.id.clone())),
+        foreground_desktop_for_restore,
+    )
+}
+
+fn foreground_desktop_for_restore() -> Result<VirtualDesktopId, VirtualDesktopError> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    const OPERATION: &str = "resolve current desktop from foreground window";
+    let session = PublicSession::open(OPERATION)?;
+    let foreground = unsafe { GetForegroundWindow() };
+    validate_window(foreground, OPERATION)?;
+    let desktop = unsafe { session.manager.GetWindowDesktopId(foreground) }
+        .map_err(|error| native_error(OPERATION, error))?;
+    // Do not trust an absent GUID or a foreground window that changed desktop
+    // while resolving it. The activation layer still verifies actual membership
+    // after movement before it is allowed to take foreground focus.
+    if desktop == GUID::zeroed()
+        || !unsafe { session.manager.IsWindowOnCurrentVirtualDesktop(foreground) }
+            .map_err(|error| native_error(OPERATION, error))?
+            .as_bool()
+        || unsafe { GetForegroundWindow() } != foreground
+    {
+        return Err(VirtualDesktopError::new(
+            VirtualDesktopErrorKind::Native,
+            OPERATION,
+            "Foreground window does not identify a stable current virtual desktop",
+        ));
+    }
+    Ok(id_from_guid(desktop))
+}
+
+pub(super) fn try_move_owned_window_public(
+    hwnd: HWND,
+    desktop: &VirtualDesktopId,
+) -> Option<Result<(), VirtualDesktopError>> {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    const OPERATION: &str = "move owned launcher window to desktop";
+    if let Err(error) = validate_window(hwnd, OPERATION) {
+        return Some(Err(error));
+    }
+    let mut owner_pid = 0;
+    let thread = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_pid)) };
+    if thread == 0 || owner_pid != std::process::id() {
+        // Do not change movement semantics for windows owned by other processes.
+        return None;
+    }
+    Some(PublicSession::open(OPERATION).and_then(|session| {
+        unsafe { session.manager.MoveWindowToDesktop(hwnd, &guid_from_id(desktop)) }
+            .map_err(|error| native_error(OPERATION, error))
+    }))
+}
+
 pub(super) fn move_window_to_desktop(
     hwnd: HWND,
     desktop: &VirtualDesktopId,
@@ -1195,6 +1275,38 @@ fn native_error(operation: &'static str, error: windows::core::Error) -> Virtual
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launcher_restore_fallback_is_lazy_and_used_only_on_error() {
+        let primary = restore_with_fallback(Ok(7), || panic!("unnecessary fallback"));
+        assert_eq!(primary.unwrap(), 7);
+        let primary = VirtualDesktopError::new(
+            VirtualDesktopErrorKind::Native,
+            "public move",
+            "denied",
+        );
+        assert_eq!(restore_with_fallback(Err(primary), || Ok(9)).unwrap(), 9);
+    }
+
+    #[test]
+    fn launcher_restore_fallback_reports_both_errors() {
+        let primary = VirtualDesktopError::new(
+            VirtualDesktopErrorKind::Native,
+            "public move",
+            "denied",
+        )
+        .context("hresult", "0x80070005");
+        let fallback = VirtualDesktopError::new(
+            VirtualDesktopErrorKind::UnsupportedCapability,
+            "internal move",
+            "unsupported layout",
+        );
+        let error = restore_with_fallback::<()>(Err(primary), || Err(fallback)).unwrap_err();
+        assert_eq!(error.operation, "internal move");
+        assert_eq!(error.context["primary_operation"], "public move");
+        assert_eq!(error.context["primary_error"], "denied");
+        assert!(error.context["primary_context"].contains("0x80070005"));
+    }
+
     #[test]
     fn guid_conversion_is_normalized_and_round_trips() {
         let guid = GUID::from_u128(0x550e8400_e29b_41d4_a716_446655440000);
