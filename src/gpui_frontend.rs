@@ -514,7 +514,7 @@ impl LauncherSearchCatalog {
                 let window_result = window_search::action_is_operation(&provider, &action);
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
-                let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_filename_start(raw_query, &action).is_some();
+                let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_search_start(raw_query, &action).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
                     .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || clipboard_modify_result || (provider == "favorites" && favorite_search::is_executable(&action))
@@ -7297,7 +7297,7 @@ impl RootWindow {
                 } else if cfg!(windows) && provider == "downloads_triage" {
                     is_downloads_triage_opener(action)
                 } else if provider == "file_search" {
-                    is_file_search_opener(&query, action) || multi_launcher::plugins::file_search::scoped_filename_start(&query, action).is_some()
+                    is_file_search_opener(&query, action) || multi_launcher::plugins::file_search::scoped_search_start(&query, action).is_some()
                 } else {
                     is_supported_launcher_search_action(action)
                 }
@@ -15226,6 +15226,17 @@ mod tests {
             },
             enabled_plugins,
         )
+    }
+
+    #[test]
+    fn exact_scoring_keeps_the_typed_content_stock_row() {
+        use multi_launcher::file_search::{model::SearchKind, query::SearchRequestDraft};
+        let query = r#"fs content "café needle" "C:\Owned Corpus""#;
+        let draft = SearchRequestDraft { kind: SearchKind::Content, root: Some(std::path::PathBuf::from(r"C:\Owned Corpus")), search_text: "café needle".into() };
+        let action = multi_launcher::plugins::file_search::start_action(draft);
+        let catalog = completion_catalog(Vec::new(), true, None);
+        let rows = catalog.compose(query, vec![("file_search".into(), action.clone())], false);
+        assert!(rows.iter().any(|row| row.action == action && matches!(&row.origin, super::LauncherResultOrigin::Provider(name) if name == "file_search")));
     }
 
     #[test]

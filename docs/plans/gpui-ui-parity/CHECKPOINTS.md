@@ -1526,3 +1526,9 @@ A second queued press can stop a reveal before the next native effect and keeps 
 Independent review covered the exact native boundary, late cancellation, queued edges and legacy activation. Scoped locked checks passed in 1 min 15 s for the initial library, 33.10 s for library and launcher, and 3.32 s for the final launcher. One grouped fast-dev build took 21 min 05 s with zero corrective links. Nextest run `378017ed-1df3-4335-a3a5-c8b12fb2126f` passed all 24 in 6.260 s with 9252 skipped. It covers owned identity, fallback refusal, sticky revocation, desktop preparation without focus effects, pending-toggle parity and egui restore regressions. The two production COM setter hooks were checked in source.
 
 The same-HWND two-desktop replay, known-duration F2 and mixed DPI remain open. [Native scenario](goals/G01-windows-and-kit-feasibility.md#g01-c--high-risk-native-capability-probes). Continue G07 typed Content and selected-match Preview using the frozen shared seams.
+
+### G07 typed Directory Content Search
+
+Quoted `fs content "term" "C:\Owned Corpus"` and the stock Content aliases use the same installed provider and exact query, generation, action and directory admission as Filename. GPUI builds the request directly from the checked draft's decoded term, original path and mode, while the form displays those values. The canonical directory is checked again before submission.
+
+The scoped locked launcher checks passed in 50.77 s and 5.61 s. The focused typed action and request tests are queued with the retained selected-match Preview launcher batch. Paired native Content activation and Preview remain open.
