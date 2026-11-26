@@ -2700,7 +2700,7 @@ impl RootWindow {
         if let Some(root) = self.root_window {
             if self.json_view.as_ref().is_some_and(|v| v.read(cx).is_mounted_in(root.window_id(), false)) {
                 let index = self.file_search_scroll_item()
-                    + usize::from(self.file_search.as_ref().is_some_and(|v| v.read(cx).open))
+                    + usize::from(self.file_search.as_ref().is_some_and(|v| v.read(cx).open && !v.read(cx).popout))
                     + usize::from(self.downloads_triage_open(cx))
                     + usize::from(self.plugin_editor.as_ref().is_some_and(|v| v.read(cx).open))
                     + usize::from(self.activity_view.as_ref().is_some_and(|v| v.read(cx).open)) + 1;

@@ -11,6 +11,7 @@ pub(super) enum UtilityKind {
     Regex,
     ClipboardHistory,
     ClipboardModify,
+    FileSearch,
 }
 
 pub(super) struct UtilityPopup {

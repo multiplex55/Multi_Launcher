@@ -202,7 +202,7 @@ impl RootWindow {
         view.update(cx, |view, cx| view.show(origin, offset, window, cx));
         panel_stack::promote(&mut self.panel_stack, Panel::ActivityDialog);
         let index = self.file_search_scroll_item()
-            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open && !view.read(cx).popout))
             + usize::from(self.downloads_triage_open(cx))
             + usize::from(self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open));
         self.root_scroll.scroll_to_top_of_item(index);

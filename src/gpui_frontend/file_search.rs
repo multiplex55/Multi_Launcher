@@ -29,6 +29,17 @@ pub(super) fn current_row(
         && visible.contains(&index)
 }
 
+fn pending_popup_ready(mount: bool, intent: bool, accepted: bool, active: bool, foreground: bool) -> bool {
+    mount && intent && accepted && active && foreground
+}
+
+fn mounted_search_row_current(
+    mount: &utility_mount::MountReceipt, open: bool, generation: u64, search: Option<SearchId>,
+    rendered_generation: u64, rendered_search: Option<SearchId>, index: usize, visible: std::ops::Range<usize>,
+) -> bool {
+    mount.is_current() && current_row(open, generation, search, rendered_generation, rendered_search, index, visible)
+}
+
 pub(super) fn eligible_file_row(row: &FilenameResult, expected: &std::path::Path) -> bool {
     row.kind == FileKind::File && row.path == expected
 }
@@ -95,9 +106,20 @@ fn typed_source(draft: multi_launcher::file_search::query::SearchRequestDraft, c
 
 pub(super) struct FileSearchView {
     pub open: bool,
-    root: WeakEntity<RootWindow>,
-    admission: Arc<RestartAdmission>,
+    pub(super) root: WeakEntity<RootWindow>,
+    pub(super) admission: Arc<RestartAdmission>,
     settings: FileSearchSettings,
+    pub(super) popout: bool,
+    pub(super) rehosting: bool,
+    pub(super) presentation_error: Option<String>,
+    pub(super) geometry_error: Option<String>,
+    pub(super) activation_revision: Arc<AtomicU64>,
+    pending_popup_typed: Option<(ScopedReceipt, utility_mount::MountReceipt, Arc<AtomicBool>, Arc<AtomicBool>)>,
+    mount_owner: utility_mount::MountOwner,
+    mount_receipt: utility_mount::MountReceipt,
+    host: AnyWindowHandle,
+    native: Option<NativeWindow>,
+    pub(super) outer_scroll: ScrollHandle,
     coordinator: SearchCoordinator,
     term: Entity<InputState>,
     directory: Entity<InputState>,
@@ -136,6 +158,7 @@ impl FileSearchView {
         root: WeakEntity<RootWindow>,
         admission: Arc<RestartAdmission>,
         settings: FileSearchSettings,
+        native: Option<NativeWindow>,
     ) -> Self {
         let term = cx.new(|cx| InputState::new(window, cx).placeholder("Search text"));
         let directory = cx.new(|cx| InputState::new(window, cx).placeholder("Directory to search"));
@@ -158,7 +181,7 @@ impl FileSearchView {
         for input in [term.clone(), directory.clone()] {
             subscriptions.push(cx.subscribe(
                 &input,
-                |this, _, event: &InputEvent, cx| match event {
+                |this, _, event: &InputEvent, cx| { if this.rehosting { return; } match event {
                     InputEvent::Change => {
                         this.invalidate("Search changed. Search again.");
                         cx.notify();
@@ -170,11 +193,17 @@ impl FileSearchView {
                         this.start(cx);
                     }
                     _ => {}
-                },
+                } },
             ));
         }
+        let mount_owner = utility_mount::MountOwner::default();
+        let mount_receipt = mount_owner.attach();
+        let host = window.window_handle();
         Self {
             open: true,
+            popout: false, rehosting: false, presentation_error: None, geometry_error: None,
+            activation_revision: Arc::new(AtomicU64::new(0)), pending_popup_typed: None, mount_owner, mount_receipt, host, native,
+            outer_scroll: ScrollHandle::new(),
             root,
             admission,
             coordinator: SearchCoordinator::from_settings(settings.clone()),
@@ -208,6 +237,118 @@ impl FileSearchView {
             truncated: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    pub(super) fn mount_receipt(&self) -> utility_mount::MountReceipt { self.mount_receipt.clone() }
+    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool {
+        self.open && self.popout == popout && self.mount_receipt.is_current() && self.host.window_id() == id
+    }
+    pub(super) fn replace_mount(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, window: &mut Window, cx: &mut Context<Self>) {
+        let term_value = self.term.read(cx).value().to_string();
+        let directory_value = self.directory.read(cx).value().to_string();
+        let term = cx.new(|cx| InputState::new(window, cx).placeholder("Search text"));
+        let directory = cx.new(|cx| InputState::new(window, cx).placeholder("Directory to search"));
+        term.update(cx, |input, cx| input.set_value(term_value, window, cx));
+        directory.update(cx, |input, cx| input.set_value(directory_value, window, cx));
+        if self.rehosting {
+            term.update(cx, |input, cx| input.set_readonly(true, cx));
+            directory.update(cx, |input, cx| input.set_readonly(true, cx));
+        }
+        self.retire_preview(cx);
+        self.retire_explorer();
+        self.pending_popup_typed = None;
+        self.mount_receipt = self.mount_owner.attach();
+        self.host = host;
+        self.native = native;
+        self.focus = cx.focus_handle();
+        self.calculate_focus = cx.focus_handle();
+        self.explorer_focus = cx.focus_handle();
+        self.preview_focus = cx.focus_handle();
+        self.content_focus.clear();
+        self.term = term;
+        self.directory = directory;
+        let receipt = self.mount_receipt.clone();
+        let mut subscriptions = Vec::new();
+        let focus_receipt = receipt.clone();
+        subscriptions.push(cx.on_focus_out(&self.focus, window, move |this, _, _, _| {
+            if focus_receipt.is_current() { this.escape_waiting_for_release = false; }
+        }));
+        let activation_receipt = receipt.clone();
+        subscriptions.push(cx.observe_window_activation(window, move |this, window, _| {
+            if activation_receipt.is_current() && !window.is_window_active() {
+                this.escape_waiting_for_release = false; this.retire_explorer();
+            }
+        }));
+        let blur_receipt = receipt.clone();
+        subscriptions.push(cx.on_blur(&self.explorer_focus, window, move |this, _, _| {
+            if blur_receipt.is_current() { this.retire_explorer(); }
+        }));
+        for input in [self.term.clone(), self.directory.clone()] {
+            let receipt = receipt.clone();
+            subscriptions.push(cx.subscribe(&input, move |this, _, event: &InputEvent, cx| {
+                if !receipt.is_current() || this.rehosting { return; }
+                match event {
+                    InputEvent::Change => { this.invalidate("Search changed. Search again."); cx.notify(); }
+                    InputEvent::PressEnter { secondary: false, shift: false } => this.start(cx),
+                    _ => {}
+                }
+            }));
+        }
+        self._subscriptions = subscriptions;
+    }
+    pub(super) fn focus_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mount_receipt.is_current() && self.host.window_id() == window.window_handle().window_id() {
+            self.term.focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    pub(super) fn wake_pending_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() || !self.is_mounted_in(window.window_handle().window_id(), true) || self.rehosting { return; }
+        let Some((_, mount, intent, accepted)) = self.pending_popup_typed.as_ref() else { return; };
+        if !mount.is_current() || !intent.load(Ordering::Acquire) { self.pending_popup_typed = None; return; }
+        if !pending_popup_ready(mount.is_current(), intent.load(Ordering::Acquire), accepted.load(Ordering::Acquire),
+            window.is_window_active(), self.native.is_some_and(|native| current_foreground_identity() == Some(native.identity))) { return; }
+        let Some((typed, mount, intent, _)) = self.pending_popup_typed.take() else { return; };
+        let root = self.root.clone();
+        let view = cx.entity().downgrade();
+        window.defer(cx, move |window, app| {
+            let _ = root.update(app, |root, cx| {
+                if !intent.load(Ordering::Acquire) || !mount.is_current() || !root.file_search_typed_receipt_current(&typed, cx) { return; }
+                let _ = view.update(cx, |view, cx| {
+                    if mount.is_current() && view.is_mounted_in(window.window_handle().window_id(), true) && window.is_window_active()
+                        && view.native.is_some_and(|native| current_foreground_identity() == Some(native.identity)) {
+                        view.start_typed(typed, window, cx);
+                    }
+                });
+            });
+        });
+    }
+    pub(super) fn host_focus_is_exact(&self, window: &Window, cx: &App) -> bool {
+        self.term.focus_handle(cx).is_focused(window)
+    }
+    pub(super) fn set_host_rehosting(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.rehosting = value;
+        self.term.update(cx, |input, cx| input.set_readonly(value, cx));
+        self.directory.update(cx, |input, cx| input.set_readonly(value, cx));
+    }
+    pub(super) fn host_effect_pending(&self) -> bool { self.explorer_pending }
+    pub(super) fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
+        if !self.open || self.rehosting || self.explorer_pending || self.admission.is_fenced() || self.popout == popout || !self.mount_receipt.is_current() { return; }
+        let Some(root) = self.root.upgrade() else { return; };
+        if self.preview.is_some() { self.status = "Close Preview before changing windows.".into(); cx.notify(); return; }
+        if root.read(cx).external_launch.auxiliary_effect_pending() { return; }
+        let visibility_revision = root.read(cx).root_visibility.request_revision.load(Ordering::Acquire);
+        let gesture = self.native.map(|source| hash_dock::Gesture {
+            source, foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity),
+            visibility_revision,
+        });
+        self.retire_explorer();
+        self.set_host_rehosting(true, cx);
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        let source = self.mount_receipt.clone();
+        let root = self.root.clone();
+        cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.start_file_search_rehost(popout, gesture, source, cx)); }).detach();
+        cx.notify();
     }
 
     fn invalidate(&mut self, message: &str) {
@@ -273,9 +414,16 @@ impl FileSearchView {
         self.invalidate("Search closed.");
         self.escape_waiting_for_release = false;
         self.open = false;
+        self.mount_owner.retire();
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting || self.explorer_pending || !self.is_mounted_in(window.window_handle().window_id(), self.popout)
+            || self.root.upgrade().is_some_and(|root| root.read(cx).external_launch.auxiliary_effect_pending()) { return; }
+        if self.popout {
+            let _ = self.root.update(cx, |root, cx| root.drain_file_search_geometry(cx, true));
+            self.shutdown(); window.remove_window(); return;
+        }
         self.shutdown();
         let _ = self.root.update(cx, |root, cx| {
             root.root_scroll
@@ -321,7 +469,7 @@ impl FileSearchView {
     }
 
     fn open_preview(&mut self, receipt: SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(receipt.kind, FileKind::File | FileKind::Directory) || !self.receipt_is_current(&receipt, cx.entity_id())
+        if self.popout || self.rehosting || !matches!(receipt.kind, FileKind::File | FileKind::Directory) || !self.receipt_is_current(&receipt, cx.entity_id())
             || !window.is_window_active() || window.has_active_dialog(cx) || !self.owns_focus(window, cx) { return; }
         let Some(return_focus) = window.focused(cx) else { return; };
         let Some(root) = self.root.upgrade() else { return; };
@@ -419,7 +567,7 @@ impl FileSearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !window.is_window_active()
+        if self.popout || self.rehosting || !window.is_window_active()
             || self.admission.is_fenced()
             || receipt.kind != FileKind::File || receipt.content_key.is_some() || !self.receipt_is_current(&receipt, cx.entity_id())
             || !self.results.get(receipt.index).is_some_and(|row| eligible_file_row(row, &receipt.path))
@@ -437,7 +585,7 @@ impl FileSearchView {
     }
 
     fn open_selected_in_explorer(&mut self, receipt: SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
-        if self.explorer_pending || !window.is_window_active() || self.admission.is_fenced()
+        if self.explorer_pending || self.rehosting || !self.is_mounted_in(window.window_handle().window_id(), self.popout) || !window.is_window_active() || self.admission.is_fenced()
             || !self.receipt_is_current(&receipt, cx.entity_id()) { return; }
         self.explorer_focus.focus(window, cx);
         let root = self.root.clone();
@@ -454,11 +602,13 @@ impl FileSearchView {
         let authority = Arc::new(AtomicBool::new(true));
         self.explorer_authority = authority.clone();
         let admission = self.admission.clone();
+        let mount = self.mount_receipt.clone();
+        let popout = self.popout;
         let worker_authority = authority.clone();
         let task = cx.background_executor().spawn(async move {
             let current = || {
                 worker_authority.load(Ordering::Acquire)
-                    && !admission.is_fenced() && visibility.is_current(revision, true)
+                    && !admission.is_fenced() && mount.is_current() && (popout || visibility.is_current(revision, true))
                     && native.is_some_and(|native| native_window_is_valid(native)
                         && current_foreground_identity() == Some(native.identity))
             };
@@ -546,7 +696,7 @@ impl FileSearchView {
     }
 
     fn start(&mut self, cx: &mut Context<Self>) {
-        if !self.open || self.running() {
+        if !self.open || self.rehosting || self.running() {
             return;
         }
         let source = SearchSource { term: self.term.read(cx).value().to_string(),
@@ -756,9 +906,9 @@ impl Render for FileSearchView {
                 .label(label)
                 .tab_stop(true)
                 .selected(self.selected == Some(index))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if current_row(
-                        this.open,
+                .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; }
+                    if mounted_search_row_current(
+                        &mount, this.open,
                         this.generation,
                         this.active,
                         generation,
@@ -768,7 +918,7 @@ impl Render for FileSearchView {
                     ) {
                         this.select_row(index, cx);
                     }
-                }));
+                }) });
                 div().flex_shrink_0().child(button)
             })
             .collect::<Vec<_>>()
@@ -783,13 +933,13 @@ impl Render for FileSearchView {
                     .accessibility_label(format!("Content match: {label}"))
                     .label(label).tab_stop(true).selected(self.selected == Some(index))
                     .when_some(row_focus, |button, focus| button.track_focus(&focus))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.kind == SearchKind::Content && current_row(this.open, this.generation, this.active,
+                    .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; }
+                        if this.kind == SearchKind::Content && mounted_search_row_current(&mount, this.open, this.generation, this.active,
                             generation, active, index, this.visible_rows())
                             && this.content_rows.get(index).is_some_and(|row| row.key == key && row.path == path) {
                             this.select_row(index, cx);
                         }
-                    }));
+                    }) });
                 let heading = (row.first_in_file || index == start).then(|| row.heading.clone());
                 div().flex_shrink_0().flex().flex_col().when_some(heading, |row, heading| row.child(Label::new(heading))).child(button)
             }).collect::<Vec<_>>()
@@ -807,7 +957,7 @@ impl Render for FileSearchView {
             )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "enter" && event.keystroke.modifiers == Modifiers::default()
-                    && !event.is_held {
+                    && !event.is_held && !this.popout && !this.rehosting {
                     let focused = this.visible_rows().find(|index| this.content_rows.get(*index).is_some_and(|row|
                         this.content_focus.get(&row.key).is_some_and(|focus| focus.is_focused(window))));
                     if this.kind == SearchKind::Content {
@@ -843,17 +993,17 @@ impl Render for FileSearchView {
             .child(Label::new("File Search"))
             .child(div().flex().gap_2()
                 .child(Button::new("file-search-filename-mode").label("Filename").selected(self.kind == SearchKind::Filename)
-                    .on_click(cx.listener(|this, _, _, cx| { if this.kind != SearchKind::Filename {
+                    .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; } if this.kind != SearchKind::Filename {
                         this.invalidate("Mode changed. Search again."); this.kind = SearchKind::Filename; cx.notify();
-                    } })))
+                    } }) }))
                 .child(Button::new("file-search-content-mode").label("Content").selected(self.kind == SearchKind::Content)
-                    .on_click(cx.listener(|this, _, _, cx| { if this.kind != SearchKind::Content {
+                    .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; } if this.kind != SearchKind::Content {
                         this.invalidate("Mode changed. Search again."); this.kind = SearchKind::Content; cx.notify();
-                    } }))))
+                    } }) })))
             .child(Label::new("Directory"))
-            .child(Input::new(&self.directory).aria_label("Search directory"))
+            .child(Input::new(&self.directory).readonly(self.rehosting).aria_label("Search directory"))
             .child(Label::new(if self.kind == SearchKind::Filename { "Filename" } else { "Content" }))
-            .child(Input::new(&self.term).aria_label(if self.kind == SearchKind::Filename { "Filename search text" } else { "Content search text" }))
+            .child(Input::new(&self.term).readonly(self.rehosting).aria_label(if self.kind == SearchKind::Filename { "Filename search text" } else { "Content search text" }))
             .child(
                 div()
                     .flex()
@@ -864,56 +1014,64 @@ impl Render for FileSearchView {
                             .tab_stop(true)
                             .label("Search")
                             .disabled(running)
-                            .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
+                            .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; } if this.is_mounted_in(window.window_handle().window_id(), this.popout) && !this.rehosting { this.start(cx); } }) }),
                     )
                     .child(
                         Button::new("file-search-cancel")
                             .tab_stop(true)
                             .label("Cancel")
                             .disabled(!running)
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; }
                                 this.invalidate("Search cancelled.");
                                 cx.notify();
-                            })),
+                            }) }),
                     )
                     .child(
                         Button::new("file-search-calculate-hash")
                             .tab_stop(true)
                             .track_focus(&self.calculate_focus)
                             .label("Calculate hash")
-                            .disabled(hash_receipt.is_none())
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .disabled(self.popout || self.rehosting || hash_receipt.is_none())
+                            .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; }
                                 if let Some(receipt) = hash_receipt.clone() {
                                     this.calculate_selected(receipt, window, cx);
                                 }
-                            })),
+                            }) }),
                     )
                     .child(
                         Button::new("file-search-preview-selected")
                             .tab_stop(true).track_focus(&self.preview_focus)
-                            .label("Preview").disabled(preview_receipt.is_none())
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .label("Preview").disabled(self.popout || self.rehosting || preview_receipt.is_none())
+                            .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; }
                                 if let Some(receipt) = preview_receipt.clone() { this.open_preview(receipt, window, cx); }
-                            })),
+                            }) }),
                     )
                     .child(
                         Button::new("file-search-open-explorer")
                             .tab_stop(true).track_focus(&self.explorer_focus)
                             .label("Open in Explorer")
                             .disabled(selected_receipt.is_none() || self.explorer_pending)
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; }
                                 if let Some(receipt) = selected_receipt.clone() {
                                     this.open_selected_in_explorer(receipt, window, cx);
                                 }
-                            })),
+                            }) }),
                     )
+                    .child(Button::new("file-search-rehost").label(if self.popout { "Dock" } else { "Pop Out" })
+                        .disabled(self.rehosting || self.explorer_pending)
+                        .on_click({ let mount = self.mount_receipt.clone(); let target = !self.popout;
+                            cx.listener(move |this, _, window, cx| {
+                                if mount.is_current() && this.is_mounted_in(window.window_handle().window_id(), !target) { this.request_rehost(target, cx); }
+                            }) }))
                     .child(
                         Button::new("file-search-close")
                             .tab_stop(true)
                             .label("Close")
-                            .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
+                            .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if mount.is_current() { this.close(window, cx); } }) }),
                     ),
             )
+            .when_some(self.presentation_error.clone(), |pane, error| pane.child(Label::new(error)))
+            .when_some(self.geometry_error.clone(), |pane, error| pane.child(Label::new(error)))
             .child(Label::new(if self.explorer_pending { "Opening in Explorer…".to_owned() } else { self.status.clone() }).id("file-search-status"))
             .when_some(selected_path, |pane, path| {
                 pane.child(Label::new("Selected result"))
@@ -929,10 +1087,10 @@ impl Render for FileSearchView {
                                 .tab_stop(true)
                                 .label("Previous page")
                                 .disabled(self.page == 0)
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; }
                                     this.set_page(this.page.saturating_sub(1));
                                     cx.notify();
-                                })),
+                                }) }),
                         )
                         .child(Label::new(format!(
                             "Results {}–{} of {}",
@@ -945,12 +1103,12 @@ impl Render for FileSearchView {
                                 .tab_stop(true)
                                 .label("Next page")
                                 .disabled(end >= self.row_count())
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| { if !mount.is_current() || !this.is_mounted_in(window.window_handle().window_id(), this.popout) || this.rehosting { return; }
                                     if (this.page + 1) * MOUNTED_ROWS < this.row_count() {
                                         this.set_page(this.page + 1);
                                         cx.notify();
                                     }
-                                })),
+                                }) }),
                         ),
                 )
             })
@@ -1051,6 +1209,76 @@ impl multi_launcher::plugin::Plugin for ScopedStockRow {
 }
 
 impl RootWindow {
+    fn file_search_typed_receipt_current(&self, typed: &ScopedReceipt, cx: &App) -> bool {
+        self.query.read(cx).value().as_str() == typed.query && self.launcher_results.query == typed.query
+            && self.launcher_results.generation == typed.generation
+            && self.file_search_probe.receipt(typed.generation, &typed.query, &typed.action,
+                self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref(), self.restart_admission.is_fenced()).is_some()
+    }
+
+    pub(super) fn file_search_prefers_popout(&self) -> bool {
+        multi_launcher::settings::UtilityToolKey::parse("file-search").ok().is_some_and(|key|
+            self.utility_presentations.preference(key).unwrap_or(multi_launcher::settings::RememberedPresentation::Docked)
+                == multi_launcher::settings::RememberedPresentation::Popout)
+    }
+
+    pub(super) fn reveal_file_search_popup(&mut self, typed: Option<ScopedReceipt>, cx: &mut Context<Self>) -> bool {
+        let (Some(popup), Some(view), Some(root_native)) = (&self.file_search_popup, &self.file_search, self.native_window) else { return false; };
+        let Some(native) = popup.native else { return true; };
+        if current_foreground_identity() != Some(root_native.identity) || view.read(cx).rehosting { return true; }
+        let Some(permit) = self.restart_admission.admit() else { return true; };
+        let popup_window = popup.window;
+        let view = view.clone();
+        let receipt = view.read(cx).mount_receipt();
+        let worker_receipt = receipt.clone();
+        let visibility = self.root_visibility.clone();
+        let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
+        let admission = self.restart_admission.clone();
+        self.file_search_popup_intent.store(false, Ordering::Release);
+        let intent = Arc::new(AtomicBool::new(true));
+        self.file_search_popup_intent = intent.clone();
+        let worker_intent = intent.clone();
+        let accepted = Arc::new(AtomicBool::new(false));
+        let root = cx.entity().downgrade();
+        if let Some(typed) = typed.as_ref() {
+            view.update(cx, |view, _| view.pending_popup_typed = Some((typed.clone(), receipt.clone(), intent.clone(), accepted.clone())));
+        }
+        let guard = view.read(cx).activation_revision.clone();
+        let revision = guard.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let worker = guard.clone();
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let activated = cx.background_executor().spawn(async move {
+                activate_for_secondary_window_if(&worker, revision, native, Some(root_native.identity), &||
+                    worker_intent.load(Ordering::Acquire) && worker_receipt.is_current() && !admission.is_fenced()
+                        && json_utility::native_host_current(&visibility, visibility_revision, Some(root_native), false))
+            }).await;
+            if !activated {
+                intent.store(false, Ordering::Release);
+                let _ = view.update(cx, |view, _| {
+                    if view.pending_popup_typed.as_ref().is_some_and(|(_, _, pending, _)| Arc::ptr_eq(pending, &intent)) { view.pending_popup_typed = None; }
+                });
+                return;
+            }
+            accepted.store(true, Ordering::Release);
+            if !intent.load(Ordering::Acquire) || !receipt.is_current() || guard.load(Ordering::Acquire) != revision { return; }
+            if current_foreground_identity() != Some(native.identity) { return; }
+            let current = root.update(cx, |root, cx| {
+                root.file_search_popup.as_ref().is_some_and(|popup| popup.window.window_id() == popup_window.window_id())
+                    && root.file_search.as_ref().is_some_and(|current| current.entity_id() == view.entity_id())
+                    && !root.restart_admission.is_fenced()
+                    && typed.as_ref().is_none_or(|typed| root.file_search_typed_receipt_current(typed, cx))
+            }).unwrap_or(false);
+            if !current || !intent.load(Ordering::Acquire) { return; }
+            let _ = update_kit_window_content(popup_window, &view, cx, |view, window, cx| {
+                if view.is_mounted_in(window.window_handle().window_id(), true) && !view.rehosting {
+                    if typed.is_some() { view.wake_pending_popup(window, cx); } else { view.focus_host(window, cx); }
+                }
+            });
+        }).detach();
+        true
+    }
+
     fn open_file_search_explorer(&mut self, source: WeakEntity<FileSearchView>, receipt: SelectionReceipt,
         window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = source.upgrade() else { return; };
@@ -1059,19 +1287,19 @@ impl RootWindow {
         let revision = self.root_visibility.request_revision.load(Ordering::Acquire);
         if !self.file_search.as_ref().is_some_and(|mounted| mounted.entity_id() == receipt.owner)
             || view.entity_id() != receipt.owner
-            || !self.root_window.is_some_and(|root| root.window_id() == window.window_handle().window_id())
-            || !self.root_visibility.is_current(revision, true) || !window.is_window_active()
+            || !source.is_mounted_in(window.window_handle().window_id(), source.popout) || source.rehosting
+            || (!source.popout && !self.root_visibility.is_current(revision, true)) || !window.is_window_active()
             || self.action_sheet.is_some() || self.context_favorite_popup.is_some()
             || context_stack_has_primary(&contexts, "PopupMenu")
             || context_stack_has_primary(&contexts, "AlertDialog")
             || context_stack_has_primary(&contexts, "Dialog")
             || !source.explorer_focus.is_focused(window) || source.explorer_pending
             || !source.receipt_is_current(&receipt, view.entity_id()) { return; }
-        if !self.native_window.is_some_and(|native| native_window_is_valid(native)
+        if !source.native.is_some_and(|native| native_window_is_valid(native)
             && current_foreground_identity() == Some(native.identity)) { return; }
         let Some(permit) = self.restart_admission.admit() else { return; };
         let visibility = self.root_visibility.clone();
-        let native = self.native_window;
+        let native = source.native;
         view.update(cx, |view, cx| view.begin_explorer(receipt, visibility, revision, native, permit, cx));
     }
 
@@ -1142,15 +1370,25 @@ impl RootWindow {
 
     pub(super) fn open_typed_file_search(&mut self, receipt: ScopedReceipt, window: &mut Window, cx: &mut Context<Self>) {
         let Some(_permit) = self.restart_admission.admit() else { return; };
+        if self.file_search_popup.is_some() { self.reveal_file_search_popup(Some(receipt), cx); return; }
+        if self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting) { return; }
+        let was_open = self.file_search.as_ref().is_some_and(|view| view.read(cx).open);
         let view = if let Some(view) = &self.file_search { view.clone() } else {
             let root = cx.entity().downgrade();
             let admission = Arc::clone(&self.restart_admission);
             let settings = self.file_search_settings.clone();
-            let view = cx.new(|cx| FileSearchView::new(window, cx, root, admission, settings));
+            let native = self.native_window;
+            let view = cx.new(|cx| FileSearchView::new(window, cx, root, admission, settings, native));
             self.file_search = Some(view.clone());
             view
         };
-        view.update(cx, |view, cx| view.start_typed(receipt, window, cx));
+        view.update(cx, |view, cx| {
+            if !view.open { view.popout = false; view.replace_mount(window.window_handle(), self.native_window, window, cx); }
+            view.start_typed(receipt, window, cx);
+        });
+        if !was_open && self.file_search_prefers_popout() {
+            let weak = view.downgrade(); cx.spawn(async move |_, cx| { let _ = weak.update(cx, |view, cx| view.request_rehost(true, cx)); }).detach();
+        }
         self.root_scroll.scroll_to_top_of_item(self.file_search_scroll_item());
         self.query_history.reset();
         cx.notify();
@@ -1162,6 +1400,37 @@ mod typed_tests {
     use super::{ProbeOwner, ProbeRequest, ScopedReceipt, validated_root_matches};
     use std::{collections::HashSet, path::PathBuf};
     use multi_launcher::file_search::{model::{SearchKind, SearchScope}, query::SearchRequestDraft};
+
+    #[test]
+    fn remount_and_rollback_preserve_search_identity_but_retire_old_rows() {
+        use super::{mounted_search_row_current, utility_mount::MountOwner};
+        use multi_launcher::file_search::model::SearchId;
+        let owner = MountOwner::default();
+        let dock = owner.attach();
+        let search = Some(SearchId(41));
+        assert!(mounted_search_row_current(&dock, true, 7, search, 7, search, 2, 0..10));
+        let candidate = owner.attach();
+        assert!(!mounted_search_row_current(&dock, true, 7, search, 7, search, 2, 0..10));
+        assert!(mounted_search_row_current(&candidate, true, 7, search, 7, search, 2, 0..10));
+        let rollback = owner.attach();
+        assert!(!mounted_search_row_current(&candidate, true, 7, search, 7, search, 2, 0..10));
+        assert!(mounted_search_row_current(&rollback, true, 7, search, 7, search, 2, 0..10));
+        assert!(!mounted_search_row_current(&rollback, true, 7, search, 7, Some(SearchId(42)), 2, 0..10));
+    }
+
+    #[test]
+    fn popup_delivery_waits_for_accepted_activation_and_current_mount() {
+        use super::pending_popup_ready;
+        assert!(!super::super::secondary_activation_request_allowed(true, false, true));
+        assert!(super::super::secondary_activation_request_allowed(false, true, true));
+        assert!(!super::super::secondary_activation_request_allowed(false, true, false));
+        assert!(!pending_popup_ready(true, true, false, true, true));
+        assert!(pending_popup_ready(true, true, true, true, true));
+        assert!(!pending_popup_ready(false, true, true, true, true));
+        assert!(!pending_popup_ready(true, false, true, true, true));
+        assert!(!pending_popup_ready(true, true, true, false, true));
+        assert!(!pending_popup_ready(true, true, true, true, false));
+    }
 
     #[test]
     fn content_excerpt_is_bounded_utf8_and_keeps_match_near_center() {

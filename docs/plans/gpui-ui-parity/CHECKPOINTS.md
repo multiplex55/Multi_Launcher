@@ -1590,3 +1590,13 @@ The document owns arrow, Page Up, Page Down, Home and End navigation. Line and c
 Independent review covered focus scope, optional match, same selection reuse, stale child retirement, late line and column navigation, shared coverage and checked Explorer. Scoped launcher checks passed in 3.28 s, 3.29 s and 3.40 s. One warm launcher build took 13.72 s with zero corrective links and no library rebuild. Nextest run `a6410e7a-7479-4204-867b-6b9940530947` passed all 14 in 9.885 s with 410 skipped. Reused shared Coverage and cache run `c78cf8e1-99c5-402a-9605-8f717cac320b` passed all four in 0.901 s.
 
 Matched native document traversal, checked effects and keyboard focus remain open. Continue the remembered File Search Dock and Pop Out packet, then inherited Preview hosting and the exact popup Hash handoff.
+
+### G07 remembered File Search Dock and Pop Out
+
+Bare and typed File Search share one retained view and the existing checked utility host. Dock and Pop Out keep the draft, coordinator, search generation, results and selection. Each mount has its own input subscriptions, focus and row authority. The `file-search` presentation and native geometry use the existing store and the stock 760 × 560 initial size and 520 × 360 minimum.
+
+Dock settles after exact term focus acknowledgement. The independent popup keeps its worker when the root hides. Popup Explorer requires the current row, mount and native foreground. A queued typed invocation also requires a fresh accepted activation and a current launcher receipt. Transfer freezes both inputs before scheduling and restores editing on settlement. An open Docked Preview stays available and blocks transfer until closed. Quit and Restart drain the popup geometry before retiring its mount.
+
+Independent review cleared the final activation, stale input and lifecycle corrections. The final locked fast-dev launcher check passed in 3.66 s. The initial warm link took 19.56 s and the corrected link took 16.53 s, with no shared-library rebuild. Nextest run `a9df51d7-68c3-4226-85db-a5a480a19b9b` passed all 23 in 9.984 s, with 403 skipped. Coverage includes the retained search identity policy, stale rows after replacement and rollback, typed activation admission, exact Dock focus, geometry receipts and existing Preview effects.
+
+The paired Windows replay at 1516 × 937 remains open. Use the owned Directory corpus to exercise transfer during a search, a retained selection, root hide, exact term focus on Dock, and a resized popup reopened through the remembered presentation. Include popup Explorer and a refusal with Preview open. Continue inherited Preview and the checked popup Hash handoff for the same candidate.

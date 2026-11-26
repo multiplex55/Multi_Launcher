@@ -123,7 +123,7 @@ trait HostedUtility: Render + Sized + 'static {
         cx: &mut Context<Self>,
     );
     fn set_popout(&mut self, value: bool);
-    fn set_rehosting(&mut self, value: bool);
+    fn set_rehosting(&mut self, value: bool, cx: &mut Context<Self>);
     fn set_error(&mut self, value: Option<String>);
     fn set_geometry_error(&mut self, value: Option<String>);
     fn after_dock(&mut self, window: &mut Window, cx: &mut Context<Self>);
@@ -203,7 +203,7 @@ impl HostedUtility for JsonWorkspace {
     fn set_popout(&mut self, value: bool) {
         self.popout = value;
     }
-    fn set_rehosting(&mut self, value: bool) {
+    fn set_rehosting(&mut self, value: bool, _: &mut Context<Self>) {
         self.rehosting = value;
     }
     fn set_error(&mut self, value: Option<String>) {
@@ -303,7 +303,7 @@ impl HostedUtility for super::regex_tester::RegexWorkspace {
     fn set_popout(&mut self, value: bool) {
         self.popout = value;
     }
-    fn set_rehosting(&mut self, value: bool) {
+    fn set_rehosting(&mut self, value: bool, _: &mut Context<Self>) {
         self.rehosting = value;
     }
     fn set_error(&mut self, value: Option<String>) {
@@ -401,7 +401,7 @@ impl HostedUtility for super::clipboard_history::ClipboardHistory {
     fn set_popout(&mut self, value: bool) {
         self.popout = value;
     }
-    fn set_rehosting(&mut self, value: bool) {
+    fn set_rehosting(&mut self, value: bool, _: &mut Context<Self>) {
         self.rehosting = value;
     }
     fn set_error(&mut self, value: Option<String>) {
@@ -456,13 +456,55 @@ impl HostedUtility for super::clipboard_modify_view::ClipboardModifyView {
     fn mounted(&self, id: WindowId, popout: bool) -> bool { self.is_mounted_in(id, popout) }
     fn replace(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, window: &mut Window, cx: &mut Context<Self>) { self.replace_mount(host, native, window, cx); }
     fn set_popout(&mut self, value: bool) { self.popout = value; }
-    fn set_rehosting(&mut self, value: bool) { self.rehosting = value; }
+    fn set_rehosting(&mut self, value: bool, _: &mut Context<Self>) { self.rehosting = value; }
     fn set_error(&mut self, value: Option<String>) { self.presentation_error = value; }
     fn set_geometry_error(&mut self, value: Option<String>) { self.geometry_error = value; }
     fn after_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.after_host(window, cx); }
     fn after_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.after_host(window, cx); }
     fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
     fn shutdown(&mut self, _: &mut Context<Self>) { self.shutdown_host(); }
+    fn pinned(_: &RootWindow) -> bool { false }
+}
+
+impl HostedUtility for super::file_search::FileSearchView {
+    const KIND: utility_mount::UtilityKind = utility_mount::UtilityKind::FileSearch;
+    const PANEL: Panel = Panel::FileSearchDialog;
+    const KEY: &'static str = "file-search";
+    const TITLE: &'static str = "File Search";
+    const INITIAL: (f32, f32) = (760.0, 560.0);
+    const MINIMUM: (f32, f32) = (520.0, 360.0);
+    fn workspace(root: &RootWindow) -> Option<Entity<Self>> { root.file_search.clone() }
+    fn popup(root: &RootWindow) -> Option<&UtilityPopup> { root.file_search_popup.as_ref() }
+    fn popup_mut(root: &mut RootWindow) -> &mut Option<UtilityPopup> { &mut root.file_search_popup }
+    fn retiring(root: &mut RootWindow) -> &mut Vec<RetiringHashWindow> { &mut root.file_search_retiring }
+    fn drain(root: &mut RootWindow, cx: &mut Context<RootWindow>, detach: bool) { root.drain_host_geometry::<Self>(cx, detach); }
+    fn reattach(root: &mut RootWindow, cx: &mut Context<RootWindow>) { root.reattach_host_geometry::<Self>(cx); }
+    fn size_error(root: &mut RootWindow, message: Option<String>, cx: &mut Context<RootWindow>) {
+        if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { view.geometry_error = message; cx.notify(); }); }
+    }
+    fn remember(root: &mut RootWindow, mode: RememberedPresentation, cx: &mut Context<RootWindow>) { root.remember_host_presentation(Self::KEY, mode, cx); }
+    fn retire(root: &mut RootWindow, cx: &mut Context<RootWindow>) { if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); } }
+    fn observe(_: &mut RootWindow, _: WindowId, _: &mut Context<RootWindow>) {}
+    fn root(&self) -> WeakEntity<RootWindow> { self.root.clone() }
+    fn open(&self) -> bool { self.open }
+    fn rehosting(&self) -> bool { self.rehosting }
+    fn close_blocked(&self) -> bool { self.host_effect_pending() }
+    fn activation_lost(&mut self, _: &mut Context<Self>) { self.retire_explorer(); }
+    fn activated(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.wake_pending_popup(window, cx); }
+    fn outer_scroll(&self) -> Option<ScrollHandle> { Some(self.outer_scroll.clone()) }
+    fn popout(&self) -> bool { self.popout }
+    fn fenced(&self) -> bool { self.admission.is_fenced() }
+    fn receipt(&self) -> utility_mount::MountReceipt { self.mount_receipt() }
+    fn mounted(&self, id: WindowId, popout: bool) -> bool { self.is_mounted_in(id, popout) }
+    fn replace(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, window: &mut Window, cx: &mut Context<Self>) { self.replace_mount(host, native, window, cx); }
+    fn set_popout(&mut self, value: bool) { self.popout = value; }
+    fn set_rehosting(&mut self, value: bool, cx: &mut Context<Self>) { self.set_host_rehosting(value, cx); }
+    fn set_error(&mut self, value: Option<String>) { self.presentation_error = value; }
+    fn set_geometry_error(&mut self, value: Option<String>) { self.geometry_error = value; }
+    fn after_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
+    fn after_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
+    fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
+    fn shutdown(&mut self, _: &mut Context<Self>) { self.shutdown(); }
     fn pinned(_: &RootWindow) -> bool { false }
 }
 
@@ -491,6 +533,7 @@ fn retiring_utilities(
     kind: utility_mount::UtilityKind,
 ) -> &mut Vec<RetiringHashWindow> {
     match kind {
+        utility_mount::UtilityKind::FileSearch => &mut root.file_search_retiring,
         utility_mount::UtilityKind::Xml => &mut root.xml_retiring,
         utility_mount::UtilityKind::Json => &mut root.json_retiring,
         utility_mount::UtilityKind::Regex => &mut root.regex_retiring,
@@ -666,6 +709,9 @@ impl RootWindow {
             view.update(cx, |view, cx| { view.geometry_error = message; cx.notify(); });
         }
     }
+    pub(super) fn set_file_search_size_error(&mut self, message: Option<String>, cx: &mut Context<Self>) {
+        if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| { view.geometry_error = message; cx.notify(); }); }
+    }
     pub(super) fn set_regex_size_error(&mut self, message: Option<String>, cx: &mut Context<Self>) {
         if let Some(view) = self.regex_view.clone() {
             view.update(cx, |view, cx| {
@@ -708,6 +754,8 @@ impl RootWindow {
                 if let Some(view) = self.clipboard_modify_view.clone() {
                     view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); });
                 }
+            } else if UtilityToolKey::parse("file-search").ok() == Some(key) {
+                if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); }); }
             } else if UtilityToolKey::parse("regex-tester").ok() == Some(key) {
                 if let Some(view) = self.regex_view.clone() {
                     view.update(cx, |view, cx| {
@@ -765,6 +813,10 @@ impl RootWindow {
         })
         .detach();
     }
+    pub(super) fn drain_file_search_geometry(&mut self, cx: &mut Context<Self>, detach: bool) { self.drain_host_geometry::<super::file_search::FileSearchView>(cx, detach); }
+    pub(super) fn start_file_search_rehost(&mut self, popout: bool, gesture: Option<hash_dock::Gesture>, source: utility_mount::MountReceipt, cx: &mut Context<Self>) {
+        self.start_hosted_rehost::<super::file_search::FileSearchView>(popout, gesture, source, cx);
+    }
     pub(super) fn start_json_rehost(
         &mut self,
         popout: bool,
@@ -811,11 +863,11 @@ impl RootWindow {
             return;
         }
         let Some(permit) = self.restart_admission.admit() else {
-            workspace.update(cx, |view, _| view.set_rehosting(false));
+            workspace.update(cx, |view, cx| view.set_rehosting(false, cx));
             return;
         };
         let Some(root_window) = self.root_window else {
-            workspace.update(cx, |view, _| view.set_rehosting(false));
+            workspace.update(cx, |view, cx| view.set_rehosting(false, cx));
             return;
         };
         let root = cx.entity().downgrade();
@@ -923,7 +975,7 @@ impl RootWindow {
                     Ok(opened) => opened,
                     Err(error) => {
                         let _ = workspace.update(cx, |view, cx| {
-                            view.set_rehosting(false);
+                            view.set_rehosting(false, cx);
                             view.set_error(Some(format!(
                                 "Could not open {} window: {error}",
                                 T::TITLE
@@ -970,7 +1022,7 @@ impl RootWindow {
                         )
                         .await;
                         let _ = workspace.update(cx, |view, cx| {
-                            view.set_rehosting(false);
+                            view.set_rehosting(false, cx);
                             view.set_error(Some(format!("Could not attach {} window.", T::TITLE)));
                             cx.notify();
                         });
@@ -1121,7 +1173,7 @@ impl RootWindow {
                         }
                         T::remember(root, RememberedPresentation::Popout, cx);
                         workspace.update(cx, |view, cx| {
-                            view.set_rehosting(false);
+                            view.set_rehosting(false, cx);
                             cx.notify();
                         });
                     });
@@ -1149,7 +1201,7 @@ impl RootWindow {
                             if mounted_receipt.is_current() {
                                 view.replace(root_window, root_native, window, cx);
                                 view.set_popout(false);
-                                view.set_rehosting(false);
+                                view.set_rehosting(false, cx);
                                 view.set_error(Some(format!(
                                     "Could not show {} window.",
                                     T::TITLE
@@ -1175,7 +1227,7 @@ impl RootWindow {
                     .ok()
                     .flatten();
                 let Some((popup, popup_native)) = source_popup else {
-                    let _ = workspace.update(cx, |view, _| view.set_rehosting(false));
+                    let _ = workspace.update(cx, |view, cx| view.set_rehosting(false, cx));
                     return;
                 };
                 let _ = root.update(cx, |root, cx| T::drain(root, cx, true));
@@ -1195,7 +1247,7 @@ impl RootWindow {
                     .ok()
                     .flatten();
                 let Some(mount) = mounted else {
-                    let _ = workspace.update(cx, |view, _| view.set_rehosting(false));
+                    let _ = workspace.update(cx, |view, cx| view.set_rehosting(false, cx));
                     let _ = root.update(cx, |root, cx| {
                         if T::popup(root)
                             .is_some_and(|old| old.window.window_id() == popup.window_id())
@@ -1223,7 +1275,7 @@ impl RootWindow {
                         if mount.is_current() {
                             view.replace(popup, popup_native, window, cx);
                             view.set_popout(true);
-                            view.set_rehosting(false);
+                            view.set_rehosting(false, cx);
                         }
                     });
                     let _ = root.update(cx, |root, cx| {
@@ -1245,7 +1297,7 @@ impl RootWindow {
                                 if mount.is_current() {
                                     view.replace(popup, popup_native, window, cx);
                                     view.set_popout(true);
-                                    view.set_rehosting(false);
+                                    view.set_rehosting(false, cx);
                                     view.set_error(Some(format!(
                                         "Could not show the launcher to dock {}.",
                                         T::TITLE
@@ -1279,7 +1331,7 @@ impl RootWindow {
                                 if mount.is_current() {
                                     view.replace(popup, popup_native, window, cx);
                                     view.set_popout(true);
-                                    view.set_rehosting(false);
+                                    view.set_rehosting(false, cx);
                                     view.set_error(Some(format!(
                                         "Could not focus the launcher to dock {}.",
                                         T::TITLE
@@ -1324,7 +1376,7 @@ impl RootWindow {
                 }
                 let _ =
                     update_kit_window_content(root_window, &workspace, cx, |view, window, cx| {
-                        view.set_rehosting(false);
+                        view.set_rehosting(false, cx);
                         if mount.is_current() {
                             view.after_dock(window, cx);
                         }

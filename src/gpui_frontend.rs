@@ -2297,6 +2297,7 @@ struct RootWindow {
     indexed_applications: indexed_applications::Owner,
     window_search: window_search::Owner,
     file_search_probe: file_search::ProbeOwner,
+    file_search_popup_intent: Arc<AtomicBool>,
     external_launch: external_launch::ExternalLaunch,
     external_launch_preferences: ExternalLaunchPreferences,
     action_sheet: Option<action_sheet::Sheet>,
@@ -2414,6 +2415,8 @@ struct RootWindow {
     hash_clipboard_operation: Option<HashClipboardOperation>,
     hash_clipboard_operation_counter: u64,
     file_search: Option<Entity<file_search::FileSearchView>>,
+    file_search_popup: Option<utility_mount::UtilityPopup>,
+    file_search_retiring: Vec<RetiringHashWindow>,
     #[cfg(windows)]
     downloads_triage: Option<Entity<downloads_triage::DownloadsTriageView>>,
     #[cfg(windows)]
@@ -4551,7 +4554,7 @@ async fn restore_root_search_focus_after_hash_close(
                         if may_leave_focus || view.read(cx).inspect_is_focused(window) {
                             let restored = view.update(cx, |view, cx| view.restore_receipt_focus(&receipt, cx.entity_id(), window, cx));
                             if restored {
-                                let index = root.file_search_scroll_item() + usize::from(root.file_search.as_ref().is_some_and(|view| view.read(cx).open));
+                                let index = root.file_search_scroll_item() + usize::from(root.file_search.as_ref().is_some_and(|view| view.read(cx).open && !view.read(cx).popout));
                                 root.root_scroll.scroll_to_top_of_item(index);
                             }
                             restored
@@ -4748,7 +4751,7 @@ impl RootWindow {
         {
             return;
         }
-        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| view.read(cx).open) || self.downloads_triage_open(cx) || self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open) {
+        if self.quick_help.open || self.result_favorites.is_open() || self.file_search.as_ref().is_some_and(|view| !view.read(cx).popout && view.read(cx).open) || self.downloads_triage_open(cx) || self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).open) {
             self.root_scroll
                 .scroll_to_top_of_item(self.docked_hash_scroll_item());
         } else {
@@ -5156,7 +5159,7 @@ impl RootWindow {
     }
 
     fn poll_utility_size_writer(&mut self, cx: &mut Context<Self>) -> bool {
-        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged, clipboard_failure, clipboard_acknowledged, modify_failure, modify_acknowledged) = {
+        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged, clipboard_failure, clipboard_acknowledged, modify_failure, modify_acknowledged, search_failure, search_acknowledged) = {
             let mut store = self
                 .utility_size_store
                 .lock()
@@ -5174,7 +5177,10 @@ impl RootWindow {
             let clipboard_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == clipboard_key));
             let modify_key = UtilityToolKey::parse("clipboard-modify").ok();
             let modify_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == modify_key));
+            let search_key = UtilityToolKey::parse("file-search").ok();
+            let search_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == search_key));
             let failures = store.take_new_write_failures();
+            let search_failure = failures.iter().find(|failure| Some(failure.key) == search_key).map(|failure| failure.message.clone());
             let modify_failure = failures.iter().find(|failure| Some(failure.key) == modify_key).map(|failure| failure.message.clone());
             let clipboard_failure = failures.iter().find(|failure| Some(failure.key) == clipboard_key).map(|failure| failure.message.clone());
             let regex_failure = failures.iter().find(|failure| Some(failure.key) == regex_key).map(|failure| failure.message.clone());
@@ -5196,6 +5202,7 @@ impl RootWindow {
                 clipboard_acknowledged,
                 modify_failure,
                 modify_acknowledged,
+                search_failure, search_acknowledged,
             )
         };
         if let Some(error) = poll_error {
@@ -5225,6 +5232,8 @@ impl RootWindow {
         else if clipboard_acknowledged { self.set_clipboard_size_error(None, cx); }
         if let Some(error) = modify_failure { self.set_clipboard_modify_size_error(Some(format!("Could not save Clipboard Modify window geometry: {error}")), cx); }
         else if modify_acknowledged { self.set_clipboard_modify_size_error(None, cx); }
+        if let Some(error) = search_failure { self.set_file_search_size_error(Some(format!("Could not save File Search window geometry: {error}")), cx); }
+        else if search_acknowledged { self.set_file_search_size_error(None, cx); }
         if !pending {
             self.utility_size_polling.store(false, Ordering::Release);
         }
@@ -5432,6 +5441,7 @@ impl RootWindow {
         self.drain_json_native_geometry(cx, false);
         self.drain_xml_native_geometry(cx, false);
         self.drain_regex_native_geometry(cx, false);
+        self.drain_file_search_geometry(cx, false);
         self.drain_clipboard_native_geometry(cx, false);
         self.drain_clipboard_modify_geometry(cx, false);
         let _ = self.poll_utility_size_writer(cx);
@@ -5471,6 +5481,11 @@ impl RootWindow {
             let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
             if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The Regex Tester window geometry is still being saved.".to_owned()); }
             if let Some((_, error)) = status.failure { return Err(format!("The Regex Tester window geometry could not be saved: {error}")); }
+        }
+        if let Ok(key) = UtilityToolKey::parse("file-search") {
+            let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
+            if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The File Search window geometry is still being saved.".to_owned()); }
+            if let Some((_, error)) = status.failure { return Err(format!("The File Search window geometry could not be saved: {error}")); }
         }
         if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
             return Err(format!("{message} Then retry the egui restart."));
@@ -5513,6 +5528,14 @@ impl RootWindow {
         if let Some(popup) = &self.clipboard_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Clipboard History window has no checked native handle.".to_owned()); } }
         if let Some(popup) = &self.clipboard_modify_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Clipboard Modify window has no checked native handle.".to_owned()); } }
 
+        if self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Err("File Search is changing presentation. Wait for it to finish before restarting.".to_owned()); }
+        self.file_search_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
+        if !self.file_search_retiring.is_empty() { return Err("A previous File Search window has not retired.".to_owned()); }
+        if let Some(popup) = &self.file_search_popup {
+            child_windows.push(popup.window);
+            if let Some(native) = popup.native { native_windows.push(native); }
+            else if cfg!(windows) { return Err("The File Search window has no checked native handle.".to_owned()); }
+        }
         if self.json_view.as_ref().is_some_and(|view| view.read(cx).rehosting) {
             return Err("JSON Utility is changing presentation. Wait for it to finish before restarting.".to_owned());
         }
@@ -5817,9 +5840,10 @@ impl RootWindow {
         self.root_visibility.deactivate();
         self.snippets_search.wake.close();
         self.window_search.retire();
-        self.file_search_probe.retire();
+        self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
         self.indexed_applications.retire();
         self.retire_search_jump_mode();
+        self.drain_file_search_geometry(cx, true);
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.retire_json_workspace(cx);
         self.drain_regex_native_geometry(cx, true);
@@ -6736,7 +6760,7 @@ impl RootWindow {
         self.calculator_search.pending = None;
         self.calculator_search.retire_history();
         self.window_search.retire();
-        self.file_search_probe.retire();
+        self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
         if query.trim().is_empty() {
             self.publish_launcher_provider_results(query, Vec::new(), scroll_to_search);
             return;
@@ -7483,7 +7507,7 @@ impl RootWindow {
             view
         };
         view.update(cx, |view, cx| view.show(window, cx));
-        let index = self.file_search_scroll_item() + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open));
+        let index = self.file_search_scroll_item() + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open && !view.read(cx).popout));
         self.root_scroll.scroll_to_top_of_item(index);
         self.query_history.reset();
         cx.notify();
@@ -7505,7 +7529,7 @@ impl RootWindow {
             view.focus_filter(session, window, cx);
         });
         let index = self.file_search_scroll_item()
-            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).open && !view.read(cx).popout))
             + usize::from(self.downloads_triage_open(cx));
         self.root_scroll.scroll_to_top_of_item(index);
         cx.notify();
@@ -7513,17 +7537,27 @@ impl RootWindow {
 
     fn open_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(_permit) = self.restart_admission.admit() else { return; };
+        if self.file_search_popup.is_some() { self.reveal_file_search_popup(None, cx); return; }
+        if self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting) { return; }
+        let was_open = self.file_search.as_ref().is_some_and(|view| view.read(cx).open);
         let view = if let Some(view) = &self.file_search {
             view.clone()
         } else {
             let root = cx.entity().downgrade();
             let admission = Arc::clone(&self.restart_admission);
             let settings = self.file_search_settings.clone();
-            let view = cx.new(|cx| file_search::FileSearchView::new(window, cx, root, admission, settings));
+            let native = self.native_window;
+            let view = cx.new(|cx| file_search::FileSearchView::new(window, cx, root, admission, settings, native));
             self.file_search = Some(view.clone());
             view
         };
-        view.update(cx, |view, cx| view.show(window, cx));
+        view.update(cx, |view, cx| {
+            if !view.open { view.popout = false; view.replace_mount(window.window_handle(), self.native_window, window, cx); }
+            view.show(window, cx);
+        });
+        if !was_open && self.file_search_prefers_popout() {
+            let weak = view.downgrade(); cx.spawn(async move |_, cx| { let _ = weak.update(cx, |view, cx| view.request_rehost(true, cx)); }).detach();
+        }
         self.root_scroll.scroll_to_top_of_item(self.file_search_scroll_item());
         self.query_history.reset();
         cx.notify();
@@ -9737,9 +9771,11 @@ impl RootWindow {
         if let Some(view) = &self.file_search { view.read(cx).retire_explorer(); }
         self.retire_json_workspace(cx);
         self.drain_regex_native_geometry(cx, true);
+        self.drain_file_search_geometry(cx, true);
+        if let Some(view) = &self.file_search { view.update(cx, |view, _| view.shutdown()); }
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         self.window_search.retire();
-        self.file_search_probe.retire();
+        self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
         self.indexed_applications.retire();
         self.hash_docked_resize.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         self.drain_hash_native_geometry(cx, true);
@@ -9752,6 +9788,8 @@ impl RootWindow {
         if let Some(popup) = self.clipboard_modify_popup.take() { retiring_clipboard.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, _| view.shutdown_host()); }
         if let Some(view) = &self.clipboard_history { view.update(cx, |view, _| view.shutdown()); }
+        let mut retiring_search = std::mem::take(&mut self.file_search_retiring);
+        if let Some(popup) = self.file_search_popup.take() { retiring_search.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         let mut retiring_regex = std::mem::take(&mut self.regex_retiring);
         if let Some(popup) = self.regex_popup.take() { retiring_regex.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         let retiring = self.xml_popup.take().map(|popup| RetiringHashWindow { window: popup.window, native_window: popup.native });
@@ -9759,6 +9797,7 @@ impl RootWindow {
         if let Some(view) = &view { view.update(cx, |view, cx| view.shutdown(cx)); }
         cx.spawn(async move |_, cx| {
             for retiring in retiring_clipboard { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
+            for retiring in retiring_search { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             for retiring in retiring_regex { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             if let Some(retiring) = retiring { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             if let Some(view) = view {
@@ -9779,7 +9818,7 @@ impl RootWindow {
     ) -> Option<RootCloseBlocker> {
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
-        if self.external_launch.auxiliary_effect_pending() { return Some(RootCloseBlocker::FileSearchEffect); }
+        if self.external_launch.auxiliary_effect_pending() || self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting || view.read(cx).host_effect_pending()) { return Some(RootCloseBlocker::FileSearchEffect); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Some(RootCloseBlocker::TempfileSave); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SnippetsSave); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardHistory); }
@@ -10644,7 +10683,7 @@ impl Render for RootWindow {
         if let Some(panel) = app_editor_panel {
             root_scroll = root_scroll.child(div().flex_shrink_0().child(panel));
         }
-        if let Some(view) = self.file_search.as_ref().filter(|view| view.read(cx).open) {
+        if let Some(view) = self.file_search.as_ref().filter(|view| view.read(cx).open && !view.read(cx).popout) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         #[cfg(windows)]
@@ -11753,6 +11792,10 @@ impl RootWindow {
     }
     fn utility_destination_current(&self, kind: utility_mount::UtilityKind, receipt: &utility_mount::MountReceipt, window: WindowId, cx: &App) -> bool {
         match kind {
+            utility_mount::UtilityKind::FileSearch => self.file_search.as_ref().is_some_and(|view| {
+                let view = view.read(cx);
+                view.is_mounted_in(window, false) && receipt.matches(&view.mount_receipt()) && receipt.is_current()
+            }),
             utility_mount::UtilityKind::Json => self.json_view.as_ref().is_some_and(|view| {
                 let view = view.read(cx);
                 view.is_mounted_in(window, false) && receipt.matches(&view.mount_receipt()) && receipt.is_current()
@@ -12138,6 +12181,11 @@ fn activate_for_secondary_window(
     activate_for_secondary_window_if(secondary_revision, revision, window, expected_foreground, &|| true);
 }
 
+#[cfg(any(windows, test))]
+fn secondary_activation_request_allowed(already_foreground: bool, expected_foreground: bool, current: bool) -> bool {
+    !already_foreground && expected_foreground && current
+}
+
 #[cfg(windows)]
 fn activate_for_secondary_window_if(
     secondary_revision: &AtomicU64,
@@ -12145,25 +12193,15 @@ fn activate_for_secondary_window_if(
     window: NativeWindow,
     expected_foreground: Option<ForegroundIdentity>,
     current: &dyn Fn() -> bool,
-) {
-    if secondary_revision.load(Ordering::Acquire) != revision || !native_window_is_valid(window) {
-        return;
-    }
+) -> bool {
+    if secondary_revision.load(Ordering::Acquire) != revision || !native_window_is_valid(window) || !current() { return false; }
     let foreground = current_foreground_identity();
-    if foreground == Some(window.identity) {
-        return;
-    }
-    let Some(expected_foreground) = expected_foreground else {
-        return;
-    };
-    if foreground != Some(expected_foreground)
-        || secondary_revision.load(Ordering::Acquire) != revision
-        || !current()
-    {
-        return;
-    }
-    if let Err(error) = activate_native_window(window) {
-        tracing::debug!(%error, "retained GPUI window activation was refused");
+    let Some(expected_foreground) = expected_foreground else { return false; };
+    if !secondary_activation_request_allowed(foreground == Some(window.identity), foreground == Some(expected_foreground),
+        secondary_revision.load(Ordering::Acquire) == revision && current()) { return false; }
+    match activate_native_window(window) {
+        Ok(()) => true,
+        Err(error) => { tracing::debug!(%error, "retained GPUI window activation was refused"); false }
     }
 }
 
@@ -12177,7 +12215,7 @@ fn activate_for_secondary_window(
 }
 
 #[cfg(not(windows))]
-fn activate_for_secondary_window_if(_: &AtomicU64, _: u64, _: NativeWindow, _: Option<ForegroundIdentity>, _: &dyn Fn() -> bool) {}
+fn activate_for_secondary_window_if(_: &AtomicU64, _: u64, _: NativeWindow, _: Option<ForegroundIdentity>, _: &dyn Fn() -> bool) -> bool { false }
 
 pub(crate) fn run_foundation_window(
     hotkey: Hotkey,
@@ -12337,6 +12375,7 @@ pub(crate) fn run_foundation_window(
                     root.snippets_search.wake.close();
                     if let Some(token) = root.settings_search.as_ref().and_then(|view| view.read(cx).pending_token()) { token.request_cancel(); }
                     root.retire_search_jump_mode();
+                    root.drain_file_search_geometry(cx, true);
                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.retire_json_workspace(cx);
                     root.drain_regex_native_geometry(cx, true);
@@ -12454,6 +12493,7 @@ pub(crate) fn run_foundation_window(
                 indexed_applications: indexed_applications::Owner::default(),
                 window_search: window_search::Owner::default(),
                 file_search_probe: file_search::ProbeOwner::default(),
+                file_search_popup_intent: Arc::new(AtomicBool::new(false)),
                 external_launch: external_launch::ExternalLaunch::default(),
                 external_launch_preferences: external_launch_preferences_for_root.clone(),
                 action_sheet: None,
@@ -12572,6 +12612,8 @@ pub(crate) fn run_foundation_window(
                 hash_clipboard_operation: None,
                 hash_clipboard_operation_counter: 0,
                 file_search: None,
+                file_search_popup: None,
+                file_search_retiring: Vec::new(),
                 #[cfg(windows)]
                 downloads_triage: None,
                 #[cfg(windows)]
@@ -12962,14 +13004,14 @@ pub(crate) fn run_foundation_window(
                 match blocker {
                     None => {
                         let deferred = root_for_window_close.update(app, |root, cx| {
-                            if root.xml_view.is_some() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                            if root.xml_view.is_some() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                         }).unwrap_or(true);
                         if deferred { return false; }
                         let _ = root_for_window_close.update(app, |root, cx| {
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.retire_json_workspace(cx);
                             if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
-                            root.window_search.retire(); root.file_search_probe.retire();
+                            root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });
                         return true;
@@ -12996,14 +13038,14 @@ pub(crate) fn run_foundation_window(
                             .unwrap_or(false);
                         if close_now {
                             let deferred = root_for_window_close.update(app, |root, cx| {
-                                if root.xml_view.is_some() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                                if root.xml_view.is_some() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                             }).unwrap_or(true);
                             if deferred { return false; }
                             let _ = root_for_window_close.update(app, |root, cx| {
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.retire_json_workspace(cx);
                             if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
-                            root.window_search.retire(); root.file_search_probe.retire();
+                            root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });
                         }
@@ -13179,6 +13221,7 @@ pub(crate) fn run_foundation_window(
                         root.drain_json_native_geometry(cx, false);
                         root.drain_xml_native_geometry(cx, false);
                         root.drain_regex_native_geometry(cx, false);
+                        root.drain_file_search_geometry(cx, false);
                         root.drain_clipboard_native_geometry(cx, false);
                         root.drain_clipboard_modify_geometry(cx, false);
                         root.hash_session
@@ -13570,13 +13613,17 @@ pub(crate) fn run_foundation_window(
                                     None
                                 };
                                 let utility = dock_reveal.as_ref().and_then(|(_, _, mount)| mount.as_ref()).filter(|(mount, kind)| root.utility_destination_current(*kind, mount, window.window_handle().window_id(), cx));
+                                let file_search_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::FileSearch).and_then(|_| root.file_search.as_ref()).cloned();
                                 let json_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Json).and_then(|_| root.json_view.as_ref()).cloned();
                                 let xml_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Xml).and_then(|_| root.xml_view.as_ref()).cloned();
                                 let regex_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Regex).and_then(|_| root.regex_view.as_ref()).cloned();
                                 let clipboard_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::ClipboardHistory).and_then(|_| root.clipboard_history.as_ref()).cloned();
                                 let clipboard_modify_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::ClipboardModify).and_then(|_| root.clipboard_modify_view.as_ref()).cloned();
-                                search_focus_selected = hash_view.is_none() && json_view.is_none() && xml_view.is_none() && regex_view.is_none() && clipboard_view.is_none() && clipboard_modify_view.is_none();
-                                if let Some(view) = clipboard_modify_view {
+                                search_focus_selected = file_search_view.is_none() && hash_view.is_none() && json_view.is_none() && xml_view.is_none() && regex_view.is_none() && clipboard_view.is_none() && clipboard_modify_view.is_none();
+                                if let Some(view) = file_search_view {
+                                    root.root_scroll.scroll_to_top_of_item(root.file_search_scroll_item());
+                                    utility_focus_delivered = view.update(cx, |tool, cx| { tool.focus_host(window, cx); tool.host_focus_is_exact(window, cx) });
+                                } else if let Some(view) = clipboard_modify_view {
                                     let host = window.window_handle().window_id();
                                     let history = root.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(host, false));
                                     root.root_scroll.scroll_to_top_of_item(root.clipboard_scroll_item(host, cx) + usize::from(history));
@@ -13709,14 +13756,14 @@ pub(crate) fn run_foundation_window(
                                     root.retire_context_favorite();
                                     root.retire_search_jump_mode();
                                     root.cancel_docked_hash_preview();
-                                    root.window_search.retire(); root.file_search_probe.retire();
+                                    root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
                                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.retire_preview(cx)); }
                                 },
                             );
                         } else {
                             let _ = root_view.update(&mut *cx, |root, cx| {
                                 root.window_search.retire();
-                                root.file_search_probe.retire();
+                                root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
                                 if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.retire_preview(cx)); }
                             });
                         }
