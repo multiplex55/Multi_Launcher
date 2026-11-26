@@ -173,7 +173,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add GPUI Folder Size table and treemap controls on the compilation-checked shared report, then run the grouped report tests. Matched Settings, G01, G07, G10, G13 and G14 replay, automatic restore of minimized inherited Hash, mixed DPI and known-duration F2 remain open. [Shared report checkpoint](CHECKPOINTS.md#g10-shared-folder-size-report-extraction) |
+| Current next action | Add remembered Folder Size Dock and Pop Out and checked File Search directory prefill. The shared report, egui and GPUI table and treemap have [grouped evidence](CHECKPOINTS.md#g10-folder-size-table-and-treemap). Matched Settings, G01, G07, G10, G13 and G14 replay, automatic restore of minimized inherited Hash, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

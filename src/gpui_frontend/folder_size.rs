@@ -1,4 +1,5 @@
 //! Retained Folder Size scanner backed by the shared session.
+mod report;
 use super::*;
 use multi_launcher::batch_rename::ExplicitDirectoryRoot;
 use multi_launcher::folder_size::{FolderSizeSession, FolderSizeSessionStatus};
@@ -44,7 +45,8 @@ pub(super) struct FolderSizeView {
     session: FolderSizeSession,
     wake: Arc<HashWakeSignal>,
     root_choice: Option<ExplicitDirectoryRoot>,
-    report_root: Option<PathBuf>,
+    report_root: Option<ExplicitDirectoryRoot>,
+    report_ui: report::ReportUi,
     report_recursive: bool,
     recursive: bool,
     picker: bool,
@@ -69,13 +71,14 @@ impl FolderSizeView {
         cx.spawn(async move |_, cx| {
             while receiver.wait().await {
                 if weak.update(cx, |view, cx| {
+                    view.sync_report();
                     if !view.session.view().is_busy() { view.scan_permit = None; }
                     cx.notify();
                 }).is_err() { break; }
             }
         }).detach();
         Self { open: true, root, host: window.window_handle(), native, visibility, admission, owner, mount,
-            session, wake, root_choice: None, report_root: None, report_recursive: true, recursive: true, picker: false, picker_attempt: 0,
+            session, wake, root_choice: None, report_root: None, report_ui: report::ReportUi::default(), report_recursive: true, recursive: true, picker: false, picker_attempt: 0,
             scan_permit: None, focus: cx.focus_handle(), choose_focus: cx.focus_handle(), message: None }
     }
     pub(super) fn busy(&self) -> bool { self.picker || self.session.view().is_busy() }
@@ -151,7 +154,7 @@ impl FolderSizeView {
                     match ExplicitDirectoryRoot::new(path) {
                         Ok(root) => {
                             if view.root_choice.as_ref().map(|old| old.as_path()) != Some(root.as_path()) {
-                                let _ = view.session.cancel(); view.report_root = None;
+                                let _ = view.session.cancel(); view.report_root = None; view.sync_report();
                             }
                             view.root_choice = Some(root); view.message = None;
                         }
@@ -169,19 +172,25 @@ impl FolderSizeView {
                 generation, self.session.view().generation()) { return; }
         let permit = if self.scan_permit.is_none() { self.admission.admit() } else { None };
         if self.scan_permit.is_none() && permit.is_none() { return; }
-        self.report_root = Some(draft.root.as_path().to_path_buf()); self.report_recursive = draft.recursive;
+        self.report_root = Some(draft.root.clone()); self.report_recursive = draft.recursive;
         match self.session.refresh(draft.root, draft.recursive) {
             Ok(_) => { if self.scan_permit.is_none() { self.scan_permit = permit; } self.message = None; }
             Err(error) => { self.report_root = None; self.message = Some(format!("Could not start scan: {error}")); }
         }
+        self.sync_report();
         cx.notify();
+    }
+    fn sync_report(&mut self) {
+        self.report_ui.report.sync(&self.session.view(), self.report_root.as_ref(), self.root_choice.as_ref());
+        self.report_ui.report.sync_visible_rows();
     }
 }
 impl Drop for FolderSizeView { fn drop(&mut self) { self.session.close(); self.wake.close(); } }
 impl Render for FolderSizeView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_report();
         let snapshot = self.session.view();
-        let show_report = self.root_choice.as_ref().is_some_and(|root| self.report_root.as_deref() == Some(root.as_path()));
+        let show_report = self.root_choice.as_ref().is_some_and(|root| self.report_root.as_ref() == Some(root));
         let mut panel = div().id("folder-size-pane").key_context("FolderSizePane").track_focus(&self.focus)
             .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Escape, window, cx| {
                 if view.owns_focus(window, cx) {
@@ -229,6 +238,7 @@ impl Render for FolderSizeView {
                     summary.reparse_entries_excluded() + summary.cloud_placeholders_excluded(), summary.issue_count())));
             }
             if let Some(error) = snapshot.error() { panel = panel.child(Label::new(format!("Scan failed: {error}"))); }
+            panel = panel.child(report::render(self, window, cx));
         } else if snapshot.status() == FolderSizeSessionStatus::Idle { panel = panel.child(Label::new("Choose a folder, then select Scan.")); }
         panel
     }

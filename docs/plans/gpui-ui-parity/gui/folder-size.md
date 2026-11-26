@@ -14,4 +14,4 @@ Use `folder_size_dialog_open_does_not_scan_and_retained_choose_starts_only_on_sc
 
 ## GPUI scan pane
 
-Enter `foldersize`, choose a directory and select Scan. Include subfolders defaults on and applies to the next request. Refresh uses the displayed directory and scope. Cancel stops the current generation and the pane reports its progress or terminal summary from the shared session. The report table and treemap, remembered host, File Search prefill and matched Windows replay remain open. [Focused evidence](../CHECKPOINTS.md#g10-folder-size-scan-pane)
+Enter `foldersize`, choose a directory and select Scan. Include subfolders defaults on and applies to the next request. Refresh uses the displayed directory and scope. Cancel stops the current generation and the pane reports its progress or terminal summary from the shared session. Table, Treemap and Both share selection and directory navigation without restarting the scan. Checked row effects, remembered host, File Search prefill and matched Windows replay remain open. [Scan pane](../CHECKPOINTS.md#g10-folder-size-scan-pane) · [Report evidence](../CHECKPOINTS.md#g10-folder-size-table-and-treemap)
