@@ -103,6 +103,7 @@ impl multi_launcher::plugin::Plugin for ClipboardBare {
 struct SnippetsBare {
     owner: std::sync::Mutex<Option<Arc<multi_launcher::plugins::snippets::SnippetSearchOwner>>>,
     projected: std::sync::Mutex<Option<(String, multi_launcher::plugins::snippets::SnippetSearchSnapshot)>>,
+    plain_aliases: std::sync::Mutex<Option<(Arc<Vec<multi_launcher::plugins::snippets::SnippetEntry>>, HashSet<String>)>>,
 }
 impl multi_launcher::plugin::Plugin for SnippetsBare {
     fn name(&self) -> &str { "snippets" }
@@ -114,7 +115,18 @@ impl multi_launcher::plugin::Plugin for SnippetsBare {
         let Some(owner) = self.owner.lock().ok().and_then(|owner| owner.clone()) else { return Vec::new(); };
         let snapshot = owner.snapshot();
         if !snapshot.healthy { return Vec::new(); }
-        let rows = projected_snippet_edits(query, &snapshot.entries);
+        let actions = multi_launcher::plugins::snippets::search_with_entries(query, &snapshot.entries);
+        let has_run = actions.iter().any(|action| matches!(multi_launcher::commands::parse_action(action), Ok(multi_launcher::commands::Command::Storage(multi_launcher::commands::StorageCommand::SnippetRun(_)))));
+        let plain = if !has_run { HashSet::new() } else if let Ok(mut cache) = self.plain_aliases.lock() {
+            if cache.as_ref().is_none_or(|(entries, _)| !Arc::ptr_eq(entries, &snapshot.entries)) {
+                let aliases = snapshot.entries.iter().filter_map(|entry| {
+                    snippet_without_prompt(entry).then(|| entry.alias.clone())
+                }).collect();
+                *cache = Some((snapshot.entries.clone(), aliases));
+            }
+            cache.as_ref().map(|(_, aliases)| aliases.clone()).unwrap_or_default()
+        } else { HashSet::new() };
+        let rows = filter_projected_snippet_actions(actions, &snapshot.entries, Some(&plain));
         if let Ok(mut projected) = self.projected.lock() { *projected = Some((query.to_owned(), snapshot)); }
         rows
     }
@@ -123,14 +135,27 @@ impl multi_launcher::plugin::Plugin for SnippetsBare {
     }
 }
 
-fn projected_snippet_edits(query: &str, entries: &[multi_launcher::plugins::snippets::SnippetEntry]) -> Vec<Action> {
+fn snippet_without_prompt(entry: &multi_launcher::plugins::snippets::SnippetEntry) -> bool {
+    matches!(multi_launcher::snippet_prompt::prepare(entry),
+        Ok(multi_launcher::snippet_prompt::PreparedInvocation::Plain(_)
+            | multi_launcher::snippet_prompt::PreparedInvocation::Automatic(_)
+            | multi_launcher::snippet_prompt::PreparedInvocation::Prompted(_)))
+}
+
+fn projected_snippet_actions(query: &str, entries: &[multi_launcher::plugins::snippets::SnippetEntry], plain: Option<&HashSet<String>>) -> Vec<Action> {
+    filter_projected_snippet_actions(multi_launcher::plugins::snippets::search_with_entries(query, entries), entries, plain)
+}
+
+fn filter_projected_snippet_actions(actions: Vec<Action>, entries: &[multi_launcher::plugins::snippets::SnippetEntry], plain: Option<&HashSet<String>>) -> Vec<Action> {
     let mut counts = std::collections::HashMap::<&str, usize>::new();
     for entry in entries { *counts.entry(&entry.alias).or_default() += 1; }
-    multi_launcher::plugins::snippets::search_with_entries(query, entries)
-        .into_iter()
+    actions.into_iter()
         .filter(|action| match multi_launcher::commands::parse_action(action) {
             Ok(multi_launcher::commands::Command::Storage(multi_launcher::commands::StorageCommand::SnippetEdit(alias))) => {
                 counts.get(alias.as_str()) == Some(&1)
+            }
+            Ok(multi_launcher::commands::Command::Storage(multi_launcher::commands::StorageCommand::SnippetRun(alias))) => {
+                counts.get(alias.as_str()) == Some(&1) && plain.is_none_or(|plain| plain.contains(&alias))
             }
             _ => false,
         })
@@ -144,7 +169,7 @@ impl multi_launcher::plugin::Plugin for SnippetsProjection<'_> {
     fn capabilities(&self) -> &[&str] { &["search"] }
     fn query_prefixes(&self) -> &[&str] { &["cs"] }
     fn search(&self, query: &str) -> Vec<Action> {
-        projected_snippet_edits(query, self.0)
+        projected_snippet_actions(query, self.0, None)
     }
 }
 
@@ -486,6 +511,30 @@ mod tests {
             SnippetEntry { alias: "same".into(), text: "second".into(), hide_contents: false, prompt_for_fields: false, fields: Vec::new(), tags: vec!["other".into()] },
         ];
         assert!(super::snippets_named_rows("cs edit tag:work", &rows, None, None).is_empty());
+    }
+    #[test]
+    fn snippet_run_admission_includes_all_supported_modes() {
+        use multi_launcher::plugins::snippets::SnippetEntry;
+        let entry = |text: &str, prompted| SnippetEntry {
+            alias: "a".into(), text: text.into(), hide_contents: false,
+            prompt_for_fields: prompted, fields: Vec::new(), tags: Vec::new(),
+        };
+        assert!(super::snippet_without_prompt(&entry("plain", false)));
+        assert!(super::snippet_without_prompt(&entry("{{sys.clipboard}}", false)));
+        assert!(super::snippet_without_prompt(&entry("{{name}}", true)));
+    }
+
+    #[test]
+    fn snippets_plain_projection_admits_only_unique_safe_run_actions() {
+        use multi_launcher::plugins::snippets::SnippetEntry;
+        let rows = vec![SnippetEntry { alias: "alpha".into(), text: "text".into(), hide_contents: false,
+            prompt_for_fields: false, fields: Vec::new(), tags: vec!["work".into()] }];
+        let allowed = HashSet::from(["alpha".to_owned()]);
+        let projected = super::projected_snippet_actions("cs list tag:work", &rows, Some(&allowed));
+        assert_eq!(projected.len(), 1);
+        assert!(matches!(multi_launcher::commands::parse_action(&projected[0]), Ok(multi_launcher::commands::Command::Storage(multi_launcher::commands::StorageCommand::SnippetRun(_)))));
+        assert!(super::projected_snippet_actions("cs list tag:work", &rows, Some(&HashSet::new())).is_empty());
+        assert!(super::projected_snippet_actions("cs edit alpha replacement", &rows, Some(&allowed)).is_empty());
     }
 
     #[test]

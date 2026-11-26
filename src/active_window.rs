@@ -7,6 +7,13 @@ pub struct ExternalForegroundWindow {
     pub(crate) title: Option<String>,
 }
 
+impl ExternalForegroundWindow {
+    /// Compare the captured observation with a native window receipt.
+    pub fn matches_identity(&self, hwnd: usize, process_id: u32, thread_id: u32) -> bool {
+        self.hwnd as usize == hwnd && self.process_id == process_id && self.thread_id == thread_id
+    }
+}
+
 pub enum ForegroundWindowObservation {
     External(ExternalForegroundWindow),
     Launcher,
@@ -144,6 +151,15 @@ impl ActiveWindowBackend for WindowsActiveWindowBackend {
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn captured_origin_requires_full_native_identity() {
+        let origin = ExternalForegroundWindow { hwnd: 7, process_id: 11, thread_id: 13, title: None };
+        assert!(origin.matches_identity(7, 11, 13));
+        assert!(!origin.matches_identity(8, 11, 13));
+        assert!(!origin.matches_identity(7, 12, 13));
+        assert!(!origin.matches_identity(7, 11, 14));
+    }
 
     struct FakeBackend {
         foreground: Option<usize>,

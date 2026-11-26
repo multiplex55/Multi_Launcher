@@ -274,6 +274,7 @@ impl RootWindow {
         self.retire_search_jump_mode();
         let root = cx.entity().downgrade();
         let first = Cell::new(true);
+        self.external_launch.retire_snippet_effect();
         window.open_dialog(cx, move |dialog, window, cx| {
             if first.replace(false) {
                 filter.focus_handle(cx).focus(window, cx);

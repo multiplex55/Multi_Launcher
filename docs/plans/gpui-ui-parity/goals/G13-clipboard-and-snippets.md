@@ -1,6 +1,6 @@
 # G13 — Clipboard history, Clipboard Modify, snippets, and temporary files
 
-**Status:** In progress. **Owner:** G13 implementer with clipboard/runtime/persistence owners. Clipboard History reaches checked Save, Copy, Remove and retained Dock and Pop Out. Clipboard Modify has all six sections across the remembered hosts, checked clipboard writes, typed Undo, canonical catalog management and Direct Execute from Search. Snippets has the retained list, checked Add and Edit, exact Remove review and cold named Edit. The shared prompt contract is tested. Standalone GPUI Fill and Run follow. Clipboard settings, remaining host variants and matched replay remain open. [Current checkpoint](../CHECKPOINTS.md#g13-shared-snippet-prompt-contract)
+**Status:** In progress. **Owner:** G13 implementer with clipboard/runtime/persistence owners. Clipboard History reaches checked Save, Copy, Remove and retained Dock and Pop Out. Clipboard Modify has all six sections across the remembered hosts, checked clipboard writes, typed Undo, canonical catalog management and Direct Execute from Search. Snippets has the retained list, checked Add and Edit, exact Remove review, cold named Edit and standalone checked Run and Fill. Editor field authoring and Preview return follow. Clipboard settings, remaining hosts and matched replay remain open. [Current checkpoint](../CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)
 
 ## Objective and dependencies
 

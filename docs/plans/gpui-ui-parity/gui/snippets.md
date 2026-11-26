@@ -21,4 +21,4 @@ Add opens the same editor with a blank draft. Its Save appends to the exact capt
 
 Named `cs edit` uses a watched snapshot of the canonical file. Stock action and tag filters select the candidates. Exact duplicate aliases remain editable by occurrence through Browse. Before opening a named draft, a worker checks the whole current file and the exact unique alias, then returns to the current Search, root and foreground owner. [Named Edit checkpoint](../CHECKPOINTS.md#g13-canonical-snippets-search-and-named-edit)
 
-Matched native replay, Run, field authoring, Preview, remembered presentation and scoped Jump remain open. [Retained editor checkpoint](../CHECKPOINTS.md#g13-retained-snippets-editor)
+Unique alias-only Run reaches checked Copy or standalone Fill through the same canonical Search snapshot. Matched native replay, field authoring, Preview, remembered presentation and scoped Jump remain open. [Standalone Fill checkpoint](../CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)

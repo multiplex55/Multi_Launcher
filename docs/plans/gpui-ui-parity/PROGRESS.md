@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Snippet Prompt has a shared preparation, context, Preview and checked Copy contract for the next GPUI consumers. All 22 focused library tests passed, including existing egui and Paste Sequence behavior. The next G13 increment wires standalone Fill and Run into the launcher. [Shared prompt checkpoint](CHECKPOINTS.md#g13-shared-snippet-prompt-contract)
+Stock Snippet Run reaches checked literal and automatic Copy and standalone Fill with live result and exact retries. All 16 focused launcher tests and three reused stock cases passed. Native Windows replay remains open. The next G13 increment adds authored fields and editor Preview. [Standalone Fill checkpoint](CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)
+
+Snippet Prompt has a shared preparation, context, Preview and checked Copy contract. All 22 focused library tests passed, including existing egui and Paste Sequence behavior. [Shared prompt checkpoint](CHECKPOINTS.md#g13-shared-snippet-prompt-contract)
 
 Cold named Snippets Edit opens the exact saved row through a canonical watched Search snapshot. All 15 focused tests passed. The same build supplied the bounded performance measurements. Matched Windows replay remains open. [Named Edit and build receipt](CHECKPOINTS.md#g13-canonical-snippets-search-and-named-edit)
 
@@ -147,7 +149,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 196 Specified, 22 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 195 Specified, 23 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |

@@ -33,6 +33,7 @@ mod regex_syntax;
 mod regex_jump;
 mod clipboard_history;
 mod snippets;
+mod snippet_fill;
 mod clipboard_modify_view;
 mod clipboard_modify_startup;
 mod regex_history;
@@ -2686,6 +2687,8 @@ struct RootWindow {
     regex_view: Option<Entity<regex_tester::RegexWorkspace>>,
     clipboard_history: Option<Entity<clipboard_history::ClipboardHistory>>,
     snippets_view: Option<Entity<snippets::SnippetsView>>,
+    snippet_fill: Option<Entity<snippet_fill::SnippetFill>>,
+    snippet_fill_escape_latched: bool,
     snippets_search: snippets::SearchState,
     clipboard_modify_view: Option<Entity<clipboard_modify_view::ClipboardModifyView>>,
     clipboard_modify_startup: clipboard_modify_startup::Owner,
@@ -4670,6 +4673,7 @@ struct RestartDrafts {
     clipboard_history: Option<clipboard_history::RestartDraft>,
     clipboard_modify: Option<clipboard_modify_view::RestartDraft>,
     snippets: Option<snippets::RestartDraft>,
+    snippet_fill: Option<Vec<String>>,
     hash: HashDraft,
     hash_window_open: bool,
     settings: SettingsRestartDraft,
@@ -4859,6 +4863,7 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.clipboard_history.is_some() { names.push("Clipboard History edit or review"); }
     if drafts.clipboard_modify.is_some() { names.push("Clipboard Modify draft"); }
     if drafts.snippets.is_some() { names.push("Snippets draft"); }
+    if drafts.snippet_fill.is_some() { names.push("Snippet prompt values"); }
     if !drafts.hash.text.is_empty() {
         names.push("Hash Generator text");
     }
@@ -4972,7 +4977,10 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if open { self.retire_context_favorite(); }
+        if open {
+            self.external_launch.retire_snippet_effect();
+            self.retire_context_favorite();
+        }
         let was_menu_open = self.file_menu_open || self.settings_menu_open || self.help_menu_open;
         match menu {
             RootMenuKind::File => self.file_menu_open = open,
@@ -5924,6 +5932,7 @@ impl RootWindow {
                 clipboard_history: self.clipboard_history.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 clipboard_modify: self.clipboard_modify_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 snippets: self.snippets_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
+                snippet_fill: self.snippet_fill.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 hash: hash_draft,
                 hash_window_open,
                 settings: self.settings_editor.restart_draft(),
@@ -5939,6 +5948,7 @@ impl RootWindow {
     }
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.external_launch.retire_snippet_effect();
         self.retire_action_sheet_now(window, cx, true);
         if self.action_sheet.is_some() { return false; }
         self.retire_context_favorite();
@@ -7760,6 +7770,7 @@ impl RootWindow {
         if !presentation.visible || action != receipt.action {
             return;
         }
+        self.external_launch.retire_snippet_effect();
         self.context_favorite_popup = Some(ContextFavoritePopup {
             receipt: receipt.clone(),
             position,
@@ -8148,6 +8159,26 @@ impl RootWindow {
                 && snippets::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
             {
                 self.open_snippets(window, cx);
+            }
+            return;
+        }
+        if result.action.action.starts_with("snippet:run:") {
+            if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "snippets") {
+                if let Some((raw, effective, generation, snapshot)) = &self.snippets_search.published {
+                    if raw == &query && *generation == self.launcher_results.generation
+                        && multi_launcher::common::query::split_action_filters(&query).0 == *effective
+                        && snippets::named_row_is_current(&query, &result.action, snapshot, self.search_catalog.providers.snippets_owner().as_deref(), self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                        && search_providers::snippets_named_rows(&query, &snapshot.entries, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()).contains(&result.action)
+                    {
+                        if let Ok(Command::Storage(multi_launcher::commands::StorageCommand::SnippetRun(alias))) = parse_action(&result.action) {
+                            if let Some(index) = snippets::exact_named_index(&snapshot.entries, &snapshot.entries, &alias) {
+                                let entry = snapshot.entries[index].clone();
+                                let snapshot = snapshot.clone();
+                                self.start_plain_snippet_run(result.action, entry, snapshot, query, source, window, cx);
+                            }
+                        }
+                    }
+                }
             }
             return;
         }
@@ -10814,6 +10845,12 @@ impl Render for RootWindow {
             }));
         let mut root_shell = div()
             .id("multi-launcher-root")
+            .capture_key_up(cx.listener(|root, event: &KeyUpEvent, _, _| {
+                if event.keystroke.key == "escape" { root.snippet_fill_escape_latched = false; }
+            }))
+            .capture_any_mouse_down(cx.listener(|root, _, _, _| {
+                root.external_launch.retire_snippet_effect();
+            }))
             .role(Role::Group)
             .flex()
             .flex_col()
@@ -11073,6 +11110,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.snippets_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.snippet_fill.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -11998,6 +12038,15 @@ fn capture_foreground_identity() -> Option<ForegroundIdentity> {
     None
 }
 
+// Capture the title only while the same external native window remains foreground.
+fn capture_snippet_origin(expected: Option<ForegroundIdentity>) -> Option<multi_launcher::active_window::ExternalForegroundWindow> {
+    let expected = expected?;
+    if current_foreground_identity() != Some(expected) { return None; }
+    let origin = multi_launcher::active_window::capture_external_foreground_window()?;
+    (origin.matches_identity(expected.hwnd, expected.process_id, expected.thread_id)
+        && current_foreground_identity() == Some(expected)).then_some(origin)
+}
+
 #[cfg(windows)]
 fn native_window_is_valid(window: NativeWindow) -> bool {
     use windows::Win32::{
@@ -12087,6 +12136,7 @@ struct RootVisibility {
     active: Arc<AtomicBool>,
     retired: Arc<AtomicBool>,
     window_search_update: Arc<AtomicBool>,
+    snippet_origin: Arc<Mutex<Option<(u64, multi_launcher::active_window::ExternalForegroundWindow)>>>,
     #[cfg(windows)]
     request_sender: Arc<Mutex<Option<Sender<()>>>>,
     #[cfg(windows)]
@@ -12187,6 +12237,7 @@ impl RootVisibility {
             active: Arc::new(AtomicBool::new(false)),
             retired: Arc::new(AtomicBool::new(false)),
             window_search_update: Arc::new(AtomicBool::new(false)),
+            snippet_origin: Arc::new(Mutex::new(None)),
             #[cfg(windows)]
             request_sender: Arc::new(Mutex::new(None)),
             #[cfg(windows)]
@@ -12425,6 +12476,11 @@ impl RootVisibility {
             && self.visible.load(Ordering::Acquire) == visible
         {
             self.visible.store(!visible, Ordering::Release);
+            if !visible {
+                if let Ok(mut saved) = self.snippet_origin.lock() {
+                    if let Some((issued, _)) = saved.as_mut() { *issued = revision; }
+                }
+            }
         }
     }
 }
@@ -12436,26 +12492,29 @@ fn activate_for_root_request(
     desired_visible: bool,
     target: NativeWindow,
     expected_foreground: Option<ForegroundIdentity>,
-) {
+) -> bool {
     if !visibility.is_current(revision, desired_visible) || !native_window_is_valid(target) {
-        return;
+        return false;
     }
     let foreground = current_foreground_identity();
     if foreground == Some(target.identity) {
-        return;
+        return false;
     }
     let Some(expected_foreground) = expected_foreground else {
-        return;
+        return false;
     };
     if foreground != Some(expected_foreground) {
-        return;
+        return false;
     }
     if !visibility.is_current(revision, desired_visible) {
-        return;
+        return false;
     }
     if let Err(error) = activate_native_window(target) {
         tracing::debug!(%error, "GPUI foreground activation was refused");
+        return false;
     }
+    visibility.is_current(revision, desired_visible)
+        && current_foreground_identity() == Some(target.identity)
 }
 
 #[cfg(windows)]
@@ -12627,6 +12686,7 @@ pub(crate) fn run_foundation_window(
     let restart_failure = Rc::new(RefCell::new(None));
     let restart_failure_after_run = Rc::clone(&restart_failure);
     let initial_return_target = capture_foreground_identity();
+    let initial_snippet_origin = capture_snippet_origin(initial_return_target);
     let (activity_center, hash_session) = new_activity_hash_session();
     let hash_session_for_quit = Arc::clone(&hash_session);
     let hash_session_for_root = Arc::clone(&hash_session);
@@ -12900,6 +12960,8 @@ pub(crate) fn run_foundation_window(
                 regex_view: None,
                 clipboard_history: None,
                 snippets_view: None,
+                snippet_fill: None,
+                snippet_fill_escape_latched: false,
                 snippets_search: snippets::SearchState::default(),
                 clipboard_modify_view: None,
                 clipboard_modify_startup: clipboard_modify_startup::Owner::default(),
@@ -12978,6 +13040,23 @@ pub(crate) fn run_foundation_window(
                         let Some(receipt) = receipt else {
                             return;
                         };
+                        if receipt.virtual_key == 0x1b {
+                            let suppress = root.update(cx, |root, _| {
+                                if root.root_window.is_none_or(|host| host.window_id() != window.window_handle().window_id())
+                                    || root.native_window.is_none_or(|native| native.identity.hwnd != receipt.hwnd) { return false; }
+                                if !receipt.held { root.snippet_fill_escape_latched = false; }
+                                root.snippet_fill_escape_latched && receipt.held
+                            }).unwrap_or(false);
+                            if suppress { window.prevent_default(); cx.stop_propagation(); return; }
+                        }
+                        if !receipt.held || receipt.virtual_key == 0x09 {
+                            let _ = root.update(cx, |root, _| {
+                                if root.native_window.is_some_and(|native| native.identity.hwnd == receipt.hwnd)
+                                    && root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id()) {
+                                    root.external_launch.retire_snippet_effect();
+                                }
+                            });
+                        }
                         if scoped_jump::dispatch(&root, &event.context_stack, receipt, window, cx) {
                             window.prevent_default();
                             cx.stop_propagation();
@@ -13232,6 +13311,7 @@ pub(crate) fn run_foundation_window(
                             }); });
                         }
                     } else {
+                        root.external_launch.retire_snippet_effect();
                         if let Some(view) = root.json_view.clone() {
                             if !view.read(cx).popout { view.update(cx, |view, cx| view.retire_jump(cx)); }
                         }
@@ -13577,6 +13657,11 @@ pub(crate) fn run_foundation_window(
                 cx.quit();
                 return;
             }
+            if let Ok(mut origin) = visibility.snippet_origin.lock() {
+                *origin = if current_foreground_identity() == Some(native_window.identity) {
+                    initial_snippet_origin.map(|origin| (visibility.request_revision.load(Ordering::Acquire), origin))
+                } else { None };
+            }
             root_view.update(cx, |root, cx| { root.start_clipboard_modify_catalog(cx); root.start_snippets_search(cx); });
 
             let root_window = root_window;
@@ -13748,14 +13833,15 @@ pub(crate) fn run_foundation_window(
                         } else {
                             continue;
                         };
-                    let foreground = if let Some((gesture, _, _)) = &dock_reveal {
-                        gesture.foreground_authorized.then_some(gesture.source.identity)
+                    let (foreground, snippet_origin) = if let Some((gesture, _, _)) = &dock_reveal {
+                        (gesture.foreground_authorized.then_some(gesture.source.identity), None)
                     } else if desired_visible {
-                        cx.background_executor()
-                            .spawn(async { capture_foreground_identity() })
-                            .await
+                        cx.background_executor().spawn(async {
+                            let identity = capture_foreground_identity();
+                            (identity, capture_snippet_origin(identity))
+                        }).await
                     } else {
-                        None
+                        (None, None)
                     };
                     if !visibility.is_current(revision, desired_visible) {
                         continue;
@@ -13931,6 +14017,9 @@ pub(crate) fn run_foundation_window(
                         tracing::error!(%error, "could not change GPUI root window visibility");
                         continue;
                     }
+                    if !desired_visible && visibility.is_current(revision, false) {
+                        if let Ok(mut saved) = visibility.snippet_origin.lock() { *saved = None; }
+                    }
                     if !desired_visible {
                         if let Some((_, closed, _)) = close_hide {
                             return_target = exclude_closed_return_target(return_target, closed);
@@ -13969,6 +14058,7 @@ pub(crate) fn run_foundation_window(
                     } else {
                         None
                     };
+                    let mut root_activation_accepted = false;
                     if let Some((gesture, generation, utility_mount_receipt)) = dock_reveal {
                         let current = visibility.is_current(revision, true)
                             && generation.is_none_or(|generation| dock_mount_generation.load(Ordering::Acquire) == generation)
@@ -13985,6 +14075,8 @@ pub(crate) fn run_foundation_window(
                                 activated = true;
                             }
                         }
+                        root_activation_accepted = activated
+                            && current_foreground_identity() == Some(native_window.identity);
                         let destination_current = utility_mount_receipt.as_ref().is_none_or(|(receipt, kind)| {
                             update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, app| {
                                 root.native_window == Some(native_window)
@@ -14007,7 +14099,7 @@ pub(crate) fn run_foundation_window(
                     } else if let Some(target) = target {
                         let expected_foreground = foreground_after_transition;
                         let visibility = visibility.clone();
-                        cx.background_executor()
+                        root_activation_accepted = cx.background_executor()
                             .spawn(async move {
                                 activate_for_root_request(
                                     &visibility,
@@ -14015,9 +14107,24 @@ pub(crate) fn run_foundation_window(
                                     desired_visible,
                                     target,
                                     expected_foreground,
-                                );
+                                )
                             })
                             .await;
+                    }
+                    if desired_visible && visibility.is_current(revision, true) {
+                        if let Ok(mut saved) = visibility.snippet_origin.lock() {
+                            if was_visible {
+                                if let Some((issued, _)) = saved.as_mut() { *issued = revision; }
+                            } else if root_activation_accepted
+                                && current_foreground_identity() == Some(native_window.identity)
+                            {
+                                    *saved = snippet_origin
+                                        .filter(|_| foreground == foreground_before_transition && return_target == foreground && show_request_is_current)
+                                        .map(|origin| (revision, origin));
+                            } else {
+                                *saved = None;
+                            }
+                        }
                     }
                     if hotkey_toggle
                         && desired_visible

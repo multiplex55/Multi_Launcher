@@ -26,7 +26,7 @@ pub(super) fn named_row_is_current(
     enabled.is_none_or(|enabled| enabled.contains("snippets"))
         && multi_launcher::settings::provider_search_capability_enabled(caps, "snippets")
         && owner.is_some_and(|owner| search_snapshot_current(owner, snapshot))
-        && matches!(parse_action(action), Ok(Command::Storage(multi_launcher::commands::StorageCommand::SnippetEdit(_))))
+        && matches!(parse_action(action), Ok(Command::Storage(multi_launcher::commands::StorageCommand::SnippetEdit(_) | multi_launcher::commands::StorageCommand::SnippetRun(_))))
 }
 
 fn edit_is_current(edit: &EditDraft, generation: u64, rows: &Arc<Vec<SnippetEntry>>, instance: u64) -> bool {
@@ -35,7 +35,7 @@ fn edit_is_current(edit: &EditDraft, generation: u64, rows: &Arc<Vec<SnippetEntr
 fn edited_alias(original: &str, initial_display: &str, current_display: &str) -> String {
     if initial_display == current_display { original.to_owned() } else { current_display.to_owned() }
 }
-fn exact_named_index(rows: &[SnippetEntry], expected: &[SnippetEntry], alias: &str) -> Option<usize> {
+pub(super) fn exact_named_index(rows: &[SnippetEntry], expected: &[SnippetEntry], alias: &str) -> Option<usize> {
     if rows != expected { return None; }
     let mut matches = rows.iter().enumerate().filter(|(_, row)| row.alias == alias);
     let (index, _) = matches.next()?;
@@ -203,6 +203,7 @@ impl SnippetsView {
         cx.notify();
     }
     pub(super) fn busy(&self) -> bool { self.pending || self.removal.is_some() }
+    pub(super) fn blocks_snippet_run(&self) -> bool { self.pending || self.edit.is_some() || self.removal.is_some() }
     fn clear_wait(&self, cx: &mut Context<Self>) {
         if self.busy() { return; }
         let _ = self.root.update(cx, |root, cx| {

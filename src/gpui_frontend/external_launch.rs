@@ -1,7 +1,7 @@
 //! Single-flight ownership for ordinary external launcher actions.
 use std::sync::{Arc, atomic::Ordering};
 
-use gpui_kit::{Context, FocusHandle, Focusable as _, Window, WindowId};
+use gpui_kit::{AppContext as _, Context, FocusHandle, Focusable as _, WeakEntity, Window, WindowId};
 use multi_launcher::actions::Action;
 use multi_launcher::commands::{
     ActivationSource, CommandBus, CommandError, CommandOutcome, ExternalCommand,
@@ -9,7 +9,7 @@ use multi_launcher::commands::{
 };
 use multi_launcher::history::HistoryEntry;
 
-use super::{RootWindow, ForegroundIdentity, current_foreground_identity};
+use super::{RootWindow, ForegroundIdentity, current_foreground_identity, utility_mount};
 use crate::gpui_restart::{EffectPermit, RestartAdmission};
 use gpui_kit::component::{
     WindowExt as _,
@@ -548,6 +548,17 @@ pub(super) enum RunCommand {
         current: Arc<dyn Fn() -> bool + Send + Sync>,
         lease: Arc<std::sync::atomic::AtomicBool>,
     },
+    SnippetRun {
+        entry: multi_launcher::plugins::snippets::SnippetEntry,
+        path: std::path::PathBuf,
+        history_query: String,
+        timestamp: chrono::DateTime<chrono::FixedOffset>,
+        origin: Option<multi_launcher::active_window::ExternalForegroundWindow>,
+        owner: Arc<multi_launcher::plugins::snippets::SnippetSearchOwner>,
+        snapshot: multi_launcher::plugins::snippets::SnippetSearchSnapshot,
+        current: Arc<dyn Fn() -> bool + Send + Sync>,
+        lease: Arc<std::sync::atomic::AtomicBool>,
+    },
     Diagnostic { kind: DiagnosticKind, message: String },
 }
 
@@ -582,6 +593,8 @@ struct Pending {
     window_catalog: bool,
     clipboard_effect: bool,
     clipboard_lease: Option<Arc<std::sync::atomic::AtomicBool>>,
+    focus_guard: Option<gpui_kit::Subscription>,
+    snippet_effect: bool,
 }
 
 #[derive(Default)]
@@ -604,6 +617,11 @@ impl ExternalLaunch {
     pub fn retire_clipboard_effect(&self) {
         if let Some(lease) = self.pending.as_ref().and_then(|pending| pending.clipboard_lease.as_ref()) { lease.store(false, Ordering::Release); }
     }
+    pub fn retire_snippet_effect(&self) {
+        if let Some(pending) = self.pending.as_ref().filter(|pending| pending.snippet_effect) {
+            if let Some(lease) = &pending.clipboard_lease { lease.store(false, Ordering::Release); }
+        }
+    }
 
     pub fn begin(
         &mut self,
@@ -622,8 +640,10 @@ impl ExternalLaunch {
             stamp,
             permit,
             window_catalog: matches!(&request.command, RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_)),
-            clipboard_effect: matches!(&request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. }),
-            clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } => Some(lease.clone()), _ => None },
+            clipboard_effect: matches!(&request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. }),
+            clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
+            focus_guard: None,
+            snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
         });
         Some(ticket)
     }
@@ -854,6 +874,38 @@ fn execute_request(
             );
             clipboard_execute_outcome(result, &request.action.label, *hide)
         }
+        RunCommand::SnippetRun { entry, path, history_query, timestamp, origin, current, .. } => {
+            use multi_launcher::snippet_prompt::{PreparedInvocation, PromptAttribution};
+            let definition = match multi_launcher::snippet_prompt::prepare(entry) {
+                Ok(PreparedInvocation::Plain(definition) | PreparedInvocation::Automatic(definition)) => definition,
+                _ => return Err(CommandError::new("snippet", "The snippet is unavailable. Refresh and try again.").with_gui_failure_policy()),
+            };
+            if !current() {
+                return Err(CommandError::new("snippet", "The snippet request is no longer current.").with_gui_failure_policy());
+            }
+            let context = definition.has_system_variables().then(|| {
+                multi_launcher::snippet_prompt::capture_protected_context(
+                    *timestamp, definition.uses_clipboard(),
+                    definition.uses_window_title(), || multi_launcher::snippet_prompt::select_origin_window(
+                        request.source, true, multi_launcher::active_window::ForegroundWindowObservation::Launcher, origin.clone(),
+                    ),
+                )
+            });
+            if !current() {
+                return Err(CommandError::new("snippet", "The snippet request is no longer current.").with_gui_failure_policy());
+            }
+            let mut session = definition.begin_execution(path, context, PromptAttribution {
+                source: request.source, history_query: history_query.clone(),
+                root_policy: multi_launcher::universal_actions::RootLauncherPolicy::Legacy,
+            }).map_err(|_| CommandError::new("snippet", "The snippet could not be prepared.").with_gui_failure_policy())?;
+            let completion = session.execute_checked(&multi_launcher::clipboard_modify::ArboardClipboardBackend, current.as_ref())
+                .map_err(|_| CommandError::new("snippet", "The snippet could not be copied. Refresh and try again.").with_gui_failure_policy())?;
+            CommandBus.complete_checked_snippet_run(completion, multi_launcher::commands::LauncherRunPreferences {
+                clear_query_after_run: request.settings.clear_query_after_run,
+                hide_after_run: request.settings.hide_after_run,
+                refocus: true,
+            })
+        }
     }
 }
 
@@ -862,7 +914,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } => None,
+            RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -910,6 +962,218 @@ fn switch_receipt_foreground_current(
 struct ExternalNotification;
 
 impl RootWindow {
+    fn settle_snippet_lane(&mut self, cx: &mut Context<Self>) {
+        if self.launcher_search_error.as_deref() == Some(super::clipboard_modify_view::LAUNCHER_EFFECT_WAIT) {
+            self.launcher_search_error = None;
+        }
+        if let Some(view) = &self.clipboard_modify_view {
+            view.update(cx, |view, cx| view.launcher_effect_settled(cx));
+        }
+        if self.restart_status.as_deref() == Some(CLOSE_STATUS) { self.restart_status = None; }
+        if self.window_search.take_deferred_update() { self.root_visibility.notify_window_search(); }
+        cx.notify();
+    }
+
+    fn prepare_snippet_fill(&mut self, action: Action, command: RunCommand, query: String,
+        source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        if self.snippet_fill.as_ref().is_some_and(|view| view.read(cx).open) { return; }
+        let Some(host) = self.root_window else { return; };
+        let stamp = Stamp { root: host.window_id(), generation: self.launcher_results.generation,
+            visibility_revision: self.root_visibility.request_revision.load(Ordering::Acquire),
+            query: query.clone(), focus: window.focused(cx) };
+        let request = Request { action, history_label: None, command, query, source,
+            settings: self.external_launch_preferences.clone() };
+        let Some(ticket) = self.external_launch.begin(&self.restart_admission, stamp, &request) else { return; };
+        if let RunCommand::SnippetRun { lease, .. } = &request.command {
+            if let Some(focus) = window.focused(cx) {
+                let lease = lease.clone();
+                let guard = cx.on_blur(&focus, window, move |_, _, _| lease.store(false, Ordering::Release));
+                if let Some(pending) = self.external_launch.pending.as_mut().filter(|pending| pending.ticket == ticket) {
+                    pending.focus_guard = Some(guard);
+                }
+            } else { lease.store(false, Ordering::Release); }
+        }
+        let worker_request = request.clone();
+        let task = cx.background_executor().spawn(async move {
+            use multi_launcher::snippet_prompt::{PreparedInvocation, PromptAttribution};
+            let RunCommand::SnippetRun { entry, path, history_query, timestamp, origin, current, snapshot, .. } = &worker_request.command else { return None; };
+            if !current() { return None; }
+            let rows = match multi_launcher::plugins::snippets::load_snippets_for_reload(path) {
+                Ok(multi_launcher::common::persistence::LoadState::Loaded(rows)) => rows,
+                _ => return None,
+            };
+            if !super::snippets::exact_named_index(&rows, &snapshot.entries, &entry.alias)
+                .and_then(|index| rows.get(index)).is_some_and(|row| row == entry) || !current() { return None; }
+            let Ok(PreparedInvocation::Prompted(definition)) = multi_launcher::snippet_prompt::prepare(entry) else { return None; };
+            let context = definition.has_system_variables().then(|| {
+                multi_launcher::snippet_prompt::capture_protected_context(*timestamp, definition.uses_clipboard(), definition.uses_window_title(), || {
+                    multi_launcher::snippet_prompt::select_origin_window(worker_request.source, true,
+                        multi_launcher::active_window::ForegroundWindowObservation::Launcher, origin.clone())
+                })
+            });
+            if !current() { return None; }
+            definition.begin_execution(path, context, PromptAttribution { source: worker_request.source,
+                history_query: history_query.clone(), root_policy: multi_launcher::universal_actions::RootLauncherPolicy::Legacy }).ok()
+        });
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let session = task.await;
+            let _ = host.update(cx, |_, window, app| {
+                let _ = root.update(app, |root, cx| {
+                    let result = WorkerResult { outcome: Ok(CommandOutcome::default()), history_error: None, usage_result: None };
+                    let Some(receipt) = root.external_launch.finish(ticket, request, result) else { return; };
+                    root.settle_snippet_lane(cx);
+                    let revision = root.root_visibility.request_revision.load(Ordering::Acquire);
+                    let native = root.native_window;
+                    let current = match &receipt.request.command { RunCommand::SnippetRun { current, .. } => current(), _ => false };
+                    let eligible = current && !root.restart_admission.is_fenced() && window.is_window_active()
+                        && !window.has_active_dialog(cx) && root.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx)
+                        && receipt.stamp.presentation_is_current(host.window_id(), root.launcher_results.generation, revision,
+                            root.query.read(cx).value().as_str(), root.root_visibility.visible.load(Ordering::Acquire))
+                        && native.is_some_and(|native| current_foreground_identity() == Some(native.identity));
+                    if !eligible { return; }
+                    let Some(session) = session else {
+                        root.launcher_search_error = Some("Could not prepare the snippet. Refresh and try again.".into());
+                        cx.notify(); return;
+                    };
+                    let root_weak = cx.entity().downgrade();
+                    let return_focus = receipt.stamp.focus.clone();
+                    let view = cx.new(|cx| super::snippet_fill::SnippetFill::new(session, receipt.request, root_weak, return_focus, window, cx));
+                    view.update(cx, |view, cx| view.focus_initial(window, cx));
+                    root.snippet_fill = Some(view);
+                    let id = window.window_handle().window_id();
+                    let history = root.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
+                    let modify = root.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
+                    let snippets = root.snippets_view.as_ref().is_some_and(|view| view.read(cx).open);
+                    root.root_scroll.scroll_to_top_of_item(root.clipboard_scroll_item(id, cx)
+                        + usize::from(history) + usize::from(modify) + usize::from(snippets));
+                    cx.notify();
+                });
+            });
+        }).detach();
+    }
+
+    pub(super) fn submit_snippet_fill(&mut self, weak: WeakEntity<super::snippet_fill::SnippetFill>,
+        mount: utility_mount::MountReceipt, issued_host: gpui_kit::AnyWindowHandle, issued_native: super::NativeWindow,
+        issued_revision: u64, issued_focus: Option<FocusHandle>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = weak.upgrade() else { return; };
+        let view_state = view.read(cx);
+        let installed = self.snippet_fill.as_ref().is_some_and(|current| current.entity_id() == view.entity_id());
+        let issued_current = super::snippet_fill::issued_mount_is_current(&mount, &view_state.mount, installed, view_state.open, view_state.pending);
+        if self.clipboard_modify_startup.pending
+            || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close())
+            || !issued_current || window.has_active_dialog(cx) || !window.is_window_active()
+            || !self.external_owner_is_current(issued_focus.as_ref(), window, cx) { return; }
+        let Some(host) = self.root_window else { return; };
+        let Some(native) = self.native_window else { return; };
+        if host.window_id() != issued_host.window_id() || host.window_id() != window.window_handle().window_id()
+            || native != issued_native || self.root_visibility.request_revision.load(Ordering::Acquire) != issued_revision
+            || current_foreground_identity() != Some(native.identity) { return; }
+        let mut request = view.read(cx).request.clone();
+        let visibility = self.root_visibility.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire);
+        let admission = self.restart_admission.clone();
+        let lease = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_lease = lease.clone();
+        let worker_mount = mount.clone();
+        let current: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || worker_lease.load(Ordering::Acquire) && worker_mount.is_current()
+            && !admission.is_fenced() && super::json_utility::native_host_current(&visibility, revision, Some(native), false)
+            && current_foreground_identity() == Some(native.identity));
+        if let RunCommand::SnippetRun { current: command_current, lease: command_lease, .. } = &mut request.command {
+            *command_current = current.clone(); *command_lease = lease.clone();
+        } else { return; }
+        request.query = self.query.read(cx).value().to_string();
+        let stamp = Stamp { root: host.window_id(), generation: self.launcher_results.generation,
+            visibility_revision: revision, query: request.query.clone(), focus: window.focused(cx) };
+        let Some(ticket) = self.external_launch.begin(&self.restart_admission, stamp, &request) else { return; };
+        let Some(mut session) = view.update(cx, |view, cx| view.take_session(cx)) else {
+            self.external_launch.pending.take(); return;
+        };
+        if let Some(modify) = &self.clipboard_modify_view {
+            modify.update(cx, |modify, cx| { modify.retire_read_for_effect(); cx.notify(); });
+        }
+        if let Some(focus) = window.focused(cx) {
+            let guard = cx.on_blur(&focus, window, move |_, _, _| lease.store(false, Ordering::Release));
+            if let Some(pending) = self.external_launch.pending.as_mut().filter(|pending| pending.ticket == ticket) { pending.focus_guard = Some(guard); }
+        }
+        let worker_request = request.clone();
+        let task = cx.background_executor().spawn(async move {
+            let copied = session.execute_checked(&multi_launcher::clipboard_modify::ArboardClipboardBackend, current.as_ref());
+            let (outcome, error, written) = match copied {
+                Ok(completion) => (CommandBus.complete_checked_snippet_run(completion, multi_launcher::commands::LauncherRunPreferences {
+                        clear_query_after_run: worker_request.settings.clear_query_after_run,
+                        hide_after_run: worker_request.settings.hide_after_run, refocus: true,
+                    }), None, true),
+                Err(error) => (Err(CommandError::new("snippet", "The snippet could not be copied.").with_gui_failure_policy()), Some(error), false),
+            };
+            let result = bookkeep(outcome, &worker_request,
+                |entry, limit| multi_launcher::history::append_history(entry, limit).map_err(|error| error.to_string()),
+                |key| multi_launcher::usage::record_usage(multi_launcher::usage::USAGE_FILE, key).map_err(|error| error.to_string()));
+            (result, (!written).then_some(session), error)
+        });
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let (result, session, error) = task.await;
+            let _ = host.update(cx, |_, window, app| {
+                let _ = root.update(app, |root, cx| {
+                    let Some(receipt) = root.external_launch.finish(ticket, request, result) else { return; };
+                    root.settle_snippet_lane(cx);
+                    let exact = mount.is_current() && root.snippet_fill.as_ref().is_some_and(|current| current.entity_id() == view.entity_id());
+                    if let Some(session) = session {
+                        if exact { view.update(cx, |view, cx| view.restore(session, error.unwrap_or(multi_launcher::snippet_prompt::PromptError::ClipboardUnavailable), cx)); }
+                    } else {
+                        root.apply_external_receipt(ticket, receipt, window, cx);
+                        if exact { view.update(cx, |view, cx| view.retire(cx)); }
+                        return;
+                    }
+                    cx.notify();
+                });
+            });
+        }).detach();
+    }
+
+    pub(super) fn start_plain_snippet_run(
+        &mut self, action: Action, entry: multi_launcher::plugins::snippets::SnippetEntry,
+        snapshot: multi_launcher::plugins::snippets::SnippetSearchSnapshot,
+        query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if self.clipboard_modify_startup.pending
+            || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close())
+            || self.snippets_view.as_ref().is_some_and(|view| view.read(cx).blocks_snippet_run())
+            || self.snippet_fill.as_ref().is_some_and(|view| view.read(cx).open)
+            || window.has_active_dialog(cx) || !window.is_window_active()
+            || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+        let Some(owner) = self.search_catalog.providers.snippets_owner() else { return; };
+        if !super::snippets::search_snapshot_current(&owner, &snapshot) { return; }
+        let Some(native) = self.native_window else { return; };
+        if self.root_window.is_none_or(|host| host.window_id() != window.window_handle().window_id())
+            || current_foreground_identity() != Some(native.identity) { return; }
+        let visibility = self.root_visibility.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire);
+        let admission = self.restart_admission.clone();
+        let origin = visibility.snippet_origin.lock().ok().and_then(|origin| {
+            origin.as_ref().filter(|(issued, _)| *issued == revision).map(|(_, origin)| origin.clone())
+        });
+        let lease = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_lease = lease.clone();
+        let worker_owner = owner.clone();
+        let worker_snapshot = snapshot.clone();
+        let current = Arc::new(move || worker_lease.load(Ordering::Acquire) && !admission.is_fenced()
+            && super::json_utility::native_host_current(&visibility, revision, Some(native), false)
+            && current_foreground_identity() == Some(native.identity)
+            && super::snippets::search_snapshot_current(&worker_owner, &worker_snapshot));
+        #[cfg(windows)]
+        let path = self.app_data_root.path().join(multi_launcher::plugins::snippets::SNIPPETS_FILE);
+        #[cfg(not(windows))]
+        let path = std::path::PathBuf::from(multi_launcher::plugins::snippets::SNIPPETS_FILE);
+        let prompted = matches!(multi_launcher::snippet_prompt::prepare(&entry), Ok(multi_launcher::snippet_prompt::PreparedInvocation::Prompted(_)));
+        let command = RunCommand::SnippetRun { entry, path, history_query: query.clone(), timestamp: chrono::Local::now().fixed_offset(), origin, owner, snapshot, current, lease };
+        if prompted {
+            self.prepare_snippet_fill(action, command, query, source, window, cx);
+        } else {
+            self.start_run(action, command, query, source, None, window, cx);
+        }
+    }
     pub(super) fn start_clipboard_execute(
         &mut self, action: Action, intent: multi_launcher::clipboard_modify::parser::ClipboardModifyIntent,
         catalog: Arc<multi_launcher::clipboard_modify::model::ClipboardModifierCatalog>, canonical: String,
@@ -1125,7 +1389,20 @@ impl RootWindow {
         else {
             return;
         };
-        if matches!(&request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. }) {
+        if let RunCommand::SnippetRun { lease, .. } = &request.command {
+            if let Some(focus) = window.focused(cx) {
+                let lease = lease.clone();
+                let guard = cx.on_blur(&focus, window, move |_, _, _| {
+                    lease.store(false, Ordering::Release);
+                });
+                if let Some(pending) = self.external_launch.pending.as_mut().filter(|pending| pending.ticket == ticket) {
+                    pending.focus_guard = Some(guard);
+                }
+            } else {
+                lease.store(false, Ordering::Release);
+            }
+        }
+        if matches!(&request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. }) {
             if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, cx| { view.retire_read_for_effect(); cx.notify(); }); }
         } else {
             self.query_history.reset();
@@ -1160,10 +1437,10 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(&receipt.request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. }) && self.launcher_search_error.as_deref() == Some(super::clipboard_modify_view::LAUNCHER_EFFECT_WAIT) {
+        if matches!(&receipt.request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. }) && self.launcher_search_error.as_deref() == Some(super::clipboard_modify_view::LAUNCHER_EFFECT_WAIT) {
             self.launcher_search_error = None;
         }
-        if matches!(&receipt.request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. }) {
+        if matches!(&receipt.request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. }) {
             if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, cx| view.launcher_effect_settled(cx)); }
         }
         if self.restart_status.as_deref() == Some(CLOSE_STATUS) {
@@ -1241,6 +1518,7 @@ impl RootWindow {
             }
             RunCommand::ClipboardUndo(current, _) => current() && window.is_window_active(),
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
+            RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
             _ => true,
         };
         let local_focus_owned = self.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx);
@@ -1273,6 +1551,10 @@ impl RootWindow {
                     self.query
                         .update(cx, |state, cx| state.replace_all(query.clone(), window, cx));
                 }
+                let snippet = matches!(&receipt.request.command, RunCommand::SnippetRun { .. });
+                if snippet && outcome.focus && focus_owned && switch_target.is_none() {
+                    self.query.focus_handle(cx).focus(window, cx);
+                }
                 if outcome.visibility == multi_launcher::commands::VisibilityPolicy::Hide {
                     if let Some(target) = switch_target {
                         self.root_visibility.request_window_switch_hide(
@@ -1289,7 +1571,7 @@ impl RootWindow {
                                 revision, root, target, changed_query.as_deref().unwrap_or(&receipt.request.query),
                             );
                         }
-                    } else if let RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } = &receipt.request.command {
+                    } else if let RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } = &receipt.request.command {
                         if let Some(native) = self.native_window {
                             let catalog_current: Option<Arc<dyn Fn() -> bool + Send + Sync>> = match &receipt.request.command {
                                 RunCommand::ClipboardExecute { catalog, .. } => {
@@ -1297,15 +1579,43 @@ impl RootWindow {
                                     let shared = self.search_catalog.providers.clipboard_modify_catalog();
                                     Some(Arc::new(move || shared.read().ok().is_some_and(|live| Arc::ptr_eq(&live, &catalog))))
                                 }
+                                RunCommand::SnippetRun { owner, snapshot, .. } => {
+                                    let owner = owner.clone();
+                                    let snapshot = snapshot.clone();
+                                    Some(Arc::new(move || super::snippets::search_snapshot_current(&owner, &snapshot)))
+                                }
                                 _ => None,
                             };
-                            self.root_visibility.request_clipboard_undo_hide(revision, native.identity, receipt.stamp.generation, &receipt.request.query, lease.clone(), receipt.stamp.focus.clone(), catalog_current);
+                            if matches!(&receipt.request.command, RunCommand::SnippetRun { .. }) && changed_query.is_some() {
+                                let expected_query = changed_query.clone().unwrap_or_default();
+                                let expected_generation = receipt.stamp.generation.wrapping_add(1).max(1);
+                                let expected_focus = window.focused(cx);
+                                let lease = lease.clone();
+                                let root = cx.entity().downgrade();
+                                window.defer(cx, move |window, app| {
+                                    let _ = root.update(app, |root, cx| {
+                                        if root.launcher_results.generation == expected_generation
+                                            && root.query.read(cx).value().as_str() == expected_query
+                                            && root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
+                                            && root.native_window == Some(native) && window.is_window_active()
+                                            && !window.has_active_dialog(cx)
+                                            && root.external_owner_is_current(expected_focus.as_ref(), window, cx)
+                                            && !root.restart_admission.is_fenced()
+                                            && current_foreground_identity() == Some(native.identity)
+                                        {
+                                            root.root_visibility.request_clipboard_undo_hide(revision, native.identity, expected_generation, &expected_query, lease, expected_focus, catalog_current);
+                                        }
+                                    });
+                                });
+                            } else {
+                                self.root_visibility.request_clipboard_undo_hide(revision, native.identity, receipt.stamp.generation, &receipt.request.query, lease.clone(), receipt.stamp.focus.clone(), catalog_current);
+                            }
                         }
                     } else {
                         self.root_visibility.request_external_hide(revision);
                     }
                 }
-                if outcome.focus && focus_owned && switch_target.is_none() {
+                if !snippet && outcome.focus && focus_owned && switch_target.is_none() {
                     self.query.focus_handle(cx).focus(window, cx);
                     if outcome.move_cursor_end && matches!(&receipt.request.command, RunCommand::ClipboardExecute { .. }) {
                         let len = self.query.read(cx).value().len();
@@ -1352,7 +1662,7 @@ impl RootWindow {
                         self.query.update(cx, |input, cx| input.set_selected_range(len..len, cx));
                     }
                 }
-                if settings.show_inline_errors || matches!(&receipt.request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. }) {
+                if settings.show_inline_errors || matches!(&receipt.request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. }) {
                     if changed_query.is_some() { deferred_inline = Some(error.message.clone()); }
                     else { self.launcher_search_error = Some(error.message.clone()); }
                 }
@@ -1385,7 +1695,7 @@ impl RootWindow {
             )
             .enumerate()
         {
-            let message = if matches!(&receipt.request.command, RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_)) {
+            let message = if matches!(&receipt.request.command, RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::SnippetRun { .. }) {
                 format!("Copied, but bookkeeping failed: {error}")
             } else {
                 format!("Application launched, but bookkeeping failed: {error}")
@@ -1501,7 +1811,7 @@ fn bookkeep(
     {
         history_error = history(
             HistoryEntry {
-                query: match &request.command { RunCommand::ClipboardExecute { canonical, .. } => canonical.clone(), _ => request.query.clone() },
+                query: match &request.command { RunCommand::ClipboardExecute { canonical, .. } => canonical.clone(), RunCommand::SnippetRun { history_query, .. } => history_query.clone(), _ => request.query.clone() },
                 query_lc: String::new(),
                 action: {
                     let mut action = request.action.clone();
