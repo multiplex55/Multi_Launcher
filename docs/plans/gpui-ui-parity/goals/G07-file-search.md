@@ -1,6 +1,6 @@
 # G07 — File Search, results, previews, and diagnostics
 
-**Status:** In implementation. **Owner:** G07 implementer with the shared search-service owner. Quoted Directory Filename Search, checked delivery to the G04 Hash pilot and checked Explorer are implemented. Manual and typed Directory Content, remembered File Search hosts, inline and native Preview retention through parent transfer, and retained live and direct Hash handoffs have focused evidence. Matched native replay, explicit promotion of a retained inline Preview and automatic restore of a minimized Hash destination remain open. [File Search record](../gui/file-search.md) · [Retained inline Preview checkpoint](../CHECKPOINTS.md#g07-retained-inline-preview-while-file-search-moves)
+**Status:** In implementation. **Owner:** G07 implementer with the shared search-service owner. Quoted Directory Filename Search, checked delivery to the G04 Hash pilot and checked Explorer are implemented. Manual and typed Directory Content, remembered File Search hosts, retained Preview transfer and promotion, and retained live and direct Hash handoffs have focused evidence. Matched native replay, automatic restore of a minimized Hash destination and the remaining G07 form, actions and independent instances remain open. [File Search record](../gui/file-search.md) · [Retained Preview promotion checkpoint](../CHECKPOINTS.md#g07-explicit-retained-preview-pop-out)
 
 ## Objective and dependencies
 

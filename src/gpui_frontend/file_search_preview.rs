@@ -65,6 +65,19 @@ fn copy_if_current(backend: &dyn multi_launcher::clipboard_modify::clipboard::Cl
         Err(error) => Err(format!("Could not copy: {error}")) }
 }
 
+fn preview_shell_owns_child<T: PartialEq>(child_host: T, shell_host: T) -> bool { child_host == shell_host }
+
+pub(super) struct PreviewPopupShell {
+    pub(super) child: Entity<FileSearchPreview>,
+    pub(super) native: Option<NativeWindow>,
+}
+impl Render for PreviewPopupShell {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().id("file-search-preview-popup").size_full().overflow_y_scroll().when(preview_shell_owns_child(self.child.read(cx).host(), window.window_handle().window_id()),
+            |shell| shell.child(self.child.clone()))
+    }
+}
+
 pub(super) struct FileSearchPreview {
     parent: WeakEntity<file_search::FileSearchView>,
     root: WeakEntity<RootWindow>,
@@ -115,6 +128,19 @@ impl FileSearchPreview {
             effect_lease: None, focus_guard: None, activation_guard: None, feedback: None,
             return_baseline: Some(Some(return_focus.clone())), return_focus: Some(return_focus), return_scroll, host, visibility, revision, native, admission,
             state: PreviewLoadStateMachine::default(), found, rendered: Vec::new(), match_present: false, line_offset: 0, column_offset: 0, max_column: 0, scroll: ScrollHandle::new() }
+    }
+    pub(super) fn inline_promotion_current(&self) -> bool {
+        !self.popup && self.mount.is_current() && !self.admission.is_fenced()
+            && self.native.is_some_and(|native| json_utility::native_host_current(&self.visibility,
+                self.visibility.request_revision.load(Ordering::Acquire), Some(native), false))
+    }
+    pub(super) fn promote_to_popup(&mut self, host: AnyWindowHandle, native: NativeWindow,
+        parent_mount: utility_mount::MountReceipt, return_focus: FocusHandle, cx: &mut Context<Self>) {
+        self.host = host; self.native = Some(native); self.popup = true; self.parent_mount = parent_mount;
+        self.return_baseline = Some(Some(return_focus.clone())); self.return_focus = Some(return_focus);
+        self.focus = cx.focus_handle(); self.document_focus = cx.focus_handle(); self.explorer_focus = cx.focus_handle();
+        self.copy_path_focus = cx.focus_handle(); self.copy_line_focus = cx.focus_handle();
+        self.action_mount = self.action_owner.attach();
     }
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) { self.document_focus.focus(window, cx); }
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool {
@@ -308,16 +334,10 @@ impl FileSearchPreview {
         let epoch = self.state.begin_request();
         let mount = self.mount.clone();
         let worker_mount = mount.clone();
-        let visibility = self.visibility.clone();
-        let Some(native) = self.native else { return; };
         let admission = self.admission.clone();
         let found = self.found.clone();
-        let popup = self.popup;
         let task = cx.background_executor().spawn(async move {
-            let current = if popup { popup_load_current(worker_mount.is_current(), native_window_is_valid(native), admission.is_fenced()) }
-                else { inline_load_current(worker_mount.is_current(),
-                    json_utility::native_host_current(&visibility, visibility.request_revision.load(Ordering::Acquire), Some(native), false), admission.is_fenced()) };
-            if !current { return None; }
+            if !worker_mount.is_current() || admission.is_fenced() { return None; }
             let mut preview = preview_file(&request);
             let selected_index = found.as_ref().and_then(|found| preview.lines.iter().position(|line| line.line_number == found.line_number)).unwrap_or(0);
             let match_present = found.as_ref().is_some_and(|found| preview.lines.get(selected_index)
@@ -331,11 +351,13 @@ impl FileSearchPreview {
             let _permit = permit;
             let result = task.await;
             let _ = weak.update(cx, |view, cx| {
-                if !mount.is_current() || !mount.matches(&view.mount)
-                    || view.admission.is_fenced()
-                    || (view.popup && !view.native.is_some_and(native_window_is_valid))
-                    || (!view.popup && !json_utility::native_host_current(&view.visibility, view.visibility.request_revision.load(Ordering::Acquire), view.native, false))
-                    || view.state.current_request_id != Some(epoch) { return; }
+                let presentation_current = if view.popup {
+                    popup_load_current(mount.is_current(), view.native.is_some_and(native_window_is_valid), view.admission.is_fenced())
+                } else {
+                    inline_load_current(mount.is_current(), json_utility::native_host_current(&view.visibility,
+                        view.visibility.request_revision.load(Ordering::Acquire), view.native, false), view.admission.is_fenced())
+                };
+                if !presentation_current || !mount.matches(&view.mount) || view.state.current_request_id != Some(epoch) { return; }
                 let Some(parent) = view.parent.upgrade() else { return; };
                 if !parent.read(cx).preview_is_current(cx.entity_id(), &view.receipt) { return; }
                 let outcome = match result {
@@ -488,6 +510,13 @@ mod tests {
         }
         #[cfg(not(windows))]
         assert_eq!(allowed.ordinary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn popup_shell_never_projects_child_before_host_commit() {
+        assert!(!super::preview_shell_owns_child(1, 2));
+        assert!(super::preview_shell_owns_child(2, 2));
+        assert!(!super::preview_shell_owns_child(3, 2));
     }
 
     #[test]

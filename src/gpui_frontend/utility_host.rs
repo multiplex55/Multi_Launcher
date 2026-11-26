@@ -754,6 +754,8 @@ impl RootWindow {
                 if let Some(view) = self.clipboard_modify_view.clone() {
                     view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); });
                 }
+            } else if UtilityToolKey::parse("file-preview").ok() == Some(key) {
+                if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| view.report_preview_presentation_error(error, cx)); }
             } else if UtilityToolKey::parse("file-search").ok() == Some(key) {
                 if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); }); }
             } else if UtilityToolKey::parse("regex-tester").ok() == Some(key) {

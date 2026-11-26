@@ -29,6 +29,14 @@ pub(super) fn current_row(
         && visible.contains(&index)
 }
 
+fn preview_prefers_popup(preference: Option<multi_launcher::settings::RememberedPresentation>) -> bool {
+    preference == Some(multi_launcher::settings::RememberedPresentation::Popout)
+}
+
+fn preview_promotion_current(pending: bool, current_ticket: u64, ticket: u64, mount: bool, load: bool) -> bool {
+    pending && current_ticket == ticket && mount && load
+}
+
 fn file_search_root_slot(open: bool, popout: bool, inline_preview: bool) -> bool {
     open && (!popout || inline_preview)
 }
@@ -142,6 +150,8 @@ pub(super) struct FileSearchView {
     preview: Option<Entity<file_search_preview::FileSearchPreview>>,
     preview_popup: Option<AnyWindowHandle>,
     preview_geometry: Option<utility_host::ShellGeometry>,
+    preview_promotion_pending: bool,
+    preview_promotion_ticket: u64,
     preview_return_role: PreviewReturnRole,
     preview_needs_baseline: bool,
     preview_retiring: Vec<RetiringHashWindow>,
@@ -234,6 +244,8 @@ impl FileSearchView {
             preview: None,
             preview_popup: None,
             preview_geometry: None,
+            preview_promotion_pending: false,
+            preview_promotion_ticket: 0,
             preview_return_role: PreviewReturnRole::Other,
             preview_needs_baseline: false,
             preview_retiring: Vec::new(),
@@ -378,11 +390,11 @@ impl FileSearchView {
         }
     }
     pub(super) fn host_effect_pending(&self, cx: &App) -> bool {
-        self.explorer_pending || self.preview_retiring.iter().any(|item| item.native_window.is_none())
+        self.explorer_pending || self.preview_promotion_pending || self.preview_retiring.iter().any(|item| item.native_window.is_none())
             || self.preview.as_ref().is_some_and(|preview| preview.read(cx).effect_pending())
     }
     pub(super) fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
-        if !self.open || self.rehosting || self.explorer_pending || self.admission.is_fenced() || self.popout == popout || !self.mount_receipt.is_current() { return; }
+        if !self.open || self.rehosting || self.preview_promotion_pending || self.explorer_pending || self.admission.is_fenced() || self.popout == popout || !self.mount_receipt.is_current() { return; }
         let Some(root) = self.root.upgrade() else { return; };
         if self.preview.as_ref().is_some_and(|child| child.read(cx).effect_pending())
             || root.read(cx).external_launch.auxiliary_effect_pending() { self.status = "Wait for the Preview action to finish.".into(); cx.notify(); return; }
@@ -490,6 +502,9 @@ impl FileSearchView {
             if let Some(signal) = signal { signal.notify(); }
         }
     }
+    pub(super) fn report_preview_presentation_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.status = format!("Could not save Preview presentation: {error}"); cx.notify();
+    }
     pub(super) fn set_preview_geometry_error(&mut self, message: Option<String>, cx: &mut Context<Self>) {
         if let Some(message) = message { self.status = format!("Preview geometry: {message}"); }
         else if self.status.starts_with("Preview geometry:") { self.status = "Preview geometry saved.".into(); }
@@ -595,11 +610,15 @@ impl FileSearchView {
     }
 
     fn open_preview(&mut self, receipt: SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rehosting || !matches!(receipt.kind, FileKind::File | FileKind::Directory) || !self.receipt_is_current(&receipt, cx.entity_id())
+        if self.rehosting || self.preview_promotion_pending || !matches!(receipt.kind, FileKind::File | FileKind::Directory) || !self.receipt_is_current(&receipt, cx.entity_id())
             || !window.is_window_active() || window.has_active_dialog(cx) || !self.owns_focus(window, cx) { return; }
         let Some(return_focus) = window.focused(cx) else { return; };
-        if self.preview_popup.is_none() { self.preview_return_role = self.preview_role_for_focus(&return_focus); }
-        if self.preview_popup.is_some() || self.popout { self.open_popup_preview(receipt, return_focus, window, cx); return; }
+        if self.preview.is_none() { self.preview_return_role = self.preview_role_for_focus(&return_focus); }
+        let remembered_popup = self.preview.is_none() && self.root.upgrade().is_some_and(|root| {
+            UtilityToolKey::parse("file-preview").ok().is_some_and(|key|
+                preview_prefers_popup(root.read(cx).utility_presentations.preference(key)))
+        });
+        if self.preview_popup.is_some() || self.popout || remembered_popup { self.open_popup_preview(receipt, return_focus, window, cx); return; }
         let Some(root) = self.root.upgrade() else { return; };
         let root_state = root.read(cx);
         let host = window.window_handle();
@@ -610,7 +629,8 @@ impl FileSearchView {
         if let Some(preview) = self.preview.as_ref().cloned() {
             let child = preview.read(cx);
             if child.receipt() != &receipt || child.host() != host.window_id() || !child.scope_current() { return; }
-            preview.update(cx, |child, cx| child.focus(window, cx));
+            self.preview_return_role = self.preview_role_for_focus(&return_focus);
+            preview.update(cx, |child, cx| { child.retarget_return(return_focus); child.focus(window, cx); });
             root.update(cx, |root, cx| { root.root_scroll.scroll_to_top_of_item(root.file_search_scroll_item()); cx.notify(); });
             cx.notify();
             return;
@@ -652,6 +672,137 @@ impl FileSearchView {
             (!require_active || window.is_window_active()) && !window.has_active_dialog(app)
                 && root.read(app).external_owner_is_current(Some(focus), window, app)
         }).unwrap_or(false)
+    }
+
+    fn preview_window_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.rehosting || self.preview_promotion_pending
+            || self.root.upgrade().is_some_and(|root| root.read(cx).external_launch.auxiliary_effect_pending()) { return false; }
+        let Some(child) = self.preview.as_ref().filter(|child| child.read(cx).host() == window.window_handle().window_id()).cloned() else { return true; };
+        let (receipt, focus, baseline, native, owns) = { let child = child.read(cx);
+            (child.receipt().clone(), child.return_focus.clone(), child.return_baseline.clone(), child.native(), child.owns_focus(window, cx)) };
+        self.return_from_popup_preview(receipt, focus, baseline, native, owns, window, cx);
+        let sample = self.take_preview_geometry(true);
+        if let Some(sample) = sample { let root = self.root.clone(); cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.record_file_preview_geometry(sample, cx)); }).detach(); }
+        let native = child.read(cx).native();
+        if let Some(popup) = self.preview_popup.take() { let _ = self.track_retiring_preview(popup, native, cx); }
+        child.update(cx, |view, _| view.retire()); self.preview = None; cx.notify(); true
+    }
+
+    fn promote_inline_preview(&mut self, child: Entity<file_search_preview::FileSearchPreview>, receipt: SelectionReceipt,
+        return_focus: FocusHandle, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview_promotion_pending || self.rehosting || !self.popout || self.preview_popup.is_some()
+            || !self.preview_is_current(child.entity_id(), &receipt) || !child.read(cx).inline_promotion_current() { return; }
+        if child.read(cx).effect_pending() || self.root.upgrade().is_some_and(|root| root.read(cx).external_launch.auxiliary_effect_pending()) {
+            self.status = "Wait for the Preview action to finish.".into(); cx.notify(); return;
+        }
+        let Some(parent_native) = self.native else { return; };
+        if !window.is_window_active() || current_foreground_identity() != Some(parent_native.identity) { return; }
+        let Some(permit) = self.admission.admit() else { return; };
+        let Some(root) = self.root.upgrade() else { return; };
+        let (geometry, sequence, wake) = {
+            let root = root.read(cx);
+            let geometry = UtilityToolKey::parse("file-preview").ok().and_then(|key| {
+                let mut store = root.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                store.track_key(key); store.effective_native_geometry(key)
+            });
+            (geometry, root.hash_geometry_sequence.clone(), root.hash_wake_signal.clone())
+        };
+        let role = self.preview_role_for_focus(&return_focus);
+        let parent_mount = self.mount_receipt.clone(); let parent_host = self.host;
+        let load_receipt = child.read(cx).load_receipt();
+        self.preview_promotion_pending = true;
+        self.preview_promotion_ticket = self.preview_promotion_ticket.wrapping_add(1).max(1);
+        let ticket = self.preview_promotion_ticket;
+        child.update(cx, |child, cx| { child.suspend_actions(); cx.notify(); });
+        let revision = self.activation_revision.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let guard = self.activation_revision.clone(); let admission = self.admission.clone();
+        let parent = cx.entity().downgrade(); let close_parent = parent.clone();
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let shell_child = child.clone();
+            let opened = cx.update(|app| {
+                let options = WindowOptions {
+                    window_bounds: Some(WindowBounds::centered(size(px(860.0), px(620.0)), app)),
+                    window_min_size: Some(size(px(320.0), px(240.0))),
+                    titlebar: Some(TitlebarOptions { title: Some("File Search Preview".into()), ..Default::default() }),
+                    show: false, focus: false, ..Default::default()
+                };
+                gpui_kit::open_window(options, app, move |window, app| {
+                    let native = checked_native_window(window).ok().flatten();
+                    window.on_window_should_close(app, move |window, app| {
+                        close_parent.update(app, |parent, cx| parent.preview_window_should_close(window, cx)).unwrap_or(true)
+                    });
+                    app.new(|_| file_search_preview::PreviewPopupShell { child: shell_child, native })
+                })
+            });
+            let (popup, shell) = match opened {
+                Ok(opened) => opened,
+                Err(_) => {
+                    let _ = parent.update(cx, |parent, cx| parent.finish_preview_promotion_failure(&child, &receipt, &parent_mount, ticket, cx));
+                    return;
+                }
+            };
+            let native = cx.update(|app| shell.read(app).native);
+            let mut binding = None;
+            if let Some(native) = native {
+                if let (Some(geometry), Some(target)) = (geometry, checked_geometry_target(native)) {
+                    let _ = restore_native_window_geometry(target, Some(geometry), (320, 240), 1.0);
+                }
+                if let Ok(key) = UtilityToolKey::parse("file-preview") {
+                    binding = utility_host::ShellGeometry::attach(native, key, load_receipt.clone(), sequence, wake).ok();
+                }
+            }
+            let valid = parent.update(cx, |parent, cx| {
+                preview_promotion_current(parent.preview_promotion_pending, parent.preview_promotion_ticket, ticket,
+                    parent_mount.is_current(), load_receipt.is_current()) && guard.load(Ordering::Acquire) == revision
+                    && child.read(cx).inline_promotion_current()
+                    && parent.preview_reuse_origin_current(&receipt, child.entity_id(), &parent_mount, &return_focus, parent_host, true, cx)
+            }).unwrap_or(false);
+            let accepted = native.is_some_and(|native| valid && binding.is_some() && native_window_is_valid(native)
+                && current_foreground_identity() == Some(parent_native.identity)
+                && set_native_window_visible(native, true).is_ok()
+                && parent_mount.is_current() && load_receipt.is_current() && !admission.is_fenced()
+                && current_foreground_identity() == Some(parent_native.identity)
+                && activate_native_window(native).is_ok() && current_foreground_identity() == Some(native.identity));
+            let committed = if let Some(native) = native.filter(|_| accepted) {
+                parent.update(cx, |parent, cx| {
+                    if !preview_promotion_current(parent.preview_promotion_pending, parent.preview_promotion_ticket, ticket,
+                        parent_mount.is_current(), load_receipt.is_current()) || guard.load(Ordering::Acquire) != revision
+                        || !child.read(cx).inline_promotion_current() || !native_window_is_valid(native)
+                        || current_foreground_identity() != Some(native.identity)
+                        || !parent.preview_reuse_origin_current(&receipt, child.entity_id(), &parent_mount, &return_focus, parent_host, false, cx) { return false; }
+                    parent.preview_return_role = role;
+                    parent.preview_popup = Some(popup); parent.preview_geometry = binding.take(); parent.preview_promotion_pending = false;
+                    child.update(cx, |child, cx| { child.promote_to_popup(popup, native, parent_mount.clone(), return_focus.clone(), cx); cx.notify(); });
+                    let _ = parent.root.update(cx, |root, cx| root.remember_host_presentation(
+                        "file-preview", multi_launcher::settings::RememberedPresentation::Popout, cx));
+                    cx.notify(); true
+                }).unwrap_or(false)
+            } else { false };
+            if committed {
+                let _ = update_kit_window_content(popup, &child, cx, |child, window, cx| { if child.scope_current() { child.focus(window, cx); } });
+                return;
+            }
+            drop(binding);
+            let _ = parent.update(cx, |parent, cx| {
+                let signal = parent.track_retiring_preview(popup, native, cx);
+                parent.remove_retiring_preview(popup, signal, cx);
+                parent.finish_preview_promotion_failure(&child, &receipt, &parent_mount, ticket, cx);
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn finish_preview_promotion_failure(&mut self, child: &Entity<file_search_preview::FileSearchPreview>, receipt: &SelectionReceipt,
+        mount: &utility_mount::MountReceipt, ticket: u64, cx: &mut Context<Self>) {
+        if self.preview_promotion_ticket != ticket || !self.preview_promotion_pending { return; }
+        self.preview_promotion_pending = false;
+        if mount.is_current() && mount.matches(&self.mount_receipt) && self.preview_is_current(child.entity_id(), receipt)
+            && child.read(cx).inline_promotion_current() {
+            child.update(cx, |child, cx| { child.bind_parent(mount.clone(), None); cx.notify(); });
+            self.status = "Could not open Preview window.".into();
+        }
+        cx.notify();
     }
 
     fn open_popup_preview(&mut self, receipt: SelectionReceipt, return_focus: FocusHandle, window: &mut Window, cx: &mut Context<Self>) {
@@ -699,8 +850,8 @@ impl FileSearchView {
             }).detach();
             return;
         }
-        if self.preview.is_some() {
-            self.status = "Preview is open in the launcher.".into(); cx.notify(); return;
+        if let Some(child) = self.preview.clone() {
+            self.promote_inline_preview(child, receipt, return_focus, window, cx); return;
         }
         let found = if receipt.content_key.is_some() {
             let Some(row) = self.content_rows.get(receipt.index).filter(|row| Some(&row.key) == receipt.content_key.as_ref() && row.path == receipt.path) else { return; };
@@ -728,19 +879,7 @@ impl FileSearchView {
             let native = checked_native_window(child_window).ok().flatten();
             let host = child_window.window_handle();
             child_window.on_window_should_close(app, move |window, app| {
-                close_parent.update(app, |parent, cx| {
-                    if parent.rehosting || parent.root.upgrade().is_some_and(|root| root.read(cx).external_launch.auxiliary_effect_pending()) { return false; }
-                    let Some(child) = parent.preview.as_ref().filter(|child| child.read(cx).host() == window.window_handle().window_id()).cloned() else { return true; };
-                    let (receipt, focus, baseline, native, owns) = { let child = child.read(cx);
-                        (child.receipt().clone(), child.return_focus.clone(), child.return_baseline.clone(), child.native(), child.owns_focus(window, cx)) };
-                    parent.return_from_popup_preview(receipt, focus, baseline, native, owns, window, cx);
-                    let sample = parent.take_preview_geometry(true);
-                    if let Some(sample) = sample { let root = parent.root.clone(); cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.record_file_preview_geometry(sample, cx)); }).detach(); }
-                    let native = child.read(cx).native();
-                    if let Some(popup) = parent.preview_popup.take() { let _ = parent.track_retiring_preview(popup, native, cx); }
-                    child.update(cx, |view, _| view.retire());
-                    parent.preview = None; cx.notify(); true
-                }).unwrap_or(true)
+                close_parent.update(app, |parent, cx| parent.preview_window_should_close(window, cx)).unwrap_or(true)
             });
             app.new(|cx| file_search_preview::FileSearchPreview::new(parent, root_weak, receipt, return_focus, point(px(0.0), px(0.0)),
                 host, found, owner, mount, visibility, revision, native, admission, parent_mount, true, cx))
@@ -1791,6 +1930,24 @@ mod typed_tests {
         assert!(!mounted_search_row_current(&candidate, true, 7, search, 7, search, 2, 0..10));
         assert!(mounted_search_row_current(&rollback, true, 7, search, 7, search, 2, 0..10));
         assert!(!mounted_search_row_current(&rollback, true, 7, search, 7, Some(SearchId(42)), 2, 0..10));
+    }
+
+    #[test]
+    fn fresh_preview_honors_only_explicit_saved_popout() {
+        use multi_launcher::settings::RememberedPresentation;
+        assert!(super::preview_prefers_popup(Some(RememberedPresentation::Popout)));
+        assert!(!super::preview_prefers_popup(Some(RememberedPresentation::Docked)));
+        assert!(!super::preview_prefers_popup(None));
+    }
+
+    #[test]
+    fn preview_promotion_requires_exact_live_reservation_and_receipts() {
+        use super::preview_promotion_current as current;
+        assert!(current(true, 4, 4, true, true));
+        assert!(!current(false, 4, 4, true, true));
+        assert!(!current(true, 5, 4, true, true));
+        assert!(!current(true, 4, 4, false, true));
+        assert!(!current(true, 4, 4, true, false));
     }
 
     #[test]
