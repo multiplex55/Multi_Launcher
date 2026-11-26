@@ -10,6 +10,7 @@ mod file_search;
 mod file_search_preview;
 mod settings_actions;
 mod settings_search;
+mod settings_navigation;
 mod date_search;
 mod calculator_search;
 mod base_convert_search;
@@ -518,9 +519,10 @@ impl LauncherSearchCatalog {
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_search_start(raw_query, &action).is_some();
+                let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || clipboard_modify_result || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || settings_result || clipboard_modify_result || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -529,7 +531,7 @@ impl LauncherSearchCatalog {
                         raw_query,
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
-                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result
+                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || settings_result
                             || (clipboard_modify_result && multi_launcher::actions::search::clipboard_modify_resolved_postfilter_bypass(raw_query, &action.action)),
                         &self.matcher,
                         self.fuzzy_weight,
@@ -1175,6 +1177,8 @@ impl RenderOnce for ToastLogViewerPanel {
 #[derive(IntoElement)]
 struct SettingsEditorPanel {
     root: WeakEntity<RootWindow>,
+    navigation: Option<Entity<settings_navigation::SettingsNavigation>>,
+    scroll: ScrollHandle,
     search: Option<Entity<settings_search::SearchSettings>>,
     actions: Option<Entity<settings_actions::ActionsSettings>>,
     busy: bool,
@@ -1611,12 +1615,24 @@ impl RenderOnce for SettingsEditorPanel {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let reload_root = self.root.clone();
         let cancel_root = self.root;
+        let scroll = self.scroll.clone();
+        let line_height = px(self.metrics.line_height);
         div().id("settings-editor").track_focus(&self.settings_owner_focus_handle).key_context("SettingsEditor")
             .flex().flex_col().gap_y(px(self.metrics.item_spacing_y)).w(px(self.width)).max_w_full()
+            .max_h(px(650.0)).overflow_y_scroll().track_scroll(&self.scroll)
+            .on_scroll(move |event, _, cx| {
+                let pixels = event.delta.pixel_delta(line_height);
+                let delta = if pixels.y.is_zero() { pixels.x } else { pixels.y }.as_f32();
+                let offset = scroll.offset(); let maximum = scroll.max_offset().y.as_f32();
+                let previous = (offset.y.as_f32() - delta).clamp(-maximum, 0.0);
+                scroll.set_offset(point(offset.x, px(offset.y.as_f32().clamp(-maximum, 0.0))));
+                if inner_results_consumed_scroll(previous, maximum, delta) { cx.stop_propagation(); }
+            })
             .p(px(self.metrics.panel_padding)).bg(appearance::to_hsla(self.palette.panel_surface))
             .rounded(px(self.metrics.corner_radius)).text_color(appearance::to_hsla(self.palette.primary_text))
             .text_size(px(self.metrics.body_text_size)).line_height(px(self.metrics.line_height))
             .child(Label::new("Settings").text_size(px(self.metrics.heading_text_size)))
+            .when_some(self.navigation, |panel, navigation| panel.child(navigation))
             .when_some(self.search, |panel, search| panel.child(search))
             .when_some(self.actions, |panel, actions| panel.child(actions))
             .child(Button::new("settings-reload-application-index").label("Reload application index")
@@ -2300,6 +2316,8 @@ struct RootWindow {
     search_completion_focus_revision: Option<u64>,
     settings_editor: SettingsEditorState,
     settings_search: Option<Entity<settings_search::SearchSettings>>,
+    settings_navigation: Option<Entity<settings_navigation::SettingsNavigation>>,
+    settings_panel_scroll: ScrollHandle,
     settings_actions: Option<Entity<settings_actions::ActionsSettings>>,
     app_editor: add_action::AppEditorState,
     plugin_editor: Option<Entity<plugin_editor::PluginEditorView>>,
@@ -2374,7 +2392,8 @@ struct RootWindow {
     snippets_view: Option<Entity<snippets::SnippetsView>>,
     tempfile_view: Option<Entity<tempfile_view::TempfileView>>,
     snippet_fill: Option<Entity<snippet_fill::SnippetFill>>,
-    snippet_fill_escape_latched: bool,
+    pane_escape_latched: bool,
+    pane_enter_latched: bool,
     snippets_search: snippets::SearchState,
     clipboard_modify_view: Option<Entity<clipboard_modify_view::ClipboardModifyView>>,
     clipboard_modify_startup: clipboard_modify_startup::Owner,
@@ -6595,7 +6614,21 @@ impl RootWindow {
         self.fresh_search_enter = None; self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
         self.open_search_settings(window, cx);
         self.open_actions_settings(window, cx);
+        let root = cx.entity().downgrade();
+        let search = self.settings_search.clone();
+        let actions = self.settings_actions.clone();
+        self.settings_navigation = Some(cx.new(|cx| settings_navigation::SettingsNavigation::new(root, search, actions, window, cx)));
+        self.settings_panel_scroll.set_offset(point(px(0.0), px(0.0)));
         self.settings_focus_handle.focus(window, cx); cx.notify();
+    }
+
+    fn settings_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.settings_editor.open || !self.settings_owner_focus_handle.contains_focused(window, cx) { return false; }
+        if self.pane_escape_latched { return true; }
+        let cleared = self.settings_navigation.clone().is_some_and(|view| view.update(cx, |view, cx| view.clear(window, cx)));
+        if cleared { self.pane_escape_latched = true; }
+        else { self.cancel_settings_editor(window, cx, true); }
+        true
     }
 
     fn toggle_settings_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -6652,6 +6685,7 @@ impl RootWindow {
         }
         self.settings_editor.open = false;
         self.settings_editor.status = None;
+        if let Some(view) = self.settings_navigation.take() { view.update(cx, |view, _| view.retire()); }
         if let Some(view) = self.settings_search.take() { view.update(cx, |view, _| view.retire()); }
         if let Some(view) = self.settings_actions.take() { view.update(cx, |view, _| view.retire()); }
         panel_stack::retire(&mut self.panel_stack, Panel::Settings);
@@ -6792,6 +6826,8 @@ impl RootWindow {
                     external_launch::provider_association_by_name(provider, action).is_some()
                 } else if cfg!(windows) && provider == "downloads_triage" {
                     is_downloads_triage_opener(action)
+                } else if provider == "settings" && action.action == "settings:search" {
+                    settings_navigation::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()).is_some()
                 } else if provider == "file_search" {
                     is_file_search_opener(&query, action) || multi_launcher::plugins::file_search::scoped_search_start(&query, action).is_some()
                 } else {
@@ -7519,6 +7555,19 @@ impl RootWindow {
         if !self.launcher_result_activation_is_live(origin, window, cx) {
             return;
         }
+        if result.action.action == "settings:search" {
+            if self.restart_admission.is_fenced() || window.has_active_dialog(cx)
+                || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+                || self.native_window.is_none_or(|native| current_foreground_identity() != Some(native.identity)) { return; }
+            if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "settings") {
+                if let Some(term) = settings_navigation::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                    self.open_settings_editor(window, cx, SettingsOpenOrigin::Search);
+                    self.settings_panel_scroll.set_offset(point(px(0.0), px(0.0)));
+                    if let Some(navigation) = self.settings_navigation.clone() { navigation.update(cx, |navigation, cx| navigation.set_query(term, window, cx)); }
+                }
+            }
+            return;
+        }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "favorites")
             && favorite_search::is_executable(&result.action)
         {
@@ -7882,6 +7931,9 @@ impl RootWindow {
             InstalledSearchRoute::Settings => {
                 drop(operation);
                 self.open_settings_editor(window, cx, SettingsOpenOrigin::Search);
+                self.settings_panel_scroll.set_offset(point(px(0.0), px(0.0)));
+                if let Some(navigation) = self.settings_navigation.clone() { navigation.update(cx, |navigation, cx| navigation.reset(window, cx)); }
+                self.settings_focus_handle.focus(window, cx);
             }
             InstalledSearchRoute::Help => {
                 drop(operation);
@@ -10194,7 +10246,8 @@ impl Render for RootWindow {
             xml_pin_focus_handle: self.xml_pin_focus_handle.clone(),
         };
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
-            root: cx.entity().downgrade(), search: self.settings_search.clone(), actions: self.settings_actions.clone(),
+            root: cx.entity().downgrade(), navigation: self.settings_navigation.clone(), scroll: self.settings_panel_scroll.clone(),
+            search: self.settings_search.clone(), actions: self.settings_actions.clone(),
             busy: self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy())
                 || self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()),
             status: self.settings_editor.status.clone(), index_busy: self.indexed_applications.busy(),
@@ -10350,8 +10403,12 @@ impl Render for RootWindow {
             }));
         let mut root_shell = div()
             .id("multi-launcher-root")
-            .capture_key_up(cx.listener(|root, event: &KeyUpEvent, _, _| {
-                if event.keystroke.key == "escape" { root.snippet_fill_escape_latched = false; }
+            .capture_key_up(cx.listener(|root, event: &KeyUpEvent, _, cx| {
+                if event.keystroke.key == "escape" { root.pane_escape_latched = false; }
+                if event.keystroke.key == "enter" {
+                    root.pane_enter_latched = false;
+                    if let Some(view) = root.settings_navigation.clone() { view.update(cx, |view, _| view.release_enter()); }
+                }
             }))
             .capture_any_mouse_down(cx.listener(|root, _, _, _| {
                 root.external_launch.retire_focus_bound_effects();
@@ -10369,11 +10426,15 @@ impl Render for RootWindow {
             .key_context("RootWindow")
             .capture_key_down(cx.listener(|root, event: &KeyDownEvent, window, cx| {
                 if window.default_prevented() { return; }
+                if event.keystroke.key == "enter" && event.is_held && root.pane_enter_latched {
+                    window.prevent_default(); cx.stop_propagation(); return;
+                }
                 if event.keystroke.key != "escape"
                     || event.keystroke.modifiers != Modifiers::default()
                 {
                     return;
                 }
+                if event.is_held && root.pane_escape_latched { window.prevent_default(); cx.stop_propagation(); return; }
                 if root.app_editor_escape(window, cx) {
                     cx.stop_propagation();
                 } else if quick_help_escape_capture_should_close(
@@ -10389,12 +10450,7 @@ impl Render for RootWindow {
                 {
                     root.close_toast_log_viewer(window, cx, true);
                     cx.stop_propagation();
-                } else if root.settings_editor.open
-                    && root
-                        .settings_owner_focus_handle
-                        .contains_focused(window, cx)
-                {
-                    root.cancel_settings_editor(window, cx, true);
+                } else if root.settings_escape(window, cx) {
                     cx.stop_propagation();
                 } else if root.quick_help.open
                     && quick_help_escape_capture_should_close(
@@ -10422,6 +10478,8 @@ impl Render for RootWindow {
                       root.result_favorites.owns_focus(window, cx),
                   ) && !context_stack_has_primary(&window.context_stack(), "List") {
                       root.dismiss_result_favorites(window, cx);
+                      cx.stop_propagation();
+                  } else if root.settings_escape(window, cx) {
                       cx.stop_propagation();
                   } else if root.quick_help.open
                     && quick_help_escape_capture_should_close(
@@ -12416,6 +12474,8 @@ pub(crate) fn run_foundation_window(
                 search_completion_focus_revision: None,
                 settings_editor: settings_editor_for_root,
                 settings_search: None,
+                settings_navigation: None,
+                settings_panel_scroll: ScrollHandle::new(),
                 settings_actions: None,
                 app_editor: add_action::AppEditorState::new(cx),
                 plugin_editor: None,
@@ -12490,7 +12550,8 @@ pub(crate) fn run_foundation_window(
                 snippets_view: None,
                 tempfile_view: None,
                 snippet_fill: None,
-                snippet_fill_escape_latched: false,
+                pane_escape_latched: false,
+                pane_enter_latched: false,
                 snippets_search: snippets::SearchState::default(),
                 clipboard_modify_view: None,
                 clipboard_modify_startup: clipboard_modify_startup::Owner::default(),
@@ -12573,8 +12634,23 @@ pub(crate) fn run_foundation_window(
                             let suppress = root.update(cx, |root, _| {
                                 if root.root_window.is_none_or(|host| host.window_id() != window.window_handle().window_id())
                                     || root.native_window.is_none_or(|native| native.identity.hwnd != receipt.hwnd) { return false; }
-                                if !receipt.held { root.snippet_fill_escape_latched = false; }
-                                root.snippet_fill_escape_latched && receipt.held
+                                if !receipt.held { root.pane_escape_latched = false; }
+                                root.pane_escape_latched && receipt.held
+                            }).unwrap_or(false);
+                            if suppress { window.prevent_default(); cx.stop_propagation(); return; }
+                        }
+                        if receipt.virtual_key == 0x0d {
+                            let suppress = root.update(cx, |root, cx| {
+                                if root.root_window.is_none_or(|host| host.window_id() != window.window_handle().window_id())
+                                    || root.native_window.is_none_or(|native| native.identity.hwnd != receipt.hwnd
+                                        || !native_window_is_valid(native) || current_foreground_identity() != Some(native.identity))
+                                    || !root.root_visibility.active.load(Ordering::Acquire)
+                                    || !root.root_visibility.visible.load(Ordering::Acquire) { return false; }
+                                if !receipt.held {
+                                    root.pane_enter_latched = false;
+                                    if let Some(view) = root.settings_navigation.clone() { view.update(cx, |view, _| view.release_enter()); }
+                                }
+                                root.pane_enter_latched && receipt.held
                             }).unwrap_or(false);
                             if suppress { window.prevent_default(); cx.stop_propagation(); return; }
                         }
@@ -14713,6 +14789,16 @@ mod tests {
             },
             enabled_plugins,
         )
+    }
+
+    #[test]
+    fn exact_scoring_keeps_only_the_stock_typed_settings_row() {
+        use multi_launcher::plugin::Plugin;
+        let query = "settings toast duration";
+        let action = multi_launcher::plugins::settings::SettingsPlugin.search(query).remove(0);
+        let catalog = completion_catalog(Vec::new(), true, None);
+        let rows = catalog.compose(query, vec![("settings".into(), action.clone())], false);
+        assert!(rows.iter().any(|row| row.action == action && matches!(&row.origin, super::LauncherResultOrigin::Provider(name) if name == "settings")));
     }
 
     #[test]

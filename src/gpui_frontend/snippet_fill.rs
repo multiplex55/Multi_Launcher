@@ -335,7 +335,7 @@ impl Render for SnippetFill {
                 if key == "escape" && modifiers == Modifiers::default() {
                     window.prevent_default(); cx.stop_propagation();
                     if !event.is_held {
-                        let _ = view.root.update(cx, |root, _| root.snippet_fill_escape_latched = true);
+                        let _ = view.root.update(cx, |root, _| root.pane_escape_latched = true);
                         view.cancel(window, cx);
                     }
                 } else if key == "tab" && !modifiers.control && !modifiers.alt && !modifiers.platform {

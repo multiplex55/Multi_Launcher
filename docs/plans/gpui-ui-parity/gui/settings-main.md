@@ -84,3 +84,9 @@ Use paired owned profiles at 1516 × 937 with matching display scale and both Pa
 The Search Results section applies the acknowledged Autocomplete, Match Exact, weights, Page Jump and Grid preferences to the current launcher. Page Jump preserves the selected row, while Grid changes update the presentation of current results. Ranking changes refresh ordinary results while preserving Calculator scalar state. Grid Rows and Plugin Opt-Out authoring remain open.
 
 Extend the paired Settings replay with a retained query and known result order. Change one ranking field and Grid, confirm the anchored query stays in place and check the updated rows. Verify Page Jump retains the selected result. Reopen through egui and verify the stored values and untouched layout keys. [Search Results checkpoint](../CHECKPOINTS.md#g06-and-g05-live-search-results-settings)
+
+## Typed Settings search
+
+Enter `settings toast duration` to open the retained Settings pane and focus its filter. The shared catalog finds currently available mounted controls. A fresh Enter from the filter or a result click focuses the target. Escape in the filter or results clears that query. Bare `settings` returns to the primary control. Reopening through a typed Settings result preserves both drafts and their save ownership.
+
+For the paired native replay, use fuzzy Search and matched profiles. Check Menu and bare and typed Search entry, a repeated typed query while a draft is dirty, exact focus and fresh key handling, and the 1516 × 937 and compact viewport. Exact-mode cross-frontend behavior and navigation to remaining Settings pages stay open. [Navigation checkpoint](../CHECKPOINTS.md#g06-typed-settings-navigation)

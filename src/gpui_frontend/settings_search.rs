@@ -132,6 +132,8 @@ pub(super) struct SearchSettings {
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     focus: FocusHandle,
+    checkbox_focus: HashMap<Field, FocusHandle>,
+    scroll: ScrollHandle,
     baseline: Option<Values>,
     draft: Option<Values>,
     inputs: [Entity<InputState>; 4],
@@ -160,11 +162,31 @@ impl SearchSettings {
                 })
             })
             .collect();
+        let checkbox_focus = [
+            Field::QueryAutocomplete,
+            Field::MatchExact,
+            Field::GridEnabled,
+            Field::GridRespectCapability,
+        ]
+        .into_iter()
+        .map(|field| {
+            (
+                field,
+                if field == Field::QueryAutocomplete {
+                    focus.clone()
+                } else {
+                    cx.focus_handle()
+                },
+            )
+        })
+        .collect();
         Self {
             root,
             owner,
             mount,
             focus,
+            checkbox_focus,
+            scroll: ScrollHandle::new(),
             baseline: None,
             draft: None,
             inputs,
@@ -174,6 +196,60 @@ impl SearchSettings {
             status: None,
         }
     }
+    pub(super) fn can_focus(&self, target: settings_navigation::Target) -> bool {
+        use settings_navigation::Target::*;
+        if self.busy() || !self.mount.is_current() {
+            return false;
+        }
+        let Some(draft) = &self.draft else {
+            return false;
+        };
+        match target {
+            Autocomplete | Exact | Fuzzy | Usage | Page | Grid => true,
+            Columns | Respect => draft.grid,
+            _ => false,
+        }
+    }
+    pub(super) fn focus_control(
+        &mut self,
+        target: settings_navigation::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use settings_navigation::Target::*;
+        if !self.can_focus(target) {
+            return false;
+        }
+        let grid = self.draft.as_ref().is_some_and(|draft| draft.grid);
+        let base = 4 + usize::from(grid);
+        let (index, focus) = match target {
+            Autocomplete => (
+                1,
+                self.checkbox_focus.get(&Field::QueryAutocomplete).cloned(),
+            ),
+            Exact => (2, self.checkbox_focus.get(&Field::MatchExact).cloned()),
+            Grid => (3, self.checkbox_focus.get(&Field::GridEnabled).cloned()),
+            Respect => (
+                4,
+                self.checkbox_focus
+                    .get(&Field::GridRespectCapability)
+                    .cloned(),
+            ),
+            Fuzzy => (base + 1, Some(self.inputs[0].focus_handle(cx))),
+            Usage => (base + 3, Some(self.inputs[1].focus_handle(cx))),
+            Page => (base + 5, Some(self.inputs[2].focus_handle(cx))),
+            Columns => (base + 7, Some(self.inputs[3].focus_handle(cx))),
+            _ => return false,
+        };
+        let Some(focus) = focus else {
+            return false;
+        };
+        self.scroll.scroll_to_top_of_item(index);
+        focus.focus(window, cx);
+        cx.notify();
+        true
+    }
+
     pub(super) fn busy(&self) -> bool {
         self.reading || self.pending.is_some()
     }
@@ -621,12 +697,32 @@ fn apply_acknowledged(
 impl Render for SearchSettings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.busy();
+        let scroll = self.scroll.clone();
         let mut panel = div()
             .id("settings-search-results")
             .when(self.draft.is_none(), |panel| panel.track_focus(&self.focus))
             .flex()
             .flex_col()
             .gap_2()
+            .max_h(px(350.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .on_scroll(move |event, _, cx| {
+                let pixels = event.delta.pixel_delta(px(20.0));
+                let delta = if pixels.y.is_zero() {
+                    pixels.x
+                } else {
+                    pixels.y
+                }
+                .as_f32();
+                let offset = scroll.offset();
+                let maximum = scroll.max_offset().y.as_f32();
+                let previous = (offset.y.as_f32() - delta).clamp(-maximum, 0.0);
+                scroll.set_offset(point(offset.x, px(offset.y.as_f32().clamp(-maximum, 0.0))));
+                if inner_results_consumed_scroll(previous, maximum, delta) {
+                    cx.stop_propagation();
+                }
+            })
             .child(Label::new("Search & Results"));
         if let Some(draft) = &self.draft {
             for (field, label, checked) in [
@@ -652,13 +748,13 @@ impl Render for SearchSettings {
                 }
                 let weak = cx.entity().downgrade();
                 let mount = self.mount.clone();
-                let focus = self.focus.clone();
+                let Some(focus) = self.checkbox_focus.get(&field).cloned() else {
+                    continue;
+                };
                 panel = panel.child(
                     Checkbox::new(SharedString::from(format!("search-setting-{field:?}")))
                         .checked(checked)
-                        .when(field == Field::QueryAutocomplete, |checkbox| {
-                            checkbox.track_focus(&focus)
-                        })
+                        .track_focus(&focus)
                         .disabled(busy)
                         .accessibility_label(label)
                         .on_change(move |state, _, _, app| {

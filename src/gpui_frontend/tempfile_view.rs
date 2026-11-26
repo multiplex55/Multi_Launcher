@@ -180,7 +180,7 @@ impl Render for TempfileView {
                     || !(view.focus.is_focused(window) || view.focus.contains_focused(window, cx)) { return; }
                 if event.keystroke.key == "escape" && event.keystroke.modifiers == Modifiers::default() {
                     window.prevent_default(); cx.stop_propagation();
-                    if !event.is_held { let _ = view.root.update(cx, |root, _| root.snippet_fill_escape_latched = true); view.cancel(window, cx); }
+                    if !event.is_held { let _ = view.root.update(cx, |root, _| root.pane_escape_latched = true); view.cancel(window, cx); }
                 }
             }))
             .child(Label::new("Create Temp File"))

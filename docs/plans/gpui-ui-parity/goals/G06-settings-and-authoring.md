@@ -1,6 +1,6 @@
 # G06 — Settings, plugins, action authoring, and recovery
 
-**Status:** GPUI Settings Menu, bare typed entry and retained Autocomplete passed scoped Windows and Rust verification. Live Actions and Feedback and Search Results use canonical checked saves and passed focused tests. Matched live preferences replay, remaining controls, typed Settings search, child surfaces and the full round trip remain in implementation. [First native Settings save](../gui/settings-main.md#first-native-settings-save) · [Search Results checkpoint](../CHECKPOINTS.md#g06-and-g05-live-search-results-settings)
+**Status:** GPUI Settings Menu, bare typed entry and retained Autocomplete passed scoped Windows and Rust verification. Live Actions and Feedback, Search Results and typed navigation to mounted controls have focused evidence. Matched replay, remaining controls, child surfaces and the full round trip remain in implementation. [First native Settings save](../gui/settings-main.md#first-native-settings-save) · [Typed Settings checkpoint](../CHECKPOINTS.md#g06-typed-settings-navigation)
 
 The ordinary egui close prerequisite passed native and focused Rust verification. EgUI close saved root geometry while preserving unowned Settings values. GPUI reopened the same profile and the checked reverse restart continued to refuse a failed close write. [G06-D ordinary close evidence](../VALIDATION_LOG.md#g06-d-ordinary-egui-close-preservation)
 
