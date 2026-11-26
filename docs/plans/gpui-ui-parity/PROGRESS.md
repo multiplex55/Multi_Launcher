@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+GPUI Preview now opens Filename results and directory metadata, reuses the current child, and navigates bounded text with document-owned keys. All 14 focused launcher tests and four reused shared cases passed. Matched native replay remains open. Remembered File Search hosting follows. [Preview navigation checkpoint](CHECKPOINTS.md#g07-bounded-preview-navigation)
+
 Typed Settings search now finds and focuses mounted controls through the existing catalog and retained pane. All 14 focused launcher tests and three reused stock tests passed. Matched keyboard and focus replay remains open. G07 full Preview navigation follows. [Typed Settings checkpoint](CHECKPOINTS.md#g06-typed-settings-navigation)
 
 GPUI now saves and applies Search Results ranking, navigation and Grid preferences. All 15 focused launcher tests passed. Page Jump retains selection and ranking Save preserves current Calculator scalar work. Matched Windows verification remains open. Typed Settings navigation follows. [Search Results checkpoint](CHECKPOINTS.md#g06-and-g05-live-search-results-settings)
@@ -171,7 +173,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add full bounded G07 Preview navigation and Filename Preview, then remembered File Search hosting. Matched Settings, G01, G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
+| Current next action | Add remembered G07 File Search Dock and Pop Out, then inherited Preview hosting and popup Hash handoff. Matched Settings, G01, G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

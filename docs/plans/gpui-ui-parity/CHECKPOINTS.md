@@ -1580,3 +1580,13 @@ The shared Settings catalog supplies matches. GPUI offers controls that are moun
 Independent review covered installed provider scope, stale focus, stock emitted arguments, and raw and resolved key handling. Scoped launcher checks passed in 7.86 s, 6.26 s and 4.17 s. One warm launcher build took 27.16 s with zero corrective links and no library rebuild. Nextest run `ccee2dcc-a522-4dfd-b284-245c01c2093f` passed all 14 in 7.227 s with 409 skipped. Reused stock provider, parser and catalog run `069fc03b-c52e-4527-8c75-ad3ece90665d` passed all three in 0.632 s. The installed route uses the shared query filtering and preserves its emitted term. The stock provider's direct raw-suffix API is unchanged.
 
 Matched 1516 × 937 and compact Settings keyboard, scroll and focus evidence remains open. Use fuzzy Search for the first paired native typed replay. Exact-mode typed Settings behavior across the two frontends remains open. Continue the G07 Preview navigation and retained File Search host batch.
+
+### G07 bounded Preview navigation
+
+The retained Preview opens from the exact file or directory selection as well as a Content match. Reopening the same current selection focuses its existing Preview. A different selection retires that child and can open a new one. Content opens the shared match context at the exact source line. Filename Preview presents the complete loaded file or bounded beginning, and directories present metadata. Binary, unsupported and read errors retain their shared coverage.
+
+The document owns arrow, Page Up, Page Down, Home and End navigation. Line and column controls traverse the loaded data with a bounded display window. The visible range uses source line numbers. Navigation clamps at the last page and recalculates the column bound when the page changes. Toolbars keep their own focus and key behavior. The existing checked Explorer and exact path or matching-line copy use the current selection and host. The directory route uses the checked directory association.
+
+Independent review covered focus scope, optional match, same selection reuse, stale child retirement, late line and column navigation, shared coverage and checked Explorer. Scoped launcher checks passed in 3.28 s, 3.29 s and 3.40 s. One warm launcher build took 13.72 s with zero corrective links and no library rebuild. Nextest run `a6410e7a-7479-4204-867b-6b9940530947` passed all 14 in 9.885 s with 410 skipped. Reused shared Coverage and cache run `c78cf8e1-99c5-402a-9605-8f717cac320b` passed all four in 0.901 s.
+
+Matched native document traversal, checked effects and keyboard focus remain open. Continue the remembered File Search Dock and Pop Out packet, then inherited Preview hosting and the exact popup Hash handoff.

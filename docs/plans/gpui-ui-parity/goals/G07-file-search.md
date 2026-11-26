@@ -1,6 +1,6 @@
 # G07 — File Search, results, previews, and diagnostics
 
-**Status:** In implementation. **Owner:** G07 implementer with the shared search-service owner. Quoted Directory Filename Search, checked delivery to the G04 Hash pilot and checked Explorer are implemented. Manual and typed Directory Content, retained selected-match Preview and its checked Explorer and copy actions have focused evidence. Matched Content replay, broader navigation and inherited Preview hosts remain open. [File Search record](../gui/file-search.md) · [Preview actions checkpoint](../CHECKPOINTS.md#g07-checked-preview-actions)
+**Status:** In implementation. **Owner:** G07 implementer with the shared search-service owner. Quoted Directory Filename Search, checked delivery to the G04 Hash pilot and checked Explorer are implemented. Manual and typed Directory Content and retained Preview have focused evidence, including bounded document navigation and checked effects. Matched native replay and remembered File Search and Preview hosting remain open. [File Search record](../gui/file-search.md) · [Preview navigation checkpoint](../CHECKPOINTS.md#g07-bounded-preview-navigation)
 
 ## Objective and dependencies
 

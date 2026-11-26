@@ -1,15 +1,15 @@
-//! Retained read-only preview for one exact File Search content match.
+//! Retained read-only preview for one exact File Search selection.
 use super::*;
-use multi_launcher::file_search::preview::{preview_file, PreviewLoadOutcome, PreviewLoadStateMachine, PreviewLoadingState, PreviewRequest, PreviewLine};
+use multi_launcher::file_search::preview::{preview_file, PreviewLoadOutcome, PreviewLoadStateMachine, PreviewLoadingState, PreviewRequest, PreviewLine, PreviewCoverage};
 
 pub(super) const WAIT: &str = "Wait for the File Search preview action to finish.";
-const MAX_LINES: usize = 7;
+const MAX_LINES: usize = 12;
 const MAX_LINE_CHARS: usize = 240;
 
-fn line_segments(line: &PreviewLine) -> Vec<(String, bool)> {
+fn line_segments(line: &PreviewLine, start: usize) -> Vec<(String, bool)> {
     let total = line.text.chars().count();
     let selected = line.match_ranges.first().map(|range| (range.start_column.saturating_sub(1), range.end_column.saturating_sub(1)));
-    let start = selected.map_or(0, |(start, _)| start.saturating_sub(80)).min(total);
+    let start = start.min(total);
     let end = start.saturating_add(MAX_LINE_CHARS).min(total);
     let mut result = Vec::new();
     if start > 0 { result.push(("…".into(), false)); }
@@ -27,12 +27,21 @@ fn line_segments(line: &PreviewLine) -> Vec<(String, bool)> {
     result
 }
 
+fn line_navigation(offset: usize, count: usize, key: &str) -> Option<usize> {
+    let last = count.saturating_sub(MAX_LINES);
+    Some(match key {
+        "up" => offset.saturating_sub(1), "down" => offset.saturating_add(1).min(last),
+        "pageup" => offset.saturating_sub(MAX_LINES), "pagedown" => offset.saturating_add(MAX_LINES).min(last),
+        "home" => 0, "end" => count.saturating_sub(MAX_LINES), _ => return None,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PreviewAction { Explorer, CopyPath, CopyLine }
 impl PreviewAction {
     fn is_clipboard(self) -> bool { !matches!(self, Self::Explorer) }
-    fn payload(self, path: &std::path::Path, line: &str) -> Option<String> {
-        match self { Self::Explorer => None, Self::CopyPath => Some(path.display().to_string()), Self::CopyLine => Some(line.to_owned()) }
+    fn payload(self, path: &std::path::Path, line: Option<&str>) -> Option<String> {
+        match self { Self::Explorer => None, Self::CopyPath => Some(path.display().to_string()), Self::CopyLine => line.map(str::to_owned) }
     }
 }
 
@@ -55,6 +64,7 @@ pub(super) struct FileSearchPreview {
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     focus: FocusHandle,
+    document_focus: FocusHandle,
     explorer_focus: FocusHandle,
     copy_path_focus: FocusHandle,
     copy_line_focus: FocusHandle,
@@ -71,24 +81,27 @@ pub(super) struct FileSearchPreview {
     native: NativeWindow,
     admission: Arc<RestartAdmission>,
     state: PreviewLoadStateMachine,
-    found: multi_launcher::file_search::model::ContentMatch,
+    found: Option<multi_launcher::file_search::model::ContentMatch>,
     rendered: Vec<(usize, Vec<(String, bool)>)>,
     match_present: bool,
+    line_offset: usize,
+    column_offset: usize,
+    max_column: usize,
     scroll: ScrollHandle,
 }
 
 impl FileSearchPreview {
     pub(super) fn new(parent: WeakEntity<file_search::FileSearchView>, root: WeakEntity<RootWindow>, receipt: file_search::SelectionReceipt,
-        return_focus: FocusHandle, return_scroll: Point<Pixels>, host: AnyWindowHandle, found: multi_launcher::file_search::model::ContentMatch, owner: utility_mount::MountOwner,
+        return_focus: FocusHandle, return_scroll: Point<Pixels>, host: AnyWindowHandle, found: Option<multi_launcher::file_search::model::ContentMatch>, owner: utility_mount::MountOwner,
         mount: utility_mount::MountReceipt, visibility: RootVisibility, revision: u64, native: NativeWindow,
         admission: Arc<RestartAdmission>, cx: &mut Context<Self>) -> Self {
-        Self { parent, root, receipt, owner, mount, focus: cx.focus_handle(), explorer_focus: cx.focus_handle(),
+        Self { parent, root, receipt, owner, mount, focus: cx.focus_handle(), document_focus: cx.focus_handle(), explorer_focus: cx.focus_handle(),
             copy_path_focus: cx.focus_handle(), copy_line_focus: cx.focus_handle(), pending: false,
             effect_lease: None, focus_guard: None, activation_guard: None, feedback: None,
             return_focus, return_scroll, host, visibility, revision, native, admission,
-            state: PreviewLoadStateMachine::default(), found, rendered: Vec::new(), match_present: false, scroll: ScrollHandle::new() }
+            state: PreviewLoadStateMachine::default(), found, rendered: Vec::new(), match_present: false, line_offset: 0, column_offset: 0, max_column: 0, scroll: ScrollHandle::new() }
     }
-    pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) { self.focus.focus(window, cx); }
+    pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) { self.document_focus.focus(window, cx); }
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool {
         self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
     }
@@ -103,7 +116,7 @@ impl FileSearchPreview {
         self.owner.retire(); self.state.clear(); self.rendered.clear();
     }
     fn start_action(&mut self, action: PreviewAction, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending || !self.scope_current()
+        if (action == PreviewAction::CopyLine && self.found.is_none()) || self.pending || !self.scope_current()
             || self.host.window_id() != window.window_handle().window_id() || !window.is_window_active()
             || window.has_active_dialog(cx) || current_foreground_identity() != Some(self.native.identity) { return; }
         let Some(parent) = self.parent.upgrade() else { return; };
@@ -144,8 +157,9 @@ impl FileSearchPreview {
         self.pending = true;
         self.effect_lease = Some(lease.clone());
         self.feedback = None;
-        let payload = action.payload(&self.receipt.path, &self.found.line);
+        let payload = action.payload(&self.receipt.path, self.found.as_ref().map(|found| found.line.as_str()));
         let path = self.receipt.path.clone();
+        let directory = self.receipt.kind == multi_launcher::file_search::model::FileKind::Directory;
         let mount = self.mount.clone();
         let worker_mount = mount.clone();
         let visibility = self.visibility.clone();
@@ -160,9 +174,14 @@ impl FileSearchPreview {
             match action {
                 PreviewAction::Explorer => {
                     #[cfg(windows)]
-                    { multi_launcher::file_search::actions::reveal_checked_file_if_current(&path, current).map_err(|error| format!("Could not open in Explorer: {error:#}")) }
+                    { (|| -> anyhow::Result<()> {
+                        if directory {
+                            let target = multi_launcher::file_search::actions::checked_explorer_target(&path, true)?;
+                            multi_launcher::actions::exec::launch_association_if_current(target.as_os_str(), current)
+                        } else { multi_launcher::file_search::actions::reveal_checked_file_if_current(&path, current) }
+                    })().map_err(|error| format!("Could not open in Explorer: {error:#}")) }
                     #[cfg(not(windows))]
-                    { let _ = (path, current); Err("Explorer requires Windows.".into()) }
+                    { let _ = (path, current, directory); Err("Explorer requires Windows.".into()) }
                 }
                 PreviewAction::CopyPath | PreviewAction::CopyLine => copy_if_current(&multi_launcher::clipboard_modify::ArboardClipboardBackend, payload.as_deref().unwrap_or_default(), &current),
             }
@@ -196,6 +215,42 @@ impl FileSearchPreview {
         cx.notify();
     }
 
+    fn refresh_lines(&mut self, new_page: bool) {
+        self.rendered.clear();
+        if let PreviewLoadingState::Loaded { preview, .. } = &self.state.state {
+            self.line_offset = self.line_offset.min(preview.lines.len().saturating_sub(MAX_LINES));
+            if new_page {
+                self.max_column = preview.lines.iter().skip(self.line_offset).take(MAX_LINES)
+                    .map(|line| line.text.chars().count().saturating_sub(1)).max().unwrap_or(0);
+            }
+            self.column_offset = self.column_offset.min(self.max_column);
+            self.rendered = preview.lines.iter().skip(self.line_offset).take(MAX_LINES)
+                .map(|line| (line.line_number, line_segments(line, self.column_offset))).collect();
+        }
+        self.scroll.set_offset(point(px(0.0), px(0.0)));
+    }
+
+    fn navigate(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let PreviewLoadingState::Loaded { preview, .. } = &self.state.state else { return false; };
+        if preview.lines.is_empty() { return false; }
+        let old_line = self.line_offset;
+        let old_column = self.column_offset;
+        if let Some(offset) = line_navigation(old_line, preview.lines.len(), key) {
+            self.line_offset = offset;
+        } else {
+            match key {
+                "left" => self.column_offset = old_column.saturating_sub(MAX_LINE_CHARS),
+                "right" => self.column_offset = old_column.saturating_add(MAX_LINE_CHARS).min(self.max_column),
+                _ => return false,
+            }
+        }
+        if old_line != self.line_offset || old_column != self.column_offset {
+            self.refresh_lines(old_line != self.line_offset);
+            cx.notify();
+        }
+        true
+    }
+
     pub(super) fn load(&mut self, request: PreviewRequest, permit: EffectPermit, cx: &mut Context<Self>) {
         let epoch = self.state.begin_request();
         let mount = self.mount.clone();
@@ -209,13 +264,13 @@ impl FileSearchPreview {
             if !worker_mount.is_current() || admission.is_fenced()
                 || !json_utility::native_host_current(&visibility, revision, Some(native), false) { return None; }
             let mut preview = preview_file(&request);
-            let selected_index = preview.lines.iter().position(|line| line.line_number == found.line_number).unwrap_or(0);
-            let match_present = preview.lines.get(selected_index).is_some_and(|line| line.line_number == found.line_number && line.text == found.line);
+            let selected_index = found.as_ref().and_then(|found| preview.lines.iter().position(|line| line.line_number == found.line_number)).unwrap_or(0);
+            let match_present = found.as_ref().is_some_and(|found| preview.lines.get(selected_index)
+                .is_some_and(|line| line.line_number == found.line_number && line.text == found.line));
             if !match_present { for line in &mut preview.lines { line.match_ranges.clear(); } }
-            let start = selected_index.saturating_sub(1);
-            let end = start.saturating_add(MAX_LINES).min(preview.lines.len());
-            let rendered = preview.lines[start..end].iter().map(|line| (line.line_number, line_segments(line))).collect();
-            Some((preview, rendered, match_present))
+            let column = preview.lines.get(selected_index).and_then(|line| line.match_ranges.first())
+                .map_or(0, |range| range.start_column.saturating_sub(81));
+            Some((preview, selected_index.saturating_sub(1), column, match_present))
         });
         cx.spawn(async move |weak, cx| {
             let _permit = permit;
@@ -226,13 +281,13 @@ impl FileSearchPreview {
                 let Some(parent) = view.parent.upgrade() else { return; };
                 if !parent.read(cx).preview_is_current(cx.entity_id(), &view.receipt) { return; }
                 let outcome = match result {
-                    Some((preview, rendered, match_present)) => {
-                        view.rendered = rendered; view.match_present = match_present;
+                    Some((preview, line_offset, column_offset, match_present)) => {
+                        view.line_offset = line_offset; view.column_offset = column_offset; view.match_present = match_present;
                         PreviewLoadOutcome::Loaded(preview)
                     }
                     None => PreviewLoadOutcome::Failed("Preview was cancelled.".into()),
                 };
-                if view.state.complete_request(epoch, outcome) { cx.notify(); }
+                if view.state.complete_request(epoch, outcome) { view.refresh_lines(true); cx.notify(); }
             });
         }).detach();
     }
@@ -240,8 +295,14 @@ impl FileSearchPreview {
 
 impl Render for FileSearchPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut pane = div().id("file-search-preview").track_focus(&self.focus).flex().flex_col().gap_2().p_3()
-            .child(Label::new("Content Preview"))
+        let mut pane = div().id("file-search-preview-document").track_focus(&self.document_focus).flex().flex_col().gap_2()
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.modifiers == Modifiers::default() && view.document_focus.is_focused(window)
+                    && view.navigate(&event.keystroke.key, cx) {
+                    window.prevent_default(); cx.stop_propagation();
+                }
+            }))
+            .child(Label::new("Preview"))
             .child(Label::new(self.receipt.path.display().to_string()));
         match &self.state.state {
             PreviewLoadingState::Idle | PreviewLoadingState::Loading { .. } => { pane = pane.child(Label::new("Loading preview…")); }
@@ -250,9 +311,20 @@ impl Render for FileSearchPreview {
                 if let Some(error) = &preview.error { pane = pane.child(Label::new(format!("Could not load preview: {}", error.message))); }
                 if let Some(unsupported) = &preview.binary_or_unsupported { pane = pane.child(Label::new(unsupported.reason.clone())); }
                 for warning in &preview.warnings { pane = pane.child(Label::new(warning.clone())); }
-                if !self.match_present { pane = pane.child(Label::new("The selected match is no longer present in the loaded file.")); }
+                if self.found.is_some() && !self.match_present { pane = pane.child(Label::new("The selected match is no longer present in the loaded file.")); }
                 let mut lines = div().id("file-search-preview-lines").flex().flex_col().max_h(px(360.0)).overflow_y_scroll().track_scroll(&self.scroll);
-                lines = lines.child(Label::new("Selected-match context"));
+                let coverage = if preview.metadata.is_directory { "Directory" } else if self.found.is_some()
+                    && matches!(preview.coverage, PreviewCoverage::Complete | PreviewCoverage::MatchContextOnly) { "Match context" } else { match preview.coverage {
+                    PreviewCoverage::Complete => "Complete", PreviewCoverage::BeginningOnly => "Beginning",
+                    PreviewCoverage::MatchContextOnly => "Match context", PreviewCoverage::BinaryUnsupported => "Binary",
+                    PreviewCoverage::Unsupported => "Unsupported", PreviewCoverage::ReadError => "Read error",
+                }};
+                pane = pane.child(Label::new(format!("{coverage} · {} bytes{}", preview.metadata.len_bytes,
+                    if preview.metadata.readonly { " · read-only" } else { "" })));
+                if !preview.lines.is_empty() {
+                    lines = lines.child(Label::new(format!("Lines {}–{} · {} loaded · Column {}",
+                        self.rendered.first().map_or(0, |row| row.0), self.rendered.last().map_or(0, |row| row.0), preview.lines.len(), self.column_offset + 1)));
+                }
                 for (number, segments) in &self.rendered {
                     let mut row = div().flex().gap_1().child(Label::new(format!("{number}")));
                     for (text, matched) in segments {
@@ -263,6 +335,17 @@ impl Render for FileSearchPreview {
                 pane = pane.child(lines.vertical_scrollbar(&self.scroll));
             }
         }
+        let line_count = match &self.state.state {
+            PreviewLoadingState::Loaded { preview, .. } => preview.lines.len(), _ => 0,
+        };
+        if line_count > 0 {
+            pane = pane.child(div().flex().flex_wrap().gap_2()
+                .child(Button::new("preview-prev").label("Previous lines").disabled(self.line_offset == 0).on_click(cx.listener(|view, _, _, cx| { view.navigate("pageup", cx); })))
+                .child(Button::new("preview-next").label("Next lines").disabled(self.line_offset + MAX_LINES >= line_count).on_click(cx.listener(|view, _, _, cx| { view.navigate("pagedown", cx); })))
+                .child(Button::new("preview-left").label("Previous columns").disabled(self.column_offset == 0).on_click(cx.listener(|view, _, _, cx| { view.navigate("left", cx); })))
+                .child(Button::new("preview-right").label("Next columns").disabled(self.column_offset.saturating_add(MAX_LINE_CHARS) > self.max_column).on_click(cx.listener(|view, _, _, cx| { view.navigate("right", cx); }))));
+        }
+        let mut pane = div().id("file-search-preview").track_focus(&self.focus).flex().flex_col().gap_2().p_3().child(pane);
         if let Some(message) = &self.feedback { pane = pane.child(Label::new(message.clone())); }
         let parent = self.parent.clone();
         let owner = cx.entity_id();
@@ -273,9 +356,9 @@ impl Render for FileSearchPreview {
             .child(Button::new("file-search-preview-copy-path").label("Copy Full Path").tab_stop(true)
                 .track_focus(&self.copy_path_focus).disabled(self.pending)
                 .on_click(cx.listener(|view, _, window, cx| view.start_action(PreviewAction::CopyPath, window, cx))))
-            .child(Button::new("file-search-preview-copy-line").label("Copy Matching Line").tab_stop(true)
+            .when(self.found.is_some(), |row| row.child(Button::new("file-search-preview-copy-line").label("Copy Matching Line").tab_stop(true)
                 .track_focus(&self.copy_line_focus).disabled(self.pending)
-                .on_click(cx.listener(|view, _, window, cx| view.start_action(PreviewAction::CopyLine, window, cx))))
+                .on_click(cx.listener(|view, _, window, cx| view.start_action(PreviewAction::CopyLine, window, cx)))))
             .child(Button::new("file-search-preview-return").label("Return to Search").tab_stop(true).on_click(cx.listener(move |_, _, window, cx| {
                 let parent = parent.clone();
                 window.defer(cx, move |window, app| {
@@ -287,7 +370,7 @@ impl Render for FileSearchPreview {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_if_current, line_segments, PreviewAction, MAX_LINE_CHARS};
+    use super::{copy_if_current, line_segments, line_navigation, PreviewAction, MAX_LINE_CHARS, MAX_LINES};
     use multi_launcher::file_search::{model::ContentMatch, preview::{preview_file, PreviewRequest}};
     #[derive(Default)]
     struct FakeClipboard { writes: std::sync::Mutex<Vec<String>>, revoke_during_acquire: bool,
@@ -313,8 +396,9 @@ mod tests {
     fn preview_copy_keeps_full_unicode_payload_and_checks_late_authority() {
         let line = format!("é{}終", "λ".repeat(512));
         let path = std::path::Path::new("owned/é.txt");
-        assert_eq!(PreviewAction::CopyLine.payload(path, &line).as_deref(), Some(line.as_str()));
-        assert_eq!(PreviewAction::CopyPath.payload(path, &line), Some(path.display().to_string()));
+        assert_eq!(PreviewAction::CopyLine.payload(path, Some(&line)).as_deref(), Some(line.as_str()));
+        assert_eq!(PreviewAction::CopyPath.payload(path, Some(&line)), Some(path.display().to_string()));
+        assert_eq!(PreviewAction::CopyLine.payload(path, None), None);
         let revoked = FakeClipboard { revoke_during_acquire: true, ..Default::default() };
         assert!(copy_if_current(&revoked, &line, &|| true).is_err());
         assert!(revoked.writes.lock().unwrap().is_empty());
@@ -344,6 +428,16 @@ mod tests {
     }
 
     #[test]
+    fn preview_navigation_reaches_beginning_and_late_lines() {
+        assert_eq!(line_navigation(0, 100, "pagedown"), Some(MAX_LINES));
+        assert_eq!(line_navigation(0, 100, "end"), Some(100 - MAX_LINES));
+        assert_eq!(line_navigation(99, 100, "down"), Some(100 - MAX_LINES));
+        assert_eq!(line_navigation(99, 100, "home"), Some(0));
+        assert_eq!(line_navigation(0, 0, "up"), Some(0));
+        assert_eq!(line_navigation(0, 100, "escape"), None);
+    }
+
+    #[test]
     fn bounded_unicode_line_marks_the_exact_visible_match() {
         let text = format!("{}éneedle{}", "界".repeat(500), "λ".repeat(500));
         let found = ContentMatch::new(3, text.clone(), 1500, 1508);
@@ -353,7 +447,7 @@ mod tests {
         let request = PreviewRequest::from_search_result(&path, Some(&found), 1024 * 1024);
         let preview = preview_file(&request);
         let line = preview.lines.iter().find(|line| line.line_number == 3).unwrap();
-        let segments = line_segments(line);
+        let segments = line_segments(line, 420);
         assert_eq!(segments.iter().filter(|(_, marked)| *marked).map(|(text, _)| text.as_str()).collect::<String>(), "éneedle");
         assert!(segments.iter().map(|(text, _)| text.chars().count()).sum::<usize>() <= MAX_LINE_CHARS + 2);
     }
