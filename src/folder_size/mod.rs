@@ -26,5 +26,5 @@ pub use model::{
     MAX_FOLDER_SIZE_ENTRIES, MAX_FOLDER_SIZE_ISSUE_EXAMPLES, MAX_FOLDER_SIZE_PATH_BYTES,
 };
 pub use session::{
-    FolderSizeSession, FolderSizeSessionError, FolderSizeSessionStatus, FolderSizeSessionView,
+    FolderSizePublicationGuard, FolderSizeSession, FolderSizeSessionError, FolderSizeSessionStatus, FolderSizeSessionView,
 };

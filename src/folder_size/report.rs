@@ -554,6 +554,8 @@ mod tests {
         report.sync_visible_rows();
         let projection = report.projection().unwrap();
         let key = projection.key();
+        let publication = session.publication_guard();
+        assert!(publication.is_current(key));
         let child_dir = projection.rows().iter().position(|row| row.name() == "nested").unwrap();
         assert_eq!(report.path_for_current_row(&view, Some(&root), Some(&root), key, child_dir), Some(directory));
         let stale = ProjectionKey { version: ProjectionVersion::Progress(0), ..key };
@@ -568,6 +570,9 @@ mod tests {
         assert_eq!(report.visible_rows().unwrap().len(), 1);
         assert!(report.up(key.generation(), child_dir));
         assert!(report.visible_rows().unwrap().contains(&child_dir));
+        session.refresh(root.clone(), true).unwrap();
+        assert!(!publication.is_current(key));
         session.close();
+        assert!(!publication.is_current(key));
     }
 }

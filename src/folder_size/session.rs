@@ -300,6 +300,30 @@ pub struct FolderSizeSession {
     worker: Mutex<Option<WorkerOwner>>,
 }
 
+/// Read-only publication authority for a worker that must not poll or promote scans.
+#[derive(Clone)]
+pub struct FolderSizePublicationGuard {
+    shared: Weak<SessionShared>,
+}
+
+impl FolderSizePublicationGuard {
+    pub fn is_current(&self, issued: super::report::ProjectionKey) -> bool {
+        use super::report::ProjectionVersion;
+        let Some(shared) = self.shared.upgrade() else { return false; };
+        let Ok(state) = shared.state.lock() else { return false; };
+        if state.closed { return false; }
+        if state.accepted_result.as_ref().is_some_and(|result| result.generation() == state.generation) {
+            issued.generation() == state.generation && issued.version() == ProjectionVersion::Result
+        } else {
+            state.progress.as_ref().is_some_and(|progress| {
+                (progress.generation() == state.generation || state.cancelled)
+                    && issued.generation() == progress.generation()
+                    && issued.version() == ProjectionVersion::Progress(progress.publication_id())
+            })
+        }
+    }
+}
+
 pub struct FolderSizeSessionView {
     generation: u64,
     result: Option<Arc<FolderSizeResult>>,
@@ -353,6 +377,9 @@ impl FolderSizeSessionView {
 }
 
 impl FolderSizeSession {
+    pub fn publication_guard(&self) -> FolderSizePublicationGuard {
+        FolderSizePublicationGuard { shared: Arc::downgrade(&self.shared) }
+    }
     #[cfg(test)]
     pub(crate) fn with_held_test_scan(
         wake: impl Fn() + Send + Sync + 'static,
@@ -1507,10 +1534,23 @@ mod tests {
         assert_eq!(progress.generation(), second_generation);
         assert!(scanning.progress_is_current());
         assert_eq!(progress.total_logical_bytes(), 14);
+        let publication = session.publication_guard();
+        let progress_key = super::super::report::ProjectionKey {
+            generation: progress.generation(),
+            version: super::super::report::ProjectionVersion::Progress(progress.publication_id()),
+        };
+        let other_publication = super::super::report::ProjectionKey {
+            generation: progress.generation(),
+            version: super::super::report::ProjectionVersion::Progress(progress.publication_id().wrapping_add(1)),
+        };
+        assert!(publication.is_current(progress_key));
+        assert!(!publication.is_current(other_publication));
 
         assert!(session.cancel().unwrap());
         let cancelled = session.view();
         assert_eq!(cancelled.status(), FolderSizeSessionStatus::Cancelled);
+        assert!(publication.is_current(progress_key));
+        assert!(!publication.is_current(other_publication));
         assert!(cancelled.is_busy());
         assert!(!cancelled.progress_is_current());
         assert_eq!(
@@ -1532,6 +1572,9 @@ mod tests {
         });
         assert!(settled.result().is_none());
         assert_eq!(settled.progress().unwrap().generation(), second_generation);
+        assert!(publication.is_current(progress_key));
+        session.close();
+        assert!(!publication.is_current(progress_key));
     }
 
     #[test]

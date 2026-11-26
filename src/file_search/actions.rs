@@ -363,9 +363,13 @@ pub fn checked_explorer_target(path: &Path, directory: bool) -> anyhow::Result<P
     Ok(target)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckedSelectionKind { File, Directory }
+
 #[cfg(windows)]
-fn checked_selection_effect(path: &Path, is_current: impl FnOnce() -> bool, effect: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
-    checked_explorer_target(path, false)?;
+fn checked_selection_effect(path: &Path, kind: CheckedSelectionKind, is_current: impl FnOnce() -> bool, effect: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    checked_explorer_target(path, kind == CheckedSelectionKind::Directory)?;
+    anyhow::ensure!(kind != CheckedSelectionKind::Directory || path.file_name().is_some(), "Cannot select a volume root");
     anyhow::ensure!(is_current(), "File Search selection is no longer current");
     effect()
 }
@@ -373,6 +377,12 @@ fn checked_selection_effect(path: &Path, is_current: impl FnOnce() -> bool, effe
 /// Select one checked ordinary local file using its absolute Shell PIDL.
 #[cfg(windows)]
 pub fn reveal_checked_file_if_current(path: &Path, is_current: impl FnOnce() -> bool) -> anyhow::Result<()> {
+    reveal_checked_item_if_current(path, CheckedSelectionKind::File, is_current)
+}
+
+/// Select a checked ordinary local file or non-root directory using its absolute Shell PIDL.
+#[cfg(windows)]
+pub fn reveal_checked_item_if_current(path: &Path, kind: CheckedSelectionKind, is_current: impl FnOnce() -> bool) -> anyhow::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{core::PCWSTR, Win32::{Foundation::RPC_E_CHANGED_MODE, System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED}, UI::Shell::{Common::ITEMIDLIST, SHOpenFolderAndSelectItems, SHParseDisplayName}}};
 
@@ -393,7 +403,8 @@ pub fn reveal_checked_file_if_current(path: &Path, is_current: impl FnOnce() -> 
         }
     }
 
-    let target = checked_explorer_target(path, false)?;
+    let target = checked_explorer_target(path, kind == CheckedSelectionKind::Directory)?;
+    anyhow::ensure!(kind != CheckedSelectionKind::Directory || target.file_name().is_some(), "Cannot select a volume root");
     let mut wide: Vec<u16> = target.as_os_str().encode_wide().collect();
     anyhow::ensure!(!wide.contains(&0), "Invalid local target");
     wide.push(0);
@@ -411,7 +422,7 @@ pub fn reveal_checked_file_if_current(path: &Path, is_current: impl FnOnce() -> 
     unsafe { SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl.0, 0, None) }
         .with_context(|| format!("resolve {} in Explorer", path.display()))?;
     anyhow::ensure!(!pidl.0.is_null(), "Explorer returned an empty item identifier");
-    checked_selection_effect(&target, is_current, || {
+    checked_selection_effect(&target, kind, is_current, || {
         // SAFETY: this is the full absolute PIDL; no relative children are supplied.
         unsafe { SHOpenFolderAndSelectItems(pidl.0.cast_const(), None, 0) }
             .with_context(|| format!("reveal {} in Explorer", path.display()))
@@ -536,7 +547,7 @@ mod tests {
         std::fs::write(&file, b"fixture").unwrap();
         let called = Cell::new(false);
         let checks = Cell::new(0);
-        let error = checked_selection_effect(&file, || { checks.set(checks.get() + 1); false }, || { called.set(true); Ok(()) }).unwrap_err();
+        let error = checked_selection_effect(&file, CheckedSelectionKind::File, || { checks.set(checks.get() + 1); false }, || { called.set(true); Ok(()) }).unwrap_err();
         assert_eq!(error.to_string(), "File Search selection is no longer current");
         assert_eq!(checks.get(), 1);
         checks.set(0);
@@ -544,11 +555,20 @@ mod tests {
         assert_eq!(error.to_string(), "File Search selection is no longer current");
         assert_eq!(checks.get(), 1);
         assert!(!called.get());
-        checked_selection_effect(&file, || true, || { called.set(true); Ok(()) }).unwrap();
+        checked_selection_effect(&file, CheckedSelectionKind::File, || true, || { called.set(true); Ok(()) }).unwrap();
         assert!(called.replace(false));
-        assert_eq!(checked_selection_effect(&file, || true, || Err(anyhow!("selection failed"))).unwrap_err().to_string(), "selection failed");
+        assert_eq!(checked_selection_effect(&file, CheckedSelectionKind::File, || true, || Err(anyhow!("selection failed"))).unwrap_err().to_string(), "selection failed");
+        let directory = temp.path().join("folder");
+        std::fs::create_dir(&directory).unwrap();
+        checked_selection_effect(&directory, CheckedSelectionKind::Directory, || true, || { called.set(true); Ok(()) }).unwrap();
+        assert!(called.replace(false));
+        assert!(checked_selection_effect(&directory, CheckedSelectionKind::File, || true, || { called.set(true); Ok(()) }).is_err());
+        assert!(checked_selection_effect(&file, CheckedSelectionKind::Directory, || true, || { called.set(true); Ok(()) }).is_err());
+        let volume_root = directory.ancestors().last().unwrap();
+        assert!(checked_selection_effect(volume_root, CheckedSelectionKind::Directory, || true, || { called.set(true); Ok(()) }).is_err());
+        assert!(!called.get());
         std::fs::remove_file(&file).unwrap();
-        assert!(checked_selection_effect(&file, || true, || { called.set(true); Ok(()) }).is_err());
+        assert!(checked_selection_effect(&file, CheckedSelectionKind::File, || true, || { called.set(true); Ok(()) }).is_err());
         assert!(!called.get());
     }
 

@@ -1694,3 +1694,9 @@ Analyze folder size stages the original directory from the exact current File Se
 An independent File Search popup can deliver to an existing Folder Size popup or through a checked hidden candidate. The destination inherits Pop Out, including with the launcher hidden. Foreground and exact ownership gate the prefill and remembered placement. Failure retires the candidate and preserves the prior Folder Size state. Fresh open waits for an older native window to retire. A minimized existing destination asks the user to restore before retrying.
 
 Independent review covered exact live source, staged rollback, focus and retirement. The final scoped locked launcher check passed in 3.21 s. One warm link took 19.99 s without a shared-library rebuild. Nextest run `7139e163-b930-485c-b296-524f293f47d3` passed all 14 in 7.904 s with 430 skipped. Reused stock retained and discarded prefill tests passed both in run `4aff778c-46c8-432a-848b-9991096d7c75` in 2.123 s. Paired 1516 × 937 Windows prefill, idle initial state and hidden-root replay remain open. Continue checked Copy Path and Reveal in Explorer from the report.
+
+### G10 shared authority for checked Folder Size report actions
+
+The checked Shell selector accepts a typed ordinary local file or non-root directory and rechecks target kind and authority at the effect boundary. File Search keeps its existing file entry point. Folder Size exposes a read-only publication guard for native effects, including the current progress revision and the frozen cancelled subtotal. The guard leaves worker polling and queued scan promotion with the session owner.
+
+The locked scoped library and launcher check passed in 1 min 50 s. Independent review cleared the typed selector and publication guard. Fixture tests cover type mismatch, volume root, stale progress in the same generation and cancellation. Link these with the GPUI report actions in one batch. Native Explorer and clipboard replay remains open.
