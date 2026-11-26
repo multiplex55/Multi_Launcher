@@ -2,9 +2,7 @@ use crate::actions::Action;
 use crate::clipboard_modify::clipboard::{
     ClipboardBackend, ClipboardError, ClipboardService, UndoRecord,
 };
-use crate::clipboard_modify::executor::{
-    Cancellation, ExecuteError, execute_pipeline, execute_stages,
-};
+use crate::clipboard_modify::executor::{Cancellation, ExecuteError, run_intent};
 use crate::clipboard_modify::model::{ClipboardModifierCatalog, StageSpec};
 use crate::clipboard_modify::parser::ClipboardModifyIntent;
 use crate::commands::ActivationSource;
@@ -329,33 +327,6 @@ impl PreviewCoordinator {
     }
     pub fn copy_result_text(&self) -> Option<&str> {
         self.full_output()
-    }
-}
-
-fn run_intent<C: Cancellation + ?Sized>(
-    source: &str,
-    intent: &ClipboardModifyIntent,
-    catalog: &ClipboardModifierCatalog,
-    c: &C,
-) -> Result<String, ExecuteError> {
-    match intent {
-        ClipboardModifyIntent::Stages(stages) => execute_stages(source, stages, catalog, c),
-        ClipboardModifyIntent::ApplyTemplate { name } => execute_stages(
-            source,
-            &[crate::clipboard_modify::model::StageSpec {
-                operation: crate::clipboard_modify::model::OperationId::Template,
-                arguments: crate::clipboard_modify::model::StageArguments {
-                    name: Some(name.clone()),
-                    ..Default::default()
-                },
-            }],
-            catalog,
-            c,
-        ),
-        ClipboardModifyIntent::ApplySavedPipeline { name } => {
-            execute_pipeline(source, name, catalog, c)
-        }
-        ClipboardModifyIntent::Undo => Ok(source.to_string()),
     }
 }
 

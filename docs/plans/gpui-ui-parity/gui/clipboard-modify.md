@@ -42,4 +42,10 @@ The scoped evidence is in the [catalog checkpoint](../CHECKPOINTS.md#g13-clipboa
 
 Both editors retain ordered, editable rows with stable identity. Drafts use the canonical model and checked store. Save compares the edited collection with its baseline and merges the latest validated sibling. Explicit reload reads the current file and offers draft replacement only while the original scope is current. Referenced templates keep their draft rows. A durable Pipeline Delete uses explicit review and retains the row until a checked success. Duplicate waits for explicit Save. Pipeline stages use shared typed editors and complete-output preview.
 
-The scoped evidence is in the [management checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-catalog-management). Windows replay, direct execution, Settings, Pop Out, pins and Jump remain open.
+The scoped evidence is in the [management checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-catalog-management). Windows replay remains open.
+
+## GPUI Direct Execute
+
+The stock typed named and inline commands execute through the launcher-owned canonical catalog and the checked clipboard service. Search and activation share the same catalog receipt. Execution transforms the protected source, then captures the current replacement value for the exact write and Undo. Search records the original action and canonical history query only after success.
+
+The scoped evidence is in the [Direct Execute checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-direct-execute). Windows replay, Settings, Pop Out, pins and Jump remain open.

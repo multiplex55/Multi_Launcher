@@ -33,6 +33,7 @@ mod regex_syntax;
 mod regex_jump;
 mod clipboard_history;
 mod clipboard_modify_view;
+mod clipboard_modify_startup;
 mod regex_history;
 mod regex_presets;
 mod regex_clipboard;
@@ -511,8 +512,9 @@ impl LauncherSearchCatalog {
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_filename_start(raw_query, &action).is_some();
+                let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || clipboard_modify_result || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -521,7 +523,8 @@ impl LauncherSearchCatalog {
                         raw_query,
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
-                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result,
+                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result
+                            || (clipboard_modify_result && multi_launcher::actions::search::clipboard_modify_resolved_postfilter_bypass(raw_query, &action.action)),
                         &self.matcher,
                         self.fuzzy_weight,
                         folder_aliases,
@@ -2682,6 +2685,7 @@ struct RootWindow {
     regex_view: Option<Entity<regex_tester::RegexWorkspace>>,
     clipboard_history: Option<Entity<clipboard_history::ClipboardHistory>>,
     clipboard_modify_view: Option<Entity<clipboard_modify_view::ClipboardModifyView>>,
+    clipboard_modify_startup: clipboard_modify_startup::Owner,
     clipboard_popup: Option<utility_mount::UtilityPopup>,
     clipboard_retiring: Vec<RetiringHashWindow>,
     xml_popup: Option<utility_mount::UtilityPopup>,
@@ -5679,7 +5683,7 @@ impl RootWindow {
                     .to_owned(),
             );
         }
-        if self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
+        if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Err(clipboard_history::WAIT.to_owned()); }
         self.clipboard_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
         if !self.clipboard_retiring.is_empty() { return Err("A previous Clipboard History window has not retired.".to_owned()); }
@@ -7148,7 +7152,10 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
-        self.external_launch.retire_clipboard_undo();
+        self.external_launch.retire_clipboard_effect();
+        self.clipboard_modify_startup.projection = None;
+        self.clipboard_modify_startup.published = None;
+        self.search_catalog.providers.take_clipboard_modify_projection();
         self.retire_context_favorite();
         self.retire_search_jump_mode();
         self.calculator_search.pending = None;
@@ -7165,6 +7172,8 @@ impl RootWindow {
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
+        self.clipboard_modify_startup.projection = self.search_catalog.providers
+            .take_clipboard_modify_projection().map(|(effective, catalog)| (query.clone(), effective, catalog));
         if file_search::typed_query(&query) && file_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             self.start_file_search_probe(query, raw_provider_actions, scroll_to_search, cx);
             return;
@@ -7218,6 +7227,12 @@ impl RootWindow {
                 } else if provider == "clipboard_modify" {
                     clipboard_modify_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                         || clipboard_modify_view::current_undo_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                        || (self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("clipboard_modify"))
+                            && multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "clipboard_modify")
+                            && self.clipboard_modify_startup.projection.as_ref().is_some_and(|(projected, _, catalog)| {
+                                projected == &query && (action.action == "clipboard_modify:execute" || action.action == "clipboard_modify:undo" || action.action.starts_with("clipboard_modify:open:") || action.action.starts_with("query:"))
+                                    && search_providers::clipboard_catalog_is_current(&self.search_catalog.providers.clipboard_modify_catalog(), catalog)
+                            }))
                 } else if provider == "clipboard" {
                     clipboard_history::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "favorites" {
@@ -7254,7 +7269,12 @@ impl RootWindow {
             }
         }
         self.launcher_results
-            .replace(query, actions, layout, self.search_catalog.page_jump);
+            .replace(query.clone(), actions, layout, self.search_catalog.page_jump);
+        self.clipboard_modify_startup.published = self.clipboard_modify_startup.projection.take()
+            .filter(|(projected, _, catalog)| projected == &query
+                && self.search_catalog.providers.clipboard_modify_catalog().read().ok()
+                    .is_some_and(|current| Arc::ptr_eq(&current, catalog)))
+            .map(|(query, effective, catalog)| (query, effective, self.launcher_results.generation, catalog));
         self.fresh_search_enter = None;
         self.launcher_results_scroll = ScrollHandle::new();
         // Query replacement can change the list height while the root is
@@ -8066,10 +8086,44 @@ impl RootWindow {
             }
             return;
         }
+        let clipboard_provider_query = if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard_modify") {
+            if self.clipboard_modify_startup.runtime.is_some() {
+                let Some((published, effective, generation, catalog)) = &self.clipboard_modify_startup.published else { return; };
+                if published != &query || *generation != self.launcher_results.generation
+                    || !search_providers::clipboard_catalog_is_current(&self.search_catalog.providers.clipboard_modify_catalog(), catalog)
+                    || !multi_launcher::plugins::clipboard_modify::search_with_catalog(effective, catalog).contains(&result.action)
+                    || self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains("clipboard_modify"))
+                    || !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "clipboard_modify") { return; }
+                effective.clone()
+            } else { query.clone() }
+        } else { query.clone() };
         if result.action.action == "clipboard_modify:undo" {
             if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard_modify")
-                && clipboard_modify_view::current_undo_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                && clipboard_modify_view::current_undo_provider(&clipboard_provider_query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 self.start_clipboard_undo(result.action, query, source, window, cx);
+            }
+            return;
+        }
+        if result.action.action == "clipboard_modify:execute" {
+            if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard_modify")
+                && self.enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("clipboard_modify"))
+                && multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "clipboard_modify") {
+                if let Some((published_query, effective, generation, catalog)) = &self.clipboard_modify_startup.published {
+                    if published_query == &query && *generation == self.launcher_results.generation
+                        && search_providers::clipboard_catalog_is_current(&self.search_catalog.providers.clipboard_modify_catalog(), catalog) {
+                        let intent = multi_launcher::plugins::clipboard_modify::execution_from_catalog(effective, &result.action, catalog);
+                        let payload = result.action.args.as_deref().and_then(|args| multi_launcher::clipboard_modify::actions::decode_action_payload::<multi_launcher::clipboard_modify::actions::ClipboardModifyActionPayload>(args).ok());
+                        let canonical = match payload {
+                            Some(multi_launcher::clipboard_modify::actions::ClipboardModifyActionPayload::ExecuteAdHocStages { canonical_command, .. })
+                            | Some(multi_launcher::clipboard_modify::actions::ClipboardModifyActionPayload::ExecuteTemplate { canonical_command, .. })
+                            | Some(multi_launcher::clipboard_modify::actions::ClipboardModifyActionPayload::ExecuteSavedPipeline { canonical_command, .. }) => Some(canonical_command),
+                            _ => None,
+                        };
+                        if let (Some(intent), Some(canonical)) = (intent, canonical) {
+                            self.start_clipboard_execute(result.action, intent, catalog.clone(), canonical, query, source, window, cx);
+                        }
+                    }
+                }
             }
             return;
         }
@@ -8142,7 +8196,7 @@ impl RootWindow {
             return;
         }
         let modify_open = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard_modify")
-            && clipboard_modify_view::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref());
+            && clipboard_modify_view::current_provider(&clipboard_provider_query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref());
         let clipboard_open = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard")
             && clipboard_history::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref());
         let installed_invocation = match if modify_open {
@@ -10059,7 +10113,7 @@ impl RootWindow {
         file_picker_pending: bool,
         cx: &App,
     ) -> Option<RootCloseBlocker> {
-        if self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
+        if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardHistory); }
         if self.structured_pins.busy() { return Some(RootCloseBlocker::StructuredPinWrite); }
         if self.regex_view.as_ref().is_some_and(|view| view.read(cx).clipboard_pending) { return Some(RootCloseBlocker::RegexClipboard); }
@@ -11970,7 +12024,7 @@ enum RootVisibilityRequest {
     HideAfterExternalLaunch(u64),
     HideAfterWindowSwitch(u64, ForegroundIdentity, Arc<str>),
     HideAfterWindowClose(u64, ForegroundIdentity, ForegroundIdentity, Arc<str>),
-    HideAfterClipboardUndo(u64, ForegroundIdentity, u64, Arc<str>, Arc<AtomicBool>, Option<FocusHandle>),
+    HideAfterClipboardUndo(u64, ForegroundIdentity, u64, Arc<str>, Arc<AtomicBool>, Option<FocusHandle>, Option<Arc<dyn Fn() -> bool + Send + Sync>>),
 }
 
 fn exclude_closed_return_target(return_target: Option<ForegroundIdentity>, closed: ForegroundIdentity) -> Option<ForegroundIdentity> {
@@ -12035,14 +12089,14 @@ impl RootVisibilityRequest {
             Self::DockUtility(_, reveal) => reveal.gesture.visibility_revision == revision && reveal.mount.is_current() && !newer_pending,
             Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _)
                 | Self::HideAfterWindowClose(expected, _, _, _)
-                | Self::HideAfterClipboardUndo(expected, _, _, _, _, _) => {
+                | Self::HideAfterClipboardUndo(expected, _, _, _, _, _, _) => {
                 *expected == revision && visible && !newer_pending
             }
         }
     }
 
     fn superseded_by_hotkey(&self, take_hotkey: impl FnOnce() -> bool) -> bool {
-        matches!(self, Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _) | Self::HideAfterWindowClose(_, _, _, _) | Self::HideAfterClipboardUndo(_, _, _, _, _, _)) && take_hotkey()
+        matches!(self, Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _) | Self::HideAfterWindowClose(_, _, _, _) | Self::HideAfterClipboardUndo(_, _, _, _, _, _, _)) && take_hotkey()
     }
 }
 
@@ -12131,8 +12185,8 @@ impl RootVisibility {
         self.queue_visible(RootVisibilityRequest::HideAfterExternalLaunch(revision))
     }
 
-    fn request_clipboard_undo_hide(&self, revision: u64, root: ForegroundIdentity, generation: u64, query: &str, lease: Arc<AtomicBool>, focus: Option<FocusHandle>) -> bool {
-        self.queue_visible(RootVisibilityRequest::HideAfterClipboardUndo(revision, root, generation, Arc::from(query), lease, focus))
+    fn request_clipboard_undo_hide(&self, revision: u64, root: ForegroundIdentity, generation: u64, query: &str, lease: Arc<AtomicBool>, focus: Option<FocusHandle>, catalog_current: Option<Arc<dyn Fn() -> bool + Send + Sync>>) -> bool {
+        self.queue_visible(RootVisibilityRequest::HideAfterClipboardUndo(revision, root, generation, Arc::from(query), lease, focus, catalog_current))
     }
 
     fn request_window_close_hide(&self, revision: u64, root: ForegroundIdentity, target: ForegroundIdentity, query: &str) -> bool {
@@ -12159,7 +12213,7 @@ impl RootVisibility {
                 && matches!(&request, RootVisibilityRequest::HideAfterExternalLaunch(_)
                     | RootVisibilityRequest::HideAfterWindowSwitch(_, _, _)
                     | RootVisibilityRequest::HideAfterWindowClose(_, _, _, _));
-            let dock_supersedes_undo = matches!(pending.as_ref(), Some(RootVisibilityRequest::HideAfterClipboardUndo(_, _, _, _, _, _)))
+            let dock_supersedes_undo = matches!(pending.as_ref(), Some(RootVisibilityRequest::HideAfterClipboardUndo(_, _, _, _, _, _, _)))
                 && matches!(&request, RootVisibilityRequest::DockHash(_) | RootVisibilityRequest::DockUtility(_, _));
             if !request.is_current(
                 self.request_revision.load(Ordering::Acquire),
@@ -12224,7 +12278,7 @@ impl RootVisibility {
             RootVisibilityRequest::DockUtility(_, _) => true,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
             RootVisibilityRequest::HideAfterWindowClose(_, _, _, _) => false,
-            RootVisibilityRequest::HideAfterClipboardUndo(_, root, _, _, lease, _) => {
+            RootVisibilityRequest::HideAfterClipboardUndo(_, root, _, _, lease, _, _) => {
                 if !lease.load(Ordering::Acquire) || current_foreground_identity() != Some(*root) { return None; }
                 false
             }
@@ -12749,6 +12803,7 @@ pub(crate) fn run_foundation_window(
                 regex_view: None,
                 clipboard_history: None,
                 clipboard_modify_view: None,
+                clipboard_modify_startup: clipboard_modify_startup::Owner::default(),
                 clipboard_popup: None,
                 clipboard_retiring: Vec::new(),
                 xml_popup: None,
@@ -13411,6 +13466,7 @@ pub(crate) fn run_foundation_window(
                 cx.quit();
                 return;
             }
+            root_view.update(cx, |root, cx| root.start_clipboard_modify_catalog(cx));
 
             let root_window = root_window;
             let root_view = root_view;
@@ -13523,12 +13579,13 @@ pub(crate) fn run_foundation_window(
                             && window_close_hide_is_current(*root, current_foreground_identity(), expected, current_query.as_deref())
                     });
                     let undo_current = requested_visible.as_ref().is_none_or(|request| {
-                        let RootVisibilityRequest::HideAfterClipboardUndo(_, expected_root, generation, expected_query, lease, focus) = request else { return true; };
+                        let RootVisibilityRequest::HideAfterClipboardUndo(_, expected_root, generation, expected_query, lease, focus, catalog_current) = request else { return true; };
                         native_window.identity == *expected_root && update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| {
                             root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
                                 && root.native_window == Some(native_window)
                                 && !window.has_active_dialog(cx)
                                 && root.external_owner_is_current(focus.as_ref(), window, cx)
+                                && catalog_current.as_ref().is_none_or(|current| current())
                                 && clipboard_undo_hide_is_current(*expected_root, current_foreground_identity(), *generation, root.launcher_results.generation, expected_query, root.query.read(cx).value().as_str(), lease.load(Ordering::Acquire))
                         }).unwrap_or(false)
                     });
@@ -13566,7 +13623,7 @@ pub(crate) fn run_foundation_window(
                     } else { None };
                     let undo_hide = if accepted_visible.is_some() {
                         requested_visible.as_ref().and_then(|request| match request {
-                            RootVisibilityRequest::HideAfterClipboardUndo(_, root, generation, query, lease, focus) => Some((*root, *generation, Arc::clone(query), Arc::clone(lease), focus.clone())),
+                            RootVisibilityRequest::HideAfterClipboardUndo(_, root, generation, query, lease, focus, catalog_current) => Some((*root, *generation, Arc::clone(query), Arc::clone(lease), focus.clone(), catalog_current.clone())),
                             _ => None,
                         })
                     } else { None };
@@ -13730,12 +13787,13 @@ pub(crate) fn run_foundation_window(
                             continue;
                         }
                     }
-                    if let Some((expected_root, generation, expected_query, lease, focus)) = &undo_hide {
+                    if let Some((expected_root, generation, expected_query, lease, focus, catalog_current)) = &undo_hide {
                         let current = update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| {
                             root.native_window == Some(native_window)
                                 && root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
                                 && !window.has_active_dialog(cx)
                                 && root.external_owner_is_current(focus.as_ref(), window, cx)
+                                && catalog_current.as_ref().is_none_or(|current| current())
                                 && clipboard_undo_hide_is_current(*expected_root, current_foreground_identity(), *generation, root.launcher_results.generation, expected_query, root.query.read(cx).value().as_str(), lease.load(Ordering::Acquire))
                         }).unwrap_or(false);
                         if !visibility.is_current(revision, false) || native_window.identity != *expected_root || !current {
@@ -13884,6 +13942,7 @@ pub(crate) fn run_foundation_window(
 
         #[cfg(not(windows))]
         {
+            root_view.update(cx, |root, cx| root.start_clipboard_modify_catalog(cx));
             let _ = (native_window, hotkey, initial_return_target);
         }
     });
@@ -18242,7 +18301,7 @@ mod tests {
         assert!(!check(root, Some(root), 7, 8, "cm undo", "cm undo", true));
         assert!(!check(root, Some(root), 7, 7, "cm undo", "cm", true));
         assert!(!check(root, Some(root), 7, 7, "cm undo", "cm undo", false));
-        let request = super::RootVisibilityRequest::HideAfterClipboardUndo(5, root, 7, Arc::from("cm undo"), Arc::new(std::sync::atomic::AtomicBool::new(true)), None);
+        let request = super::RootVisibilityRequest::HideAfterClipboardUndo(5, root, 7, Arc::from("cm undo"), Arc::new(std::sync::atomic::AtomicBool::new(true)), None, None);
         assert!(request.is_current(5, true, false));
         assert!(request.superseded_by_hotkey(|| true));
         assert!(!request.is_current(6, true, false));
@@ -18259,14 +18318,14 @@ mod tests {
         let gesture = super::hash_dock::Gesture { source: super::NativeWindow { identity: root }, foreground_authorized: true, visibility_revision: 0 };
         let lease = || Arc::new(std::sync::atomic::AtomicBool::new(true));
         let first = visibility.request_hash_visible(gesture, 1).unwrap();
-        assert!(!visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None));
+        assert!(!visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None, None));
         assert!(!first.state.lock().unwrap().closed);
         assert!(matches!(visibility.take_requested_visible(), Some(super::RootVisibilityRequest::DockHash(_))));
-        assert!(visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None));
+        assert!(visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None, None));
         let second = visibility.request_hash_visible(gesture, 1).unwrap();
         assert!(matches!(visibility.take_requested_visible(), Some(super::RootVisibilityRequest::DockHash(_))));
         assert!(second.state.lock().unwrap().closed);
-        assert!(visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None));
+        assert!(visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None, None));
         let owner = super::utility_mount::MountOwner::default();
         let (utility, _) = visibility.request_xml_visible(gesture, owner.attach()).unwrap();
         assert!(matches!(visibility.take_requested_visible(), Some(super::RootVisibilityRequest::DockUtility(_, _))));

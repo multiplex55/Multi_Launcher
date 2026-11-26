@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Clipboard Modify includes Manage Templates and Manage Pipelines with checked canonical Save, stable drafts, reference checks, and exact Delete review. All 27 focused tests passed. Matched Windows replay remains open. Direct Execute from Search follows. [Management checkpoint](CHECKPOINTS.md#g13-clipboard-modify-catalog-management)
+Clipboard Modify runs checked named templates, saved pipelines and inline stages directly from Search. The launcher owns one shared canonical catalog. All 26 focused tests passed across two runs from one linked batch. Matched Windows replay remains open. Remembered Dock and Pop Out follow. [Direct Execute checkpoint](CHECKPOINTS.md#g13-clipboard-modify-direct-execute)
+
+Clipboard Modify includes Manage Templates and Manage Pipelines with checked canonical Save, stable drafts, reference checks, and exact Delete review. All 27 focused tests passed. Matched Windows replay remains open. [Management checkpoint](CHECKPOINTS.md#g13-clipboard-modify-catalog-management)
 
 Clipboard Modify has Templates, Saved Pipelines and Help in one retained docked workspace. Template and pipeline actions use the exact completed preview. All 18 focused tests passed across two runs from one linked batch. Matched Windows replay remains open. [Catalog checkpoint](CHECKPOINTS.md#g13-clipboard-modify-templates-saved-pipelines-and-help)
 
@@ -141,7 +143,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add the checked Clipboard Modify direct Execute route and canonical startup catalog owner. Matched Clipboard History and Modify replay, remaining structured text targets, and broader native acceptance stay open. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Add remembered Clipboard Modify Dock and Pop Out using the shared retained host. Matched Clipboard History and Modify replay, remaining structured text targets, and broader native acceptance stay open. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::executor::{Cancellation, ExecuteError, execute_pipeline, execute_stages};
 use super::model::{ClipboardModifierCatalog, StageSpec};
+use super::parser::ClipboardModifyIntent;
 
 pub const RETRY_ATTEMPTS: usize = 4;
 pub const RETRY_INITIAL_DELAY: Duration = Duration::from_millis(20);
@@ -347,6 +348,83 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         let out = execute_stages(&a, stages, catalog, c)?;
         self.commit_output(out, label)
     }
+    /// Execute a typed direct action using protected source A and a fresh
+    /// protected replacement B. The caller owns the worker and its admission.
+    pub fn execute_checked<C: Cancellation + ?Sized>(
+        &self,
+        intent: &ClipboardModifyIntent,
+        catalog: &ClipboardModifierCatalog,
+        label: &str,
+        cancellation: &C,
+        current: &dyn Fn() -> bool,
+    ) -> Result<bool, ClipboardError> {
+        if matches!(intent, ClipboardModifyIntent::Undo) {
+            return Err(ClipboardError::Config(
+                "Undo requires its own checked action".into(),
+            ));
+        }
+        let cancelled = || cancellation.is_cancelled() || !current();
+        if cancelled() {
+            return Ok(false);
+        }
+        let source = self.backend.read_text();
+        if cancelled() {
+            return Ok(false);
+        }
+        let source = source?;
+        let output = super::executor::run_intent(&source, intent, catalog, &cancelled);
+        if cancelled() {
+            return Ok(false);
+        }
+        let output = match output {
+            Ok(output) => output,
+            Err(ExecuteError::Cancelled) => return Ok(false),
+            Err(_) => {
+                return Err(ClipboardError::Transform(
+                    "Clipboard transformation failed".into(),
+                ));
+            }
+        };
+        if output.contains('\0') {
+            return Err(ClipboardError::InvalidContent(
+                "Clipboard text contains NUL".into(),
+            ));
+        }
+        if cancelled() {
+            return Ok(false);
+        }
+        let _guard = self.try_commit_lock()?;
+        if cancelled() {
+            return Ok(false);
+        }
+        let replacement = self.backend.read_stamped();
+        if cancelled() {
+            return Ok(false);
+        }
+        let (original_text, stamp) = replacement?;
+        if original_text.contains('\0') {
+            return Err(ClipboardError::InvalidContent(
+                "Clipboard text contains NUL".into(),
+            ));
+        }
+        let write = self
+            .backend
+            .write_stamped_if(&output, stamp, &|| !cancelled());
+        let written = match write {
+            Ok(written) => written,
+            Err(_) if cancelled() => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !written {
+            return Ok(false);
+        }
+        *self.undo.lock().unwrap() = Some(UndoRecord {
+            original_text,
+            modified_text: output,
+            operation_label: label.to_owned(),
+        });
+        Ok(true)
+    }
     pub fn apply_pipeline<C: Cancellation + ?Sized>(
         &self,
         name: &str,
@@ -635,6 +713,236 @@ pub mod fake {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_direct_execution_uses_a_then_replaces_and_undoes_b() {
+        use super::{ClipboardBackend, ClipboardError, ClipboardService, UndoRecord};
+        use crate::{
+            clipboard_modify::{
+                defaults::default_catalog,
+                model::{OperationId, StageArguments, StageSpec},
+                parser::ClipboardModifyIntent,
+            },
+            platform::protected_clipboard::ClipboardStamp,
+        };
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        struct State {
+            source: Result<String, ClipboardError>,
+            current: String,
+            sequence: u32,
+            b_reads: usize,
+            b_error: Option<ClipboardError>,
+            stale_writer: bool,
+            revoke_writer: bool,
+            writes: Vec<String>,
+            revoke_source: bool,
+        }
+        struct Backend {
+            state: Mutex<State>,
+            live: Arc<AtomicBool>,
+        }
+        impl ClipboardBackend for Backend {
+            fn read_text(&self) -> Result<String, ClipboardError> {
+                let s = self.state.lock().unwrap();
+                if s.revoke_source {
+                    self.live.store(false, Ordering::Release);
+                }
+                s.source.clone()
+            }
+            fn read_stamped(&self) -> Result<(String, ClipboardStamp), ClipboardError> {
+                let mut s = self.state.lock().unwrap();
+                s.b_reads += 1;
+                if let Some(error) = &s.b_error {
+                    return Err(error.clone());
+                }
+                Ok((
+                    s.current.clone(),
+                    ClipboardStamp::from_sequence(s.sequence).unwrap(),
+                ))
+            }
+            fn write_text(&self, _: &str) -> Result<(), ClipboardError> {
+                panic!("unchecked write")
+            }
+            fn write_stamped_if(
+                &self,
+                text: &str,
+                stamp: ClipboardStamp,
+                current: &dyn Fn() -> bool,
+            ) -> Result<bool, ClipboardError> {
+                let mut s = self.state.lock().unwrap();
+                if s.stale_writer {
+                    s.sequence += 1;
+                    s.stale_writer = false;
+                }
+                if s.revoke_writer {
+                    self.live.store(false, Ordering::Release);
+                    s.revoke_writer = false;
+                }
+                if ClipboardStamp::from_sequence(s.sequence) != Some(stamp) || !current() {
+                    return Ok(false);
+                }
+                s.current = text.to_owned();
+                s.writes.push(text.to_owned());
+                s.sequence += 1;
+                Ok(true)
+            }
+        }
+        let live = Arc::new(AtomicBool::new(true));
+        let service = ClipboardService::new(Backend {
+            live: live.clone(),
+            state: Mutex::new(State {
+                source: Ok("é source".into()),
+                current: "replacement B 😀".into(),
+                sequence: 1,
+                b_reads: 0,
+                b_error: None,
+                stale_writer: false,
+                revoke_writer: false,
+                writes: Vec::new(),
+                revoke_source: false,
+            }),
+        });
+        let prior = UndoRecord {
+            original_text: "old original".into(),
+            modified_text: "old output".into(),
+            operation_label: "old".into(),
+        };
+        *service.undo.lock().unwrap() = Some(prior.clone());
+        let intent = ClipboardModifyIntent::Stages(vec![StageSpec {
+            operation: OperationId::Uppercase,
+            arguments: StageArguments::default(),
+        }]);
+        let catalog = default_catalog();
+        let cancelled = AtomicBool::new(false);
+        let current = || live.load(Ordering::Acquire);
+        service.backend.state.lock().unwrap().stale_writer = true;
+        assert!(
+            !service
+                .execute_checked(&intent, &catalog, "direct", &cancelled, &current)
+                .unwrap()
+        );
+        assert_eq!(service.undo_record(), Some(prior.clone()));
+        assert!(service.backend.state.lock().unwrap().writes.is_empty());
+        let sequence = service.backend.state.lock().unwrap().sequence;
+        service.backend.state.lock().unwrap().revoke_writer = true;
+        assert!(
+            !service
+                .execute_checked(&intent, &catalog, "direct", &cancelled, &current)
+                .unwrap()
+        );
+        assert_eq!(service.backend.state.lock().unwrap().sequence, sequence);
+        assert!(service.backend.state.lock().unwrap().writes.is_empty());
+        assert_eq!(service.undo_record(), Some(prior.clone()));
+        live.store(true, Ordering::Release);
+        assert!(
+            service
+                .execute_checked(&intent, &catalog, "direct", &cancelled, &current)
+                .unwrap()
+        );
+        assert_eq!(
+            service.undo_record().unwrap().original_text,
+            "replacement B 😀"
+        );
+        assert_eq!(service.backend.state.lock().unwrap().current, "É SOURCE");
+        assert!(service.undo_checked(&current).unwrap());
+        assert_eq!(
+            service.backend.state.lock().unwrap().current,
+            "replacement B 😀"
+        );
+        assert_eq!(
+            service.backend.state.lock().unwrap().writes,
+            vec!["É SOURCE", "replacement B 😀"]
+        );
+        *service.undo.lock().unwrap() = Some(prior.clone());
+        {
+            let mut s = service.backend.state.lock().unwrap();
+            s.source = Err(ClipboardError::ProtectedItem);
+            s.writes.clear();
+        }
+        assert!(matches!(
+            service.execute_checked(&intent, &catalog, "direct", &cancelled, &current),
+            Err(ClipboardError::ProtectedItem)
+        ));
+        assert_eq!(service.undo_record(), Some(prior.clone()));
+        {
+            let mut s = service.backend.state.lock().unwrap();
+            s.source = Ok("fixture".into());
+            s.revoke_source = true;
+        }
+        let reads = service.backend.state.lock().unwrap().b_reads;
+        assert!(
+            !service
+                .execute_checked(&intent, &catalog, "direct", &cancelled, &current)
+                .unwrap()
+        );
+        assert_eq!(service.backend.state.lock().unwrap().b_reads, reads);
+        assert_eq!(service.undo_record(), Some(prior.clone()));
+        assert!(service.backend.state.lock().unwrap().writes.is_empty());
+        live.store(true, Ordering::Release);
+        {
+            let mut s = service.backend.state.lock().unwrap();
+            s.revoke_source = false;
+            s.b_error = Some(ClipboardError::NonText);
+        }
+        assert!(matches!(
+            service.execute_checked(&intent, &catalog, "direct", &cancelled, &current),
+            Err(ClipboardError::NonText)
+        ));
+        assert_eq!(service.undo_record(), Some(prior.clone()));
+        {
+            service.backend.state.lock().unwrap().b_error = None;
+        }
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let stop_during_execution = || checks.fetch_add(1, Ordering::AcqRel) >= 2;
+        let reads = service.backend.state.lock().unwrap().b_reads;
+        assert!(
+            !service
+                .execute_checked(
+                    &intent,
+                    &catalog,
+                    "direct",
+                    &stop_during_execution,
+                    &current
+                )
+                .unwrap()
+        );
+        assert_eq!(service.backend.state.lock().unwrap().b_reads, reads);
+        assert_eq!(service.undo_record(), Some(prior));
+        let template = ClipboardModifyIntent::ApplyTemplate {
+            name: "markdown-quote".into(),
+        };
+        assert!(
+            service
+                .execute_checked(&template, &catalog, "template", &cancelled, &current)
+                .unwrap()
+        );
+        assert_eq!(service.backend.state.lock().unwrap().current, "> fixture");
+        let pipeline = ClipboardModifyIntent::ApplySavedPipeline {
+            name: "clean-lines".into(),
+        };
+        assert!(
+            service
+                .execute_checked(&pipeline, &catalog, "pipeline", &cancelled, &current)
+                .unwrap()
+        );
+        assert_eq!(service.backend.state.lock().unwrap().current, "fixture");
+        assert_eq!(service.undo_record().unwrap().original_text, "> fixture");
+        let saved = service.undo_record().unwrap();
+        {
+            let mut s = service.backend.state.lock().unwrap();
+            s.source = Ok("bad\0text".into());
+            s.writes.clear();
+        }
+        let identity = ClipboardModifyIntent::Stages(Vec::new());
+        assert!(matches!(
+            service.execute_checked(&identity, &catalog, "direct", &cancelled, &current),
+            Err(ClipboardError::InvalidContent(_))
+        ));
+        assert!(service.backend.state.lock().unwrap().writes.is_empty());
+        assert_eq!(service.undo_record(), Some(saved));
+    }
     #[test]
     fn checked_dialog_effects_revalidate_at_writer_and_preserve_undo() {
         use super::{

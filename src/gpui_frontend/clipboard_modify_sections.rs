@@ -156,10 +156,10 @@ pub(super) fn render(
         return panel.child(Label::new("Loading Clipboard Modify catalog…"));
     };
     let mount = view.mount.clone();
-    let undo_pending = view
+    let launcher_effect_pending = view
         .root
         .upgrade()
-        .is_some_and(|root| root.read(cx).external_launch.clipboard_undo_pending());
+        .is_some_and(|root| root.read(cx).external_launch.clipboard_effect_pending());
     let revision = view.section_revision;
     match view.section {
         Section::Templates => {
@@ -226,7 +226,7 @@ pub(super) fn render(
                 row = row.child(
                     Button::new(SharedString::from(format!("cm-template-apply-{apply_id}")))
                         .label("Apply Template")
-                        .disabled(expected_preview.is_none() || undo_pending)
+                        .disabled(expected_preview.is_none() || launcher_effect_pending)
                         .on_click(cx.listener(move |view, _, window, cx| {
                             if view.blocked()
                                 || !apply_mount.is_current()
@@ -329,7 +329,7 @@ pub(super) fn render(
                                 "cm-pipeline-execute-{apply_id}"
                             )))
                             .label(format!("Execute {}", pipeline.label))
-                            .disabled(expected_preview.is_none() || undo_pending)
+                            .disabled(expected_preview.is_none() || launcher_effect_pending)
                             .on_click(cx.listener(
                                 move |view, _, window, cx| {
                                     if view.blocked()

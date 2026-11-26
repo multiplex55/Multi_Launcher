@@ -34,7 +34,16 @@ fn redacted_read_error(
     .into()
 }
 pub(super) const BLOCK_WAIT: &str = "Wait for Clipboard Modify to finish or cancel its review.";
-pub(super) const UNDO_WAIT: &str = "Wait for Clipboard Modify Undo to finish.";
+fn refresh_catalog_search(view: &ClipboardModifyView, cx: &mut Context<ClipboardModifyView>) {
+    let _ = view.root.update(cx, |root, cx| {
+        let query = root.query.read(cx).value().to_string();
+        if clipboard_modify_startup::is_clipboard_modify_search(&query) {
+            root.refresh_launcher_results_with_viewport(query, false, cx);
+            cx.notify();
+        }
+    });
+}
+pub(super) const LAUNCHER_EFFECT_WAIT: &str = "Wait for the Clipboard Modify operation to finish.";
 const LARGE_SOURCE: usize = 5 * 1024 * 1024;
 const EFFECT_WAIT: &str = "Wait for the Clipboard Modify operation to finish.";
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,6 +103,35 @@ fn read_result_current(
         && receipt.matches(mounted)
         && request == current_request
         && source == current_source
+}
+enum ReadWork {
+    NotStarted,
+    Attempted(Result<String, String>),
+}
+fn deferred_read_after_worker(
+    initial: bool,
+    not_started: bool,
+    exact: bool,
+    queued: Option<bool>,
+) -> Option<bool> {
+    if !not_started || !exact {
+        return None;
+    }
+    if initial && queued != Some(false) {
+        Some(true)
+    } else if !initial && queued.is_none() {
+        Some(false)
+    } else {
+        None
+    }
+}
+fn effective_read_intent(initial: bool, queued: Option<bool>) -> bool {
+    initial && queued != Some(false)
+}
+fn begin_read_intent(initial: bool, queued: &mut Option<bool>) -> bool {
+    let effective = effective_read_intent(initial, *queued);
+    *queued = None;
+    effective
 }
 pub(super) fn current_provider(
     query: &str,
@@ -194,7 +232,7 @@ pub(super) struct ClipboardModifyView {
     read_revision: u64,
     read_authority: Arc<AtomicU64>,
     reading: bool,
-    initializing: bool,
+    initial_read_started: bool,
     active_read: Option<u64>,
     queued_read: Option<bool>,
     resolved: bool,
@@ -220,6 +258,93 @@ pub(super) struct ClipboardModifyView {
     _source_sub: Subscription,
 }
 impl ClipboardModifyView {
+    fn defer_initial_read(&mut self, cx: &mut Context<Self>) {
+        if !self.open || !self.mount.is_current() || self.initial_read_started {
+            return;
+        }
+        if self.queued_read.is_none() {
+            self.queued_read = Some(true);
+        }
+        self.feedback =
+            Some("Clipboard was not loaded; activate this window and reopen the section.".into());
+        cx.notify();
+    }
+    fn defer_explicit_read(&mut self, cx: &mut Context<Self>) {
+        if !self.open || !self.mount.is_current() {
+            return;
+        }
+        self.queued_read = Some(false);
+        self.feedback = Some(
+            "Clipboard reload is waiting; activate this window and reopen the section.".into(),
+        );
+        cx.notify();
+    }
+    pub(super) fn startup_failed(&mut self, cx: &mut Context<Self>) {
+        self.queued_read = None;
+        self.feedback = Some("Clipboard Modify could not be initialized.".into());
+        cx.notify();
+    }
+    pub(super) fn startup_delivery_failed(&mut self, cx: &mut Context<Self>) {
+        if self.open {
+            self.feedback =
+                Some("Clipboard Modify is ready; reopen the section to continue.".into());
+        }
+        cx.notify();
+    }
+    pub(super) fn install_startup(
+        &mut self,
+        runtime: ClipboardModifyRuntime,
+        diagnostic: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.runtime.is_some() {
+            return;
+        }
+        self.catalog = Some(runtime.catalog_snapshot());
+        self.runtime = Some(runtime);
+        self.catalog_feedback = diagnostic;
+        if self.feedback.as_deref() == Some("Loading Clipboard Modify settings…") {
+            self.feedback = None;
+        }
+        if self.open {
+            if self.section == Section::ManageTemplates {
+                manage::ensure_templates(self, window, cx);
+            }
+            if self.section == Section::ManagePipelines {
+                pipelines::ensure(self, window, cx);
+            }
+            if self.resolved {
+                self.schedule(cx);
+            }
+            if let Some(initial) = self.queued_read.take() {
+                let receipt = self.mount.clone();
+                let source_revision = self.source_revision;
+                let weak = cx.entity().downgrade();
+                window.defer(cx, move |window, app| {
+                    let _ = weak.update(app, |view, cx| {
+                        if !view.open
+                            || !receipt.is_current()
+                            || !receipt.matches(&view.mount)
+                            || view.source_revision != source_revision
+                        {
+                            return;
+                        }
+                        if !window.is_window_active() {
+                            if initial {
+                                view.defer_initial_read(cx);
+                            } else {
+                                view.defer_explicit_read(cx);
+                            }
+                            return;
+                        }
+                        view.read_source(initial, window, cx);
+                    });
+                });
+            }
+        }
+        cx.notify();
+    }
     fn subscribe_source(
         source: &Entity<TextareaState>,
         receipt: utility_mount::MountReceipt,
@@ -334,13 +459,13 @@ impl ClipboardModifyView {
             })
             .collect()
     }
-    pub(super) fn retire_read_for_undo(&mut self) {
+    pub(super) fn retire_read_for_effect(&mut self) {
         self.read_revision = self.read_revision.wrapping_add(1);
         self.read_authority.fetch_add(1, Ordering::AcqRel);
         self.queued_read = None;
     }
-    pub(super) fn undo_settled(&mut self, cx: &mut Context<Self>) {
-        if self.feedback.as_deref() == Some(UNDO_WAIT) {
+    pub(super) fn launcher_effect_settled(&mut self, cx: &mut Context<Self>) {
+        if self.feedback.as_deref() == Some(LAUNCHER_EFFECT_WAIT) {
             self.feedback = None;
         }
         cx.notify();
@@ -376,7 +501,7 @@ impl ClipboardModifyView {
             read_revision: 0,
             read_authority: Arc::new(AtomicU64::new(0)),
             reading: false,
-            initializing: false,
+            initial_read_started: false,
             active_read: None,
             queued_read: None,
             resolved: false,
@@ -523,20 +648,45 @@ impl ClipboardModifyView {
         .detach();
     }
     fn read_source(&mut self, initial: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open
-            || self.blocked()
-            || !self.mount.is_current()
-            || window.has_active_dialog(cx)
-            || !window.is_window_active()
-        {
+        let initial = effective_read_intent(initial, self.queued_read);
+        if !self.open || (initial && self.initial_read_started) || !self.mount.is_current() {
+            return;
+        }
+        if self.blocked() || window.has_active_dialog(cx) || !window.is_window_active() {
+            if initial {
+                self.defer_initial_read(cx);
+            } else {
+                self.defer_explicit_read(cx);
+            }
             return;
         }
         let Some(root) = self.root.upgrade() else {
             return;
         };
         let root_state = root.read(cx);
-        if root_state.external_launch.clipboard_undo_pending() {
-            self.feedback = Some(UNDO_WAIT.into());
+        if root_state.external_launch.clipboard_effect_pending() {
+            if initial {
+                self.defer_initial_read(cx);
+            } else {
+                self.defer_explicit_read(cx);
+            }
+            self.feedback = Some(LAUNCHER_EFFECT_WAIT.into());
+            cx.notify();
+            return;
+        }
+        if self.runtime.is_none() {
+            if root_state.clipboard_modify_startup.pending {
+                if initial {
+                    if self.queued_read.is_none() {
+                        self.queued_read = Some(true);
+                    }
+                } else {
+                    self.queued_read = Some(false);
+                }
+                self.feedback = Some("Loading Clipboard Modify settings…".into());
+            } else {
+                self.feedback = Some("Clipboard Modify could not be initialized.".into());
+            }
             cx.notify();
             return;
         }
@@ -548,6 +698,11 @@ impl ClipboardModifyView {
             return;
         }
         let Some(native) = root_state.native_window else {
+            if initial {
+                self.defer_initial_read(cx);
+            } else {
+                self.defer_explicit_read(cx);
+            }
             return;
         };
         if root_state
@@ -555,20 +710,37 @@ impl ClipboardModifyView {
             .is_none_or(|host| host.window_id() != window.window_handle().window_id())
             || current_foreground_identity() != Some(native.identity)
         {
+            if initial && !self.initial_read_started {
+                self.defer_initial_read(cx);
+            } else if !initial {
+                self.defer_explicit_read(cx);
+            }
             return;
         }
         self.read_revision = self.read_revision.wrapping_add(1);
         self.read_authority.fetch_add(1, Ordering::AcqRel);
         if self.reading {
-            self.queued_read = Some(initial);
+            if initial {
+                if self.queued_read.is_none() {
+                    self.queued_read = Some(true);
+                }
+            } else {
+                self.queued_read = Some(false);
+            }
             return;
         }
-        let settings = root_state.settings_path.clone();
         let visibility = root_state.root_visibility.clone();
         let admission = root_state.restart_admission.clone();
         let Some(permit) = admission.admit() else {
+            if initial {
+                self.defer_initial_read(cx);
+            } else {
+                self.defer_explicit_read(cx);
+            }
             return;
         };
+        let initial = begin_read_intent(initial, &mut self.queued_read);
+        self.initial_read_started = true;
         let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
         let mount = self.mount.clone();
         let worker_mount = mount.clone();
@@ -578,18 +750,10 @@ impl ClipboardModifyView {
         let source_revision = self.source_revision;
         let publication_visibility = visibility.clone();
         let publication_admission = admission.clone();
-        let initialize = self.runtime.is_none();
-        self.initializing = initialize;
         self.reading = true;
         self.active_read = Some(request);
         self.feedback = None;
         let task = cx.background_executor().spawn(async move {
-            let initialized = initialize.then(|| {
-                ClipboardModifyRuntime::new(
-                    std::path::Path::new(&settings),
-                    runtime::shared_default_catalog(),
-                )
-            });
             let result = if worker_mount.is_current()
                 && read_authority.load(Ordering::Acquire) == expected_authority
                 && !admission.is_fenced()
@@ -601,46 +765,132 @@ impl ClipboardModifyView {
                 )
                 && current_foreground_identity() == Some(native.identity)
             {
-                runtime::clipboard_service()
-                    .read_text_for_modify_once()
-                    .map_err(redacted_read_error)
+                ReadWork::Attempted(
+                    runtime::clipboard_service()
+                        .read_text_for_modify_once()
+                        .map_err(redacted_read_error),
+                )
             } else {
-                Err("Clipboard read was superseded.".into())
+                ReadWork::NotStarted
             };
-            (initialized, result)
+            result
         });
         let host = window.window_handle();
         cx.spawn(async move |weak, cx| {
             let _permit = permit;
-            let (initialized, result) = task.await;
+            let result = task.await;
+            let not_started = matches!(&result, ReadWork::NotStarted);
             let Some(view) = weak.upgrade() else {
                 return;
             };
+            let delivery_mount = mount.clone();
             let result_update = update_kit_window_content(host, &view, cx, |view, window, cx| {
-                if view.active_read != Some(request) { return; }
-                view.active_read = None; view.reading = false; view.initializing = false; view.clear_block_wait(cx);
-                let installed = initialized.is_some() && view.runtime.is_none();
-                if view.runtime.is_none() { if let Some((runtime, loaded)) = initialized { view.catalog = Some(runtime.catalog_snapshot()); view.runtime = Some(runtime); if loaded.state.startup_diagnostic().is_some() { view.catalog_feedback = Some("Clipboard Modify settings could not be loaded; defaults are in use.".into()); } } }
-                if installed && view.section == Section::ManageTemplates { manage::ensure_templates(view, window, cx); }
-                if installed && view.section == Section::ManagePipelines { pipelines::ensure(view, window, cx); }
-                let current = read_result_current(view.open, &mount, &view.mount, request, view.read_revision, source_revision, view.source_revision)
-                    && window.is_window_active() && !publication_admission.is_fenced()
-                    && json_utility::native_host_current(&publication_visibility, visibility_revision, Some(native), false)
+                if view.active_read != Some(request) {
+                    return;
+                }
+                view.active_read = None;
+                view.reading = false;
+                view.clear_block_wait(cx);
+                let exact = read_result_current(
+                    view.open,
+                    &delivery_mount,
+                    &view.mount,
+                    request,
+                    view.read_revision,
+                    source_revision,
+                    view.source_revision,
+                );
+                let rearmed =
+                    deferred_read_after_worker(initial, not_started, exact, view.queued_read);
+                if let Some(initial) = rearmed {
+                    if initial {
+                        view.initial_read_started = false;
+                        view.defer_initial_read(cx);
+                    } else {
+                        view.defer_explicit_read(cx);
+                    }
+                }
+                let current = exact
+                    && window.is_window_active()
+                    && !publication_admission.is_fenced()
+                    && json_utility::native_host_current(
+                        &publication_visibility,
+                        visibility_revision,
+                        Some(native),
+                        false,
+                    )
                     && current_foreground_identity() == Some(native.identity);
-                let mut accepted_initial = false;
-                if current { match result {
-                    Ok(text) => { view.reset_source = text.clone(); view.reset_resolved = true; view.resolved = true; view.large_allowed = false;
-                        view.source_revision = view.source_revision.wrapping_add(1); view.source.update(cx, |input, cx| input.set_value(text, window, cx));
-                        if initial { accepted_initial = true; if view.section == Section::Modify { view.preview.cancel_and_invalidate(); cx.notify(); } else { view.schedule(cx); } } else { view.schedule(cx); }
-                    },
-                    Err(error) => { view.feedback = Some(error); cx.notify(); }
-                } }
-                if installed && view.open && view.resolved && !accepted_initial { view.schedule(cx); }
-                if let Some(next_initial) = view.queued_read.take() { if view.open { view.read_source(next_initial, window, cx); } }
+                if current {
+                    match result {
+                        ReadWork::NotStarted => {}
+                        ReadWork::Attempted(Ok(text)) => {
+                            view.reset_source = text.clone();
+                            view.reset_resolved = true;
+                            view.resolved = true;
+                            view.large_allowed = false;
+                            view.source_revision = view.source_revision.wrapping_add(1);
+                            view.source
+                                .update(cx, |input, cx| input.set_value(text, window, cx));
+                            if initial {
+                                if view.section == Section::Modify {
+                                    view.preview.cancel_and_invalidate();
+                                    cx.notify();
+                                } else {
+                                    view.schedule(cx);
+                                }
+                            } else {
+                                view.schedule(cx);
+                            }
+                        }
+                        ReadWork::Attempted(Err(error)) => {
+                            view.feedback = Some(error);
+                            cx.notify();
+                        }
+                    }
+                }
+                if rearmed.is_none() {
+                    if let Some(next_initial) = view.queued_read.take() {
+                        if view.open {
+                            view.read_source(next_initial, window, cx);
+                        }
+                    }
+                }
                 cx.notify();
             });
-            if result_update.is_err() { let _ = view.update(cx, |view, cx| { if view.active_read == Some(request) { view.active_read = None; view.reading = false; view.initializing = false; view.clear_block_wait(cx); if view.open { view.feedback = Some("Clipboard read could not be delivered.".into()); } cx.notify(); } }); }
-
+            if result_update.is_err() {
+                let _ = view.update(cx, |view, cx| {
+                    if view.active_read == Some(request) {
+                        view.active_read = None;
+                        view.reading = false;
+                        view.clear_block_wait(cx);
+                        let exact = read_result_current(
+                            view.open,
+                            &mount,
+                            &view.mount,
+                            request,
+                            view.read_revision,
+                            source_revision,
+                            view.source_revision,
+                        );
+                        if let Some(initial) = deferred_read_after_worker(
+                            initial,
+                            not_started,
+                            exact,
+                            view.queued_read,
+                        ) {
+                            if initial {
+                                view.initial_read_started = false;
+                                view.defer_initial_read(cx);
+                            } else {
+                                view.defer_explicit_read(cx);
+                            }
+                        } else if view.open {
+                            view.feedback = Some("Clipboard read could not be delivered.".into());
+                        }
+                        cx.notify();
+                    }
+                });
+            }
         })
         .detach();
         cx.notify();
@@ -754,8 +1004,7 @@ impl ClipboardModifyView {
         });
     }
     pub(super) fn blocks_close(&self) -> bool {
-        self.initializing
-            || self.effect_pending.is_some()
+        self.effect_pending.is_some()
             || self.review.is_some()
             || self.management.pending.is_some()
             || self.pipelines.review.is_some()
@@ -854,7 +1103,7 @@ impl ClipboardModifyView {
             return;
         };
         let root_state = root.read(cx);
-        if root_state.external_launch.clipboard_undo_pending() {
+        if root_state.external_launch.clipboard_effect_pending() {
             return;
         }
         let Some(native) = root_state.native_window else {
@@ -1060,11 +1309,12 @@ impl ClipboardModifyView {
         })
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.initializing || self.blocked() {
+        if !self.open || self.blocked() {
             return;
         }
         let owns_focus = self.focus.is_focused(window) || self.focus.contains_focused(window, cx);
         self.open = false;
+        self.initial_read_started = false;
         self.owner.retire();
         self.read_revision = self.read_revision.wrapping_add(1);
         self.read_authority.fetch_add(1, Ordering::AcqRel);
@@ -1164,10 +1414,10 @@ impl ClipboardModifyView {
 impl Render for ClipboardModifyView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mount = self.mount.clone();
-        let undo_pending = self
+        let launcher_effect_pending = self
             .root
             .upgrade()
-            .is_some_and(|root| root.read(cx).external_launch.clipboard_undo_pending());
+            .is_some_and(|root| root.read(cx).external_launch.clipboard_effect_pending());
         let revision = self.stage_revision;
         let section_revision = self.section_revision;
         let key_mount = mount.clone();
@@ -1402,8 +1652,8 @@ impl Render for ClipboardModifyView {
             );
         }
         panel = panel.child(tabs);
-        if undo_pending {
-            panel = panel.child(Label::new(UNDO_WAIT));
+        if launcher_effect_pending {
+            panel = panel.child(Label::new(LAUNCHER_EFFECT_WAIT));
         }
         if self.section == Section::Modify {
             panel = panel.child(Textarea::new(&self.source).aria_label("Clipboard Modify source"));
@@ -1416,7 +1666,7 @@ impl Render for ClipboardModifyView {
                     .child(
                         Button::new("cm-reload")
                             .label("Reload clipboard")
-                            .disabled(self.reading || undo_pending)
+                            .disabled(self.reading || launcher_effect_pending)
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if view.blocked()
                                     || view.section != Section::Modify
@@ -1763,7 +2013,7 @@ impl Render for ClipboardModifyView {
                         .child(
                             Button::new("cm-close")
                                 .label("Close")
-                                .disabled(self.initializing)
+                                .disabled(self.blocked())
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     if view.blocked()
                                         || view.section != Section::Modify
@@ -1818,7 +2068,7 @@ impl Render for ClipboardModifyView {
             panel = panel.child(
                 Button::new("cm-close-other")
                     .label("Close")
-                    .disabled(self.initializing)
+                    .disabled(self.blocked())
                     .on_click(cx.listener(move |view, _, window, cx| {
                         if !view.blocked()
                             && view.section == section
@@ -1903,7 +2153,7 @@ impl Render for ClipboardModifyView {
                 .child(output.whitespace_nowrap())
         });
         let effect_receipt = self.effect_receipt();
-        let available = effect_receipt.is_some() && self.picker.is_none() && !undo_pending;
+        let available = effect_receipt.is_some() && self.picker.is_none() && !launcher_effect_pending;
         let apply_label = match self.section {
             Section::Templates => "Apply Template",
             Section::SavedPipelines => "Execute",
@@ -1950,13 +2200,13 @@ impl RootWindow {
         if self.restart_admission.is_fenced() {
             return;
         }
-        if self.external_launch.clipboard_undo_pending()
+        if self.external_launch.clipboard_effect_pending()
             && !self
                 .clipboard_modify_view
                 .as_ref()
                 .is_some_and(|view| view.read(cx).open)
         {
-            self.launcher_search_error = Some(UNDO_WAIT.into());
+            self.launcher_search_error = Some(LAUNCHER_EFFECT_WAIT.into());
             cx.notify();
             return;
         }
@@ -1966,12 +2216,26 @@ impl RootWindow {
             .clone()
             .unwrap_or_else(|| cx.new(|cx| ClipboardModifyView::new(window, cx, root)));
         let was_open = view.read(cx).open;
+        let ready = self.clipboard_modify_startup.runtime.clone();
+        let diagnostic = self.clipboard_modify_startup.diagnostic.clone();
+        let waiting = self.clipboard_modify_startup.pending;
         view.update(cx, |view, cx| {
+            if let Some(runtime) = ready {
+                view.install_startup(runtime, diagnostic, window, cx);
+            }
             view.reopen(window, cx);
             view.select_section(section, window, cx);
+            if !was_open && waiting && view.runtime.is_none() {
+                view.queued_read = Some(true);
+                view.feedback = Some("Loading Clipboard Modify settings…".into());
+            }
         });
         self.clipboard_modify_view = Some(view.clone());
-        if !was_open {
+        if !was_open
+            || (view.read(cx).runtime.is_some()
+                && view.read(cx).queued_read.is_some()
+                && !view.read(cx).reading)
+        {
             let weak = view.downgrade();
             let mount = view.read(cx).mount.clone();
             let source_revision = view.read(cx).source_revision;
@@ -1982,7 +2246,8 @@ impl RootWindow {
                         && mount.matches(&view.mount)
                         && view.source_revision == source_revision
                     {
-                        view.read_source(true, window, cx);
+                        let initial = view.queued_read.take().unwrap_or(true);
+                        view.read_source(initial, window, cx);
                     }
                 });
             });
@@ -2132,6 +2397,43 @@ mod tests {
         }
         assert_eq!(displayed, "draft");
         assert!(read_result_current(true, &new, &new, 2, 2, 4, 4));
+    }
+    #[test]
+    fn deferred_worker_rearms_only_current_unattempted_intents() {
+        use super::deferred_read_after_worker;
+        assert_eq!(
+            deferred_read_after_worker(true, true, true, None),
+            Some(true)
+        );
+        assert_eq!(deferred_read_after_worker(true, false, true, None), None);
+        assert_eq!(deferred_read_after_worker(true, true, false, None), None);
+        assert_eq!(
+            deferred_read_after_worker(true, true, true, Some(false)),
+            None
+        );
+        assert_eq!(
+            deferred_read_after_worker(false, true, true, None),
+            Some(false)
+        );
+        assert_eq!(deferred_read_after_worker(false, false, true, None), None);
+    }
+    #[test]
+    fn admitted_read_consumes_only_the_request_it_supersedes() {
+        use super::{begin_read_intent, effective_read_intent};
+        let mut queued = Some(false);
+        assert!(!effective_read_intent(true, queued));
+        assert!(!begin_read_intent(true, &mut queued));
+        assert_eq!(queued, None);
+        assert_eq!(
+            super::deferred_read_after_worker(false, false, true, queued),
+            None
+        );
+        let mut queued = Some(true);
+        assert!(!begin_read_intent(false, &mut queued));
+        assert_eq!(queued, None);
+        let mut queued = Some(true);
+        assert!(begin_read_intent(true, &mut queued));
+        assert_eq!(queued, None);
     }
     #[test]
     fn protected_read_categories_do_not_publish_backend_details() {

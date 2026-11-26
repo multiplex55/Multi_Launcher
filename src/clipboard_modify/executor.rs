@@ -6,6 +6,7 @@ use base64::Engine;
 use super::catalog::{canonical_command, operation_by_id};
 use super::error::ClipboardModifyError;
 use super::model::{ClipboardModifierCatalog, OperationId, StageSpec};
+use super::parser::ClipboardModifyIntent;
 use super::pipeline::{find_pipeline, find_template, validate_executable_stages};
 
 pub trait Cancellation {
@@ -62,6 +63,33 @@ impl std::fmt::Display for ExecuteError {
     }
 }
 impl std::error::Error for ExecuteError {}
+
+pub(crate) fn run_intent<C: Cancellation + ?Sized>(
+    source: &str,
+    intent: &ClipboardModifyIntent,
+    catalog: &ClipboardModifierCatalog,
+    c: &C,
+) -> Result<String, ExecuteError> {
+    match intent {
+        ClipboardModifyIntent::Stages(stages) => execute_stages(source, stages, catalog, c),
+        ClipboardModifyIntent::ApplyTemplate { name } => execute_stages(
+            source,
+            &[crate::clipboard_modify::model::StageSpec {
+                operation: crate::clipboard_modify::model::OperationId::Template,
+                arguments: crate::clipboard_modify::model::StageArguments {
+                    name: Some(name.clone()),
+                    ..Default::default()
+                },
+            }],
+            catalog,
+            c,
+        ),
+        ClipboardModifyIntent::ApplySavedPipeline { name } => {
+            execute_pipeline(source, name, catalog, c)
+        }
+        ClipboardModifyIntent::Undo => Ok(source.to_string()),
+    }
+}
 
 pub fn execute_stages<C: Cancellation + ?Sized>(
     source: &str,

@@ -379,7 +379,7 @@ fn submit(
             && view.review.is_none()))
         || view.section != Section::ManagePipelines
         || !manage::host_current(view, window, cx)
-        || manage::undo_pending(view, cx)
+        || manage::launcher_effect_pending(view, cx)
     {
         return;
     }
@@ -475,6 +475,7 @@ fn submit(
         let _permit = permit; let result = task.await; let Some(view) = weak.upgrade() else { return; };
         let delivered = update_kit_window_content(host, &view, cx, |view, window, cx| {
             if view.management.pending != Some(serial) { return; } view.management.pending = None;
+            if matches!(&result, Outcome::Save(Ok(CheckedCatalogSave::Saved(_))) | Outcome::Reload(Ok(CheckedCatalogRead::Loaded(_)))) { refresh_catalog_search(view, cx); }
             let current = receipt.is_current() && receipt.matches(&view.mount) && view.section == Section::ManagePipelines && view.section_revision == section && view.pipelines.revision == revision;
             match result {
                 Outcome::Save(Ok(CheckedCatalogSave::Saved(catalog))) => {
@@ -581,7 +582,7 @@ pub(super) fn render(
     let section = view.section_revision;
     let revision = view.pipelines.revision;
     let busy = view.management.pending.is_some();
-    let undo = manage::undo_pending(view, cx);
+    let launcher_effect = manage::launcher_effect_pending(view, cx);
     if let Some(review) = view.pipelines.review {
         let reviewed = view
             .pipelines
@@ -648,7 +649,7 @@ pub(super) fn render(
                             || view.management.pending.is_some()
                             || !confirm.matches(&view.mount)
                             || !manage::host_current(view, window, cx)
-                            || manage::undo_pending(view, cx)
+                            || manage::launcher_effect_pending(view, cx)
                             || view.section != Section::ManagePipelines
                             || view.section_revision != section
                             || view.pipelines.revision != review.revision
@@ -709,7 +710,7 @@ pub(super) fn render(
             } else {
                 "Reload pipelines from disk"
             })
-            .disabled(busy || undo)
+            .disabled(busy || launcher_effect)
             .on_click(cx.listener(move |view, _, window, cx| {
                 if action_current(view, &reload_receipt, section, revision, window, cx) {
                     submit(view, true, None, window, cx);
@@ -757,13 +758,13 @@ pub(super) fn render(
                 )))
                 .label(label)
                 .disabled(
-                    busy || undo
+                    busy || launcher_effect
                         || (direction < 0 && index == 0)
                         || (direction > 0 && index + 1 == view.pipelines.rows.len()),
                 )
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if !action_current(view, &move_receipt, section, revision, window, cx)
-                        || manage::undo_pending(view, cx)
+                        || manage::launcher_effect_pending(view, cx)
                     {
                         return;
                     }
@@ -797,10 +798,10 @@ pub(super) fn render(
         controls = controls.child(
             Button::new(SharedString::from(format!("cm-pipeline-delete-{token}")))
                 .label("Delete")
-                .disabled(busy || undo)
+                .disabled(busy || launcher_effect)
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if !action_current(view, &delete, section, revision, window, cx)
-                        || manage::undo_pending(view, cx)
+                        || manage::launcher_effect_pending(view, cx)
                     {
                         return;
                     }
@@ -929,7 +930,7 @@ pub(super) fn render(
     panel = panel.child(
         Button::new("cm-pipeline-save")
             .label("Save pipelines")
-            .disabled(busy || undo || !view.pipelines.dirty || validation.is_some())
+            .disabled(busy || launcher_effect || !view.pipelines.dirty || validation.is_some())
             .on_click(cx.listener(move |view, _, window, cx| {
                 if action_current(view, &save, section, revision, window, cx) {
                     submit(view, false, None, window, cx);

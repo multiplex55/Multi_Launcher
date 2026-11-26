@@ -82,6 +82,18 @@ pub fn provider_query_term(trimmed_lc: &str) -> String {
     term.to_lowercase()
 }
 
+/// Completed Clipboard Modify commands must survive exact display filtering.
+pub fn clipboard_modify_resolved_postfilter_bypass(query: &str, action: &str) -> bool {
+    let mut words = query.split_whitespace();
+    words.next().is_some_and(|head| head.eq_ignore_ascii_case("cm"))
+        && words.next().is_some()
+        && (action == "clipboard_modify:execute"
+            || action == "clipboard_modify:undo"
+            || action.starts_with("clipboard_modify:execute:")
+            || action.starts_with("clipboard_modify:open:")
+            || action.starts_with("clipboard_modify:undo:"))
+}
+
 /// Date calculation rows are already resolved and must survive exact post-filtering.
 pub fn date_resolved_postfilter_bypass(query: &str, action: &str) -> bool {
     let mut words = query.split_whitespace();
@@ -637,6 +649,16 @@ mod tests {
     use crate::{actions::Action, common::query::ActionFilterMetadata};
     use fuzzy_matcher::skim::SkimMatcherV2;
     use std::collections::HashMap;
+
+    #[test]
+    fn clipboard_modify_resolved_bypass_keeps_completions_scored() {
+        let bypass = super::clipboard_modify_resolved_postfilter_bypass;
+        assert!(bypass("cm uppercase -id:unrelated", "clipboard_modify:execute"));
+        assert!(bypass("cm template", "clipboard_modify:open:templates"));
+        assert!(bypass("cm undo", "clipboard_modify:undo"));
+        assert!(!bypass("cm up", "query:cm uppercase"));
+        assert!(!bypass("other uppercase", "clipboard_modify:execute"));
+    }
 
     fn command_action(label: &str, action: &str, args: &str) -> Action {
         Action {

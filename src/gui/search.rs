@@ -577,13 +577,7 @@ impl LauncherApp {
             )
             && action.starts_with("note:");
 
-        let clipboard_modify_resolved = head == "cm"
-            && !action.starts_with("query:")
-            && (action == "clipboard_modify:execute"
-                || action == "clipboard_modify:undo"
-                || action.starts_with("clipboard_modify:execute:")
-                || action.starts_with("clipboard_modify:open:")
-                || action.starts_with("clipboard_modify:undo:"));
+        let clipboard_modify_resolved = crate::actions::search::clipboard_modify_resolved_postfilter_bypass(query, action);
 
         // Date expressions resolve to computed values or explanatory errors,
         // neither of which must contain the original expression's words.

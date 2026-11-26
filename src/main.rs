@@ -4888,6 +4888,9 @@ fn main() -> anyhow::Result<()> {
                 show_error_toasts: settings.show_error_toasts,
                 show_inline_errors: settings.show_inline_errors,
                 toast_duration: settings.toast_duration,
+                clipboard_modify_hide_after_apply: settings.plugin_settings.get("clipboard_modify")
+                    .and_then(|value| serde_json::from_value::<multi_launcher::settings::ClipboardModifyPluginSettings>(value.clone()).ok())
+                    .unwrap_or_default().hide_launcher_after_apply,
             },
             settings.coordinate_tool.clone(),
             settings.theme.clone(),

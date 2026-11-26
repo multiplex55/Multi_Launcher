@@ -101,10 +101,10 @@ pub(super) fn host_current(
             .native_window
             .is_some_and(|native| current_foreground_identity() == Some(native.identity))
 }
-pub(super) fn undo_pending(view: &ClipboardModifyView, cx: &App) -> bool {
+pub(super) fn launcher_effect_pending(view: &ClipboardModifyView, cx: &App) -> bool {
     view.root
         .upgrade()
-        .is_some_and(|root| root.read(cx).external_launch.clipboard_undo_pending())
+        .is_some_and(|root| root.read(cx).external_launch.clipboard_effect_pending())
 }
 fn validation_error(view: &ClipboardModifyView, cx: &App) -> Option<String> {
     let catalog = view.catalog.as_ref()?;
@@ -391,7 +391,7 @@ fn save_templates(
         return;
     };
     let host = window.window_handle();
-    if root.external_launch.clipboard_undo_pending()
+    if root.external_launch.clipboard_effect_pending()
         || !root
             .clipboard_modify_view
             .as_ref()
@@ -450,6 +450,7 @@ fn save_templates(
         let delivered = update_kit_window_content(host, &view, cx, |view, window, cx| {
             if view.management.pending != Some(serial) { return; }
             view.management.pending = None;
+            if matches!(&result, Ok(CheckedCatalogSave::Saved(_))) { refresh_catalog_search(view, cx); }
             if !receipt.is_current() || !receipt.matches(&view.mount) || view.section != Section::ManageTemplates { view.clear_block_wait(cx); cx.notify(); return; }
             if view.management.revision != revision {
                 if let Ok(CheckedCatalogSave::Saved(catalog)) = result {
@@ -497,7 +498,7 @@ fn discard_and_reload(
     if view.blocked()
         || view.section != Section::ManageTemplates
         || !host_current(view, window, cx)
-        || undo_pending(view, cx)
+        || launcher_effect_pending(view, cx)
     {
         return;
     }
@@ -558,6 +559,7 @@ fn discard_and_reload(
                 return;
             }
             view.management.pending = None;
+            if matches!(&result, Ok(CheckedCatalogRead::Loaded(_))) { refresh_catalog_search(view, cx); }
             let loaded = if let Ok(CheckedCatalogRead::Loaded(catalog)) = &result {
                 view.catalog = Some(catalog.clone());
                 view.sections.template = None;
@@ -646,7 +648,7 @@ pub(super) fn render_templates(
     let section = view.section_revision;
     let revision = view.management.revision;
     let busy = view.management.pending.is_some();
-    let undo_busy = undo_pending(view, cx);
+    let launcher_effect_busy = launcher_effect_pending(view, cx);
     let validation = validation_error(view, cx);
     panel = panel.child(Label::new(
         "Manage templates · Aliases are comma-separated.",
@@ -663,7 +665,7 @@ pub(super) fn render_templates(
                 } else {
                     "Reload from disk"
                 })
-                .disabled(busy || undo_busy)
+                .disabled(busy || launcher_effect_busy)
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if receipt.is_current()
                         && receipt.matches(&view.mount)
@@ -689,14 +691,14 @@ pub(super) fn render_templates(
                 )))
                 .label(label)
                 .disabled(
-                    busy || undo_busy
+                    busy || launcher_effect_busy
                         || (direction < 0 && index == 0)
                         || (direction > 0 && index + 1 == view.management.rows.len()),
                 )
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if view.blocked()
                         || !host_current(view, window, cx)
-                        || undo_pending(view, cx)
+                        || launcher_effect_pending(view, cx)
                         || view.section != Section::ManageTemplates
                         || view.section_revision != section
                         || view.management.revision != revision
@@ -889,7 +891,7 @@ pub(super) fn render_templates(
     panel = panel.child(
         Button::new("cm-template-save")
             .label("Save templates")
-            .disabled(busy || undo_busy || !view.management.dirty || validation.is_some())
+            .disabled(busy || launcher_effect_busy || !view.management.dirty || validation.is_some())
             .on_click(cx.listener(move |view, _, window, cx| {
                 if save.is_current()
                     && save.matches(&view.mount)

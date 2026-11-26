@@ -2,6 +2,13 @@ use super::{CommandHelpProvider, supported_launcher_search_actions};
 use multi_launcher::actions::Action;
 use std::{collections::HashSet, sync::Arc};
 
+pub(super) fn clipboard_catalog_is_current(
+    shared: &multi_launcher::clipboard_modify::runtime::SharedClipboardModifierCatalog,
+    expected: &Arc<multi_launcher::clipboard_modify::model::ClipboardModifierCatalog>,
+) -> bool {
+    shared.read().ok().is_some_and(|live| Arc::ptr_eq(&live, expected))
+}
+
 struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
 
 impl multi_launcher::plugin::Plugin for CalculatorMetadata {
@@ -58,13 +65,27 @@ impl multi_launcher::plugin::Plugin for FileSearchBarePlugin {
     }
 }
 
-struct ClipboardModifyBare;
+struct ClipboardModifyBare {
+    catalog: multi_launcher::clipboard_modify::runtime::SharedClipboardModifierCatalog,
+    ready: std::sync::atomic::AtomicBool,
+    projected: std::sync::Mutex<Option<(String, Arc<multi_launcher::clipboard_modify::model::ClipboardModifierCatalog>)>>,
+}
 impl multi_launcher::plugin::Plugin for ClipboardModifyBare {
     fn name(&self) -> &str { "clipboard_modify" }
     fn description(&self) -> &str { "Builds clipboard modification pipelines with prefix `cm`" }
     fn capabilities(&self) -> &[&str] { &["search"] }
     fn query_prefixes(&self) -> &[&str] { &["cm"] }
-    fn search(&self, query: &str) -> Vec<Action> { multi_launcher::plugins::clipboard_modify::bare_modify_opener(query).or_else(|| multi_launcher::plugins::clipboard_modify::bare_undo_action(query)).into_iter().collect() }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+            if let Ok(catalog) = self.catalog.read() {
+                let catalog = catalog.clone();
+                let rows = multi_launcher::plugins::clipboard_modify::search_with_catalog(query, &catalog);
+                if let Ok(mut projected) = self.projected.lock() { *projected = Some((query.to_owned(), catalog)); }
+                return rows;
+            }
+        }
+        multi_launcher::plugins::clipboard_modify::bare_modify_opener(query).or_else(|| multi_launcher::plugins::clipboard_modify::bare_undo_action(query)).into_iter().collect()
+    }
     fn commands(&self) -> Vec<Action> { multi_launcher::plugins::clipboard_modify::admitted_modify_commands() }
 }
 
@@ -104,6 +125,15 @@ pub(super) struct InstalledLauncherProviders {
 }
 
 impl InstalledLauncherProviders {
+    pub(super) fn clipboard_modify_ready(&self) {
+        self.clipboard_modify.ready.store(true, std::sync::atomic::Ordering::Release);
+    }
+    pub(super) fn take_clipboard_modify_projection(&self) -> Option<(String, Arc<multi_launcher::clipboard_modify::model::ClipboardModifierCatalog>)> {
+        self.clipboard_modify.projected.lock().ok()?.take()
+    }
+    pub(super) fn clipboard_modify_catalog(&self) -> multi_launcher::clipboard_modify::runtime::SharedClipboardModifierCatalog {
+        self.clipboard_modify.catalog.clone()
+    }
     #[cfg(not(test))]
     pub(super) fn new(enabled_plugins: Option<&HashSet<String>>) -> Self {
         Self::with_providers(
@@ -132,7 +162,11 @@ impl InstalledLauncherProviders {
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             clipboard: ClipboardBare,
-            clipboard_modify: ClipboardModifyBare,
+            clipboard_modify: ClipboardModifyBare {
+                catalog: multi_launcher::clipboard_modify::runtime::shared_default_catalog(),
+                ready: std::sync::atomic::AtomicBool::new(false),
+                projected: std::sync::Mutex::new(None),
+            },
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
@@ -338,6 +372,45 @@ mod tests {
         plugin::{Plugin, search_filtered_plugins_with_origin},
     };
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn clipboard_catalog_receipt_rejects_same_id_with_changed_body() {
+        use std::sync::{Arc, RwLock};
+        use multi_launcher::clipboard_modify::model::{ClipboardModifierCatalog, ClipboardTemplate};
+        let old = Arc::new(ClipboardModifierCatalog::new(vec![ClipboardTemplate {
+            id: "same-id".into(), label: "Same".into(), aliases: vec![],
+            template: "before {{clipboard}}".into(), processor: None,
+        }], vec![]).unwrap());
+        let shared = Arc::new(RwLock::new(old.clone()));
+        assert!(super::clipboard_catalog_is_current(&shared, &old));
+        let mut replacement = (*old).clone();
+        replacement.templates[0].template = "after {{clipboard}}".into();
+        *shared.write().unwrap() = Arc::new(replacement);
+        assert!(!super::clipboard_catalog_is_current(&shared, &old));
+    }
+
+    #[test]
+    fn clipboard_provider_projects_cold_custom_catalog_and_effective_filtered_query() {
+        use std::sync::{Arc, Mutex, RwLock, atomic::AtomicBool};
+        use multi_launcher::clipboard_modify::model::{ClipboardModifierCatalog, ClipboardTemplate};
+        let catalog = Arc::new(ClipboardModifierCatalog::new(vec![ClipboardTemplate {
+            id: "custom-owned".into(), label: "Custom owned".into(), aliases: vec![],
+            template: "owned {{clipboard}}".into(), processor: None,
+        }], vec![]).unwrap());
+        let provider = super::ClipboardModifyBare {
+            catalog: Arc::new(RwLock::new(catalog.clone())), ready: AtomicBool::new(false), projected: Mutex::new(None),
+        };
+        assert!(provider.search("cm template custom-owned").is_empty());
+        provider.ready.store(true, std::sync::atomic::Ordering::Release);
+        let enabled = HashSet::from(["clipboard_modify".to_owned()]);
+        let rows = super::search_routed([&provider as &dyn Plugin], "cm uppercase -id:unrelated", Some(&enabled), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.action, "clipboard_modify:execute");
+        let (effective, used) = provider.projected.lock().unwrap().take().unwrap();
+        assert_eq!(effective.trim(), "cm uppercase");
+        assert!(Arc::ptr_eq(&used, &catalog));
+        assert_eq!(provider.search("cm template custom-owned")[0].action, "clipboard_modify:execute");
+    }
 
     #[test]
     fn installed_activity_provider_uses_stock_search_gates() {

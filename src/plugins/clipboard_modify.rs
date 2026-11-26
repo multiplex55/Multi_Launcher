@@ -46,29 +46,49 @@ impl ClipboardModifyPlugin {
         self.catalog.read().unwrap().clone()
     }
 }
+/// Project stock Search rows from an already loaded catalog without I/O.
+pub fn search_with_catalog(query: &str, catalog: &ClipboardModifierCatalog) -> Vec<Action> {
+    if is_exact_cm_root_query(query) {
+        return cm_root_actions(catalog);
+    }
+    match parse(query, catalog) {
+        ClipboardModifyParseResult::NotClipboardModify => Vec::new(),
+        ClipboardModifyParseResult::OpenSection(section) => vec![section_action(section)],
+        ClipboardModifyParseResult::Partial(partial) => partial_actions(partial),
+        ClipboardModifyParseResult::CompleteExecution(intent) => {
+            vec![execution_action(intent, catalog)]
+        }
+        ClipboardModifyParseResult::Invalid(error) => vec![Action {
+            label: "Invalid clipboard modify query".into(),
+            desc: format!(
+                "Clipboard Modify syntax is invalid: {}. Open `cm` and use the Help section for syntax examples.",
+                parser_error_hint(&error.kind)
+            ),
+            action: "clipboard_modify:error".into(),
+            args: None,
+        }],
+    }
+}
+
+/// Resolve only an exact stock execution row against the catalog that produced it.
+pub fn execution_from_catalog(
+    query: &str,
+    action: &Action,
+    catalog: &ClipboardModifierCatalog,
+) -> Option<ClipboardModifyIntent> {
+    let ClipboardModifyParseResult::CompleteExecution(intent) = parse(query, catalog) else {
+        return None;
+    };
+    if matches!(intent, ClipboardModifyIntent::Undo) {
+        return None;
+    }
+    (execution_action(intent.clone(), catalog) == *action).then_some(intent)
+}
+
 impl Plugin for ClipboardModifyPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let catalog = self.catalog_snapshot();
-        if is_exact_cm_root_query(query) {
-            return cm_root_actions(catalog.as_ref());
-        }
-        match parse(query, catalog.as_ref()) {
-            ClipboardModifyParseResult::NotClipboardModify => Vec::new(),
-            ClipboardModifyParseResult::OpenSection(section) => vec![section_action(section)],
-            ClipboardModifyParseResult::Partial(partial) => partial_actions(partial),
-            ClipboardModifyParseResult::CompleteExecution(intent) => {
-                vec![execution_action(intent, catalog.as_ref())]
-            }
-            ClipboardModifyParseResult::Invalid(error) => vec![Action {
-                label: "Invalid clipboard modify query".into(),
-                desc: format!(
-                    "Clipboard Modify syntax is invalid: {}. Open `cm` and use the Help section for syntax examples.",
-                    parser_error_hint(&error.kind)
-                ),
-                action: "clipboard_modify:error".into(),
-                args: None,
-            }],
-        }
+        search_with_catalog(query, catalog.as_ref())
     }
 
     fn name(&self) -> &str {
@@ -726,6 +746,22 @@ mod tests {
                 name: "alpha-pipeline".into(),
             }
         );
+    }
+
+    #[test]
+    fn pure_projection_resolves_exact_execution_and_rejects_forged_rows() {
+        let plugin = plugin_with_test_catalog();
+        let catalog = plugin.catalog_snapshot();
+        for query in ["cm uppercase", "cm template \"at\"", "cm apply \"ap\""] {
+            let rows = search_with_catalog(query, &catalog);
+            assert_eq!(rows, plugin.search(query));
+            assert!(execution_from_catalog(query, &rows[0], &catalog).is_some());
+            let mut forged = rows[0].clone();
+            forged.desc.push_str(" forged");
+            assert!(execution_from_catalog(query, &forged, &catalog).is_none());
+        }
+        let undo = plugin.search("cm undo").remove(0);
+        assert!(execution_from_catalog("cm undo", &undo, &catalog).is_none());
     }
 
     #[test]
