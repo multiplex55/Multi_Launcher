@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Stock Snippet Run reaches checked literal and automatic Copy and standalone Fill with live result and exact retries. All 16 focused launcher tests and three reused stock cases passed. Native Windows replay remains open. The next G13 increment adds authored fields and editor Preview. [Standalone Fill checkpoint](CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)
+Snippets supports authored prompt fields and read-only Test / Preview with exact draft return. Preview, automatic Run and Fill share a protected reader that checks current authority at acquisition. All 19 focused tests passed. Matched native replay remains open. Checked Create Temp File follows. [Editor Preview checkpoint](CHECKPOINTS.md#g13-snippets-field-authoring-and-editor-preview)
+
+Stock Snippet Run reaches checked literal and automatic Copy and standalone Fill with live result and exact retries. All 16 focused launcher tests and three reused stock cases passed. Native Windows replay remains open. [Standalone Fill checkpoint](CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)
 
 Snippet Prompt has a shared preparation, context, Preview and checked Copy contract. All 22 focused library tests passed, including existing egui and Paste Sequence behavior. [Shared prompt checkpoint](CHECKPOINTS.md#g13-shared-snippet-prompt-contract)
 

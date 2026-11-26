@@ -32,6 +32,10 @@ pub(super) fn named_row_is_current(
 fn edit_is_current(edit: &EditDraft, generation: u64, rows: &Arc<Vec<SnippetEntry>>, instance: u64) -> bool {
     edit.instance == instance && edit.generation == generation && Arc::ptr_eq(&edit.snapshot, rows)
 }
+fn preview_return_is_current(issued: &utility_mount::MountReceipt, current: &utility_mount::MountReceipt,
+    active: bool, open: bool, issued_instance: u64, current_instance: Option<u64>, same_host: bool) -> bool {
+    issued.is_current() && issued.matches(current) && active && open && current_instance == Some(issued_instance) && same_host
+}
 fn edited_alias(original: &str, initial_display: &str, current_display: &str) -> String {
     if initial_display == current_display { original.to_owned() } else { current_display.to_owned() }
 }
@@ -55,6 +59,42 @@ struct EditDraft {
     tag_input: Entity<InputState>,
     hidden: bool,
     revealed: bool,
+    prompt_for_fields: bool,
+    fields: Vec<AuthorField>,
+    body_sub: Option<Subscription>,
+}
+
+struct AuthorField {
+    definition: snippets::SnippetFieldDefinition,
+    label: Option<Entity<InputState>>,
+    label_initial_display: String,
+    default_value: Option<Entity<TextareaState>>,
+}
+
+impl AuthorField {
+    fn current(&self, cx: &App) -> snippets::SnippetFieldDefinition {
+        let mut definition = self.definition.clone();
+        if let Some(label) = &self.label {
+            definition.label = edited_alias(&definition.label, &self.label_initial_display, label.read(cx).value().as_str());
+        }
+        if let Some(default) = &self.default_value { definition.default_value = default.read(cx).value().to_string(); }
+        definition
+    }
+    fn detach(&mut self, cx: &App) {
+        self.definition = self.current(cx);
+        self.label = None;
+        self.default_value = None;
+    }
+    fn attach(&mut self, window: &mut Window, cx: &mut Context<SnippetsView>) {
+        if self.label.is_some() { return; }
+        let label = cx.new(|cx| InputState::new(window, cx).placeholder("Field label"));
+        label.update(cx, |input, cx| input.set_value(self.definition.label.clone(), window, cx));
+        self.label_initial_display = label.read(cx).value().to_string();
+        let default = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 4).placeholder("Default value"));
+        default.update(cx, |input, cx| input.set_value(self.definition.default_value.clone(), window, cx));
+        self.label = Some(label);
+        self.default_value = Some(default);
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DraftKind { New, Existing(usize) }
@@ -89,6 +129,8 @@ pub(super) struct RestartDraft {
     tag_input: String,
     hidden: bool,
     revealed: bool,
+    prompt_for_fields: bool,
+    fields: Vec<snippets::SnippetFieldDefinition>,
 }
 
 pub(super) fn current_provider(
@@ -111,6 +153,7 @@ pub(super) struct SnippetsView {
     path: PathBuf,
     focus: FocusHandle,
     save_focus: FocusHandle,
+    preview_focus: FocusHandle,
     filter: Entity<InputState>,
     _filter_sub: Subscription,
     selected_tags: Vec<String>,
@@ -128,6 +171,9 @@ pub(super) struct SnippetsView {
     pending: bool,
     authority: Arc<AtomicU64>,
     feedback: Option<String>,
+    preview_pending: bool,
+    preview_active: bool,
+    preview_focus_guard: Option<Subscription>,
 }
 
 impl SnippetsView {
@@ -138,13 +184,14 @@ impl SnippetsView {
         let subscription = cx.subscribe(&filter, |_: &mut Self, _: Entity<InputState>, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) { cx.notify(); }
         });
-        Self { open: false, root, owner, mount, host: window.window_handle(), path, focus: cx.focus_handle(), save_focus: cx.focus_handle(), filter,
+        Self { open: false, root, owner, mount, host: window.window_handle(), path, focus: cx.focus_handle(), save_focus: cx.focus_handle(), preview_focus: cx.focus_handle(), filter,
             _filter_sub: subscription, selected_tags: Vec::new(), rows: Arc::new(Vec::new()), generation: 0,
             loading: false, diagnostic: None, selected: None, edit: None, removal: None,
             removal_focus: cx.focus_handle(), removal_cancel_focus: cx.focus_handle(), removal_confirm_focus: cx.focus_handle(), instance: 0, pending: false,
-            authority: Arc::new(AtomicU64::new(0)), feedback: None }
+            authority: Arc::new(AtomicU64::new(0)), feedback: None, preview_pending: false, preview_active: false, preview_focus_guard: None }
     }
     fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview_pending || self.preview_active { return; }
         if !self.open {
             if !self.mount.is_current() { self.mount = self.owner.attach(); }
             self.open = true;
@@ -183,7 +230,7 @@ impl SnippetsView {
         cx.notify();
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.pending || self.removal.is_some() || self.host.window_id() != window.window_handle().window_id() { return; }
+        if !self.open || self.pending || self.preview_pending || self.preview_active || self.removal.is_some() || self.host.window_id() != window.window_handle().window_id() { return; }
         let owns_focus = self.focus.is_focused(window) || self.focus.contains_focused(window, cx);
         self.open = false;
         self.owner.retire();
@@ -202,7 +249,7 @@ impl SnippetsView {
         });
         cx.notify();
     }
-    pub(super) fn busy(&self) -> bool { self.pending || self.removal.is_some() }
+    pub(super) fn busy(&self) -> bool { self.pending || self.preview_pending || self.removal.is_some() }
     pub(super) fn blocks_snippet_run(&self) -> bool { self.pending || self.edit.is_some() || self.removal.is_some() }
     fn clear_wait(&self, cx: &mut Context<Self>) {
         if self.busy() { return; }
@@ -243,6 +290,7 @@ impl SnippetsView {
             body: edit.body.as_ref().map(|body| body.read(cx).value().to_string()).unwrap_or_else(|| edit.body_private.clone()), tags: edit.tags.clone(),
             tag_input: edit.tag_input.read(cx).value().to_string(),
             hidden: edit.hidden, revealed: edit.revealed,
+            prompt_for_fields: edit.prompt_for_fields, fields: edit.fields.iter().map(|field| field.current(cx)).collect(),
         })
     }
 
@@ -265,8 +313,14 @@ impl SnippetsView {
         let alias_initial_display = alias.read(cx).value().to_string();
         if let Some(body) = &body { body.update(cx, |input, cx| input.set_value(entry.text.clone(), window, cx)); }
         self.instance = self.instance.wrapping_add(1);
+        let body_sub = body.as_ref().map(|body| cx.subscribe(body, |_: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { cx.notify(); }
+        }));
+        let fields = entry.fields.iter().cloned().map(|definition| AuthorField { definition, label: None,
+            label_initial_display: String::new(), default_value: None }).collect();
         self.edit = Some(EditDraft { snapshot: self.rows.clone(), generation, kind, instance: self.instance,
-            alias: alias.clone(), alias_initial_display, body, body_private: entry.text.clone(), tags: entry.tags.clone(), tag_input, hidden: entry.hide_contents, revealed: !entry.hide_contents });
+            alias: alias.clone(), alias_initial_display, body, body_private: entry.text.clone(), tags: entry.tags.clone(), tag_input, hidden: entry.hide_contents, revealed: !entry.hide_contents,
+            prompt_for_fields: entry.prompt_for_fields, fields, body_sub });
         self.feedback = None;
         alias.focus_handle(cx).focus(window, cx);
         cx.notify();
@@ -279,35 +333,52 @@ impl SnippetsView {
             let body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(6, 14).placeholder("Snippet text"));
             body.update(cx, |input, cx| input.set_value(edit.body_private.clone(), window, cx));
             edit.body = Some(body);
+            edit.body_sub = edit.body.as_ref().map(|body| cx.subscribe(body, |_: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) { cx.notify(); }
+            }));
         } else if let Some(body) = edit.body.take() {
             if body.focus_handle(cx).is_focused(window) { self.focus.focus(window, cx); }
             edit.body_private = body.read(cx).value().to_string();
+            edit.body_sub = None;
+            for field in &mut edit.fields { field.detach(cx); }
         }
         edit.revealed = revealed;
         cx.notify();
     }
 
-    fn save(&mut self, instance: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending || self.loading || self.diagnostic.is_some() || !window.is_window_active()
-            || window.has_active_dialog(cx) || !self.mount.is_current() { return; }
-        let Some(edit) = &self.edit else { return; };
-        if !edit_is_current(edit, self.generation, &self.rows, instance) { return; }
-        let alias_display = edit.alias.read(cx).value().to_string();
+    fn discover_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<String> {
+        if self.pending || self.preview_pending || self.preview_active { return Vec::new(); }
+        let Some(edit) = self.edit.as_mut() else { return Vec::new(); };
+        if !edit.revealed || !edit.prompt_for_fields { return Vec::new(); }
+        let text = edit.body.as_ref().map(|body| body.read(cx).value().to_string()).unwrap_or_else(|| edit.body_private.clone());
+        let definitions: Vec<_> = edit.fields.iter().map(|field| field.current(cx)).collect();
+        let Ok(discovery) = multi_launcher::snippet_prompt::discover_editor_fields(&text, &definitions) else { return Vec::new(); };
+        for definition in discovery.fields {
+            if !edit.fields.iter().any(|field| field.definition.name == definition.name) {
+                edit.fields.push(AuthorField { definition, label: None, label_initial_display: String::new(), default_value: None });
+            }
+        }
+        for field in &mut edit.fields {
+            if discovery.keys.contains(&field.definition.name) { field.attach(window, cx); }
+        }
+        discovery.keys
+    }
+
+    fn editor_candidate(&self, instance: u64, cx: &App) -> Result<(Arc<Vec<SnippetEntry>>, Vec<SnippetEntry>, Option<usize>, String), String> {
+        let edit = self.edit.as_ref().ok_or("The editor is no longer available.")?;
+        if !edit_is_current(edit, self.generation, &self.rows, instance) { return Err("The saved list changed.".into()); }
         let original = match edit.kind {
-            DraftKind::Existing(index) => { let Some(entry) = edit.snapshot.get(index) else { return; }; entry.clone() }
+            DraftKind::Existing(index) => edit.snapshot.get(index).cloned().ok_or("The edited snippet no longer exists.")?,
             DraftKind::New => new_snippet(),
         };
-        let alias = edited_alias(&original.alias, &edit.alias_initial_display, &alias_display);
-        if alias.trim().is_empty() { self.feedback = Some("An alias is required.".into()); cx.notify(); return; }
-        let tags = match snippets::normalize_snippet_tags(edit.tags.clone()) {
-            Ok(tags) => tags,
-            Err(message) => { self.feedback = Some(message.into()); cx.notify(); return; }
-        };
+        let alias = edited_alias(&original.alias, &edit.alias_initial_display, edit.alias.read(cx).value().as_str());
+        if alias.trim().is_empty() { return Err("An alias is required.".into()); }
+        let tags = snippets::normalize_snippet_tags(edit.tags.clone()).map_err(str::to_owned)?;
         let text = edit.body.as_ref().map(|body| body.read(cx).value().to_string()).unwrap_or_else(|| edit.body_private.clone());
-        let mut candidate = match snippets::prepare_snippet_draft(&original, &text) {
-            Ok(candidate) => candidate,
-            Err(_) => { self.feedback = Some("The prompted snippet template is invalid.".into()); cx.notify(); return; }
-        };
+        let mut draft = original;
+        draft.prompt_for_fields = edit.prompt_for_fields;
+        draft.fields = edit.fields.iter().map(|field| field.current(cx)).collect();
+        let mut candidate = snippets::prepare_snippet_draft(&draft, &text).map_err(|_| "The prompted snippet template is invalid.".to_owned())?;
         candidate.alias = alias.clone();
         candidate.tags = tags;
         candidate.hide_contents = edit.hidden;
@@ -316,7 +387,154 @@ impl SnippetsView {
             DraftKind::Existing(index) => { rows[index] = candidate; Some(index) }
             DraftKind::New => { rows.push(candidate); None }
         };
-        let expected = edit.snapshot.clone();
+        snippets::snapshot_edit_decision(&edit.snapshot, &edit.snapshot, &rows, Some((index, &alias)))
+            .map_err(|_| "An entry with this exact alias already exists.".to_owned())?;
+        Ok((edit.snapshot.clone(), rows, index, alias))
+    }
+
+    fn set_editor_readonly(&mut self, readonly: bool, cx: &mut Context<Self>) {
+        if let Some(edit) = &self.edit {
+            for input in [&edit.alias, &edit.tag_input] { input.update(cx, |input, cx| input.set_readonly(readonly, cx)); }
+            if let Some(body) = &edit.body { body.update(cx, |input, cx| input.set_readonly(readonly, cx)); }
+            for field in &edit.fields {
+                if let Some(label) = &field.label { label.update(cx, |input, cx| input.set_readonly(readonly, cx)); }
+                if let Some(default) = &field.default_value { default.update(cx, |input, cx| input.set_readonly(readonly, cx)); }
+            }
+        }
+    }
+
+    pub(super) fn return_from_preview(&mut self, issued: &utility_mount::MountReceipt, instance: u64, host: WindowId,
+        focus: Option<FocusHandle>, owns: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !preview_return_is_current(issued, &self.mount, self.preview_active, self.open, instance,
+            self.edit.as_ref().map(|edit| edit.instance), self.host.window_id() == host && window.window_handle().window_id() == host) { return; }
+        self.preview_active = false;
+        self.set_editor_readonly(false, cx);
+        if owns && window.is_window_active() && !window.has_active_dialog(cx)
+            && self.root.upgrade().is_some_and(|root| root.read(cx).native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity))) {
+            let _ = focus;
+            self.preview_focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn start_preview(&mut self, instance: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending || self.preview_pending || self.preview_active || self.loading || self.diagnostic.is_some()
+            || !self.open || !self.mount.is_current() || !window.is_window_active() || window.has_active_dialog(cx)
+            || !(self.focus.is_focused(window) || self.focus.contains_focused(window, cx) || self.preview_focus.is_focused(window))
+            || !self.edit.as_ref().is_some_and(|edit| edit.instance == instance && edit.revealed) { return; }
+        let (_, rows, index, _) = match self.editor_candidate(instance, cx) {
+            Ok(candidate) => candidate,
+            Err(error) => { self.feedback = Some(error); cx.notify(); return; }
+        };
+        let index = index.unwrap_or(rows.len() - 1);
+        let definition = match multi_launcher::snippet_prompt::prepare(&rows[index]) {
+            Ok(multi_launcher::snippet_prompt::PreparedInvocation::Automatic(definition)
+                | multi_launcher::snippet_prompt::PreparedInvocation::Prompted(definition)) => definition,
+            _ => { self.feedback = Some("Add a prompt field or automatic value to preview.".into()); cx.notify(); return; }
+        };
+        let Some(root) = self.root.upgrade() else { return; };
+        let root_state = root.read(cx);
+        let Some(native) = root_state.native_window else { return; };
+        let host = window.window_handle();
+        let focus = window.focused(cx);
+        if root_state.root_window.is_none_or(|current| current.window_id() != host.window_id())
+            || !root_state.external_owner_is_current(focus.as_ref(), window, cx)
+            || current_foreground_identity() != Some(native.identity) || root_state.snippet_fill.as_ref().is_some_and(|view| view.read(cx).open) { return; }
+        let Some(permit) = root_state.restart_admission.admit() else { return; };
+        let admission = root_state.restart_admission.clone();
+        let visibility = root_state.root_visibility.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire);
+        let origin = visibility.snippet_origin.lock().ok().and_then(|origin| origin.as_ref().filter(|(issued, _)| *issued == revision).map(|(_, origin)| origin.clone()));
+        let timestamp = chrono::Local::now().fixed_offset();
+        let receipt = self.mount.clone();
+        let worker_receipt = receipt.clone();
+        let Some(origin_focus) = focus.as_ref() else { return; };
+        let lease = Arc::new(AtomicBool::new(true));
+        let focus_lease = lease.clone();
+        self.preview_focus_guard = Some(cx.on_blur(origin_focus, window, move |_, _, _| focus_lease.store(false, Ordering::Release)));
+        root.update(cx, |root, _| root.external_launch.set_snippet_preview_lease(lease.clone()));
+        let worker_lease = lease.clone();
+        self.preview_pending = true;
+        self.set_editor_readonly(true, cx);
+        self.feedback = None;
+        let task = cx.background_executor().spawn(async move {
+            let current: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || worker_lease.load(Ordering::Acquire) && worker_receipt.is_current() && !admission.is_fenced()
+                && json_utility::native_host_current(&visibility, revision, Some(native), false)
+                && current_foreground_identity() == Some(native.identity));
+            if !current() { return None; }
+            let context = definition.has_system_variables().then(|| multi_launcher::snippet_prompt::capture_protected_context_guarded(
+                timestamp, definition.uses_clipboard(), definition.uses_window_title(), current.clone(), || origin)).flatten();
+            if !current() { return None; }
+            definition.begin(context).ok()
+        });
+        cx.spawn(async move |parent, cx| {
+            let _permit = permit;
+            let session = task.await;
+            let view_entity = parent.upgrade()?;
+            let fallback_receipt = receipt.clone();
+            let ack_lease = lease.clone();
+            let result = update_kit_window_content(host, &view_entity, cx, |view, window, cx| {
+                if !view.preview_pending || !receipt.is_current() || !receipt.matches(&view.mount)
+                    || !view.open || !view.edit.as_ref().is_some_and(|edit| edit.instance == instance) { return; }
+                view.preview_pending = false;
+                view.preview_focus_guard = None;
+                let Some(root) = view.root.upgrade() else { return; };
+                root.update(cx, |root, _| root.external_launch.clear_snippet_preview_lease(&ack_lease));
+                let valid = ack_lease.load(Ordering::Acquire) && window.is_window_active() && !window.has_active_dialog(cx)
+                    && current_foreground_identity() == Some(native.identity)
+                    && root.read(cx).root_visibility.request_revision.load(Ordering::Acquire) == revision
+                    && root.read(cx).external_owner_is_current(focus.as_ref(), window, cx)
+                    && !root.read(cx).restart_admission.is_fenced();
+                if !valid { view.set_editor_readonly(false, cx); view.clear_wait(cx); cx.notify(); return; }
+                let Some(session) = session else { view.set_editor_readonly(false, cx); view.clear_wait(cx); view.feedback = Some("Could not prepare the preview.".into()); cx.notify(); return; };
+                let parent = cx.entity().downgrade();
+                let parent_receipt = receipt.clone();
+                let root_weak = view.root.clone();
+                let opened = root.update(cx, |root, cx| {
+                    if root.snippet_fill.as_ref().is_some_and(|child| child.read(cx).open) { return false; }
+                    let child = cx.new(|cx| super::snippet_fill::SnippetFill::preview(session, parent, parent_receipt, instance,
+                        host.window_id(), root_weak, focus, window, cx));
+                    child.update(cx, |child, cx| child.focus_initial(window, cx));
+                    root.snippet_fill = Some(child);
+                    let id = window.window_handle().window_id();
+                    let history = root.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
+                    let modify = root.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
+                    root.root_scroll.scroll_to_top_of_item(root.clipboard_scroll_item(id, cx)
+                        + usize::from(history) + usize::from(modify) + 1);
+                    cx.notify();
+                    true
+                });
+                view.preview_active = opened;
+                if !opened { view.set_editor_readonly(false, cx); }
+                view.clear_wait(cx);
+                cx.notify();
+            });
+            if result.is_err() {
+                let _ = view_entity.update(cx, |view, cx| {
+                    if view.preview_pending && fallback_receipt.is_current() && fallback_receipt.matches(&view.mount)
+                        && view.edit.as_ref().is_some_and(|edit| edit.instance == instance) {
+                        view.preview_pending = false;
+                        view.preview_focus_guard = None;
+                        view.set_editor_readonly(false, cx);
+                        if let Some(root) = view.root.upgrade() { root.update(cx, |root, _| root.external_launch.clear_snippet_preview_lease(&lease)); }
+                        view.clear_wait(cx);
+                        view.feedback = Some("Could not open the preview.".into());
+                        cx.notify();
+                    }
+                });
+            }
+            Some(())
+        }).detach();
+        cx.notify();
+    }
+
+    fn save(&mut self, instance: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending || self.preview_pending || self.preview_active || self.loading || self.diagnostic.is_some() || !window.is_window_active()
+            || window.has_active_dialog(cx) || !self.mount.is_current() { return; }
+        let (expected, rows, index, alias) = match self.editor_candidate(instance, cx) {
+            Ok(candidate) => candidate,
+            Err(error) => { self.feedback = Some(error); cx.notify(); return; }
+        };
         self.submit(expected, rows, Some((index, alias)), Mutation::Save(instance), window, cx);
     }
 
@@ -340,10 +558,7 @@ impl SnippetsView {
         let worker_receipt = receipt.clone();
         let path = self.path.clone();
         let host = self.host;
-        if let Some(edit) = &self.edit {
-            for input in [&edit.alias, &edit.tag_input] { input.update(cx, |input, cx| input.set_readonly(true, cx)); }
-            if let Some(body) = &edit.body { body.update(cx, |input, cx| input.set_readonly(true, cx)); }
-        }
+        self.set_editor_readonly(true, cx);
         self.focus.focus(window, cx);
         self.pending = true;
         self.feedback = None;
@@ -401,10 +616,7 @@ impl SnippetsView {
                         view.feedback = Some("Could not save snippet. Draft retained.".into());
                     }
                 }
-                if let Some(edit) = &view.edit {
-                    for input in [&edit.alias, &edit.tag_input] { input.update(cx, |input, cx| input.set_readonly(false, cx)); }
-                    if let Some(body) = &edit.body { body.update(cx, |input, cx| input.set_readonly(false, cx)); }
-                }
+                view.set_editor_readonly(false, cx);
                 if view.removal.is_some() && owns_focus && window.is_window_active()
                     && !window.has_active_dialog(cx) && current_foreground_identity() == Some(native.identity)
                     && json_utility::native_host_current(&ack_visibility, revision, Some(native), false)
@@ -423,10 +635,7 @@ impl SnippetsView {
                     };
                 if !exact { return; }
                 view.pending = false; view.feedback = Some("Save result could not be delivered.".into());
-                if let Some(edit) = &view.edit {
-                    for input in [&edit.alias, &edit.tag_input] { input.update(cx, |input, cx| input.set_readonly(false, cx)); }
-                    if let Some(body) = &edit.body { body.update(cx, |input, cx| input.set_readonly(false, cx)); }
-                }
+                view.set_editor_readonly(false, cx);
                 view.clear_wait(cx); cx.notify(); }); }
         }).detach();
         cx.notify();
@@ -434,7 +643,8 @@ impl SnippetsView {
 }
 
 impl Render for SnippetsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let discovered = self.discover_fields(window, cx);
         let mount = self.mount.clone();
         let filter = self.filter.read(cx).value().to_string();
         let key_mount = mount.clone();
@@ -468,13 +678,16 @@ impl Render for SnippetsView {
             .w_full().flex().flex_col().gap_2().p_3()
             .child(Label::new("Snippets"))
             .child(Input::new(&self.filter).aria_label("Filter snippets"));
+        if self.preview_active {
+            return div().id("snippets-preview-parent").child(Label::new("Editing snippet"));
+        }
         let mut tag_row = div().flex().flex_wrap().gap_2();
         for (index, tag) in tags.into_iter().enumerate() {
             let selected = self.selected_tags.iter().any(|value| value.to_lowercase() == tag.to_lowercase());
             let receipt = mount.clone();
             tag_row = tag_row.child(Button::new(SharedString::from(format!("snippet-filter-tag-{index}")))
                 .label(tag.clone()).selected(selected).on_click(cx.listener(move |view, _, _, cx| {
-                    if !receipt.is_current() || !receipt.matches(&view.mount) || !view.open || view.removal.is_some() || view.pending { return; }
+                    if !receipt.is_current() || !receipt.matches(&view.mount) || !view.open || view.removal.is_some() || view.pending || view.preview_pending || view.preview_active { return; }
                     if view.selected_tags.iter().any(|value| value.to_lowercase() == tag.to_lowercase()) { view.selected_tags.retain(|value| value.to_lowercase() != tag.to_lowercase()); }
                     else { view.selected_tags.push(tag.clone()); }
                     cx.notify();
@@ -525,17 +738,17 @@ impl Render for SnippetsView {
                 let tag = tag.clone();
                 tag_edit = tag_edit.child(Button::new(SharedString::from(format!("snippet-remove-tag-{instance}-{index}")))
                     .label(format!("Remove {tag}"))
-                    .disabled(self.pending)
+                    .disabled(self.pending || self.preview_pending)
                     .on_click(cx.listener(move |view, _, _, cx| {
-                        if !receipt.is_current() || !receipt.matches(&view.mount) || view.pending { return; }
+                        if !receipt.is_current() || !receipt.matches(&view.mount) || view.pending || view.preview_pending || view.preview_active { return; }
                         if let Some(edit) = view.edit.as_mut().filter(|edit| edit.instance == instance)
                             && edit.tags.get(index) == Some(&tag)
                         { edit.tags.remove(index); cx.notify(); }
                     })));
             }
-            panel = panel.child(tag_edit).child(Button::new("snippet-add-tag").label("Add tag").disabled(self.pending)
+            panel = panel.child(tag_edit).child(Button::new("snippet-add-tag").label("Add tag").disabled(self.pending || self.preview_pending)
                 .on_click(cx.listener(move |view, _, window, cx| {
-                    if !add_tag_mount.is_current() || !add_tag_mount.matches(&view.mount) || view.pending { return; }
+                    if !add_tag_mount.is_current() || !add_tag_mount.matches(&view.mount) || view.pending || view.preview_pending || view.preview_active { return; }
                     let Some(edit) = view.edit.as_mut().filter(|edit| edit.instance == instance) else { return; };
                     let value = edit.tag_input.read(cx).value().to_string();
                     let mut tags = edit.tags.clone();
@@ -548,26 +761,78 @@ impl Render for SnippetsView {
                 })));
             if let Some(body) = &edit.body { panel = panel.child(Textarea::new(body).aria_label("Snippet text")); }
             else { panel = panel.child(Label::new("Contents hidden")); }
+            if revealed {
+                let toggle_mount = mount.clone();
+                let prompted = edit.prompt_for_fields;
+                panel = panel.child(Button::new("snippet-prompt-fields")
+                    .label(if prompted { "Prompt for Fields: On" } else { "Prompt for Fields: Off" })
+                    .disabled(self.pending || self.preview_pending)
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        if toggle_mount.is_current() && toggle_mount.matches(&view.mount) && !view.pending && !view.preview_pending && !view.preview_active {
+                            if let Some(edit) = view.edit.as_mut().filter(|edit| edit.instance == instance) {
+                                edit.prompt_for_fields = !edit.prompt_for_fields;
+                                cx.notify();
+                            }
+                        }
+                    })));
+                if prompted {
+                    for (order, key) in discovered.iter().enumerate() {
+                        let Some(field) = edit.fields.iter().find(|field| &field.definition.name == key) else { continue; };
+                        let (Some(label), Some(default)) = (&field.label, &field.default_value) else { continue; };
+                        let required = field.definition.required;
+                        let kind = field.definition.input_kind;
+                        let required_key = key.clone();
+                        let kind_key = key.clone();
+                        let required_mount = mount.clone();
+                        let kind_mount = mount.clone();
+                        panel = panel.child(div().id(SharedString::from(format!("snippet-field-{instance}-{order}"))).flex().flex_col().gap_1()
+                            .child(Label::new(format!("Field {key}")))
+                            .child(Input::new(label).aria_label(format!("Label for {key}")))
+                            .child(Textarea::new(default).aria_label(format!("Default for {key}")))
+                            .child(div().flex().gap_2()
+                                .child(Button::new(SharedString::from(format!("snippet-field-required-{instance}-{order}")))
+                                    .label(if required { "Required" } else { "Optional" }).disabled(self.pending || self.preview_pending)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        if !required_mount.is_current() || !required_mount.matches(&view.mount) || view.pending || view.preview_pending || view.preview_active { return; }
+                                        if let Some(field) = view.edit.as_mut().filter(|edit| edit.instance == instance)
+                                            .and_then(|edit| edit.fields.iter_mut().find(|field| field.definition.name == required_key)) {
+                                            field.definition.required = !field.definition.required; cx.notify();
+                                        }
+                                    })))
+                                .child(Button::new(SharedString::from(format!("snippet-field-kind-{instance}-{order}")))
+                                    .label(if kind == snippets::SnippetInputKind::SingleLine { "Single line" } else { "Multiline" }).disabled(self.pending || self.preview_pending)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        if !kind_mount.is_current() || !kind_mount.matches(&view.mount) || view.pending || view.preview_pending || view.preview_active { return; }
+                                        if let Some(field) = view.edit.as_mut().filter(|edit| edit.instance == instance)
+                                            .and_then(|edit| edit.fields.iter_mut().find(|field| field.definition.name == kind_key)) {
+                                            field.definition.input_kind = if field.definition.input_kind == snippets::SnippetInputKind::SingleLine { snippets::SnippetInputKind::Multiline } else { snippets::SnippetInputKind::SingleLine }; cx.notify();
+                                        }
+                                    })))));
+                    }
+                }
+            }
             panel = panel.child(div().flex().gap_2()
-                .child(Button::new("snippet-reveal").label(if revealed { "Hide" } else { "Reveal" }).disabled(self.pending)
+                .child(Button::new("snippet-reveal").label(if revealed { "Hide" } else { "Reveal" }).disabled(self.pending || self.preview_pending)
                     .on_click(cx.listener(move |view, _, window, cx| {
-                        if reveal_mount.is_current() && reveal_mount.matches(&view.mount) && !view.pending {
+                        if reveal_mount.is_current() && reveal_mount.matches(&view.mount) && !view.pending && !view.preview_pending && !view.preview_active {
                             view.set_revealed(instance, !revealed, window, cx);
                         }
                     })))
-                .child(Button::new("snippet-privacy").label(if hidden { "Hidden in previews" } else { "Visible in previews" }).disabled(self.pending)
+                .child(Button::new("snippet-privacy").label(if hidden { "Hidden in previews" } else { "Visible in previews" }).disabled(self.pending || self.preview_pending)
                     .on_click(cx.listener(move |view, _, window, cx| {
-                        if edit_mount.is_current() && edit_mount.matches(&view.mount) && !view.pending {
+                        if edit_mount.is_current() && edit_mount.matches(&view.mount) && !view.pending && !view.preview_pending && !view.preview_active {
                             if let Some(edit) = view.edit.as_mut().filter(|edit| edit.instance == instance) { edit.hidden = !hidden; }
                             if !hidden { view.set_revealed(instance, false, window, cx); }
                             cx.notify();
                         }
                     })))
-                .child(Button::new("snippet-save").label("Save").track_focus(&self.save_focus).disabled(self.pending || self.diagnostic.is_some())
+                .child(Button::new("snippet-save").label("Save").track_focus(&self.save_focus).disabled(self.pending || self.preview_pending || self.diagnostic.is_some())
                     .on_click(cx.listener(move |view, _, window, cx| view.save(instance, window, cx))))
-                .child(Button::new("snippet-cancel-edit").label("Cancel").disabled(self.pending)
+                .child(Button::new("snippet-preview").label("Test / Preview").track_focus(&self.preview_focus).disabled(self.pending || self.preview_pending || !revealed || self.diagnostic.is_some())
+                    .on_click(cx.listener(move |view, _, window, cx| view.start_preview(instance, window, cx))))
+                .child(Button::new("snippet-cancel-edit").label("Cancel").disabled(self.pending || self.preview_pending)
                     .on_click(cx.listener(move |view, _, window, cx| {
-                        if cancel_mount.is_current() && cancel_mount.matches(&view.mount) && !view.pending
+                        if cancel_mount.is_current() && cancel_mount.matches(&view.mount) && !view.pending && !view.preview_pending && !view.preview_active
                             && view.edit.as_ref().is_some_and(|edit| edit.instance == instance) {
                             view.edit = None; view.feedback = None;
                             if view.diagnostic.is_some() { view.refresh(cx); }
@@ -787,6 +1052,16 @@ mod tests {
     use multi_launcher::plugins::snippets::SnippetEntry;
     fn entry(alias: &str, text: &str) -> SnippetEntry {
         SnippetEntry { alias: alias.into(), text: text.into(), hide_contents: false, prompt_for_fields: false, fields: Vec::new(), tags: Vec::new() }
+    }
+    #[test]
+    fn preview_return_rejects_replaced_parent_and_editor() {
+        let owner = super::utility_mount::MountOwner::default();
+        let first = owner.attach();
+        assert!(super::preview_return_is_current(&first, &first, true, true, 7, Some(7), true));
+        assert!(!super::preview_return_is_current(&first, &first, true, true, 7, Some(8), true));
+        assert!(!super::preview_return_is_current(&first, &first, true, true, 7, Some(7), false));
+        let replacement = owner.attach();
+        assert!(!super::preview_return_is_current(&first, &replacement, true, true, 7, Some(7), true));
     }
     #[test]
     fn unchanged_single_line_projection_preserves_legacy_alias() {

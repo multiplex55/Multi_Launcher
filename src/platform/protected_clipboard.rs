@@ -157,6 +157,13 @@ pub(crate) fn read_clipboard_briefly() -> Result<ClipboardRead, ClipboardError> 
     platform::read(Duration::from_millis(32))
 }
 
+/// Read a short-lived context only while its issuing owner remains current.
+pub(crate) fn read_clipboard_briefly_guarded(
+    current: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<ClipboardRead, ClipboardError> {
+    platform::read_guarded(Duration::from_millis(32), current)
+}
+
 #[cfg(windows)]
 mod platform {
     use super::*;
@@ -682,10 +689,18 @@ mod platform {
         Err(ClipboardError::Unavailable)
     }
 
+    fn guarded_native_step<T>(cancelled: &AtomicBool, deadline: Instant, current: &dyn Fn() -> bool, step: impl FnOnce() -> T) -> Result<T, ClipboardError> {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline { return Err(ClipboardError::TimedOut); }
+        if !current() { return Err(ClipboardError::Unavailable); }
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline { return Err(ClipboardError::TimedOut); }
+        Ok(step())
+    }
+
     fn read_native(
         diagnostics: &ReadDiagnostics,
         cancelled: &AtomicBool,
         deadline: Instant,
+        current: &dyn Fn() -> bool,
     ) -> Result<StampedClipboardRead, ClipboardError> {
         use windows::Win32::{
             Foundation::{ERROR_SUCCESS, GetLastError, HGLOBAL, SetLastError},
@@ -738,7 +753,7 @@ mod platform {
         }
         check(ReadStage::OpenClipboard)?;
         // A failed open commonly means another process has the clipboard open.
-        if let Err(error) = unsafe { OpenClipboard(None) } {
+        if let Err(error) = guarded_native_step(cancelled, deadline, current, || unsafe { OpenClipboard(None) })? {
             let code = error.code().0 as u32;
             diagnostics.native_error(ReadStage::OpenClipboard, code);
             return Err(
@@ -772,7 +787,7 @@ mod platform {
             return Ok(StampedClipboardRead::NonText);
         }
         check(ReadStage::GetText)?;
-        let handle = unsafe { GetClipboardData(13) }
+        let handle = guarded_native_step(cancelled, deadline, current, || unsafe { GetClipboardData(13) })?
             .map_err(|error| failure(ReadStage::GetText, error.code().0 as u32))?;
         let global = HGLOBAL(handle.0);
         check(ReadStage::GlobalSize)?;
@@ -814,8 +829,18 @@ mod platform {
         run_bounded_worker(
             Arc::clone(&MODIFY_READ_WORKERS),
             timeout,
-            |diagnostics, cancelled, deadline| read_native(&diagnostics, &cancelled, deadline),
+            |diagnostics, cancelled, deadline| read_native(&diagnostics, &cancelled, deadline, &|| true),
         )
+    }
+
+    pub(super) fn read_guarded(timeout: Duration, current: Arc<dyn Fn() -> bool + Send + Sync>) -> Result<ClipboardRead, ClipboardError> {
+        run_bounded_worker(Arc::clone(&MODIFY_READ_WORKERS), timeout, move |diagnostics, cancelled, deadline| {
+            read_native(&diagnostics, &cancelled, deadline, current.as_ref()).map(|read| match read {
+                StampedClipboardRead::Ordinary { text, .. } => ClipboardRead::Ordinary(text),
+                StampedClipboardRead::Private => ClipboardRead::Private,
+                StampedClipboardRead::NonText => ClipboardRead::NonText,
+            })
+        })
     }
 
     #[cfg(test)]
@@ -824,6 +849,23 @@ mod platform {
         use std::sync::mpsc;
 
         const TEST_WAIT: Duration = Duration::from_millis(750);
+
+        #[test]
+        fn guarded_native_steps_refuse_revoked_owners_before_acquisition() {
+            let calls = std::cell::Cell::new(0);
+            let cancelled = AtomicBool::new(false);
+            let deadline = Instant::now() + TEST_WAIT;
+            let opened = guarded_native_step(&cancelled, deadline, &|| true, || { calls.set(calls.get() + 1); true });
+            assert_eq!(opened, Ok(true));
+            let read = guarded_native_step(&cancelled, deadline, &|| false, || { calls.set(calls.get() + 1); true });
+            assert_eq!(read, Err(ClipboardError::Unavailable));
+            let timed_out = guarded_native_step(&cancelled, deadline, &|| {
+                cancelled.store(true, Ordering::Release);
+                true
+            }, || { calls.set(calls.get() + 1); true });
+            assert_eq!(timed_out, Err(ClipboardError::TimedOut));
+            assert_eq!(calls.get(), 1);
+        }
 
         #[test]
         fn native_format_inspection_fails_closed_and_recognizes_absence() {
@@ -1161,6 +1203,10 @@ mod platform {
             Err(arboard::Error::ClipboardOccupied) => Err(ClipboardError::Busy),
             Err(_) => Err(ClipboardError::Unavailable),
         }
+    }
+
+    pub(super) fn read_guarded(_: Duration, _: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) -> Result<ClipboardRead, ClipboardError> {
+        Err(ClipboardError::Unsupported)
     }
 
     pub(super) fn read_for_modify(timeout: Duration) -> Result<ClipboardRead, ClipboardError> {

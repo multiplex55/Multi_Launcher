@@ -144,6 +144,23 @@ pub fn capture_protected_context(
         || crate::actions::clipboard::get_text().ok(), capture_origin)
 }
 
+/// Capture automatic values while a live UI owner permits the native read.
+pub fn capture_protected_context_guarded(
+    timestamp: chrono::DateTime<chrono::FixedOffset>,
+    needs_clipboard: bool,
+    needs_window_title: bool,
+    current: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    capture_origin: impl FnOnce() -> Option<crate::active_window::ExternalForegroundWindow>,
+) -> Option<SnippetInvocationContext> {
+    if !current() { return None; }
+    let context = capture_context_with(timestamp, needs_clipboard, needs_window_title,
+        || match crate::platform::protected_clipboard::read_clipboard_briefly_guarded(current.clone()) {
+            Ok(crate::platform::protected_clipboard::ClipboardRead::Ordinary(text)) => Some(text),
+            _ => None,
+        }, capture_origin);
+    current().then_some(context)
+}
+
 fn capture_context_with(
     timestamp: chrono::DateTime<chrono::FixedOffset>,
     needs_clipboard: bool,

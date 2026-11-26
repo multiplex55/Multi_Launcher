@@ -54,7 +54,8 @@ pub(super) struct SnippetFill {
     pub open: bool,
     pub(super) pending: bool,
     pub(super) session: Option<PromptSession>,
-    pub(super) request: external_launch::Request,
+    pub(super) request: Option<external_launch::Request>,
+    preview_parent: Option<(WeakEntity<snippets::SnippetsView>, utility_mount::MountReceipt, u64, WindowId)>,
     pub(super) owner: utility_mount::MountOwner,
     pub(super) mount: utility_mount::MountReceipt,
     root: WeakEntity<RootWindow>,
@@ -103,7 +104,44 @@ impl SnippetFill {
             Field { key: definition.name.clone(), label: definition.display_label().into_owned(), required: definition.required,
                 input, initial_value, initial_display }
         }).collect();
-        let mut view = Self { open: true, pending: false, session: Some(session), request, owner, mount, root, return_focus,
+        let mut view = Self { open: true, pending: false, session: Some(session), request: Some(request), preview_parent: None, owner, mount, root, return_focus,
+            focus: cx.focus_handle(), copy_focus: cx.focus_handle(), cancel_focus: cx.focus_handle(), scroll: ScrollHandle::new(), fields,
+            subscriptions, preview: String::new(), preview_issues: Vec::new(), feedback: None };
+        view.refresh_preview(cx);
+        view
+    }
+
+    pub(super) fn preview(session: PromptSession, parent: WeakEntity<snippets::SnippetsView>, parent_mount: utility_mount::MountReceipt,
+        instance: u64, host: WindowId, root: WeakEntity<RootWindow>, return_focus: Option<FocusHandle>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let owner = utility_mount::MountOwner::default();
+        let mount = owner.attach();
+        let mut subscriptions = Vec::new();
+        let fields = session.fields().iter().map(|definition| {
+            let value = session.value(&definition.name).unwrap_or_default().to_owned();
+            let initial_value = value.clone();
+            let input = match definition.input_kind {
+                SnippetInputKind::SingleLine => {
+                    let input = cx.new(|cx| InputState::new(window, cx));
+                    input.update(cx, |input, cx| input.set_value(value, window, cx));
+                    subscriptions.push(cx.subscribe(&input, |view: &mut Self, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) { view.refresh_preview(cx); }
+                    }));
+                    FieldInput::Single(input)
+                }
+                SnippetInputKind::Multiline => {
+                    let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 8));
+                    input.update(cx, |input, cx| input.set_value(value, window, cx));
+                    subscriptions.push(cx.subscribe(&input, |view: &mut Self, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) { view.refresh_preview(cx); }
+                    }));
+                    FieldInput::Multi(input)
+                }
+            };
+            let initial_display = match &input { FieldInput::Single(input) => input.read(cx).value().to_string(), FieldInput::Multi(input) => input.read(cx).value().to_string() };
+            Field { key: definition.name.clone(), label: definition.display_label().into_owned(), required: definition.required, input, initial_value, initial_display }
+        }).collect();
+        let mut view = Self { open: true, pending: false, session: Some(session), request: None,
+            preview_parent: Some((parent, parent_mount, instance, host)), owner, mount, root, return_focus,
             focus: cx.focus_handle(), copy_focus: cx.focus_handle(), cancel_focus: cx.focus_handle(), scroll: ScrollHandle::new(), fields,
             subscriptions, preview: String::new(), preview_issues: Vec::new(), feedback: None };
         view.refresh_preview(cx);
@@ -126,9 +164,10 @@ impl SnippetFill {
             FieldInput::Single(input) => input.focus_handle(cx).is_focused(window),
             FieldInput::Multi(input) => input.focus_handle(cx).is_focused(window),
         }).or_else(|| self.copy_focus.is_focused(window).then_some(self.fields.len()))
-          .or_else(|| self.cancel_focus.is_focused(window).then_some(self.fields.len() + 1));
-        let count = self.fields.len() + 2;
+          .or_else(|| self.cancel_focus.is_focused(window).then_some(self.fields.len() + usize::from(self.preview_parent.is_none())));
+        let count = self.fields.len() + if self.preview_parent.is_some() { 1 } else { 2 };
         let index = next_focus(current, count, backwards);
+        if index == self.fields.len() && self.preview_parent.is_some() { self.cancel_focus.focus(window, cx); return; }
         if index == self.fields.len() { self.copy_focus.focus(window, cx); return; }
         if index == self.fields.len() + 1 { self.cancel_focus.focus(window, cx); return; }
         self.scroll.scroll_to_top_of_item(index);
@@ -215,7 +254,12 @@ impl SnippetFill {
         if self.pending || !self.open { return; }
         let owns = self.focus.is_focused(window) || self.focus.contains_focused(window, cx);
         let return_focus = self.return_focus.take();
+        let preview_parent = self.preview_parent.take();
         self.retire(cx);
+        if let Some((parent, receipt, instance, host)) = preview_parent {
+            let _ = parent.update(cx, |parent, cx| parent.return_from_preview(&receipt, instance, host, return_focus, owns, window, cx));
+            return;
+        }
         let _ = self.root.update(cx, |root, cx| {
             if owns && window.is_window_active() && !window.has_active_dialog(cx)
                 && root.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity)) {
@@ -226,7 +270,7 @@ impl SnippetFill {
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending || !self.open || !self.mount.is_current() || !window.is_window_active()
+        if self.preview_parent.is_some() || self.pending || !self.open || !self.mount.is_current() || !window.is_window_active()
             || window.has_active_dialog(cx)
             || !(self.focus.is_focused(window) || self.focus.contains_focused(window, cx)) { return; }
         let Some(root) = self.root.upgrade() else { return; };
@@ -302,7 +346,7 @@ impl Render for SnippetFill {
                     if !event.is_held { view.submit(window, cx); }
                 }
             }))
-            .child(Label::new("Fill Snippet"));
+            .child(Label::new(if self.preview_parent.is_some() { "Preview Snippet" } else { "Fill Snippet" }));
         let mut fields_panel = div().id("snippet-fill-fields").flex().flex_col().gap_2().max_h(px(360.0))
             .overflow_y_scroll().track_scroll(&self.scroll);
         for field in &self.fields {
@@ -320,11 +364,11 @@ impl Render for SnippetFill {
         if let Some(feedback) = &self.feedback { panel = panel.child(Label::new(feedback.clone())); }
         let submit_mount = mount.clone();
         panel.child(div().flex().gap_2()
-            .child(Button::new("snippet-fill-copy").label("Copy").track_focus(&self.copy_focus).disabled(self.pending)
+            .when(self.preview_parent.is_none(), |row| row.child(Button::new("snippet-fill-copy").label("Copy").track_focus(&self.copy_focus).disabled(self.pending)
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if submit_mount.is_current() && submit_mount.matches(&view.mount) { view.submit(window, cx); }
-                })))
-            .child(Button::new("snippet-fill-cancel").label("Cancel").track_focus(&self.cancel_focus).disabled(self.pending)
+                }))))
+            .child(Button::new("snippet-fill-cancel").label(if self.preview_parent.is_some() { "Return to Editor" } else { "Cancel" }).track_focus(&self.cancel_focus).disabled(self.pending)
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if mount.is_current() && mount.matches(&view.mount) { view.cancel(window, cx); }
                 }))))

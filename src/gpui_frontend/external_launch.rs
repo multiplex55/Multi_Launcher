@@ -601,6 +601,7 @@ struct Pending {
 pub(super) struct ExternalLaunch {
     pending: Option<Pending>,
     next_ticket: u64,
+    preview_lease: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ExternalLaunch {
@@ -618,9 +619,17 @@ impl ExternalLaunch {
         if let Some(lease) = self.pending.as_ref().and_then(|pending| pending.clipboard_lease.as_ref()) { lease.store(false, Ordering::Release); }
     }
     pub fn retire_snippet_effect(&self) {
+        if let Some(lease) = &self.preview_lease { lease.store(false, Ordering::Release); }
         if let Some(pending) = self.pending.as_ref().filter(|pending| pending.snippet_effect) {
             if let Some(lease) = &pending.clipboard_lease { lease.store(false, Ordering::Release); }
         }
+    }
+
+    pub(super) fn set_snippet_preview_lease(&mut self, lease: Arc<std::sync::atomic::AtomicBool>) {
+        if let Some(previous) = self.preview_lease.replace(lease) { previous.store(false, Ordering::Release); }
+    }
+    pub(super) fn clear_snippet_preview_lease(&mut self, lease: &Arc<std::sync::atomic::AtomicBool>) {
+        if self.preview_lease.as_ref().is_some_and(|current| Arc::ptr_eq(current, lease)) { self.preview_lease = None; }
     }
 
     pub fn begin(
@@ -884,13 +893,13 @@ fn execute_request(
                 return Err(CommandError::new("snippet", "The snippet request is no longer current.").with_gui_failure_policy());
             }
             let context = definition.has_system_variables().then(|| {
-                multi_launcher::snippet_prompt::capture_protected_context(
+                multi_launcher::snippet_prompt::capture_protected_context_guarded(
                     *timestamp, definition.uses_clipboard(),
-                    definition.uses_window_title(), || multi_launcher::snippet_prompt::select_origin_window(
+                    definition.uses_window_title(), current.clone(), || multi_launcher::snippet_prompt::select_origin_window(
                         request.source, true, multi_launcher::active_window::ForegroundWindowObservation::Launcher, origin.clone(),
                     ),
                 )
-            });
+            }).flatten();
             if !current() {
                 return Err(CommandError::new("snippet", "The snippet request is no longer current.").with_gui_failure_policy());
             }
@@ -1006,11 +1015,11 @@ impl RootWindow {
                 .and_then(|index| rows.get(index)).is_some_and(|row| row == entry) || !current() { return None; }
             let Ok(PreparedInvocation::Prompted(definition)) = multi_launcher::snippet_prompt::prepare(entry) else { return None; };
             let context = definition.has_system_variables().then(|| {
-                multi_launcher::snippet_prompt::capture_protected_context(*timestamp, definition.uses_clipboard(), definition.uses_window_title(), || {
+                multi_launcher::snippet_prompt::capture_protected_context_guarded(*timestamp, definition.uses_clipboard(), definition.uses_window_title(), current.clone(), || {
                     multi_launcher::snippet_prompt::select_origin_window(worker_request.source, true,
                         multi_launcher::active_window::ForegroundWindowObservation::Launcher, origin.clone())
                 })
-            });
+            }).flatten();
             if !current() { return None; }
             definition.begin_execution(path, context, PromptAttribution { source: worker_request.source,
                 history_query: history_query.clone(), root_policy: multi_launcher::universal_actions::RootLauncherPolicy::Legacy }).ok()
@@ -1069,7 +1078,7 @@ impl RootWindow {
         if host.window_id() != issued_host.window_id() || host.window_id() != window.window_handle().window_id()
             || native != issued_native || self.root_visibility.request_revision.load(Ordering::Acquire) != issued_revision
             || current_foreground_identity() != Some(native.identity) { return; }
-        let mut request = view.read(cx).request.clone();
+        let Some(mut request) = view.read(cx).request.clone() else { return; };
         let visibility = self.root_visibility.clone();
         let revision = visibility.request_revision.load(Ordering::Acquire);
         let admission = self.restart_admission.clone();
@@ -1222,7 +1231,7 @@ impl RootWindow {
         &self,
         origin: Option<&FocusHandle>,
         window: &Window,
-        cx: &Context<Self>,
+        cx: &gpui_kit::App,
     ) -> bool {
         let contexts = window.context_stack();
         let blocked = self.action_sheet.is_some()

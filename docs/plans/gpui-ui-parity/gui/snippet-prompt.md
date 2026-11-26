@@ -15,4 +15,6 @@ Select `prompted_run_queues_safe_snapshot_without_copy_or_success_history`, `req
 
 Canonical Snippets Search admits exact unique actions for literal, automatic and prompted entries. Fill uses the shared field order, defaults and read-only result. Its exact focus scope handles Tab, Shift+Tab, Ctrl+Enter and Escape. Copy uses the existing acquired clipboard worker and alias-only completion. A refused write returns the same retained values and captured context. [Standalone Fill checkpoint](../CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)
 
-Actual desktop Copy and system value replay, editor Preview, and the Paste Sequence companion remain open.
+Editor Test / Preview uses the same field controls and live result with one Return to Editor action. It holds the exact unsaved parent draft and permits no copy, History or persistence effect. Protected context capture checks authority at the native reader. [Editor Preview checkpoint](../CHECKPOINTS.md#g13-snippets-field-authoring-and-editor-preview)
+
+Actual desktop Copy and system value replay, paired editor Preview and the Paste Sequence companion remain open.
