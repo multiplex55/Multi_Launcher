@@ -1,0 +1,193 @@
+# Plugin Maturity Register
+
+The built-in inventory comes from [PluginManager::reload_from_dirs](../../../src/plugin.rs#L910). It has 91 identifiers on Windows and 89 on other platforms. Only built-in `file_operations` and `downloads_triage` are registration-gated to Windows. Runtime support and GPUI admission can be narrower. Dynamic libraries are tracked in the original parity matrix. [Installed GPUI provider list](../../../src/gpui_frontend/search_providers.rs#L211) · [GPUI dispatch](../../../src/gpui_frontend.rs)
+
+Each row describes the registered route as scoped here. Shared services, a registered identifier, an item in Help, an admitted Search row and functional execution are distinct. Stage 2 requires focused working-route evidence. Stage 3 requires essential native smoke for that workflow. Read the authoritative [User Priorities](USER_PRIORITIES.md), [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md), [Goal Register](GOAL_REGISTER.md) and [original parity matrix](PARITY_MATRIX.md).
+
+Priority values encode user tier and preferred order, for example P0.02. For an unnamed plugin, the named priority family or general-purpose/specialized umbrella supplies its planning position. The register does not change the user's assignments. The dependency column identifies the immediate shared owner. G00–G26 packets carry the remaining original dependencies. The Next / gap column gives the next unfinished operation. A dash in a verification column means this register assigns no current GPUI evidence; stock baseline evidence remains in the linked goal or original matrix. Deferred criteria keep that same owner.
+
+## Built-in plugin inventory
+
+| Plugin | Registration identifier | Original goal | Priority and order | Stage → target | Working GPUI route | Next / gap | Automated | Native | Dependency | Deferred | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Google and Web Search | `web_search` | G05 | P0.15 | 3 → 3 | Exact Google and general checked web route | More stock aliases | [W](#evidence-keys) | Matched Google/Wikipedia only | Shared Search and typed dispatch | Later original secondary criteria | [W](#evidence-keys) |
+| Inline Calculator and scalar history | `calculator` | G05 | P1.16 | 3 → 3 | Stock scalar calculation and checked history | Separate Calculation Pad at P0.11 | [C](#evidence-keys) | Matched scoped scalar entry | Shared Search and typed dispatch | Later original secondary criteria | [C](#evidence-keys) |
+| Inline Unit Convert | `unit_convert` | G05/G16 | P1.16 | 3 → 3 | Stock inline unit conversions | Advanced workspace at P3.05 | [C](#evidence-keys) | Matched scoped scalar entry | Shared Search and typed dispatch · Shared scalar/conversion engine | Later original secondary criteria | [C](#evidence-keys) |
+| Inline Base Convert | `base_convert` | G05/G16 | P1.16 | 3 → 3 | Stock inline base conversions | Advanced workspace at P3.05 | [C](#evidence-keys) | Matched scoped scalar entry | Shared Search and typed dispatch · Shared scalar/conversion engine | Later original secondary criteria | [C](#evidence-keys) |
+| Drop Calculator | `dropcalc` | G16 | P3.05 | 1 → 2 | — | Drop-to-calculate conversions | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| RuneScape Search | `runescape_search` | G05 | P0.15 | 2 → 3 | Checked stock web route | Provider-specific native smoke | [W](#evidence-keys) | Matched Google/Wikipedia only | Shared Search and typed dispatch | Later original secondary criteria | [W](#evidence-keys) |
+| YouTube Search | `youtube` | G05 | P0.15 | 2 → 3 | Checked stock web route | Provider-specific native smoke | [W](#evidence-keys) | Matched Google/Wikipedia only | Shared Search and typed dispatch | Later original secondary criteria | [W](#evidence-keys) |
+| Reddit Search | `reddit` | G05 | P0.15 | 2 → 3 | Checked stock web route | Provider-specific native smoke | [W](#evidence-keys) | Matched Google/Wikipedia only | Shared Search and typed dispatch | Later original secondary criteria | [W](#evidence-keys) |
+| Wikipedia Search | `wikipedia` | G05 | P0.15 | 3 → 3 | Checked stock web route | Secondary provider commands | [W](#evidence-keys) | Matched Google/Wikipedia only | Shared Search and typed dispatch | Later original secondary criteria | [W](#evidence-keys) |
+| Clipboard History | `clipboard` | G13 | P4.01 | 2 → Deferred · 5 final | Retained history, filters and checked clipboard actions | Preserve route and return in Pass E | [H](#evidence-keys) | Queued | Canonical data and clipboard services | Pass E the full family | [H](#evidence-keys) |
+| Clipboard Modify | `clipboard_modify` | G13 | P0.07 | 2 → 3 | Real load, Preview, Copy/Apply, Undo and templates | Matched native ordinary use and remaining management | [M](#evidence-keys) | Queued | Canonical data and clipboard services | Later original secondary criteria | [M](#evidence-keys) |
+| Bookmark Search and management | `bookmarks` | G05/G06 | P0.04 | 2 → 3 | Watched Search and checked URL open | Canonical Add/Edit/Remove and aliases | [S](#evidence-keys) | Matched Search/open only | Shared Search and typed dispatch · Canonical stores and Settings | Later original secondary criteria | [S](#evidence-keys) |
+| Folder Search and management | `folders` | G05/G06 | P0.03 | 2 → 3 | Watched Search and checked folder open | Canonical Add/Edit/Remove and aliases | [S](#evidence-keys) | Matched Search/open only | Shared Search and typed dispatch · Canonical stores and Settings | Later original secondary criteria | [S](#evidence-keys) |
+| File Search and Preview | `file_search` | G07 | P1.04 | 2 → 3 | Filename, Content, preview and checked file actions | Common form/menus, matched host/Preview/clipboard | [F](#evidence-keys) | Matched primary routes, newer replay open | Shared file search and Preview | Later original secondary criteria | [F](#evidence-keys) |
+| Diff | `diff` | G08 | P2.05 | 1 → 2–3 | — | Text and file comparison workspace | — | — | Stock Diff engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Omni Search | `omni_search` | G05 | P0.06 | 1 → 3 | — | Checked combined app, folder and bookmark provenance | — | — | Shared Search and typed dispatch | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| System commands | `system` | G24 | P3.10 | 1 → 2 | — | Typed safe system routes and confirmations | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Process Search | `processes` | G24 | P3.10 | 1 → 2 | — | Current process inventory and authority | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| System Information | `sysinfo` | G24 | P3.10 | 1 → 2 | — | System information workspace | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Network tools | `network` | G24 | P3.10 | 1 → 2 | — | Network commands and read-only status | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Shell | `shell` | G24 | P3.10 | 1 → 2 | — | Existing typed shell commands and host | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| History provider | `history` | G05 | P0.01 | 1 → 3 | — | Stock history provider beyond launcher query history | — | — | Shared Search and typed dispatch | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Notes | `notes` | G12 | P0.09 | 1 → 3 | — | Open/search/create/edit/save notes and Quick Notes | — | — | Canonical notes and documents | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Todo List | `todo` | G23 | P2.13 | 1 → 2–3 | — | Canonical tasks and organizer controls | — | — | Stock organizer/widget/activity service | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Calendar | `calendar` | G23 | P2.12 | 1 → 2–3 | — | Canonical calendar views and editing | — | — | Stock organizer/widget/activity service | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Clipboard Snippets | `snippets` | G13 | P0.08 | 2 → 3 | Canonical CRUD/Search and prompt Run/Copy | Matched ordinary authoring and live clipboard Run | [N](#evidence-keys) | Queued | Canonical data and clipboard services | Later original secondary criteria | [N](#evidence-keys) |
+| Paste Sequences | `paste_sequence` | G21 | P1.07 | 1 → 3 | — | Canonical sequence authoring and checked execution | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Macros | `macros` | G19 | P1.08 | 1 → 3 | — | Shared macro execution and authoring routes | — | — | Stock macro engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| MkMacro | `mkmacro` | G19 | P1.08 | 1 → 3 | — | Retained macro editor and safe run | — | — | Stock macro engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Keyboard actions | `keys` | G21 | P3.10 | 1 → 2 | — | Typed approved input actions | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Ordinary Mouse Gestures | `mouse_gestures` | G21 | P0.18 | 1 → 3 | — | Start stock runtime and migrate ordinary authoring | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| MultiManager | `MultiManager` | G24 | P0.10 | 1 → 3 | — | Workspace and card CRUD, capture/apply and Windows placement | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Favorites | `favorites` | G05/G06 | P1.05 | 2 → 3 | Checked canonical CRUD and Search | Remaining common host/workspace and native checks | [V](#evidence-keys) | Scoped native CRUD | Shared Search and typed dispatch · Canonical stores and Settings | Later original secondary criteria | [V](#evidence-keys) |
+| Missing applications | `missing` | G06 | P0.02 | 1 → 3 | — | App repair against existing catalog | — | — | Canonical stores and Settings | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Recycle Bin | `recycle` | G11 | P2.17 | 1 → 2–3 | — | Checked Recycle Bin workflow | — | — | Checked native file operations | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Temporary Files | `tempfile` | G13 | P0.16 | 2 → 3 | Retained checked Create/Save and association | Find/list/open, manage, alias/config and native Shell | [T](#evidence-keys) | Engine/filesystem only | Canonical data and clipboard services | Later original secondary criteria | [T](#evidence-keys) |
+| Media commands | `media` | G24 | P3.10 | 1 → 2 | — | Typed ordinary media actions | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| ASCII Art | `asciiart` | G16 | P2.17 | 1 → 2–3 | — | Stock output and copy | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Emoji | `emoji` | G16 | P2.17 | 1 → 2–3 | — | Emoji Search and output | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Text Case | `text_case` | G13 | P2.17 | 1 → 2–3 | — | Stock standalone command route | — | — | Canonical data and clipboard services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Screenshot | `screenshot` | G18 | P1.13 | 1 → 3 | — | Native capture and essential editor | — | — | Native capture and image engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Screenshot Pinboard | `pinboard` | G22 | P2.16 | 1 → 2–3 | — | Persistent pinboard and native windows | — | — | Native overlay capability | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Screen Draw | `screen_draw` | G22 | P2.15 | 1 → 2–3 | — | Stock drawing overlay | — | — | Native overlay capability | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Screen Recorder | `recording` | G18 | P3.08 | 1 → 2 | — | Recorder control and retirement | — | — | Native capture and image engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Image Crop | `crop` | G18 | P1.14 | 1 → 3 | — | Core image crop and export | — | — | Native capture and image engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Data conversions | `data` | G16 | P3.05 | 1 → 2 | — | Stock advanced conversion output | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Timestamp | `timestamp` | G16 | P3.06 | 1 → 2 | — | Stock timestamp workspace and actions | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Date Arithmetic Search | `date_arithmetic` | G05/G16 | P3.06 | 3 → 2 | Stock scalar date results | Date & Time Studio at P3.06 | [C](#evidence-keys) | Matched scoped scalar entry | Shared Search and typed dispatch · Shared scalar/conversion engine | Later original secondary criteria | [C](#evidence-keys) |
+| Diagram Studio | `diagram_studio` | G17 | P3.03 | 1 → 2 | — | Diagram editor and stock persistence | — | — | Stock diagram persistence | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Markdown Studio | `markdown_studio` | G12 | P0.09 | 1 → 3 | — | Essential Markdown edit and view | — | — | Canonical notes and documents | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| IP tools | `ip` | G24 | P3.10 | 1 → 2 | — | Stock IP commands | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Random and password generation | `random` | G16 | P3.07 | 1 → 2 | — | Existing generator and secure copy | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Radial Menu | `radial` | G20 | P4.02–10 | 1 → Deferred · 5 final | — | Defer runtime, designer and companion interfaces | — | — | Stock Radial runtime and store | Pass E the full family | [Registry](../../../src/plugin.rs#L910) |
+| Lorem Ipsum | `lorem` | G16 | P2.17 | 1 → 2–3 | — | Stock text generation and Copy | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Conversion panel | `convert_panel` | G16 | P3.05 | 1 → 2 | — | Stock advanced conversion workspace | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| JSON Utility | `json_utility` | G14 | P1.10 | 2 → 3 | Retained editor with real structured-text workflows | Matched native host, files and controls | [J](#evidence-keys) | Queued | Stock text engine and editor | Later original secondary criteria | [J](#evidence-keys) |
+| XML Toolkit | `xml_toolkit` | G14 | P1.11 | 2 → 3 | Real source, XPath, checked save and modes | Matched native editor, paths and modal/focus checks | [J](#evidence-keys) | Queued | Stock text engine and editor | Later original secondary criteria | [J](#evidence-keys) |
+| ZIP Extract and Create | `zip_extractor` | G10 | P2.04 | 1 → 2–3 | — | Real archive preview and both modes | — | — | Existing scanner or archive session | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Image Comparison | `image_compare` | G18 | P3.09 | 1 → 2 | — | Stock comparison workspace | — | — | Native capture and image engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Duplicate Finder | `duplicate_finder` | G10 | P2.03 | 2 → 2–3 | Docked roots, real scan, Cancel and verified report | Matched native replay, later host and checked actions | [D](#evidence-keys) | Generated Windows engine fixture | Existing scanner or archive session | Remembered host and checked results in a later pass | [D](#evidence-keys) |
+| Folder Size | `folder_size` | G10 | P2.01 | 2 → 2–3 | Shared scan, table, treemap, prefill and checked effects | Matched native replay and menu placement | [Z](#evidence-keys) | Engine only | Existing scanner or archive session | Later original secondary criteria | [Z](#evidence-keys) |
+| Explorer Tabs | `explorer_tabs` | G11 | P2.08 | 1 → 2–3 | — | Native Explorer tab ownership | — | — | Checked native file operations | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| File Lock Inspector | `file_lock` | G10 | P2.02 | 2 → 2–3 | Shared inspection, host, prefill and checked report actions | Matched native clipboard, Explorer and keyboard | [L](#evidence-keys) | Owned process only | Existing scanner or archive session | Later original secondary criteria | [L](#evidence-keys) |
+| Activity Center | `activity` | G23 | P2.17 | 2 → 2–3 | Real shared activity items and Hash control | Later actions, integration and broader verification | [A](#evidence-keys) | Scoped pilot | Stock organizer/widget/activity service | Later original secondary criteria | [A](#evidence-keys) |
+| File Operations Center (Windows) | `file_operations` | G11 | P2.10 | 1 → 2–3 | — | Stock checked operation center | — | — | Checked native file operations | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Downloads Triage (Windows) | `downloads_triage` | G11 | P2.09 | 2 → 2–3 | Read-only owned rows and checked Hash Inspect | Remaining inspection and triage actions | [Y](#evidence-keys) | Matched Inspect | Checked native file operations | Later original secondary criteria | [Y](#evidence-keys) |
+| Notification Inbox | `notification_inbox` | G23 | P2.17 | 1 → 2–3 | Toast Log exists separately | Port actual inbox workflows and alert routing | — | — | Stock organizer/widget/activity service | Later original secondary criteria | — |
+| Table Utility | `table_utility` | G16 | P3.01 | 1 → 2 | — | Real table workspace | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| CSV Viewer | `csv` | G16 | P3.02 | 1 → 2 | — | Real CSV viewer and editing where supported | — | — | Shared scalar/conversion engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Batch File Renamer | `batch_rename` | G09 | P2.06 | 1 → 2–3 | — | Existing preview and guarded apply | — | — | Shared file proof and plan | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Search & Replace | `search_replace` | G09 | P2.07 | 1 → 2–3 | — | Existing preview and guarded apply | — | — | Shared file proof and plan | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Hot Folder | `hotfolder` | G21 | P2.11 | 1 → 2–3 | — | Canonical rules and runtime | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Hash Generator | `hash_generator` | G04 | P1.09 | 3 → 3 | Text, File, Clipboard, Compare, hosts and controls | Inherited restore native, mixed DPI and remaining acceptance | [X](#evidence-keys) | Matched core controls | Hash session and utility host | Later original secondary criteria | [X](#evidence-keys) |
+| Regex Tester | `regex_tester` | G14 | P1.12 | 2 → 3 | Real live matcher, options, views and retained hosts | Matched native editor and clipboard/geometry | [J](#evidence-keys) | Queued | Stock text engine and editor | Later original secondary criteria | [J](#evidence-keys) |
+| QR tools | `qr` | G18 | P2.17 | 1 → 2–3 | — | Stock QR workspace | — | — | Native capture and image engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Screen Color Picker | `color_picker` | G18 | P1.15 | 1 → 3 | — | Native picker and exact output | — | — | Native capture and image engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Mouse actions | `mouse` | G21 | P3.10 | 1 → 2 | — | Typed approved pointer actions | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| OCR | `ocr` | G22 | P2.14 | 1 → 2–3 | — | Native capture and OCR workspace | — | — | Native overlay capability | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Volume | `volume` | G24 | P3.10 | 1 → 2 | — | Stock safe volume commands | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Brightness | `brightness` | G24 | P3.10 | 1 → 2 | — | Stock safe brightness commands | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Task Manager | `task_manager` | G24 | P3.10 | 1 → 2 | — | Stock task views and checked actions | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Window Search | `windows` | G01/G05 | P1.06 | 2 → 3 | Checked Switch and Close with Windows evidence | Remaining stock actions and multiple desktops | [I](#evidence-keys) | Matched Switch/Close | Windows lifecycle · Shared Search and typed dispatch | Later original secondary criteria | [I](#evidence-keys) |
+| Virtual Desktop commands | `virtual_desktop` | G01/G24 | P3.10 | 1 → 2 | — | Stock commands beyond the P0 launcher restore workflow | — | — | Windows lifecycle · Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Browser Tabs | `browser_tabs` | G24 | P2.17 | 1 → 2–3 | — | Stock browser tab commands | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Settings Search and editor | `settings` | G03/G06 | P0.14 | 2 → 3 | Typed navigation and canonical live writes | Essential hotkey/window/plugin membership and native replay | [E](#evidence-keys) | Scoped native saves and older routes | Frontend ownership · Canonical stores and Settings | Later original secondary criteria | [E](#evidence-keys) |
+| Help | `help` | G05 | P0.01 | 2 → 3 | Actual provider catalog and query admission | Remaining navigation and matched verification | [Q](#evidence-keys) | Broader native pending | Shared Search and typed dispatch | Later original secondary criteria | [Q](#evidence-keys) |
+| Layout | `layout` | G24 | P3.10 | 1 → 2 | — | Stock placement workflows and settings | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Links | `link` | G05 | P2.17 | 1 → 2–3 | — | Stock standalone link commands | — | — | Shared Search and typed dispatch | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Timers and Alarms | `timer` | G23 | P0.17 | 1 → 3 | — | Create/edit/list/cancel, scheduler and notifications | — | — | Stock organizer/widget/activity service | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Stopwatch | `stopwatch` | G23 | P2.17 | 1 → 2–3 | — | Stock stopwatch and timing controls | — | — | Stock organizer/widget/activity service | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Weather Search | `weather` | G05 | P0.15 | 2 → 3 | Checked stock web route | Provider-specific native smoke | [W](#evidence-keys) | Matched Google/Wikipedia only | Shared Search and typed dispatch | Later original secondary criteria | [W](#evidence-keys) |
+
+## Evidence keys
+
+| Key | Automated and native scope |
+| --- | --- |
+| A | [Activity Center checkpoint](CHECKPOINTS.md), with shared task rows, lifecycle and the Hash pilot. |
+| C | [Scoped Calculator](VALIDATION_LOG.md#g05-stock-inline-calculator-search), [Unit Convert](VALIDATION_LOG.md#g05-stock-inline-unit-convert-search), [Base Convert](VALIDATION_LOG.md#g05-stock-base-convert-search) and [Date Arithmetic](VALIDATION_LOG.md#g05-stock-date-arithmetic-search). |
+| D | [Duplicate Finder checkpoint](CHECKPOINTS.md#g10-docked-read-only-duplicate-finder), verified commit `3a6cc8974` with 17 focused tests and generated Windows scan. |
+| E | [Typed Settings](CHECKPOINTS.md#g06-typed-settings-navigation) and [native Plugin capability](VALIDATION_LOG.md#g06-checked-plugin-editor-search-capability). |
+| F | [Filename native](VALIDATION_LOG.md#g07-and-g04-typed-directory-filename-search), [explorer effects and Preview record](gui/file-search.md). |
+| H | [Clipboard History record](gui/clipboard-history.md). |
+| I | [Native Window Search Switch](VALIDATION_LOG.md#g05-checked-window-search-and-foreground-handoff) and [Close](VALIDATION_LOG.md#g05-checked-window-search-close). |
+| J | [Structured tools goal and checkpoints](goals/G14-structured-text.md). |
+| L | [Checked File Lock report actions](CHECKPOINTS.md#g10-checked-file-lock-snapshot-and-executable-actions). |
+| M | [Checked Clipboard Modify effects](CHECKPOINTS.md#g13-clipboard-modify-checked-clipboard-effects) and [Direct Execute](CHECKPOINTS.md#g13-clipboard-modify-direct-execute). |
+| N | [Snippet CRUD and Search](CHECKPOINTS.md#g13-canonical-snippets-search-and-named-edit) and [Run and Fill](CHECKPOINTS.md#g13-standalone-snippet-run-and-fill). |
+| Q | [Blank Search and Help inventory](VALIDATION_LOG.md#g05-blank-search-installed-inventory) and [provider source](../../../src/gpui_frontend/search_providers.rs). |
+| S | [Folder and Bookmark native Search](VALIDATION_LOG.md#g05-folder-and-bookmark-search-admission). |
+| T | [Create Temp File](CHECKPOINTS.md#g13-checked-create-temp-file). |
+| V | [Favorites Editor](gui/favorites-editor.md) and [native authoring](VALIDATION_LOG.md#g06-favorites-authoring-batch). |
+| W | [Stock web providers](VALIDATION_LOG.md#g05-stock-web-providers-and-exclusive-google-routing). |
+| X | [Hash Generator record](gui/hash-generator.md), [matched Clipboard](VALIDATION_LOG.md#g04-matched-windows-clipboard-load-and-copy), and [inherited restore](CHECKPOINTS.md#g04-and-g07-minimized-inherited-hash-restore). |
+| Y | [Downloads Triage record](gui/downloads-triage.md), including checked Inspect. |
+| Z | [Folder Size checked actions](CHECKPOINTS.md#g10-checked-folder-size-report-actions). |
+
+See the exact tested commit/artifact, test run and observed gaps in each receipt. Read-only stock baseline and native engine checks do not establish GPUI window behavior.
+
+## Application-level workflows
+
+The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share this register's maturity definitions. That table records workflow-specific working features, gaps, next actions and evidence, with the G00–G26 owner and P0 order. The stages below use the same denominator, even where a workflow also has a registered plugin.
+
+| Workflow and order | Registration | Owner | Stage → target | Shared dependency | Detailed readiness |
+| --- | --- | --- | --- | --- | --- |
+| P0.01 Main Launcher and Search | — | G05 | 3 → 3 | Search, retained root and checked dispatch | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.02 Applications and indexed execution | — | G05/G06 | 2 → 3 | Action store, index, execution and App Editor | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.03 Folders and aliases | folders | G05/G06 | 2 → 3 | Folder store and Explorer | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.04 Bookmarks and aliases | bookmarks | G05/G06 | 2 → 3 | Bookmark store and checked URL open | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.05 Windows Explorer drag-and-drop | — | G01/G05/G06 | 1 → 3 | OLE ExternalPaths and canonical draft owners | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.06 Omni Search | omni_search | G05 | 1 → 3 | Combined Search with source provenance | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.07 Clipboard Modify | clipboard_modify | G13 | 2 → 3 | Canonical pipelines and acquired clipboard effects | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.08 Clipboard Snippets | snippets | G13 | 2 → 3 | Canonical watched store and prompt | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.09 Notes, Quick Notes and Markdown | notes, markdown_studio | G12 | 1 → 3 | Canonical document store and dirty-state ownership | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.10 MultiManager | MultiManager | G24 | 1 → 3 | Workspace store and native window operations | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.11 Calculation Pad | calculator entry family | G15 | 1 → 3 | Stock Pad session and persistence | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.12 Keyboard and numpad | — | G05 | 2 → 3 | Input routing and native keypad receipts | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.13 Global invocation and visibility | — | G01/G03/G05 | 2 → 3 | Native hotkey and foreground/desktop ownership | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.14 Settings, authoring and recovery | settings | G03/G06 | 2 → 3 | Canonical Settings, process/instance ownership | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.15 Google and general Search | web_search and web providers | G05 | 3 → 3 | Stock provider admission and external execution | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.16 Temporary Files | tempfile | G13 | 2 → 3 | Canonical file publication and association | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.17 Timers and Alarms | timer | G23 | 1 → 3 | Stock scheduler and notifications | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.18 Ordinary Mouse Gestures | mouse_gestures | G21 | 1 → 3 | Stock native gesture capture and action dispatch | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.19 Common Jump Mode | — | G05 | 3 → 3 | Launcher scope and fresh keyboard activation | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+
+| Other major application workflow | Registration | Original goal | Priority and stage → target | Working route and next action | Dependencies, verification and deferred criteria |
+| --- | --- | --- | --- | --- | --- |
+| Dashboard | — | G23 | P1.01 · 1 → 3 | Port reusable dashboard host and working widget dispatch. | Stock registry and shared catalogs. GPUI verification pending. [Dashboard](gui/dashboard.md) |
+| Dashboard Editor | — | G23 | P1.02 · 1 → 3 | Port editable layout, widget placement and checked saves. | Canonical dashboard persistence and actual host. [G23](goals/G23-dashboard-and-organizers.md) |
+| Frequently useful Dashboard widgets | Widget registry | G23 | P1.03 · 1 → 3 | Deliver widgets supporting P0 and P1 workflows. | Dashboard host and each widget's engine. Full widget matrix follows. [G23](goals/G23-dashboard-and-organizers.md) |
+| File Preview | file_search child | G07 | P1.04 · 2 → 3 | Actual text and metadata preview, retained transfer. Replay hosts and actions natively. | Shared preview loader, exact selection and clipboard. [File Preview](gui/file-preview.md) |
+| Mermaid Viewer | diagram_studio child | G17 | P3.04 · 1 → 2 | Port actual Mermaid viewer and stock conversion/output. | Existing diagram workspace. [G17](goals/G17-diagram-studio.md) |
+| Date & Time Studio | Date provider family | G16 | P3.06 · 1 → 2 | Port actual workspace. Inline date results tracked separately. | Shared date engine and scoped settings. [G16](goals/G16-tables-and-conversion.md) |
+| Less-used Dashboard widgets | Widget registry | G23 | P3.11 · 1 → 2 | Bring the remaining lower-priority widgets into the shared host. | Preserve the 39-widget inventory and defer exhaustive acceptance. [Matrix](PARITY_MATRIX.md) |
+| Specialized plugin Settings | Plugin capability registry | G06 and feature owners | P3.12 · 1 → 2 | Common plugin Search capability works. Port owner-specific forms as the related workflow matures. | Canonical settings callbacks and scoped native Save. [Settings record](gui/settings-main.md) |
+| Advanced companions and secondary flows | Multiple | G00–G26 | P3.13 · 1 → 2 | Use individual GUI records for remaining flows. | Their product owners retain original criteria. [Matrix](PARITY_MATRIX.md) |
+| Radial authoring and integrations | radial children | G20/G21 | P4.03–10 · 1 → deferred | Defer designer, submenus, skins, assets, import/export, previews and Radial-specific gestures. | Ordinary Mouse Gestures stay P0. Full acceptance stays in scope. [G20](goals/G20-radial-interfaces.md) |
+| Packaging, parity reconciliation and final acceptance | — | G25/G26 | Pass F | Keep original delivery gates and explicit frontend selector behavior. | Earlier native and regression evidence carries forward where still applicable. [Goal Register](GOAL_REGISTER.md) |
+
+## Reporting baseline
+
+Count built-in rows once by registration identifier. Report Stage 1–5 separately, real GPUI functionality, Search admission only, and unstarted routes. Report P0 workflow readiness separately using its 19-row register. For tier counts, use built-in rows plus separately identified non-plugin workflow rows, tallying those two denominators explicitly where overlapping workflows would otherwise be double counted. A target met means the listed interim stage passed with applicable evidence. Pending means no active implementation, and blocked requires a concrete dependency. Original GUI and acceptance counts stay in [Progress](PROGRESS.md) and the [parity matrix](PARITY_MATRIX.md).
+
+Windows baseline on 2026-11-26 after the active G10 checkpoint. **91 built-ins**, with **61 Stage 1, 23 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **30** have real GPUI functionality within the stated route. **0** have Search admission alone. **61** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **9 at Stage 2** and **3 at Stage 3 or higher**.
+
+| Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
+| --- | --- | --- | --- | --- | --- |
+| P0 | 21 | 2 | 11 | 8 | 0 |
+| P1 | 16 | 4 | 6 | 6 | 0 |
+| P2 | 27 | 5 | 0 | 22 | 0 |
+| P3 | 25 | 1 | 0 | 24 | 0 |
+| P4 | 2 | 0 | 1 | 1 | 0 |
+
+The P2 interim floor is Stage 2. P4's existing functional Clipboard History is preserved below final target and further work is deferred. Native-only gaps stay visible in the readiness and checkpoint records. Application workflows are counted separately because several include registered routes.
+
+| Priority tier · separate workflow view | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
+| --- | --- | --- | --- | --- | --- |
+| P0 · readiness workflows | 19 | 3 | 9 | 7 | 0 |
+| P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 1 | 3 | 0 |
+| P2 · represented by its built-ins | 0 | 0 | 0 | 0 | 0 |
+| P3 · other workspace and companion groups above | 5 | 0 | 0 | 5 | 0 |
+| P4 · Radial companion group | 1 | 0 | 0 | 1 | 0 |

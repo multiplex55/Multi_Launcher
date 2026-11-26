@@ -1,8 +1,8 @@
 # Goal register
 
-G00–G07 have active or completed checkpoints. G11 has the checked Downloads Triage Inspect route. G14 has functional JSON and XML workspaces with Windows replay pending. G23 includes Toast Log routing and the first Activity Center view for the Hash pilot. Read the Master Goal for shared contracts, the packets for scoped criteria, and the required [Execution Strategy](EXECUTION_STRATEGY.md) for implementation and verification scheduling.
+Follow the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption). Read the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md), [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md) and required [Execution Strategy](EXECUTION_STRATEGY.md). G00–G07 have active or completed checkpoints. G10 has Folder Size, File Lock and Duplicate Finder work. G11 has the checked Downloads Triage Inspect route. G13 includes Clipboard History, Clipboard Modify, Snippets and Create Temp File. G14 covers JSON, XML and Regex workflows. G23 includes Toast Log and Activity Center.
 
-The initial program has 27 goals. All remain on **one migration branch**, with one active source writer. Ordering below is a default, not a requirement to block independent work behind an unavailable unrelated native check. Record any resequencing and preserve dependency/evidence ownership.
+The initial program has 27 goals. All remain on **one migration branch**, with one active source writer. The numerical table records ownership and dependencies. User priorities govern execution order. Record dependency-driven resequencing and preserve evidence ownership.
 
 | Goal | Outcome and packet | Dependencies | Current stage |
 | --- | --- | --- | --- |
@@ -16,10 +16,10 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | G07 | [File Search, previews, filters, and window modes](goals/G07-file-search.md) | G00–G05 | In implementation |
 | G08 | [Text, binary, and folder Diff with all child flows](goals/G08-diff.md) | G00–G05; G07 for search handoffs | Not started |
 | G09 | [Batch Rename and Search & Replace](goals/G09-rename-and-replace.md) | G00–G05; shared file contracts | Not started |
-| G10 | [ZIP, duplicate finding, folder size, and file locks](goals/G10-file-utilities.md) | G00–G05; G04 owns Hash Generator | Not started |
+| G10 | [ZIP, duplicate finding, folder size, and file locks](goals/G10-file-utilities.md) | G00–G05; G04 owns Hash Generator | In implementation for Folder Size, File Lock and Duplicate Finder |
 | G11 | [File Operations Center, Downloads Triage, and Explorer Tabs](goals/G11-file-workflows.md) | G00–G05; relevant G07–G10 handoffs | In implementation for Downloads Triage |
 | G12 | [Notes, Markdown Studio, links, export, and printing](goals/G12-notes-and-markdown.md) | G00–G05 | Not started |
-| G13 | [Clipboard history, Clipboard Modify, snippets, and prompts](goals/G13-clipboard-and-snippets.md) | G00–G05 | Not started |
+| G13 | [Clipboard history, Clipboard Modify, snippets, and prompts](goals/G13-clipboard-and-snippets.md) | G00–G05 | In implementation for Clipboard History, Clipboard Modify, Snippets and Create Temp File |
 | G14 | [JSON, XML, Regex, and structured text tooling](goals/G14-structured-text.md) | G00–G05; G13 where clipboard handoffs apply | In implementation |
 | G15 | [Calculation Pad, editors, reference, and companion windows](goals/G15-calculation-pad.md) | G00–G05 | Not started |
 | G16 | [Table Utility, date/time, and conversion interfaces](goals/G16-tables-and-conversion.md) | G00–G05; G15 only for shared chart/data handoffs | Not started |

@@ -1,6 +1,12 @@
 # Progress
 
-## Current checkpoint
+## Current direction
+
+Use the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption), including the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md) and [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md). The November 26 amendment moves scheduling to Pass A after the verified read-only Duplicate Finder increment `3a6cc8974`. Begin P0.02 App Editor Browse, then canonical Folder and Bookmark authoring and Explorer drop. Historical checkpoint continuations below record the order at the time.
+
+Daily-driver readiness has 19 P0 workflows, with 9 at Stage 2 and 3 at Stage 3 or higher. The 91 Windows built-ins include 30 with real GPUI routes, comprising 23 at Stage 2 and 7 at Stage 3. The remaining 61 are Stage 1. Stage 4 and 5 and Search-admission-only counts are zero. The [maturity register](PLUGIN_MATURITY_REGISTER.md#reporting-baseline) holds tier totals. The [readiness register](DAILY_DRIVER_READINESS.md#current-readiness) lists daily-driver blockers and essential replay by workflow.
+
+## Earlier checkpoint receipts
 
 GPUI Preview now opens Filename results and directory metadata, reuses the current child, and navigates bounded text with document-owned keys. All 14 focused launcher tests and four reused shared cases passed. Matched native replay remains open. Remembered File Search hosting follows. [Preview navigation checkpoint](CHECKPOINTS.md#g07-bounded-preview-navigation)
 
@@ -163,17 +169,17 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Goals with active or completed work | G00–G07, G10 Folder Size and File Lock Inspector, G11 Downloads Triage, G13 Clipboard History, Clipboard Modify, Snippets and Create Temp File, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G10, G11, G13, G14 and G23 have open criteria. |
+| Goals with active or completed work | G00–G07, G10 Folder Size, File Lock and Duplicate Finder, G11 Downloads Triage, G13 Clipboard History, Clipboard Modify, Snippets and Create Temp File, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G10, G11, G13, G14 and G23 have open criteria. |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 191 Specified, 27 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 190 Specified, 28 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Begin the read-only Duplicate Finder workflow using the existing session and verified result model. [Minimized inherited Hash restore](CHECKPOINTS.md#g04-and-g07-minimized-inherited-hash-restore) has focused evidence. Matched Settings, G01, G04, G07, G10, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
+| Current next action | Implement P0.02 native App Editor Browse with the existing Add/Edit draft and checked Actions store. Follow with P0.03 canonical Folder and P0.04 Bookmark authoring, then Explorer drop and Omni. Matched Settings, G01, G04, G07, G10, G13 and G14 replay, mixed DPI and known-duration F2 remain open. [User priority order](USER_PRIORITIES.md) |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

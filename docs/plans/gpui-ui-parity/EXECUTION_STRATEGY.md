@@ -4,7 +4,7 @@ Read and follow this strategy before planning, implementing, reviewing, verifyin
 
 ## Continue the existing migration
 
-Resume the current checkpoint, branch, and goal from the existing migration records. Preserve existing work and plans. Read the current repository instructions, goal packets, checkpoint records, and actual role configuration. Use the established Planner, Implementer, and Reviewer workflow. This methodology applies through context compaction, agent or model replacement, session restart, checkpoint or milestone transition, goal continuation, and upstream integration. Include the link and relevant requirements in every new sub-agent assignment.
+Resume the current checkpoint, branch and goal from the existing migration records. Use the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption), including the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md) and [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md). Follow it through context compaction, agent or model replacement, session restart, new role assignments, checkpoint or milestone selection and interrupted work. Keep one source writer and use the established Planner, Implementer and Reviewer roles.
 
 Deliver complete GUI-by-GUI parity with the egui application through official GPUI Kit. Preserve behavior, controls, workflows, configuration, data, the functional egui fallback, and a single authoritative shared engine. Implementation scheduling may change while the original scope, safety requirements, and final acceptance criteria continue to govern.
 
@@ -28,7 +28,7 @@ Fix cross-cutting defects at the responsible boundary. Distinguish work that blo
 
 ## Select coherent GUI batches
 
-The Planner selects related work by dependencies, shared infrastructure, and concrete reuse. A typical batch is three to five smaller surfaces or several meaningful increments of a substantial family. Adjust scope for complexity, safety, and link cost. Use G00–G26 and the existing packets as the coverage and ownership ledger. Document dependencies and GUI ownership when scheduling independent work out of register order.
+The Planner selects the highest appropriate incomplete workflow under the [user priority order](USER_PRIORITIES.md), grouping steps with concrete dependencies and shared infrastructure. A typical batch is three to five smaller surfaces or several meaningful increments of a substantial family. Adjust scope for complexity, safety and link cost. Use G00–G26 as the coverage and ownership ledger. Record every dependency-driven departure from preferred user order.
 
 Examples include structured text with JSON, XML, and Regex. Clipboard History, Clipboard Modify, and Clipboard Snippets share clipboard workflows. File Search, Folder Size, File Locks, Duplicate Finder, and ZIP utilities share file operations. Diff, Batch Rename, and Search & Replace can share preview and apply controls. Notes and Markdown Studio share document workflows. Calculation Pad, converters, and table tools share input and data presentation. Dashboard and organizer widgets, screenshot and native overlays, and Automation, MkMacro, Radial Menu, and related authoring interfaces offer further families. Choose concrete batches from the source and documented dependencies.
 
@@ -38,7 +38,22 @@ Recent shared-library and launcher test builds have taken 12–30 minutes. Warm 
 
 Keep small, coherent commits. Related lower-risk increments may be compilation-checked and committed before one grouped linked verification run. Aim for two to five related increments between expensive shared-library builds when their dependencies, risk, complexity and verification backlog allow it. Run inexpensive launcher-only tests more frequently when they provide useful evidence. Apply the immediate verification requirements below at high-risk boundaries and record the outstanding checks for each unverified commit.
 
-## Pass 1 · Functional implementation and coverage
+## Migration passes
+
+| Pass | Objective |
+| --- | --- |
+| A · Daily-driver implementation | Bring P0 to Stage 3 or higher and complete the distinct readiness milestone. Focus on missing or materially incomplete primary workflows. |
+| B · Dashboard and frequently used features | Start with Dashboard, Dashboard Editor and useful widgets, then bring the remaining P1 workflows to Stage 3. |
+| C · Broad functional coverage | Bring P2 and P3 to at least Stage 2 and Stage 3 where appropriate. Group related providers and GUI families. |
+| D · Daily usage feedback | Once the user begins using GPUI regularly, prioritize observed defects and usability feedback. Record its effect on the schedule. |
+| E · Complete parity | Complete secondary flows, advanced controls and configuration, companion windows, deferred native interactions, Clipboard History, Radial Menu and all other preserved criteria. |
+| F · Final acceptance | Complete the original functional, native, accessibility, performance, compatibility, regression, lifecycle and delivery gates. |
+
+When a workflow meets its current-pass target, record the functionality, gaps, verification, deferred work and safety issues, then continue the next highest applicable priority. Focused tests and essential native smoke are required for Stage 3. Keep data integrity, checked persistence, cancellation, error handling, worker lifetimes and critical native safeguards with the work that needs them.
+
+At the November 26 shift to Pass A, begin with owner-bound App Editor Browse against the existing Add/Edit draft. Follow with canonical Folder and Bookmark authoring, then native Explorer drop. This order lets drop reuse the real draft and store owners. Omni Search can then admit checked application, folder and bookmark sources while Notes, Todo and Calendar availability is tracked explicitly. Preserve G01 hardware and virtual-desktop evidence as an open P0 requirement during independent source work. [Readiness and evidence](DAILY_DRIVER_READINESS.md#current-readiness)
+
+## Functional implementation
 
 Inspect the relevant egui implementation and map its real controls, modes, state, actions, and effects. Implement usable GPUI workflows using the authoritative engine, commands, canonical data, and persistence. Each shipped increment must exercise its actual feature. Count empty shells, mock data, and nonfunctional controls as unfinished.
 
@@ -46,7 +61,7 @@ Write meaningful tests alongside the implementation. Use scoped `cargo check --l
 
 Use one active source writer and keep small coherent checkpoint commits. Safe independent implementation can proceed with explicit verification gaps. Maintain separate functional and acceptance status for every GUI.
 
-## Pass 2 · Grouped verification, refinement, and acceptance
+## Grouped verification, refinement and acceptance
 
 Before an expensive link, identify the affected Cargo packages and targets. Use scoped locked application, library and test-target checks where practical. Inspect test-only imports, feature gates, macros and fixture setup. Verify the intended selectors from the test inventory and confirm the run selects a nonzero intended set. Compile only affected test targets. Continue using Nextest and the repository runner configuration.
 

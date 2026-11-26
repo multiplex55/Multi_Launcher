@@ -68,6 +68,8 @@ Prefer the interpretation that preserves the requested behavior while fitting th
 
 The current user request, current implementation goal, and current milestone instructions define the active scope.
 
+For the GPUI parity migration only, follow the [mandatory startup and resumption sequence](docs/CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption) before beginning, resuming, recovering or choosing work, including after compaction, model changes and new role assignments. Read the [authoritative user priorities](docs/plans/gpui-ui-parity/USER_PRIORITIES.md) and associated registers. Apply the user's order while preserving original goal ownership and acceptance.
+
 Historical plans, milestone documents, acceptance matrices, reports, logs, test methodologies, candidate procedures, and prior initiative-specific instructions are reference material only unless the current task explicitly adopts them.
 
 Do not automatically inherit verification procedures from an older feature branch or previous remediation effort.

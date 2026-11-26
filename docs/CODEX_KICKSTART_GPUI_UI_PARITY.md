@@ -4,6 +4,22 @@
 
 You are executing the complete GPUI UI parity program for `multiplex55/Multi_Launcher`. Read `docs/CODEX_GOAL_GPUI_UI_PARITY.md` and its linked goal package in full before broad implementation. These files define the approved scope: a complete native GPUI Kit frontend, GUI-by-GUI parity, one shared engine, and the complete egui fallback. Continue across all G00–G26 goals and any necessary discovered child work.
 
+## Mandatory startup and resumption
+
+Use these steps at startup, resumption, plan reconstruction, after compaction, agent restart or model change, before any new Planner, Implementer or Reviewer assignment, before choosing or reorganizing milestones, and when recovering an interrupted checkpoint.
+
+1. Read the [Master Goal](CODEX_GOAL_GPUI_UI_PARITY.md).
+2. Read this Kickstart, [AGENTS.md](../AGENTS.md), nested instructions and the current agent configuration.
+3. Read the authoritative [User Priorities](plans/gpui-ui-parity/USER_PRIORITIES.md).
+4. Read the [Execution Strategy](plans/gpui-ui-parity/EXECUTION_STRATEGY.md).
+5. Read the [Plugin Maturity Register](plans/gpui-ui-parity/PLUGIN_MATURITY_REGISTER.md).
+6. Read the [Daily-Driver Readiness Register](plans/gpui-ui-parity/DAILY_DRIVER_READINESS.md).
+7. Reconcile [Progress](plans/gpui-ui-parity/PROGRESS.md) and [Checkpoints](plans/gpui-ui-parity/CHECKPOINTS.md) with the actual branch, source and working tree.
+8. Identify unfinished work in the highest applicable priority. Record any dependency-driven resequencing.
+9. Select the next meaningful batch and provide these governing links in every new role handoff.
+
+Use the G00–G26 goal register for ownership, dependencies and original acceptance. User priorities govern the implementation order.
+
 ## 1. Establish source, authority, and the dedicated branch
 
 1. Read current `AGENTS.md` and applicable nested instructions, `.codex/config.toml`, and actual planner/implementer/reviewer definitions. Use the configured roles/settings; do not invent old model choices or change agent instructions.
@@ -51,7 +67,7 @@ As dependencies become ready, execute G02–G04 for shared-engine boundaries, se
 
 ## 5. Execute the full product conversion
 
-Use `GOAL_REGISTER.md` and the per-goal packets for dependencies, ownership, and coverage. Apply the [Execution Strategy](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) to schedule foundational work, related GUI batches, and both verification passes. Document dependencies and owners when scheduling independent work out of register order.
+Use `GOAL_REGISTER.md` and the per-goal packets for dependencies, ownership and coverage. Apply [User Priorities](plans/gpui-ui-parity/USER_PRIORITIES.md) and the [Execution Strategy](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) to choose a batch and its verification. Document dependencies and owners for any departure from the preferred user order.
 
 For each checkpoint:
 
@@ -94,7 +110,7 @@ Track the stages Not started → Specified → In implementation → Implemented
 
 A window that opens is not automatically implemented; an implemented GUI is not automatically accepted. No placeholders, Unsupported buttons, TODO routes, suppressed errors or automatic egui handoffs may be counted as complete GPUI parity.
 
-Keep the linked documents authoritative. At each context or session boundary write the branch, HEAD, working-tree state, active checkpoint, partial changes, evidence, unrun checks, blockers, and next action. Link the Execution Strategy in the continuation record and every sub-agent handoff. On resume read that record and the strategy before work. Apply the same requirement after a model change, checkpoint transition, or upstream integration.
+Keep the linked documents authoritative. At each context or session boundary record the branch, HEAD, working tree, active checkpoint, partial changes, evidence, unrun checks, blockers and next action. Use the mandatory startup and resumption sequence and link it in each continuation record and role handoff.
 
 Use one source writer, one shared heavy build/test process, and one native desktop controller. Planner/reviewer work may be parallel only when it is read-only and snapshot-safe.
 

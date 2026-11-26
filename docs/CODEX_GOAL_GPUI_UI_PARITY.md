@@ -1,6 +1,6 @@
 # Codex Goal: complete Multi Launcher GPUI UI parity
 
-**Required execution strategy.** Every Planner, Implementer, Reviewer, and orchestrator must read and follow [EXECUTION_STRATEGY.md](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) before planning, implementing, reviewing, verifying, or continuing this migration. This Goal defines the objectives, functional scope, and final acceptance. The Kickstart defines initialization, resumption, and coordination. The Execution Strategy governs implementation methodology, infrastructure priorities, batching, verification scheduling, and build efficiency. [AGENTS.md](../AGENTS.md) governs repository-wide engineering and agent conventions.
+**Required startup and resumption.** Every Planner, Implementer, Reviewer and orchestrator follows the [Kickstart startup sequence](CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption). [USER_PRIORITIES.md](plans/gpui-ui-parity/USER_PRIORITIES.md) governs user-defined scheduling. The [Execution Strategy](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) governs batching and verification. This Goal defines scope and final acceptance. [AGENTS.md](../AGENTS.md) governs repository-wide engineering and agent conventions.
 
 ## Assignment
 
@@ -11,6 +11,8 @@ Keep the complete egui frontend. Both frontends must use one authoritative appli
 The program is finished only when the user can choose GPUI and use all of Multi Launcher as before, with a cleaner presentation and a dependable egui fallback. A main-window prototype, partial feature catalog, mock implementation, and “use egui for the rest” are intermediate states.
 
 This is one implementation program with **27 initial work goals, G00–G26**, on one dedicated branch. The goal packets are the initial executable breakdown, not a cap on scope. Split complex packets into additional recorded checkpoints or child goals when the actual inventory warrants it. Every discovered GUI and child flow must retain one accountable owner.
+
+The interim [Daily-Driver Readiness milestone](plans/gpui-ui-parity/DAILY_DRIVER_READINESS.md) prioritizes ordinary use of P0 workflows. The [maturity register](plans/gpui-ui-parity/PLUGIN_MATURITY_REGISTER.md) records progress by feature. The original matrix and final acceptance remain the delivery authority.
 
 ## 1. Read these contracts first
 
