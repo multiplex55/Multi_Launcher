@@ -54,6 +54,14 @@ fn pending_timer(
     }
     delay
 }
+fn advance_due(session: &mut RegexSession, now: Instant) -> bool {
+    let previous = session.evaluated_revision();
+    session.tick(now);
+    let main_completed =
+        session.evaluated_revision().is_some() && session.evaluated_revision() != previous;
+    session.tick_test_cases(now);
+    main_completed
+}
 fn preview(text: &str) -> String {
     let mut chars = text.chars();
     let mut output: String = chars.by_ref().take(160).collect();
@@ -67,11 +75,14 @@ fn preview(text: &str) -> String {
     }
 }
 pub(super) struct RegexMount {
-    receipt: utility_mount::MountReceipt,
+    pub(super) receipt: utility_mount::MountReceipt,
     window: AnyWindowHandle,
     native: Option<NativeWindow>,
     pattern: Entity<InputState>,
     text: Entity<TextareaState>,
+    pub(super) replacement: Entity<TextareaState>,
+    pub(super) cases:
+        HashMap<multi_launcher::regex_tester::RegexTestCaseId, super::regex_cases::CaseEditor>,
     focus: FocusHandle,
     scroll: gpui_kit::UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
@@ -88,7 +99,9 @@ pub(super) struct RegexWorkspace {
     pub(super) session: RegexSession,
     pub(super) history: super::regex_history::HistoryLane,
     mount_owner: utility_mount::MountOwner,
-    mount: RegexMount,
+    pub(super) mount: RegexMount,
+    pub(super) cases_expanded: bool,
+    pub(super) cases_error: Option<String>,
     return_focus: Option<FocusHandle>,
     generation: u64,
     pub(super) activation_revision: Arc<AtomicU64>,
@@ -121,6 +134,41 @@ impl RegexMount {
                 .auto_grow(5, 12)
                 .placeholder("Enter test text")
         });
+        let replacement = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 5)
+                .placeholder("Replacement")
+        });
+        let replacement_receipt = receipt.clone();
+        let replacement_sub = cx.subscribe_in(
+            &replacement,
+            window,
+            move |view: &mut RegexWorkspace,
+                  input: &Entity<TextareaState>,
+                  event: &InputEvent,
+                  window: &mut Window,
+                  cx: &mut Context<RegexWorkspace>| {
+                if replacement_receipt.is_current()
+                    && view.open
+                    && !view.rehosting
+                    && !view.admission.is_fenced()
+                    && matches!(event, InputEvent::Change)
+                {
+                    let next = input.read(cx).value().to_string();
+                    if next != view.session.draft.replacement {
+                        if next.len() > view.session.policy().replacement_bytes
+                            && input.focus_handle(cx).is_focused(window)
+                        {
+                            view.focus.focus(window, cx);
+                        }
+                        view.session.draft.replacement = next;
+                        view.session.mark_replacement_changed(Instant::now());
+                        view.pump(cx);
+                        cx.notify();
+                    }
+                }
+            },
+        );
         let pattern_receipt = receipt.clone();
         let pattern_sub = cx.subscribe(
             &pattern,
@@ -166,9 +214,11 @@ impl RegexMount {
             native,
             pattern,
             text,
+            replacement,
+            cases: HashMap::new(),
             focus: cx.focus_handle(),
             scroll: Default::default(),
-            _subscriptions: vec![pattern_sub, text_sub],
+            _subscriptions: vec![pattern_sub, text_sub, replacement_sub],
         }
     }
 }
@@ -198,6 +248,8 @@ impl RegexWorkspace {
             history: super::regex_history::HistoryLane::new(history_path),
             mount_owner,
             mount,
+            cases_expanded: true,
+            cases_error: None,
             return_focus: None,
             generation: 0,
             activation_revision: Arc::new(AtomicU64::new(0)),
@@ -214,13 +266,18 @@ impl RegexWorkspace {
         let mount = RegexMount::new(window, cx, &self.mount_owner, host, native);
         let pattern = self.session.draft.pattern.clone();
         let text = self.session.draft.test_text.clone();
+        let replacement = self.session.draft.replacement.clone();
         mount
             .pattern
             .update(cx, |input, cx| input.set_value(pattern, window, cx));
         mount
             .text
             .update(cx, |input, cx| input.set_value(text, window, cx));
+        mount
+            .replacement
+            .update(cx, |input, cx| input.set_value(replacement, window, cx));
         self.mount = mount;
+        super::regex_cases::sync_editors(self, window, cx);
     }
     pub(super) fn mount_receipt(&self) -> utility_mount::MountReceipt {
         self.mount.receipt.clone()
@@ -230,6 +287,9 @@ impl RegexWorkspace {
             && self.popout == popout
             && self.mount.receipt.is_current()
             && self.mount.window.window_id() == id
+    }
+    pub(super) fn focus_anchor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
     }
     pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
@@ -283,7 +343,7 @@ impl RegexWorkspace {
         self.pump(cx);
         cx.notify();
     }
-    fn pump(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn pump(&mut self, cx: &mut Context<Self>) {
         if self.pumping || !self.open || self.session.pending_delay(Instant::now()).is_none() {
             return;
         }
@@ -308,7 +368,7 @@ impl RegexWorkspace {
                         if !timer_current(view.open, view.generation, generation) {
                             return false;
                         }
-                        if view.session.tick(Instant::now()) {
+                        if advance_due(&mut view.session, Instant::now()) {
                             view.record_accepted_history(cx);
                         }
                         let more = view.session.pending_delay(Instant::now()).is_some();
@@ -467,7 +527,10 @@ impl Render for RegexWorkspace {
                                     .border_1()
                                     .child(if selected { "✓" } else { "" }),
                             )
-                            .child(Label::new(label)),
+                            .child(
+                                Label::new(label)
+                                    .id(SharedString::from(format!("regex-flag-label-{index}"))),
+                            ),
                     ),
             );
         }
@@ -620,7 +683,9 @@ impl Render for RegexWorkspace {
                     && !context_stack_has_primary(&contexts, "AlertDialog");
                 let input_owns_escape = event.keystroke.key == "escape"
                     && (view.pattern.focus_handle(cx).is_focused(window)
-                        || view.text.focus_handle(cx).is_focused(window));
+                        || view.text.focus_handle(cx).is_focused(window)
+                        || view.mount.replacement.focus_handle(cx).is_focused(window)
+                        || super::regex_cases::editor_focused(view, window, cx));
                 if key_receipt.is_current()
                     && !input_owns_escape
                     && view.open
@@ -743,6 +808,8 @@ impl Render for RegexWorkspace {
                         )))
                     }))
             }))
+            .child(super::regex_substitution::render(self, cx))
+            .child(super::regex_cases::render(self, cx))
     }
 }
 impl RootWindow {
@@ -886,7 +953,8 @@ impl RootWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        Modifiers, pending_timer, preview, provider_is_current, standalone_close_key, timer_current,
+        Modifiers, advance_due, pending_timer, preview, provider_is_current, standalone_close_key,
+        timer_current,
     };
     use multi_launcher::plugin::Plugin;
     use multi_launcher::plugins::regex_tester::RegexTesterPlugin;
@@ -990,6 +1058,46 @@ mod tests {
         assert!(timer_current(true, 7, 7));
         assert!(!timer_current(false, 7, 7));
         assert!(!timer_current(true, 8, 7));
+    }
+    #[test]
+    fn grouped_due_work_keeps_primary_match_and_history_revision_stable() {
+        use multi_launcher::regex_tester::{
+            RegexTestCaseExpectation, RegexTestCaseStatus, SubstitutionEvaluationResult,
+        };
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "a".into();
+        session.draft.test_text = "aa".into();
+        session.mark_changed(now);
+        assert!(advance_due(&mut session, now + Duration::from_millis(200)));
+        session.select_match(1);
+        let revision = session.revision();
+        session.set_substitution_enabled(true, now);
+        session.draft.replacement = "b".into();
+        session.mark_replacement_changed(now);
+        assert!(!advance_due(&mut session, now + Duration::from_millis(200)));
+        assert!(
+            matches!(session.substitution_result(), Some(SubstitutionEvaluationResult::Success(result)) if result.output == "bb")
+        );
+        assert_eq!(session.revision(), revision);
+        assert_eq!(session.selected_index(), Some(1));
+        let id = session
+            .draft
+            .test_cases
+            .add(None, "a".into(), RegexTestCaseExpectation::Match)
+            .unwrap();
+        session.mark_test_cases_changed(now);
+        assert!(!advance_due(&mut session, now + Duration::from_millis(200)));
+        assert!(
+            session
+                .test_case_evaluation()
+                .unwrap()
+                .results
+                .iter()
+                .any(|result| result.case_id == id && result.status == RegexTestCaseStatus::Pass)
+        );
+        assert_eq!(session.revision(), revision);
+        assert_eq!(session.selected_index(), Some(1));
     }
     #[test]
     fn oversized_then_valid_releases_timer_and_evaluates_new_source() {

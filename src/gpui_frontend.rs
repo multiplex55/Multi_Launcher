@@ -26,6 +26,8 @@ mod wake;
 mod json_utility;
 mod xml_utility;
 mod regex_tester;
+mod regex_substitution;
+mod regex_cases;
 mod regex_history;
 mod xml_host;
 mod xml_tree;

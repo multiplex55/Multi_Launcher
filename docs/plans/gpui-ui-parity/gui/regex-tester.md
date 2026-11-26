@@ -20,4 +20,10 @@ Regex defaults to the stock Pop Out and honors saved Dock and native geometry. A
 
 Automatic history records only the exact current accepted pattern and flags. A single owned lane uses the shared store, preserves accepted order, survives host moves and settles before Quit or restart. Its warning preserves the store diagnostic and corrupt bytes. Scoped policy, privacy, persistence and restart tests passed. Native recording and reload evidence remain pending.
 
-Substitution and Test Cases are next. Explicit clipboard, History controls and Presets, explanation, syntax, reference, examples and scoped Jump remain open.
+## GPUI Substitution and Test Cases
+
+Substitution evaluates edited Replacement independently of the current match selection. The UI shows distinct disabled, pending, invalid, paused and successful output states. The UTF-8 preview is bounded at 16 KiB and the session retains the complete output. Oversized Replacement remains authored and Clear remains reachable.
+
+Test Cases edits the same retained collection through stable case IDs. Add, Duplicate, Remove, Move Up and Down, expectation, optional labels, multiline inputs and Run or Rerun use the shared case policy and separate revisions. Stable editor and action identities preserve keyboard focus through changes. Case evaluation leaves primary results and accepted history intact. Rehost rebuilds the local editors from the retained draft. New GPUI tests await the grouped clipboard run and matched native replay.
+
+Explicit protected clipboard effects are next. History controls and Presets, explanation, syntax, reference, examples and scoped Jump remain open.
