@@ -780,7 +780,7 @@ impl RootWindow {
     ) {
         self.remember_host_presentation("json-utility", presentation, cx);
     }
-    fn remember_host_presentation(
+    pub(super) fn remember_host_presentation(
         &mut self,
         tool_key: &str,
         presentation: RememberedPresentation,

@@ -781,6 +781,12 @@ impl FileSearchView {
         true
     }
 
+    pub(super) fn clear_hash_error(&mut self, cx: &mut Context<Self>) {
+        if self.status.starts_with("Could not open Hash Generator:") {
+            self.status = "Hash Generator opened.".into(); cx.notify();
+        }
+    }
+
     pub(super) fn report_hash_error(&mut self, error: String, cx: &mut Context<Self>) {
         self.status = format!("Could not open Hash Generator: {error}");
         cx.notify();

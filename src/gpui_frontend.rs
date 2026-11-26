@@ -3634,7 +3634,6 @@ enum HashOpenIntent {
     Default,
     Reactivate,
     File(PathBuf),
-    InheritedFile(PathBuf),
 }
 
 #[derive(Clone)]
@@ -3643,6 +3642,23 @@ enum HashReturnReceipt {
     FileSearchPopup { receipt: file_search::SelectionReceipt, mount: utility_mount::MountReceipt, host: AnyWindowHandle, native: NativeWindow },
     #[cfg(windows)]
     Downloads(downloads_triage::InspectReceipt),
+}
+
+fn hash_popup_visibility_eligible(visible: bool, minimized: bool) -> bool { visible && !minimized }
+
+fn checked_hash_popup_visible(native: NativeWindow) -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsIconic};
+        native_window_is_valid(native) && hash_popup_visibility_eligible(native_window_is_visible(native).unwrap_or(false),
+            unsafe { IsIconic(HWND(native.identity.hwnd as *mut _)) }.as_bool())
+    }
+    #[cfg(not(windows))]
+    { let _ = native; false }
+}
+
+fn direct_inherited_hash_commit_current(accepted: bool, slot: bool, revision: bool, target: bool, native: bool, epoch: bool, origin: bool) -> bool {
+    accepted && slot && revision && target && native && epoch && origin
 }
 
 fn inherited_hash_parent_return_allowed(remount: bool, unpin: bool) -> bool { !remount && !unpin }
@@ -7556,14 +7572,9 @@ impl RootWindow {
                 self.start_hash_rehost(HashPresentationMode::Popout, generation, epoch, revision, None, Some(origin), operation, cx);
                 return;
             }
-            match self.open_hash_generator_window(HashOpenIntent::InheritedFile(receipt.path.clone()), operation, window, cx) {
-                Ok(()) => {
-                    self.hash_return = Some(HashReturnReceipt::FileSearchPopup { receipt, mount: source_mount,
-                        host: source_host, native: source_native });
-                    cx.notify();
-                }
-                Err(error) => view.update(cx, |view, cx| view.report_hash_error(error, cx)),
-            }
+            let origin = HashInheritedOrigin { receipt, mount: source_mount, host: source_host,
+                native: source_native, focus: source.hash_action_focus(cx) };
+            self.start_direct_inherited_hash(origin, operation, cx);
             return;
         }
         let Some(operation) = self.restart_admission.admit() else {
@@ -8270,17 +8281,13 @@ impl RootWindow {
             self.hash_pin.remount_revision = None;
         }
         let reactivation = matches!(&intent, HashOpenIntent::Reactivate);
-        let inherited = matches!(&intent, HashOpenIntent::InheritedFile(_));
-        if inherited && self.hash_window.mode() == Some(HashPresentationMode::Docked) {
-            return Err("Docked Hash Generator must be popped out before opening from File Search.".into());
-        }
         let file = match intent {
             HashOpenIntent::Default => {
                 self.hash_return = None;
                 None
             }
             HashOpenIntent::Reactivate => None,
-            HashOpenIntent::File(path) | HashOpenIntent::InheritedFile(path) => {
+            HashOpenIntent::File(path) => {
                 if self.hash_rehost_pending.load(Ordering::Acquire)
                     || self.hash_file_picker_pending.load(Ordering::Acquire)
                     || self.hash_clipboard_pending.is_pending()
@@ -8407,9 +8414,9 @@ impl RootWindow {
             HashDraft::from_session(&session)
         };
         let mount_generation = self.next_hash_mount_generation();
-        let mode = if inherited { HashPresentationMode::Popout } else { HashPresentationMode::from_saved(
+        let mode = HashPresentationMode::from_saved(
             self.utility_presentations.preference(self.hash_tool_key),
-        ) };
+        );
         let root = cx.entity().downgrade();
         let mount_config = HashMountConfig {
             jump_controller: self.search_jump_mode.fresh(),
@@ -8564,6 +8571,146 @@ impl RootWindow {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
         cx.notify();
+    }
+
+    fn release_direct_inherited_hash_transition(&mut self, target_mount: u64, epoch: u64, revision: u64, cx: &mut Context<Self>) {
+        if self.hash_rehost_revision.load(Ordering::Acquire) != revision { return; }
+        self.hash_rehost_pending.store(false, Ordering::Release);
+        let current = self.hash_window.mount_generation() == Some(target_mount)
+            && self.hash_mount_generation.load(Ordering::Acquire) == target_mount
+            && self.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch() == epoch;
+        if current { if let Some(view) = self.hash_window.view().cloned() {
+            view.update(cx, |tool, cx| { tool.set_editors_readonly(false, cx); cx.notify(); });
+        }}
+        cx.notify();
+    }
+
+    fn report_inherited_hash_origin_error(&self, origin: &HashInheritedOrigin, message: &str, cx: &mut Context<Self>) {
+        if !self.hash_inherited_origin_current(origin, origin.native.identity, cx) { return; }
+        if let Some(view) = self.file_search.clone().filter(|view| view.entity_id() == origin.receipt.owner) {
+            view.update(cx, |view, cx| view.report_hash_error(message.to_owned(), cx));
+        }
+    }
+
+    fn start_direct_inherited_hash(&mut self, origin: HashInheritedOrigin, operation: EffectPermit, cx: &mut Context<Self>) {
+        if self.hash_pin.pending.is_some() || self.hash_file_picker_pending.load(Ordering::Acquire)
+            || self.hash_clipboard_pending.is_pending()
+            || self.hash_rehost_pending.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            self.report_inherited_hash_origin_error(&origin, "Hash Generator is busy with another operation.", cx); return;
+        }
+        let revision = self.hash_rehost_revision.fetch_add(1, Ordering::AcqRel).wrapping_add(1).max(1);
+        let epoch = self.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch();
+        let existing = match &self.hash_window {
+            HashWindowState::Popout { window, view, mount_generation } => Some((*window, view.clone(), *mount_generation)),
+            HashWindowState::Closed => None,
+            _ => { self.hash_rehost_pending.store(false, Ordering::Release);
+                self.report_inherited_hash_origin_error(&origin, "Hash Generator changed before activation.", cx); return; }
+        };
+        if let Some((_, view, _)) = &existing { view.update(cx, |tool, cx| { tool.set_editors_readonly(true, cx); cx.notify(); }); }
+        let target_mount = existing.as_ref().map(|(_, _, mount)| *mount).unwrap_or_else(|| self.next_hash_mount_generation());
+        let candidate_epoch = if existing.is_some() { epoch } else { epoch.wrapping_add(1) };
+        let root = cx.entity().downgrade();
+        let config = existing.is_none().then(|| HashMountConfig {
+            jump_controller: self.search_jump_mode.fresh(), session: Arc::clone(&self.hash_session), wake_signal: Arc::clone(&self.hash_wake_signal),
+            file_picker_pending: Arc::clone(&self.hash_file_picker_pending), clipboard_pending: Arc::clone(&self.hash_clipboard_pending),
+            pinned: Arc::clone(&self.hash_pin.saved), restart_admission: Arc::clone(&self.restart_admission), mount_generation: target_mount,
+            session_epoch: candidate_epoch, active_mount_generation: Arc::clone(&self.hash_mount_generation), rehost_pending: Arc::clone(&self.hash_rehost_pending),
+            rehost_revision: Arc::clone(&self.hash_rehost_revision), presentation_feedback: Arc::clone(&self.hash_presentation_feedback),
+            native_geometry_sequence: Arc::clone(&self.hash_geometry_sequence), hash_tool_key: self.hash_tool_key,
+            size_write_error: self.hash_size_write_error.clone(), root: root.clone(), mode: HashPresentationMode::Popout,
+        });
+        cx.spawn(async move |_, cx| {
+            let _operation = operation;
+            let fresh = existing.is_none();
+            let target = if let Some((window, view, _)) = existing {
+                Some((window, view))
+            } else {
+                let mut local = HashSession::new(); local.begin(Some(origin.receipt.path.clone()));
+                let draft = HashDraft::from_session(&local);
+                let Some(config) = config else { return; };
+                let mut options = cx.update(|app| hash_popout_window_options(app)); options.show = false; options.focus = false;
+                cx.update(|app| gpui_kit::open_window(options, app, move |window, app| {
+                    let native = checked_native_window(window).ok().flatten();
+                    create_hash_generator_view(window, app, draft, native, config)
+                })).ok()
+            };
+            let Some((window, view)) = target else {
+                let _ = root.update(cx, |root, cx| {
+                    if root.hash_rehost_revision.load(Ordering::Acquire) != revision { return; }
+                    root.release_direct_inherited_hash_transition(target_mount, epoch, revision, cx);
+                    root.report_inherited_hash_origin_error(&origin, "Could not open Hash Generator.", cx);
+                });
+                return;
+            };
+            let native = cx.update(|app| view.read(app).native_window);
+            let Some(native) = native else {
+                if fresh { retire_unchecked_hash_candidate(&root, window, cx).await; }
+                let _ = root.update(cx, |root, cx| {
+                    if root.hash_rehost_revision.load(Ordering::Acquire) != revision { return; }
+                    root.release_direct_inherited_hash_transition(target_mount, epoch, revision, cx);
+                    root.report_inherited_hash_origin_error(&origin, "Hash Generator has no checked native window.", cx);
+                });
+                return;
+            };
+            let preflight = root.update(cx, |root, cx| {
+                let target_current = if fresh { matches!(root.hash_window, HashWindowState::Closed) }
+                    else { matches!(&root.hash_window, HashWindowState::Popout { window: current, view: mounted, mount_generation }
+                        if current.window_id() == window.window_id() && mounted.entity_id() == view.entity_id() && *mount_generation == target_mount) };
+                target_current && root.hash_rehost_pending.load(Ordering::Acquire) && root.hash_rehost_revision.load(Ordering::Acquire) == revision
+                    && root.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch() == epoch
+                    && root.hash_inherited_origin_current(&origin, origin.native.identity, cx)
+            }).unwrap_or(false);
+            let target_unavailable = !fresh && !checked_hash_popup_visible(native);
+            let accepted = preflight && !target_unavailable && native_window_is_valid(native) && current_foreground_identity() == Some(origin.native.identity)
+                && (!fresh || set_native_window_visible(native, true).is_ok()) && checked_hash_popup_visible(native)
+                && current_foreground_identity() == Some(origin.native.identity) && activate_native_window(native).is_ok()
+                && current_foreground_identity() == Some(native.identity) && checked_hash_popup_visible(native);
+            let committed = if accepted { root.update(cx, |root, cx| {
+                let target_current = if fresh { matches!(root.hash_window, HashWindowState::Closed) }
+                    else { matches!(&root.hash_window, HashWindowState::Popout { window: current, view: mounted, mount_generation }
+                        if current.window_id() == window.window_id() && mounted.entity_id() == view.entity_id() && *mount_generation == target_mount) };
+                let slot = root.hash_rehost_pending.load(Ordering::Acquire);
+                let same_revision = root.hash_rehost_revision.load(Ordering::Acquire) == revision;
+                let native_current = native_window_is_valid(native) && checked_hash_popup_visible(native);
+                let epoch_current = root.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch() == epoch;
+                let origin_current = target_current && slot && same_revision && native_current && epoch_current
+                    && root.hash_inherited_origin_current(&origin, native.identity, cx);
+                if !direct_inherited_hash_commit_current(accepted, slot, same_revision, target_current, native_current, epoch_current, origin_current) { return false; }
+                if fresh {
+                    root.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).begin(Some(origin.receipt.path.clone()));
+                    root.hash_mount_generation.store(target_mount, Ordering::Release);
+                    let subscription = root.observe_hash_popout_close(window, Some(native), target_mount, candidate_epoch, cx);
+                    root.hash_window = HashWindowState::Popout { mount_generation: target_mount, window, view: view.clone() };
+                    root.hash_window_close_subscriptions.push((window, subscription));
+                } else if update_kit_window_content(window, &view, cx, |tool, window, cx| {
+                    tool.apply_file_selection(origin.receipt.path.clone(), window, cx); tool.set_editors_readonly(false, cx);
+                }).is_err() { return false; }
+                root.hash_rehost_pending.store(false, Ordering::Release);
+                if let Some(source) = root.file_search.clone().filter(|view| view.entity_id() == origin.receipt.owner) {
+                    source.update(cx, |view, cx| view.clear_hash_error(cx));
+                }
+                root.hash_return = Some(HashReturnReceipt::FileSearchPopup { receipt: origin.receipt.clone(), mount: origin.mount.clone(), host: origin.host, native: origin.native });
+                root.remember_host_presentation("hash-generator", multi_launcher::settings::RememberedPresentation::Popout, cx);
+                panel_stack::promote(&mut root.panel_stack, Panel::HashGeneratorDialog);
+                root.hash_wake_signal.notify(); cx.notify(); true
+            }).unwrap_or(false) } else { false };
+            if committed {
+                let _ = update_kit_window_content(window, &view, cx, |tool, window, cx| tool.focus_editable(window, cx));
+                if fresh { let _ = root.update(cx, |root, cx| root.schedule_hash_popout_setup(native, view, target_mount, candidate_epoch, _operation, cx)); }
+                return;
+            }
+            if fresh {
+                let candidate = RetiringHashWindow { window, native_window: Some(native) };
+                if !remove_and_wait_for_hash_window(cx, candidate).await { let _ = root.update(cx, |root, _| root.hash_retiring_windows.push(candidate)); }
+            }
+            let _ = root.update(cx, |root, cx| {
+                let error = if target_unavailable { "Restore the Hash Generator window and retry." }
+                    else { "File Search or Hash Generator changed before activation completed." };
+                if root.hash_rehost_revision.load(Ordering::Acquire) != revision { return; }
+                root.release_direct_inherited_hash_transition(target_mount, epoch, revision, cx);
+                root.report_inherited_hash_origin_error(&origin, if target_unavailable { error } else { "Hash Generator could not be activated." }, cx);
+            });
+        }).detach();
     }
 
     fn hash_inherited_origin_current(&self, origin: &HashInheritedOrigin, foreground: ForegroundIdentity, cx: &mut Context<Self>) -> bool {
@@ -15722,6 +15869,22 @@ mod tests {
         assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs", Some(&HashSet::new()), Some(&search)).is_empty());
         let disabled_caps = HashMap::from([("file_search".to_owned(), Vec::new())]);
         assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs", Some(&enabled), Some(&disabled_caps)).is_empty());
+    }
+
+    #[test]
+    fn direct_inherited_hash_commit_requires_all_receipts_and_activation() {
+        use super::direct_inherited_hash_commit_current as current;
+        assert!(current(true, true, true, true, true, true, true));
+        assert!(super::hash_popup_visibility_eligible(true, false));
+        assert!(!super::hash_popup_visibility_eligible(true, true));
+        assert!(!super::hash_popup_visibility_eligible(false, false));
+        assert!(!current(false, true, true, true, true, true, true));
+        assert!(!current(true, false, true, true, true, true, true));
+        assert!(!current(true, true, false, true, true, true, true));
+        assert!(!current(true, true, true, false, true, true, true));
+        assert!(!current(true, true, true, true, false, true, true));
+        assert!(!current(true, true, true, true, true, false, true));
+        assert!(!current(true, true, true, true, true, true, false));
     }
 
     #[test]

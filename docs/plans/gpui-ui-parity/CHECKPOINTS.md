@@ -1620,3 +1620,11 @@ Close, Escape and title-bar Close for the inherited Hash window use the same acc
 Independent review cleared the transfer, rollback, close and retirement paths. The final scoped locked launcher check passed in 4.89 s. The warm Nextest link took 20.96 s with no shared-library build. Run `cedb7559-0fd3-4452-9fe4-95433e819649` passed all 15 in 5.751 s, with 415 skipped. The batch covers refused, same and changed paths, exact File Search rows, mount lifetime, picker and clipboard fences, pin policy and focus return authority.
 
 Paired Windows 1516 × 937 verification remains open for live transfer, exact HWND return and competing foreground. Remembering an inherited direct open of a fresh or already popped-out Hash still needs an accepted native activation acknowledgement. Live Preview transfer remains a separate G07 checkpoint.
+
+### G07 and G04 direct Hash activation acknowledgement
+
+File Search popup can hand the exact selected file to a fresh or existing Hash popup after Windows accepts activation of that visible target. A fresh candidate opens hidden and begins the shared session at commit. An existing popup keeps its path, worker and digest through a refused or superseded request. Acceptance rechecks the source selection and focus, target mount and session, and native foreground before applying the file, return receipt and remembered Pop Out. Calculation stays explicit.
+
+Refusal releases the exact pending transition and reports to a still-current File Search origin. Existing Hash persistence feedback remains available. A minimized or hidden existing Hash asks the user to restore it before retrying. Automatic native restore and matched 1516 × 937 verification remain open.
+
+The final locked fast-dev launcher check passed in 4.89 s. Warm links took 16.08 s and 21.86 s after correcting refusal feedback, with no shared-library rebuild. Nextest run `5133716c-a6ba-4104-83e5-c3e6149f9d0b` passed all 16 in 8.897 s with 415 skipped. Review and focused tests cover the exact activation gate, retained and changed paths, source and target retirement, and pin and effect fences. Continue with live Preview transfer.
