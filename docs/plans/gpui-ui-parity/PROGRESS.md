@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Regex History now displays persisted rows and supports checked Load, Reload and Retry through the canonical store. The locked launcher check and independent review passed. The focused History cases are queued for the Presets batch, and matched Windows replay remains pending. [Regex History checkpoint](CHECKPOINTS.md#g14-c-live-regex-history-controls)
+Regex Presets supports the canonical saved list, explicit Load, Save, Rename, Update, Reload and checked Delete. All 15 grouped History and Presets cases passed. Matched Windows replay remains pending. Explanation, Reference and Examples are next. [Regex Presets checkpoint](CHECKPOINTS.md#g14-c-saved-regex-presets)
+
+Regex History now displays persisted rows and supports checked Load, Reload and Retry through the canonical store. Seven cases passed in the Presets batch. [Regex History checkpoint](CHECKPOINTS.md#g14-c-live-regex-history-controls)
 
 Regex supports explicit protected clipboard import, exact copies, complete replacement output and counts-only case summaries with checked host and action authority. All 14 grouped tests passed, including Substitution and Test Cases. Native and ordinary editor clipboard evidence remain pending. [Regex clipboard checkpoint](CHECKPOINTS.md#g14-c-explicit-protected-regex-clipboard)
 

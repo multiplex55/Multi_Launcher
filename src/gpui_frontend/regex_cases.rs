@@ -18,6 +18,7 @@ impl CaseEditor {
     fn new(
         case: &RegexTestCase,
         receipt: utility_mount::MountReceipt,
+        case_receipt: utility_mount::MountReceipt,
         window: &mut Window,
         cx: &mut Context<RegexWorkspace>,
     ) -> Self {
@@ -35,10 +36,11 @@ impl CaseEditor {
             input.set_value(case.input.clone(), window, cx)
         });
         let label_receipt = receipt.clone();
+        let label_case_receipt = case_receipt.clone();
         let label_sub = cx.subscribe(
             &label,
             move |view: &mut RegexWorkspace, input: Entity<InputState>, event: &InputEvent, cx| {
-                if !case_live(view, &label_receipt, id) || !matches!(event, InputEvent::Change) {
+                if !case_live(view, &label_receipt, &label_case_receipt, id) || !matches!(event, InputEvent::Change) {
                     return;
                 }
                 let value = input.read(cx).value().to_string();
@@ -57,7 +59,7 @@ impl CaseEditor {
                   input: Entity<TextareaState>,
                   event: &InputEvent,
                   cx| {
-                if !case_live(view, &receipt, id) || !matches!(event, InputEvent::Change) {
+                if !case_live(view, &receipt, &case_receipt, id) || !matches!(event, InputEvent::Change) {
                     return;
                 }
                 let value = input.read(cx).value().to_string();
@@ -80,9 +82,10 @@ impl CaseEditor {
 fn case_live(
     view: &RegexWorkspace,
     receipt: &utility_mount::MountReceipt,
+    case_receipt: &utility_mount::MountReceipt,
     id: RegexTestCaseId,
 ) -> bool {
-    receipt.is_current()
+    receipt.is_current() && case_receipt.is_current()
         && view.open
         && !view.rehosting
         && !view.admission.is_fenced()
@@ -123,7 +126,7 @@ pub(super) fn sync_editors(
         .cloned()
         .collect();
     for case in missing {
-        let editor = CaseEditor::new(&case, view.mount.receipt.clone(), window, cx);
+        let editor = CaseEditor::new(&case, view.mount.receipt.clone(), view.mount.case_receipt.clone(), window, cx);
         view.mount.cases.insert(case.id, editor);
     }
 }
@@ -208,12 +211,13 @@ fn apply_action(
 fn apply(
     view: &mut RegexWorkspace,
     receipt: &utility_mount::MountReceipt,
+    case_receipt: &utility_mount::MountReceipt,
     id: RegexTestCaseId,
     action: CaseAction,
     window: &mut Window,
     cx: &mut Context<RegexWorkspace>,
 ) {
-    if !case_live(view, receipt, id) {
+    if !case_live(view, receipt, case_receipt, id) {
         return;
     }
     let removing_focused = matches!(action, CaseAction::Remove)
@@ -237,6 +241,7 @@ fn apply(
 }
 pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>) -> AnyElement {
     let receipt = view.mount.receipt.clone();
+    let case_receipt = view.mount.case_receipt.clone();
     let enabled = view.open && !view.rehosting && !view.admission.is_fenced();
     let expanded = view.cases_expanded;
     let at_limit =
@@ -251,6 +256,9 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
     let add_receipt = receipt.clone();
     let run_receipt = receipt.clone();
     let copy_receipt = receipt.clone();
+    let add_cases = case_receipt.clone();
+    let run_cases = case_receipt.clone();
+    let copy_cases = case_receipt.clone();
     let mut panel = div()
         .id("regex-test-cases")
         .flex()
@@ -285,7 +293,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                         .label("Add")
                         .disabled(!enabled || at_limit)
                         .on_click(cx.listener(move |view, _, window, cx| {
-                            if !add_receipt.is_current()
+                            if !add_receipt.is_current() || !add_cases.is_current()
                                 || !view.open
                                 || view.rehosting
                                 || view.admission.is_fenced()
@@ -319,7 +327,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                         )
                         .disabled(!enabled || !has_cases)
                         .on_click(cx.listener(move |view, _, _, cx| {
-                            if run_receipt.is_current()
+                            if run_receipt.is_current() && run_cases.is_current()
                                 && view.open
                                 && !view.rehosting
                                 && !view.admission.is_fenced()
@@ -334,7 +342,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                         .label("Copy summary")
                         .disabled(!enabled || view.clipboard_pending)
                         .on_click(cx.listener(move |view, _, window, cx| {
-                            if copy_receipt.is_current() {
+                            if copy_receipt.is_current() && copy_cases.is_current() {
                                 view.clipboard_action(super::regex_clipboard::Action::Cases, window, cx);
                             }
                         })),
@@ -397,6 +405,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
             ),
         ] {
             let captured = receipt.clone();
+            let captured_case = case_receipt.clone();
             controls = controls.child(
                 Button::new(SharedString::from(format!(
                     "regex-case-{}-{}",
@@ -407,7 +416,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                 .small()
                 .disabled(!enabled || disabled)
                 .on_click(cx.listener(move |view, _, window, cx| {
-                    apply(view, &captured, id, action, window, cx)
+                    apply(view, &captured, &captured_case, id, action, window, cx)
                 })),
             );
         }

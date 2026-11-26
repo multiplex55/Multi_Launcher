@@ -34,4 +34,8 @@ The matched Windows replay still needs actual protected refusal, clipboard conte
 
 ## GPUI History controls
 
-History lists canonical saved pattern and flag pairs. Load checks the current row, assigns its pattern and flags and focuses Pattern. Reload refreshes the store, and Retry repeats the current accepted pair. The launcher check and independent review passed. Focused History tests and the matched Windows replay remain pending. [Checkpoint](../CHECKPOINTS.md#g14-c-live-regex-history-controls)
+History lists canonical saved pattern and flag pairs. Load checks the current row, assigns its pattern and flags and focuses Pattern. Reload refreshes the store, and Retry repeats the current accepted pair. Focused History tests passed. Matched Windows replay remains pending. [Checkpoint](../CHECKPOINTS.md#g14-c-live-regex-history-controls)
+
+## GPUI Presets
+
+Presets lists canonical saved entries and changes the draft only through explicit Load. Save and Update preserve optional empty values and authored cases. Rename and content-only Update retain the saved ID. Delete owns a scoped inline confirmation and checks that its reviewed entry still matches the current disk record. Reload keeps the last valid rows when disk data is corrupt. Matched Windows replay remains pending. [Checkpoint](../CHECKPOINTS.md#g14-c-saved-regex-presets)

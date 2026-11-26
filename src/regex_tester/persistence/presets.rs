@@ -288,6 +288,26 @@ impl PresetStore {
         })
     }
 
+    /// Delete only the exact preset the user reviewed.
+    pub fn delete_checked(&mut self, reviewed: &RegexPreset) -> Result<(), RegexStoreError> {
+        self.mutate(|document, path| {
+            let index = preset_index(path, document, reviewed.id)?;
+            let current = &document.presets[index];
+            if current.id != reviewed.id
+                || current.name != reviewed.name
+                || current.pattern != reviewed.pattern
+                || current.flags != reviewed.flags
+                || current.sample_text != reviewed.sample_text
+                || current.replacement != reviewed.replacement
+                || current.test_cases.as_slice() != reviewed.test_cases.as_slice()
+            {
+                return Err(invalid(path, "preset changed; review it again before deleting"));
+            }
+            document.presets.remove(index);
+            Ok(())
+        })
+    }
+
     fn mutate<R>(
         &mut self,
         change: impl FnOnce(&mut PresetDocument, &Path) -> Result<R, RegexStoreError>,
@@ -500,6 +520,41 @@ mod tests {
 
     fn write_document(path: &Path, document: &PresetDocument) {
         save_json_atomic(path, document).unwrap();
+    }
+
+    #[test]
+    fn checked_delete_rejects_changed_preset_without_rewriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("presets.json");
+        let mut first = PresetStore::open(&path);
+        let id = first.create(input("Original")).unwrap();
+        let reviewed = first.get(id).unwrap().clone();
+        let mut other = PresetStore::open(&path);
+        other.rename(id, "Changed").unwrap();
+        let external = std::fs::read(&path).unwrap();
+        assert!(first.delete_checked(&reviewed).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), external);
+        assert_eq!(first.get(id), Some(&reviewed));
+        first.reload().unwrap();
+        let current = first.get(id).unwrap().clone();
+        first.delete_checked(&current).unwrap();
+        assert!(first.entries().is_empty());
+    }
+
+    #[test]
+    fn checked_delete_ignores_unpersisted_case_allocator() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("presets.json");
+        let mut store = PresetStore::open(&path);
+        let mut saved = input("Cases");
+        let id = saved.test_cases.add(None, "retained".into(), crate::regex_tester::RegexTestCaseExpectation::Match).unwrap();
+        let removed = saved.test_cases.add(None, "removed".into(), crate::regex_tester::RegexTestCaseExpectation::NoMatch).unwrap();
+        saved.test_cases.remove(removed);
+        let preset = store.create(saved).unwrap();
+        let reviewed = store.get(preset).unwrap().clone();
+        assert_eq!(reviewed.test_cases.as_slice()[0].id, id);
+        store.delete_checked(&reviewed).unwrap();
+        assert!(store.entries().is_empty());
     }
 
     #[test]

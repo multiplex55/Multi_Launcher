@@ -81,6 +81,10 @@ pub(super) struct RegexMount {
     pub(super) pattern: Entity<InputState>,
     pub(super) text: Entity<TextareaState>,
     pub(super) replacement: Entity<TextareaState>,
+    pub(super) preset_name: Entity<InputState>,
+    pub(super) preset_confirmation_focus: FocusHandle,
+    pub(super) case_owner: utility_mount::MountOwner,
+    pub(super) case_receipt: utility_mount::MountReceipt,
     pub(super) cases:
         HashMap<multi_launcher::regex_tester::RegexTestCaseId, super::regex_cases::CaseEditor>,
     focus: FocusHandle,
@@ -98,6 +102,7 @@ pub(super) struct RegexWorkspace {
     pub(super) visibility: RootVisibility,
     pub(super) session: RegexSession,
     pub(super) history: super::regex_history::HistoryLane,
+    pub(super) presets: super::regex_presets::PresetLane,
     pub(super) clipboard_pending: bool,
     pub(super) clipboard_epochs: super::regex_clipboard::Epochs,
     pub(super) clipboard_feedback: Option<String>,
@@ -131,6 +136,8 @@ impl RegexMount {
         native: Option<NativeWindow>,
     ) -> Self {
         let receipt = owner.attach();
+        let case_owner = utility_mount::MountOwner::default();
+        let case_receipt = case_owner.attach();
         let pattern =
             cx.new(|cx| InputState::new(window, cx).placeholder("Enter a Rust regex pattern"));
         let text = cx.new(|cx| {
@@ -142,6 +149,15 @@ impl RegexMount {
             TextareaState::new(window, cx)
                 .auto_grow(2, 5)
                 .placeholder("Replacement")
+        });
+        let preset_name = cx.new(|cx| InputState::new(window, cx).placeholder("Preset name"));
+        let preset_receipt = receipt.clone();
+        let preset_sub = cx.subscribe(&preset_name, move |view: &mut RegexWorkspace, input: Entity<InputState>, event: &InputEvent, cx| {
+            if preset_receipt.is_current() && view.open && !view.rehosting && !view.admission.is_fenced()
+                && view.presets.can_edit_name() && matches!(event, InputEvent::Change) {
+                view.presets.name = input.read(cx).value().to_string();
+                cx.notify();
+            }
         });
         let replacement_receipt = receipt.clone();
         let replacement_sub = cx.subscribe_in(
@@ -228,10 +244,14 @@ impl RegexMount {
             pattern,
             text,
             replacement,
+            preset_name,
+            preset_confirmation_focus: cx.focus_handle(),
+            case_owner,
+            case_receipt,
             cases: HashMap::new(),
             focus: cx.focus_handle(),
             scroll: Default::default(),
-            _subscriptions: vec![pattern_sub, text_sub, replacement_sub],
+            _subscriptions: vec![pattern_sub, text_sub, replacement_sub, preset_sub],
         }
     }
 }
@@ -258,6 +278,7 @@ impl RegexWorkspace {
             admission,
             visibility,
             session: RegexSession::default(),
+            presets: super::regex_presets::PresetLane::new(history_path.as_ref().map(|path| path.with_file_name("regex_presets.json"))),
             history: super::regex_history::HistoryLane::new(history_path),
             clipboard_pending: false,
             clipboard_epochs: super::regex_clipboard::Epochs::default(),
@@ -293,6 +314,7 @@ impl RegexWorkspace {
         mount
             .replacement
             .update(cx, |input, cx| input.set_value(replacement, window, cx));
+        mount.preset_name.update(cx, |input, cx| input.set_value(self.presets.name.clone(), window, cx));
         self.mount = mount;
         super::regex_cases::sync_editors(self, window, cx);
     }
@@ -314,6 +336,8 @@ impl RegexWorkspace {
     pub(super) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rehosting {
             self.focus.focus(window, cx);
+        } else if self.presets.has_confirmation() {
+            self.mount.preset_confirmation_focus.focus(window, cx);
         } else {
             self.pattern.focus_handle(cx).focus(window, cx);
         }
@@ -334,7 +358,7 @@ impl RegexWorkspace {
         }
     }
     fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
-        if !self.open || self.rehosting || self.clipboard_pending || self.admission.is_fenced() || self.popout == popout {
+        if !self.open || self.rehosting || self.clipboard_pending || self.presets.blocks_host() || self.admission.is_fenced() || self.popout == popout {
             return;
         }
         let source = self.mount.receipt.clone();
@@ -424,10 +448,11 @@ impl RegexWorkspace {
             self.session.ensure_initial_evaluation(Instant::now());
             self.pump(cx);
         }
-        self.pattern.focus_handle(cx).focus(window, cx);
+        self.focus_editor(window, cx);
         cx.notify();
     }
     pub(super) fn shutdown(&mut self) {
+        self.presets.cancel_confirmation();
         self.open = false;
         self.activation_revision.fetch_add(1, Ordering::AcqRel);
         self.mount_owner.retire();
@@ -435,7 +460,8 @@ impl RegexWorkspace {
         self.pumping = false;
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.rehosting || self.clipboard_pending {
+        if self.presets.cancel_confirmation() { self.focus_anchor(window, cx); cx.notify(); return; }
+        if !self.open || self.rehosting || self.clipboard_pending || self.presets.busy() {
             return;
         }
         let popout = self.popout;
@@ -715,10 +741,26 @@ impl Render for RegexWorkspace {
                     && !context_stack_has_primary(&contexts, "PopupMenu")
                     && !context_stack_has_primary(&contexts, "Dialog")
                     && !context_stack_has_primary(&contexts, "AlertDialog");
+                if key_receipt.is_current() && view.open && !view.rehosting && child_free
+                    && view.contains_focus(window, cx) && event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == Modifiers::default() && view.presets.has_confirmation() {
+                    view.focus_anchor(window, cx);
+                    view.presets.cancel_confirmation();
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if key_receipt.is_current() && event.is_held && view.open && child_free
+                    && standalone_close_key(view.popout, child_free, view.contains_focus(window, cx),
+                        &event.keystroke.key, event.keystroke.modifiers) {
+                    cx.stop_propagation();
+                    return;
+                }
                 let input_owns_escape = event.keystroke.key == "escape"
                     && (view.pattern.focus_handle(cx).is_focused(window)
                         || view.text.focus_handle(cx).is_focused(window)
                         || view.mount.replacement.focus_handle(cx).is_focused(window)
+                        || view.mount.preset_name.focus_handle(cx).is_focused(window)
                         || super::regex_cases::editor_focused(view, window, cx));
                 if key_receipt.is_current()
                     && !input_owns_escape
@@ -816,7 +858,7 @@ impl Render for RegexWorkspace {
                     .child(
                         Button::new("regex-rehost")
                             .label(if self.popout { "Dock" } else { "Pop Out" })
-                            .disabled(self.rehosting || self.clipboard_pending)
+                            .disabled(self.rehosting || self.clipboard_pending || self.presets.blocks_host())
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if rehost_receipt.is_current() {
                                     view.request_rehost(!view.popout, cx);
@@ -826,7 +868,7 @@ impl Render for RegexWorkspace {
                     .child(
                         Button::new("regex-close")
                             .label("Close")
-                            .disabled(self.clipboard_pending)
+                            .disabled(self.clipboard_pending || self.presets.busy())
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if close_receipt.is_current() {
                                     view.close(window, cx);
@@ -891,6 +933,7 @@ impl Render for RegexWorkspace {
             .child(super::regex_cases::render(self, cx))
             .child(super::regex_clipboard::render(self, cx))
             .child(super::regex_history::render(self, cx))
+            .child(super::regex_presets::render(self, cx))
     }
 }
 impl RootWindow {
