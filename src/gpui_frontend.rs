@@ -3817,6 +3817,7 @@ enum RootCloseBlocker {
     ClipboardModifyBlocked,
     SnippetsSave,
     TempfileSave,
+    FileSearchEffect,
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -4984,7 +4985,7 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         if open {
-            self.external_launch.retire_snippet_effect();
+            self.external_launch.retire_focus_bound_effects();
             self.retire_context_favorite();
         }
         let was_menu_open = self.file_menu_open || self.settings_menu_open || self.help_menu_open;
@@ -5713,6 +5714,7 @@ impl RootWindow {
             );
         }
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Err(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
+        if self.external_launch.auxiliary_effect_pending() { return Err(file_search_preview::WAIT.to_owned()); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Err(tempfile_view::WAIT.to_owned()); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(snippets::SAVE_WAIT.to_owned()); }
         self.clipboard_modify_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
@@ -5956,7 +5958,7 @@ impl RootWindow {
     }
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.external_launch.retire_snippet_effect();
+        self.external_launch.retire_focus_bound_effects();
         self.retire_action_sheet_now(window, cx, true);
         if self.action_sheet.is_some() { return false; }
         self.retire_context_favorite();
@@ -7780,7 +7782,7 @@ impl RootWindow {
         if !presentation.visible || action != receipt.action {
             return;
         }
-        self.external_launch.retire_snippet_effect();
+        self.external_launch.retire_focus_bound_effects();
         self.context_favorite_popup = Some(ContextFavoritePopup {
             receipt: receipt.clone(),
             position,
@@ -10146,6 +10148,7 @@ impl RootWindow {
             }
             Some(RootCloseBlocker::RegexHistory) => { self.restart_status = Some(regex_history::WAIT_QUIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardModifyBlocked) => { self.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
+            Some(RootCloseBlocker::FileSearchEffect) => { self.restart_status = Some(file_search_preview::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
@@ -10234,6 +10237,7 @@ impl RootWindow {
         cx: &App,
     ) -> Option<RootCloseBlocker> {
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
+        if self.external_launch.auxiliary_effect_pending() { return Some(RootCloseBlocker::FileSearchEffect); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Some(RootCloseBlocker::TempfileSave); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SnippetsSave); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardHistory); }
@@ -10868,7 +10872,7 @@ impl Render for RootWindow {
                 if event.keystroke.key == "escape" { root.snippet_fill_escape_latched = false; }
             }))
             .capture_any_mouse_down(cx.listener(|root, _, _, _| {
-                root.external_launch.retire_snippet_effect();
+                root.external_launch.retire_focus_bound_effects();
             }))
             .role(Role::Group)
             .flex()
@@ -13099,7 +13103,7 @@ pub(crate) fn run_foundation_window(
                             let _ = root.update(cx, |root, _| {
                                 if root.native_window.is_some_and(|native| native.identity.hwnd == receipt.hwnd)
                                     && root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id()) {
-                                    root.external_launch.retire_snippet_effect();
+                                    root.external_launch.retire_focus_bound_effects();
                                 }
                             });
                         }
@@ -13357,7 +13361,7 @@ pub(crate) fn run_foundation_window(
                             }); });
                         }
                     } else {
-                        root.external_launch.retire_snippet_effect();
+                        root.external_launch.retire_focus_bound_effects();
                         if let Some(view) = root.json_view.clone() {
                             if !view.read(cx).popout { view.update(cx, |view, cx| view.retire_jump(cx)); }
                         }
@@ -13504,6 +13508,7 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::RegexHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_history::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardModifyBlocked) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::FileSearchEffect) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(file_search_preview::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }

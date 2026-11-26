@@ -1786,7 +1786,7 @@ impl XmlWorkspace {
         let target_popout = !self.popout;
         self.review_jump = Some(XmlReviewJump { id, presentation, mount: mount.clone(), receipt: receipt.clone(), core: super::scoped_jump::ScopedJump::new("xml-save-review", self.host.jump.core.controller.fresh()), cancel: cx.focus_handle(), replace: cx.focus_handle(), transfer: cx.focus_handle() });
         if !self.popout {
-            let _ = self.root.update(cx, |root, _| root.external_launch.retire_snippet_effect());
+            let _ = self.root.update(cx, |root, _| root.external_launch.retire_focus_bound_effects());
         }
         window.open_alert_dialog(cx, move |alert, window, app| {
             let close = owner.clone();

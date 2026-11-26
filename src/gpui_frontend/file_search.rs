@@ -108,7 +108,7 @@ pub(super) struct FileSearchView {
     content_focus: HashMap<FileSearchResultKey, FocusHandle>,
     preview: Option<Entity<file_search_preview::FileSearchPreview>>,
     preview_owner: utility_mount::MountOwner,
-    explorer_authority: Arc<AtomicBool>,
+     explorer_authority: Arc<AtomicBool>,
     explorer_pending: bool,
     escape_waiting_for_release: bool,
     generation: u64,
@@ -188,7 +188,7 @@ impl FileSearchView {
             content_focus: HashMap::new(),
             preview: None,
             preview_owner: utility_mount::MountOwner::default(),
-            explorer_authority: Arc::new(AtomicBool::new(false)),
+             explorer_authority: Arc::new(AtomicBool::new(false)),
             explorer_pending: false,
             escape_waiting_for_release: false,
             generation: 0,
@@ -333,10 +333,11 @@ impl FileSearchView {
         let request = multi_launcher::file_search::preview::PreviewRequest::from_search_result(
             &receipt.path, Some(&found), self.settings.max_full_preview_file_size_bytes);
         let parent = cx.entity().downgrade();
+        let root_weak = self.root.clone();
         let owner = self.preview_owner.clone();
         let mount = owner.attach();
-        let preview = cx.new(|cx| file_search_preview::FileSearchPreview::new(parent, receipt, return_focus, return_scroll,
-            host.window_id(), found, owner, mount, visibility, revision, native, self.admission.clone(), cx));
+        let preview = cx.new(|cx| file_search_preview::FileSearchPreview::new(parent, root_weak, receipt, return_focus, return_scroll,
+            host, found, owner, mount, visibility, revision, native, self.admission.clone(), cx));
         self.preview = Some(preview.clone());
         preview.update(cx, |preview, cx| { preview.focus(window, cx); preview.load(request, permit, cx); });
         root.update(cx, |root, cx| {

@@ -602,6 +602,7 @@ pub(super) struct ExternalLaunch {
     pending: Option<Pending>,
     next_ticket: u64,
     preview_lease: Option<Arc<std::sync::atomic::AtomicBool>>,
+    auxiliary_effect: Option<(Arc<std::sync::atomic::AtomicBool>, bool)>,
 }
 
 impl ExternalLaunch {
@@ -614,11 +615,14 @@ impl ExternalLaunch {
     }
     pub fn clipboard_effect_pending(&self) -> bool {
         self.pending.as_ref().is_some_and(|pending| pending.clipboard_effect)
+            || self.auxiliary_effect.as_ref().is_some_and(|(_, clipboard)| *clipboard)
     }
     pub fn retire_clipboard_effect(&self) {
+        if let Some((lease, true)) = &self.auxiliary_effect { lease.store(false, Ordering::Release); }
         if let Some(lease) = self.pending.as_ref().and_then(|pending| pending.clipboard_lease.as_ref()) { lease.store(false, Ordering::Release); }
     }
-    pub fn retire_snippet_effect(&self) {
+    pub fn retire_focus_bound_effects(&self) {
+        if let Some((lease, _)) = &self.auxiliary_effect { lease.store(false, Ordering::Release); }
         if let Some(lease) = &self.preview_lease { lease.store(false, Ordering::Release); }
         if let Some(pending) = self.pending.as_ref().filter(|pending| pending.snippet_effect) {
             if let Some(lease) = &pending.clipboard_lease { lease.store(false, Ordering::Release); }
@@ -632,13 +636,28 @@ impl ExternalLaunch {
         if self.preview_lease.as_ref().is_some_and(|current| Arc::ptr_eq(current, lease)) { self.preview_lease = None; }
     }
 
+    pub(super) fn auxiliary_effect_pending(&self) -> bool { self.auxiliary_effect.is_some() }
+
+    pub(super) fn begin_auxiliary_effect(&mut self, lease: Arc<std::sync::atomic::AtomicBool>, clipboard: bool) -> bool {
+        if self.auxiliary_effect.is_some() || (clipboard && self.clipboard_effect_pending()) { return false; }
+        self.auxiliary_effect = Some((lease, clipboard));
+        true
+    }
+
+    pub(super) fn finish_auxiliary_effect(&mut self, lease: &Arc<std::sync::atomic::AtomicBool>) {
+        if self.auxiliary_effect.as_ref().is_some_and(|(current, _)| Arc::ptr_eq(current, lease)) {
+            self.auxiliary_effect = None;
+        }
+    }
+
     pub fn begin(
         &mut self,
         admission: &Arc<RestartAdmission>,
         stamp: Stamp,
         request: &Request,
     ) -> Option<u64> {
-        if self.pending.is_some() || request.query != stamp.query {
+        let clipboard = matches!(&request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. });
+        if self.pending.is_some() || request.query != stamp.query || (clipboard && self.clipboard_effect_pending()) {
             return None;
         }
         let permit = admission.admit()?;
@@ -1847,6 +1866,23 @@ fn bookkeep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_clipboard_reservation_is_exclusive_and_exactly_retired() {
+        let mut owner = ExternalLaunch::default();
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let other = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(owner.begin_auxiliary_effect(first.clone(), true));
+        assert!(owner.clipboard_effect_pending());
+        assert!(!owner.begin_auxiliary_effect(other.clone(), true));
+        owner.finish_auxiliary_effect(&other);
+        assert!(owner.clipboard_effect_pending());
+        owner.retire_focus_bound_effects();
+        assert!(!first.load(Ordering::Acquire));
+        assert!(owner.clipboard_effect_pending());
+        owner.finish_auxiliary_effect(&first);
+        assert!(!owner.clipboard_effect_pending());
+    }
 
     #[test]
     fn clipboard_execute_success_uses_canonical_history_and_requested_visibility() {

@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+Selected-match Preview now opens the exact file in Explorer and can copy its full path or original matching line through a checked effect. All seven focused tests passed. Native effects and fuller preview navigation remain open. G06/G05 live Launcher Settings follows. [Preview actions checkpoint](CHECKPOINTS.md#g07-checked-preview-actions)
+
 Quoted Directory Content starts from the exact checked draft. Its selected-match Preview uses the shared loader, exact Unicode highlights and a retained Return path. The grouped launcher run passed all 12 tests. Matched Windows replay and explicit child actions remain open. [Typed Content](CHECKPOINTS.md#g07-typed-directory-content-search) · [Preview checkpoint](CHECKPOINTS.md#g07-retained-selected-match-preview)
 
 GPUI now prepares the exact retained launcher on the current virtual desktop before an authorized hidden-root hotkey reveal. All 24 focused tests passed. Actual two-desktop reveal, known-duration F2 and mixed DPI remain open. G07 typed Content and selected-match Preview follow. [Cross-desktop checkpoint](CHECKPOINTS.md#g01-checked-cross-desktop-hotkey-reveal)
@@ -163,7 +165,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add explicit G07 Preview Explorer and exact clipboard actions through the existing checked services. Matched G01, G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
+| Current next action | Implement checked live G06/G05 Launcher Settings, beginning with Actions and Feedback. Matched G01, G07, G13 and G14 replay, full Preview navigation, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 
