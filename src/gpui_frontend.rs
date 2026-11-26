@@ -8,6 +8,7 @@ mod appearance;
 mod external_launch;
 mod file_search;
 mod file_search_preview;
+mod settings_actions;
 mod date_search;
 mod calculator_search;
 mod base_convert_search;
@@ -1361,6 +1362,7 @@ impl RenderOnce for ToastLogViewerPanel {
 #[derive(IntoElement)]
 struct SettingsEditorPanel {
     root: WeakEntity<RootWindow>,
+    actions: Option<Entity<settings_actions::ActionsSettings>>,
     draft: bool,
     saving: bool,
     reading: bool,
@@ -1897,6 +1899,7 @@ impl RenderOnce for SettingsEditorPanel {
                     .line_height(px(self.metrics.line_height)),
             )
             .child(checkbox)
+            .when_some(self.actions, |panel, actions| panel.child(actions))
             .child(
                 Button::new("settings-reload-application-index")
                     .label("Reload application index")
@@ -1924,7 +1927,7 @@ impl RenderOnce for SettingsEditorPanel {
                     .gap_x(px(self.metrics.item_spacing_x))
                     .child(
                         Button::new("settings-save")
-                            .label(if self.saving { "Saving…" } else { "Save" })
+                            .label(if self.saving { "Saving…" } else { "Save Search Settings" })
                             .disabled(save_disabled)
                             .on_click(move |_, _, app| {
                                 let _ = save_root.update(app, |root, cx| {
@@ -2615,6 +2618,7 @@ struct RootWindow {
     search_completion: SearchCompletion,
     search_completion_focus_revision: Option<u64>,
     settings_editor: SettingsEditorState,
+    settings_actions: Option<Entity<settings_actions::ActionsSettings>>,
     app_editor: add_action::AppEditorState,
     plugin_editor: Option<Entity<plugin_editor::PluginEditorView>>,
     command_help: CommandHelpState,
@@ -3821,6 +3825,7 @@ enum RootCloseBlocker {
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
+    SettingsActionsSave,
     PluginPreferenceSave,
     CalculatorSearch,
 }
@@ -5688,6 +5693,8 @@ impl RootWindow {
                     .to_owned(),
             );
         }
+        if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_actions::WAIT.to_owned()); }
+        if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).restart_draft(cx).dirty()) { return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned()); }
         if self.settings_editor.open && self.settings_editor.is_dirty() {
             return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned());
         }
@@ -6944,6 +6951,7 @@ impl RootWindow {
         self.root_scroll
             .scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
         self.settings_focus_handle.focus(window, cx);
+        self.open_actions_settings(window, cx);
         let receiver = match self.settings_save_workers.begin_boolean_preference_read(
             self.settings_path.clone(),
             multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete,
@@ -6996,6 +7004,9 @@ impl RootWindow {
 
     fn toggle_settings_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_editor.open {
+            if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) {
+                self.settings_editor.status = Some(settings_actions::WAIT.into()); cx.notify(); return;
+            }
             if self.settings_editor.pending.is_some()
                 || self.settings_editor.read_pending.is_some()
             {
@@ -7049,6 +7060,9 @@ impl RootWindow {
                 self.settings_owner_focus_handle.contains_focused(window, cx),
                 self.restart_admission.is_fenced(),
             );
+        if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) {
+            self.settings_editor.status = Some(settings_actions::WAIT.into()); cx.notify(); return;
+        }
         if self.settings_editor.pending.is_some()
             || self.settings_editor.read_pending.is_some()
             || !self.settings_editor.cancel_idle()
@@ -7064,6 +7078,7 @@ impl RootWindow {
             cx.notify();
             return;
         }
+        if let Some(view) = self.settings_actions.take() { view.update(cx, |view, _| view.retire()); }
         panel_stack::retire(&mut self.panel_stack, Panel::Settings);
         clear_stale_settings_restart_status(&mut self.restart_status, true);
         let return_focus = self.settings_return_focus.take();
@@ -10148,6 +10163,7 @@ impl RootWindow {
             }
             Some(RootCloseBlocker::RegexHistory) => { self.restart_status = Some(regex_history::WAIT_QUIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardModifyBlocked) => { self.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
+            Some(RootCloseBlocker::SettingsActionsSave) => { self.restart_status = Some(settings_actions::WAIT.to_owned()); }
             Some(RootCloseBlocker::FileSearchEffect) => { self.restart_status = Some(file_search_preview::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
@@ -10237,6 +10253,7 @@ impl RootWindow {
         cx: &App,
     ) -> Option<RootCloseBlocker> {
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
+        if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
         if self.external_launch.auxiliary_effect_pending() { return Some(RootCloseBlocker::FileSearchEffect); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Some(RootCloseBlocker::TempfileSave); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SnippetsSave); }
@@ -10705,6 +10722,7 @@ impl Render for RootWindow {
         };
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
             root: cx.entity().downgrade(),
+            actions: self.settings_actions.clone(),
             draft: self.settings_editor.draft,
             saving: self.settings_editor.pending.is_some(),
             reading: self.settings_editor.read_pending.is_some(),
@@ -12935,6 +12953,7 @@ pub(crate) fn run_foundation_window(
                 search_completion: SearchCompletion::default(),
                 search_completion_focus_revision: None,
                 settings_editor: settings_editor_for_root,
+                settings_actions: None,
                 app_editor: add_action::AppEditorState::new(cx),
                 plugin_editor: None,
                 command_help: command_help_for_root,
@@ -13508,6 +13527,7 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::RegexHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_history::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardModifyBlocked) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::SettingsActionsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(settings_actions::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::FileSearchEffect) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(file_search_preview::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }

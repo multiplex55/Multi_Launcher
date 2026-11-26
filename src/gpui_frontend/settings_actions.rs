@@ -1,0 +1,633 @@
+//! Retained Actions and Feedback preferences backed by checked scoped Settings writes.
+use super::*;
+use multi_launcher::settings::{
+    ScopedSetting as Field, ScopedSettingChange as Change, ScopedSettingValue as Value,
+    ScopedSettingsAcknowledgement, ScopedSettingsError, Settings, SettingsBooleanSaveToken,
+};
+
+pub(super) const WAIT: &str = "Wait for Actions and Feedback settings to finish.";
+
+#[derive(Clone, Debug, PartialEq)]
+struct Values {
+    clear: bool,
+    hide: bool,
+    toasts: bool,
+    duration: f32,
+    inline: bool,
+    errors: bool,
+}
+impl Values {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            clear: settings.clear_query_after_run,
+            hide: settings.hide_after_run,
+            toasts: settings.enable_toasts,
+            duration: settings.toast_duration,
+            inline: settings.show_inline_errors,
+            errors: settings.show_error_toasts,
+        }
+    }
+    fn changes(&self, desired: &Self) -> Vec<Change> {
+        [
+            (
+                Field::ClearQueryAfterRun,
+                Value::Bool(self.clear),
+                Value::Bool(desired.clear),
+            ),
+            (
+                Field::HideAfterRun,
+                Value::Bool(self.hide),
+                Value::Bool(desired.hide),
+            ),
+            (
+                Field::EnableToasts,
+                Value::Bool(self.toasts),
+                Value::Bool(desired.toasts),
+            ),
+            (
+                Field::ToastDuration,
+                Value::Float(self.duration),
+                Value::Float(desired.duration),
+            ),
+            (
+                Field::ShowInlineErrors,
+                Value::Bool(self.inline),
+                Value::Bool(desired.inline),
+            ),
+            (
+                Field::ShowErrorToasts,
+                Value::Bool(self.errors),
+                Value::Bool(desired.errors),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, baseline, desired)| baseline != desired)
+        .map(|(field, baseline, desired)| Change {
+            field,
+            baseline,
+            desired,
+        })
+        .collect()
+    }
+}
+
+fn resolve_duration(text: &str, baseline: f32, toasts: bool) -> Result<f32, &'static str> {
+    if text == baseline.to_string() {
+        return Ok(baseline);
+    }
+    match text.trim().parse::<f32>() {
+        Ok(value) if value.is_finite() && (0.1..=5.0).contains(&value) => Ok(value),
+        _ if !toasts => Ok(baseline),
+        _ => Err("Toast duration must be a number from 0.1 to 5.0 seconds."),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RestartDraft {
+    baseline: Option<Values>,
+    draft: Option<Values>,
+    duration_text: String,
+    busy: bool,
+}
+impl RestartDraft {
+    pub(super) fn dirty(&self) -> bool {
+        self.baseline != self.draft
+            || self
+                .baseline
+                .as_ref()
+                .is_some_and(|base| self.duration_text != base.duration.to_string())
+    }
+}
+
+pub(super) struct ActionsSettings {
+    root: WeakEntity<RootWindow>,
+    owner: utility_mount::MountOwner,
+    mount: utility_mount::MountReceipt,
+    baseline: Option<Values>,
+    draft: Option<Values>,
+    duration: Entity<InputState>,
+    _duration_sub: Subscription,
+    reading: bool,
+    pending: Option<(SettingsBooleanSaveToken, Vec<Change>)>,
+    status: Option<String>,
+}
+impl ActionsSettings {
+    pub(super) fn new(
+        root: WeakEntity<RootWindow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let owner = utility_mount::MountOwner::default();
+        let mount = owner.attach();
+        let duration = cx.new(|cx| InputState::new(window, cx).placeholder("0.1–5.0 seconds"));
+        let sub = cx.subscribe(&duration, |_: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        Self {
+            root,
+            owner,
+            mount,
+            baseline: None,
+            draft: None,
+            duration,
+            _duration_sub: sub,
+            reading: false,
+            pending: None,
+            status: None,
+        }
+    }
+    pub(super) fn busy(&self) -> bool {
+        self.reading || self.pending.is_some()
+    }
+    pub(super) fn restart_draft(&self, cx: &App) -> RestartDraft {
+        RestartDraft {
+            baseline: self.baseline.clone(),
+            draft: self.draft.clone(),
+            duration_text: self.duration.read(cx).value().to_string(),
+            busy: self.busy(),
+        }
+    }
+    pub(super) fn retire(&mut self) {
+        self.owner.retire();
+    }
+    fn clear_wait(&self, cx: &mut Context<Self>) {
+        let _ = self.root.update(cx, |root, cx| {
+            if root.restart_status.as_deref() == Some(WAIT) {
+                root.restart_status = None;
+            }
+            if root.settings_editor.status.as_deref() == Some(WAIT) {
+                root.settings_editor.status = None;
+            }
+            cx.notify();
+        });
+    }
+    pub(super) fn read(
+        &mut self,
+        path: String,
+        workers: SettingsSaveWorkerRegistry,
+        permit: EffectPermit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reading = true;
+        self.status = None;
+        let receiver = match workers.begin_scoped_preferences_read(path) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.reading = false;
+                self.status = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let host = window.window_handle();
+        let mount = self.mount.clone();
+        cx.spawn(async move |weak, cx| {
+            let _permit = permit;
+            let result = loop {
+                match receiver.try_recv() {
+                    Ok(result) => break result,
+                    Err(TryRecvError::Disconnected) => {
+                        break Err("Settings reader ended without a receipt.".into());
+                    }
+                    Err(TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await
+                    }
+                }
+            };
+            let Some(entity) = weak.upgrade() else {
+                return;
+            };
+            let updated = update_kit_window_content(host, &entity, cx, |view, window, cx| {
+                if !mount.is_current() || !mount.matches(&view.mount) || !view.reading {
+                    return;
+                }
+                let installed = view.root.upgrade().is_some_and(|root| {
+                    let root = root.read(cx);
+                    root.settings_editor.open
+                        && root
+                            .settings_actions
+                            .as_ref()
+                            .is_some_and(|current| current.entity_id() == cx.entity_id())
+                        && root
+                            .root_window
+                            .is_some_and(|current| current.window_id() == host.window_id())
+                });
+                if !installed {
+                    return;
+                }
+                view.reading = false;
+                match result {
+                    Ok(settings) => {
+                        let values = Values::from_settings(&settings);
+                        view.duration.update(cx, |input, cx| {
+                            input.set_value(values.duration.to_string(), window, cx)
+                        });
+                        view.baseline = Some(values.clone());
+                        view.draft = Some(values);
+                        view.status = None;
+                    }
+                    Err(error) => {
+                        view.status = Some(format!(
+                            "Could not read Actions and Feedback settings: {error}"
+                        ))
+                    }
+                }
+                view.clear_wait(cx);
+                cx.notify();
+            });
+            if updated.is_err() {
+                let _ = entity.update(cx, |view, cx| {
+                    if mount.is_current() {
+                        view.reading = false;
+                        view.status = Some("Settings window is unavailable.".into());
+                        view.clear_wait(cx);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy() || !self.mount.is_current() {
+            return;
+        }
+        let (Some(baseline), Some(mut desired)) = (self.baseline.clone(), self.draft.clone())
+        else {
+            return;
+        };
+        let text = self.duration.read(cx).value().to_string();
+        desired.duration = match resolve_duration(&text, baseline.duration, desired.toasts) {
+            Ok(duration) => duration,
+            Err(message) => {
+                self.status = Some(message.into());
+                cx.notify();
+                return;
+            }
+        };
+        let changes = baseline.changes(&desired);
+        if changes.is_empty() {
+            self.duration.update(cx, |input, cx| {
+                input.set_value(baseline.duration.to_string(), window, cx)
+            });
+            self.status = Some("No changes to save.".into());
+            cx.notify();
+            return;
+        }
+        let Some(root) = self.root.upgrade() else {
+            return;
+        };
+        let has_active_dialog = window.has_active_dialog(cx);
+        let state = root.read(cx);
+        if !state.settings_editor.open
+            || state.restart_admission.is_fenced()
+            || !window.is_window_active()
+            || has_active_dialog
+            || !state
+                .settings_actions
+                .as_ref()
+                .is_some_and(|view| view.entity_id() == cx.entity_id())
+            || state
+                .root_window
+                .is_none_or(|host| host.window_id() != window.window_handle().window_id())
+            || !state.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+            || state
+                .native_window
+                .is_none_or(|native| current_foreground_identity() != Some(native.identity))
+        {
+            return;
+        }
+        let Some(permit) = state.restart_admission.admit() else {
+            return;
+        };
+        let workers = state.settings_save_workers.clone();
+        let path = state.settings_path.clone();
+        let (receiver, token) = match workers.begin_scoped_preferences_save(path, changes.clone()) {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.status = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.pending = Some((token.clone(), changes.clone()));
+        self.status = None;
+        self.duration
+            .update(cx, |input, cx| input.set_readonly(true, cx));
+        let host = window.window_handle();
+        let mount = self.mount.clone();
+        cx.spawn(async move |weak, cx| {
+            let _permit = permit;
+            let result = loop {
+                match receiver.try_recv() {
+                    Ok(result) => break result,
+                    Err(TryRecvError::Disconnected) => {
+                        break Err(ScopedSettingsError::Store(
+                            "Settings writer ended without an acknowledgement.".into(),
+                        ));
+                    }
+                    Err(TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await
+                    }
+                }
+            };
+            let Some(entity) = weak.upgrade() else {
+                return;
+            };
+            let fallback = mount.clone();
+            let updated = update_kit_window_content(host, &entity, cx, |view, window, cx| {
+                if !mount.is_current()
+                    || !mount.matches(&view.mount)
+                    || view
+                        .pending
+                        .as_ref()
+                        .is_none_or(|(pending, _)| pending.id() != token.id())
+                {
+                    return;
+                }
+                let installed = view.root.upgrade().is_some_and(|root| {
+                    let root = root.read(cx);
+                    root.settings_editor.open
+                        && root
+                            .settings_actions
+                            .as_ref()
+                            .is_some_and(|current| current.entity_id() == cx.entity_id())
+                        && root
+                            .root_window
+                            .is_some_and(|current| current.window_id() == host.window_id())
+                        && !root.restart_admission.is_fenced()
+                });
+                if !installed {
+                    return;
+                }
+                workers.acknowledge_boolean_preference_save(token.id());
+                view.pending = None;
+                view.duration
+                    .update(cx, |input, cx| input.set_readonly(false, cx));
+                match result {
+                    Ok(ack) if ack_matches(&changes, &ack) => {
+                        view.baseline = Some(desired.clone());
+                        view.draft = Some(desired.clone());
+                        view.duration.update(cx, |input, cx| {
+                            input.set_value(desired.duration.to_string(), window, cx)
+                        });
+                        let _ = view.root.update(cx, |root, cx| {
+                            apply_if_acknowledged(
+                                &mut root.external_launch_preferences,
+                                &changes,
+                                &ack,
+                            );
+                            if root.restart_status.as_deref() == Some(WAIT) {
+                                root.restart_status = None;
+                            }
+                            cx.notify();
+                        });
+                        view.status = Some("Actions and Feedback settings saved.".into());
+                    }
+                    Ok(_) => {
+                        view.status = Some(
+                            "Settings acknowledgement did not match the requested values.".into(),
+                        )
+                    }
+                    Err(error) => {
+                        view.status = Some(format!("Could not save Actions and Feedback: {error}"))
+                    }
+                }
+                view.clear_wait(cx);
+                cx.notify();
+            });
+            if updated.is_err() {
+                let _ = entity.update(cx, |view, cx| {
+                    if fallback.is_current()
+                        && view
+                            .pending
+                            .as_ref()
+                            .is_some_and(|(pending, _)| pending.id() == token.id())
+                    {
+                        workers.acknowledge_boolean_preference_save(token.id());
+                        view.pending = None;
+                        view.duration
+                            .update(cx, |input, cx| input.set_readonly(false, cx));
+                        view.status = Some(
+                            "Settings window is unavailable; reopen Settings to reload.".into(),
+                        );
+                        view.clear_wait(cx);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+fn ack_matches(changes: &[Change], ack: &ScopedSettingsAcknowledgement) -> bool {
+    ack.values.len() == changes.len()
+        && changes.iter().all(|change| {
+            ack.values
+                .iter()
+                .any(|(field, value)| *field == change.field && *value == change.desired)
+        })
+}
+fn apply_if_acknowledged(
+    settings: &mut external_launch::Settings,
+    changes: &[Change],
+    ack: &ScopedSettingsAcknowledgement,
+) -> bool {
+    if !ack_matches(changes, ack) {
+        return false;
+    }
+    apply_acknowledged(settings, changes);
+    true
+}
+
+fn apply_acknowledged(settings: &mut external_launch::Settings, changes: &[Change]) {
+    for change in changes {
+        match (&change.field, &change.desired) {
+            (Field::ClearQueryAfterRun, Value::Bool(value)) => {
+                settings.clear_query_after_run = *value
+            }
+            (Field::HideAfterRun, Value::Bool(value)) => settings.hide_after_run = *value,
+            (Field::EnableToasts, Value::Bool(value)) => settings.enable_toasts = *value,
+            (Field::ToastDuration, Value::Float(value)) => settings.toast_duration = *value,
+            (Field::ShowInlineErrors, Value::Bool(value)) => settings.show_inline_errors = *value,
+            (Field::ShowErrorToasts, Value::Bool(value)) => settings.show_error_toasts = *value,
+            _ => {}
+        }
+    }
+}
+
+impl Render for ActionsSettings {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let busy = self.busy();
+        let mut panel = div()
+            .id("settings-actions-feedback")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Label::new("Actions and Feedback"));
+        if let Some(draft) = &self.draft {
+            for (field, label, checked) in [
+                (
+                    Field::ClearQueryAfterRun,
+                    "Clear query after run",
+                    draft.clear,
+                ),
+                (
+                    Field::HideAfterRun,
+                    "Hide window after running action",
+                    draft.hide,
+                ),
+                (
+                    Field::EnableToasts,
+                    "Enable toast notifications",
+                    draft.toasts,
+                ),
+                (Field::ShowInlineErrors, "Show inline errors", draft.inline),
+                (Field::ShowErrorToasts, "Show error toasts", draft.errors),
+            ] {
+                let weak = cx.entity().downgrade();
+                let mount = self.mount.clone();
+                panel = panel.child(
+                    Checkbox::new(SharedString::from(format!("actions-setting-{field:?}")))
+                        .checked(checked)
+                        .disabled(busy)
+                        .accessibility_label(label)
+                        .on_change(move |state, _, _, app| {
+                            let _ = weak.update(app, |view, cx| {
+                                if view.busy() || !mount.is_current() || !mount.matches(&view.mount)
+                                {
+                                    return;
+                                }
+                                if let Some(draft) = &mut view.draft {
+                                    let value = state == CheckboxState::Checked;
+                                    match field {
+                                        Field::ClearQueryAfterRun => draft.clear = value,
+                                        Field::HideAfterRun => draft.hide = value,
+                                        Field::EnableToasts => draft.toasts = value,
+                                        Field::ShowInlineErrors => draft.inline = value,
+                                        Field::ShowErrorToasts => draft.errors = value,
+                                        _ => {}
+                                    }
+                                }
+                                view.status = None;
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(CheckboxIndicator::new().checked(checked))
+                                .child(Label::new(label)),
+                        ),
+                );
+            }
+            if draft.toasts {
+                panel = panel
+                    .child(Label::new("Toast duration (seconds)"))
+                    .child(Input::new(&self.duration).aria_label("Toast duration in seconds"));
+            }
+            panel = panel.child(
+                Button::new("settings-actions-save")
+                    .label(if self.pending.is_some() {
+                        "Saving…"
+                    } else {
+                        "Save Actions and Feedback"
+                    })
+                    .disabled(busy)
+                    .on_click(cx.listener(|view, _, window, cx| view.save(window, cx))),
+            );
+        } else if self.reading {
+            panel = panel.child(Label::new("Reading Actions and Feedback…"));
+        }
+        if let Some(status) = &self.status {
+            panel = panel.child(Label::new(status.clone()).id("settings-actions-status"));
+        }
+        panel
+    }
+}
+impl RootWindow {
+    pub(super) fn open_actions_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_actions.is_some() {
+            return;
+        }
+        let Some(permit) = self.restart_admission.admit() else {
+            return;
+        };
+        let root = cx.entity().downgrade();
+        let view = cx.new(|cx| ActionsSettings::new(root, window, cx));
+        self.settings_actions = Some(view.clone());
+        let path = self.settings_path.clone();
+        let workers = self.settings_save_workers.clone();
+        view.update(cx, |view, cx| view.read(path, workers, permit, window, cx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Values, ack_matches, apply_if_acknowledged, resolve_duration};
+    use multi_launcher::settings::{
+        ScopedSetting as Field, ScopedSettingChange as Change, ScopedSettingValue as Value,
+        ScopedSettingsAcknowledgement,
+    };
+
+    #[test]
+    fn live_actions_change_only_after_exact_acknowledgement() {
+        let mut settings = super::external_launch::Settings {
+            clear_query_after_run: false,
+            hide_after_run: false,
+            history_limit: 10,
+            enable_toasts: true,
+            show_error_toasts: true,
+            show_inline_errors: true,
+            toast_duration: 2.0,
+            clipboard_modify_hide_after_apply: true,
+        };
+        let changes = vec![Change {
+            field: Field::HideAfterRun,
+            baseline: Value::Bool(false),
+            desired: Value::Bool(true),
+        }];
+        let wrong = ScopedSettingsAcknowledgement {
+            values: vec![(Field::HideAfterRun, Value::Bool(false))],
+            persisted: true,
+        };
+        assert!(!ack_matches(&changes, &wrong));
+        assert!(!apply_if_acknowledged(&mut settings, &changes, &wrong));
+        assert!(!settings.hide_after_run);
+        let right = ScopedSettingsAcknowledgement {
+            values: vec![(Field::HideAfterRun, Value::Bool(true))],
+            persisted: true,
+        };
+        assert!(ack_matches(&changes, &right));
+        assert!(apply_if_acknowledged(&mut settings, &changes, &right));
+        assert!(settings.hide_after_run);
+        assert!(settings.enable_toasts);
+    }
+
+    #[test]
+    fn hidden_invalid_duration_preserves_baseline_but_valid_edit_survives() {
+        assert_eq!(resolve_duration("invalid", 2.0, false), Ok(2.0));
+        assert_eq!(resolve_duration("3.25", 2.0, false), Ok(3.25));
+        assert!(resolve_duration("invalid", 2.0, true).is_err());
+        assert_eq!(resolve_duration("7", 7.0, true), Ok(7.0));
+        assert_eq!(resolve_duration("0.10", 0.1, true), Ok(0.1));
+    }
+
+    #[test]
+    fn unchanged_actions_produce_no_patch() {
+        let settings = multi_launcher::settings::Settings::default();
+        let baseline = Values::from_settings(&settings);
+        assert!(baseline.changes(&baseline).is_empty());
+    }
+}

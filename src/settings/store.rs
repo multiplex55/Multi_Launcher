@@ -1,3 +1,7 @@
+#[path = "scoped_preferences.rs"]
+mod scoped_preferences;
+pub use scoped_preferences::{ScopedSetting, ScopedSettingChange, ScopedSettingValue, ScopedSettingsAcknowledgement, ScopedSettingsError};
+
 use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use anyhow::Context;

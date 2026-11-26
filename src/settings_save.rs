@@ -884,6 +884,50 @@ impl SettingsSaveWorkerRegistry {
         Ok(receiver)
     }
 
+    fn reserve_preference_token(&self) -> Result<SettingsBooleanSaveToken, String> {
+        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting { return Err("launcher is shutting down".into()); }
+        let id = state.boolean_preference_next_id.checked_add(1)
+            .ok_or_else(|| "Settings save request identity is exhausted".to_owned())?;
+        state.boolean_preference_next_id = id;
+        let token = SettingsBooleanSaveToken::new(id);
+        state.boolean_preference_pending.insert(id, token.clone());
+        Ok(token)
+    }
+
+    fn complete_preference_token(&self, request_id: u64, failure: Option<String>) {
+        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.boolean_preference_pending.remove(&request_id);
+        if let Some(failure) = failure { state.boolean_preference_failures.insert(request_id, failure); }
+    }
+
+    /// Read the current canonical Settings for a scoped editor on the registered worker.
+    pub fn begin_scoped_preferences_read(&self, settings_path: String) -> Result<Receiver<Result<Settings, String>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        self.spawn(move || { let _ = sender.send(Settings::read_current(&settings_path).map_err(|error| error.to_string())); })
+            .map_err(|error| format!("could not start the Settings baseline reader: {error}"))?;
+        Ok(receiver)
+    }
+
+    /// Register a cancellable multi-field Settings transaction under the same shutdown owner.
+    pub fn begin_scoped_preferences_save(&self, settings_path: String, changes: Vec<crate::settings::ScopedSettingChange>)
+        -> Result<(Receiver<Result<crate::settings::ScopedSettingsAcknowledgement, crate::settings::ScopedSettingsError>>, SettingsBooleanSaveToken), String> {
+        let token = self.reserve_preference_token()?;
+        let (sender, receiver) = mpsc::channel();
+        let registry = self.clone();
+        let worker_token = token.clone();
+        if let Err(error) = self.spawn(move || {
+            let result = Settings::save_scoped_preferences_cancellable(std::path::Path::new(&settings_path), &changes, &worker_token);
+            let failure = result.as_ref().err().filter(|error| !matches!(error, crate::settings::ScopedSettingsError::Cancelled)).map(ToString::to_string);
+            registry.complete_preference_token(worker_token.id(), failure);
+            let _ = sender.send(result);
+        }) {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).boolean_preference_pending.remove(&token.id());
+            return Err(format!("could not start the Settings preference writer: {error}"));
+        }
+        Ok((receiver, token))
+    }
+
     /// Read a Boolean preference on a registered Settings worker.
     /// The caller owns the typed receipt and keeps any admission it needs
     /// until this receiver settles.
@@ -925,23 +969,7 @@ impl SettingsSaveWorkerRegistry {
         ),
         String,
     > {
-        let token = {
-            let mut state = self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !state.accepting {
-                return Err("launcher is shutting down".to_owned());
-            }
-            let id = state
-                .boolean_preference_next_id
-                .checked_add(1)
-                .ok_or_else(|| "Settings save request identity is exhausted".to_owned())?;
-            state.boolean_preference_next_id = id;
-            let token = SettingsBooleanSaveToken::new(id);
-            state.boolean_preference_pending.insert(id, token.clone());
-            token
-        };
+        let token = self.reserve_preference_token()?;
         let (sender, receiver) = mpsc::channel();
         let registry = self.clone();
         let worker_token = token.clone();
@@ -972,18 +1000,10 @@ impl SettingsSaveWorkerRegistry {
             crate::settings::SettingsBooleanSaveError,
         >,
     ) {
-        let mut state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.boolean_preference_pending.remove(&request_id);
-        if let Err(error) = result
-            && !matches!(error, crate::settings::SettingsBooleanSaveError::Cancelled)
-        {
-            state
-                .boolean_preference_failures
-                .insert(request_id, error.to_string());
-        }
+        let failure = result.as_ref().err()
+            .filter(|error| !matches!(error, crate::settings::SettingsBooleanSaveError::Cancelled))
+            .map(ToString::to_string);
+        self.complete_preference_token(request_id, failure);
     }
 
     pub fn acknowledge_boolean_preference_save(&self, request_id: u64) {
