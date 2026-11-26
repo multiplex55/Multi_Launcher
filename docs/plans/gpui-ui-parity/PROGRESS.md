@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Docked Clipboard History supports checked Save, full Copy and exact Remove confirmation. All 15 grouped cases passed. Matched Windows replay remains pending. Remembered Dock and Pop Out follow. [Checked effects checkpoint](CHECKPOINTS.md#g13-checked-clipboard-history-save-copy-and-remove)
+Clipboard History uses the checked shared Dock and Pop Out host, retaining the draft and review across moves. All 15 focused host and effects tests passed. Matched Windows, pins, docked sizing and full Jump remain open. Clipboard Modify is next. [Clipboard History host checkpoint](CHECKPOINTS.md#g13-retained-clipboard-history-host)
+
+Clipboard History supports checked Save, full Copy and exact Remove confirmation. All 15 grouped cases passed. [Checked effects checkpoint](CHECKPOINTS.md#g13-checked-clipboard-history-save-copy-and-remove)
 
 Bare `cb` opens docked Clipboard History with ordered selectable rows, full multiline Edit and Cancel through the canonical disk loader. Focused cases passed in the checked effects batch. [Clipboard History checkpoint](CHECKPOINTS.md#g13-clipboard-history-browse-edit-and-cancel)
 

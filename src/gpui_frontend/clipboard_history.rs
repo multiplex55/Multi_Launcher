@@ -19,6 +19,15 @@ pub(super) fn current_provider(
         && multi_launcher::settings::provider_search_capability_enabled(caps, "clipboard")
         && multi_launcher::plugins::clipboard::bare_history_opener(query).as_ref() == Some(action)
 }
+fn close_key(key: &str, modifiers: Modifiers) -> bool {
+    (key == "escape" && modifiers == Modifiers::default())
+        || (key == "w"
+            && modifiers
+                == Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                })
+}
 fn preview(text: &str) -> String {
     let mut chars = text.chars();
     let mut result: String = chars
@@ -56,7 +65,7 @@ fn same_unreadable_snapshot(
 ) -> bool {
     old_version == version && Arc::ptr_eq(old_rows, current_rows) && old_rows.as_slice() == loaded
 }
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct EditReceipt {
     version: u64,
     generation: u64,
@@ -97,11 +106,23 @@ impl Effect {
     }
 }
 pub(super) const WAIT: &str = "Wait for Clipboard History to finish its operation.";
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RestartDraft {
+    edit: Option<(EditReceipt, String)>,
+    decision: Option<EditReceipt>,
+}
 pub(super) struct ClipboardHistory {
     pub open: bool,
+    pub(super) popout: bool,
+    pub(super) rehosting: bool,
+    pub(super) presentation_error: Option<String>,
+    pub(super) geometry_error: Option<String>,
+    host: AnyWindowHandle,
+    native: Option<NativeWindow>,
+    pub(super) activation_revision: Arc<AtomicU64>,
     owner: utility_mount::MountOwner,
     receipt: utility_mount::MountReceipt,
-    root: WeakEntity<RootWindow>,
+    pub(super) root: WeakEntity<RootWindow>,
     path: PathBuf,
     focus: FocusHandle,
     decision_focus: FocusHandle,
@@ -121,7 +142,7 @@ pub(super) struct ClipboardHistory {
     instance: u64,
     busy: bool,
     effect_epoch: Arc<AtomicU64>,
-    admission: Arc<RestartAdmission>,
+    pub(super) admission: Arc<RestartAdmission>,
     visibility: RootVisibility,
 }
 impl ClipboardHistory {
@@ -132,11 +153,20 @@ impl ClipboardHistory {
         path: PathBuf,
         admission: Arc<RestartAdmission>,
         visibility: RootVisibility,
+        host: AnyWindowHandle,
+        native: Option<NativeWindow>,
     ) -> Self {
         let owner = utility_mount::MountOwner::default();
         let receipt = owner.attach();
         Self {
             open: false,
+            popout: false,
+            rehosting: false,
+            presentation_error: None,
+            geometry_error: None,
+            host,
+            native,
+            activation_revision: Arc::new(AtomicU64::new(0)),
             owner,
             receipt,
             root,
@@ -163,6 +193,126 @@ impl ClipboardHistory {
             visibility,
         }
     }
+    pub(super) fn mount_receipt(&self) -> utility_mount::MountReceipt {
+        self.receipt.clone()
+    }
+    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool {
+        self.open
+            && self.popout == popout
+            && self.receipt.is_current()
+            && self.host.window_id() == id
+    }
+    pub(super) fn replace_mount(
+        &mut self,
+        host: AnyWindowHandle,
+        native: Option<NativeWindow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let draft = self
+            .editor
+            .as_ref()
+            .map(|editor| editor.read(cx).value().to_string());
+        let pending = self.loading;
+        if pending && self.preserve_unreadable.is_none() {
+            self.preserve_unreadable = self.version.map(|version| (version, self.rows.clone()));
+        }
+        self.receipt = self.owner.attach();
+        self.host = host;
+        self.native = native;
+        self.focus = cx.focus_handle();
+        self.decision_focus = cx.focus_handle();
+        self.save_focus = cx.focus_handle();
+        self.copy_focus = cx.focus_handle();
+        let editor = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(6, 14)
+                .placeholder("Clipboard entry")
+        });
+        if let Some(draft) = draft {
+            editor.update(cx, |input, cx| input.set_value(draft, window, cx));
+        }
+        self.editor = Some(editor);
+        self.loading = false;
+        if pending {
+            self.version = None;
+            self.refresh(cx);
+        }
+    }
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
+    }
+    pub(super) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting {
+            self.focus.focus(window, cx);
+            return;
+        }
+        if self.decision.is_some() {
+            self.decision_focus.focus(window, cx);
+        } else if self.edit.is_some() {
+            if let Some(editor) = &self.editor {
+                editor.focus_handle(cx).focus(window, cx);
+            }
+        } else {
+            self.focus.focus(window, cx);
+        }
+    }
+    pub(super) fn finish_dock_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.is_focused(window)
+            && self
+                .native
+                .is_some_and(|native| current_foreground_identity() == Some(native.identity))
+        {
+            self.focus_editor(window, cx);
+        }
+    }
+    pub(super) fn finish_popout_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.is_focused(window)
+            && window.is_window_active()
+            && self
+                .native
+                .is_some_and(|native| current_foreground_identity() == Some(native.identity))
+        {
+            self.focus_editor(window, cx);
+        }
+    }
+    pub(super) fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
+        if !self.open
+            || self.busy
+            || self.rehosting
+            || self.admission.is_fenced()
+            || self.popout == popout
+        {
+            return;
+        }
+        let source = self.receipt.clone();
+        let gesture = self.native.map(|source| hash_dock::Gesture {
+            source,
+            foreground_authorized: native_window_is_valid(source)
+                && current_foreground_identity() == Some(source.identity),
+            visibility_revision: self.visibility.request_revision.load(Ordering::Acquire),
+        });
+        self.rehosting = true;
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        let root = self.root.clone();
+        cx.spawn(async move |_, cx| {
+            let _ = root.update(cx, |root, cx| {
+                root.start_clipboard_rehost(popout, gesture, source, cx)
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    pub(super) fn shutdown(&mut self) {
+        self.open = false;
+        self.owner.retire();
+        self.effect_epoch.fetch_add(1, Ordering::AcqRel);
+        self.activation_revision.fetch_add(1, Ordering::AcqRel);
+        self.editor = None;
+        self.edit = None;
+        self.decision = None;
+        self.loading = false;
+    }
     fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open {
             if self.diagnostic.is_some() && !self.loading && !self.busy {
@@ -180,12 +330,16 @@ impl ClipboardHistory {
             }
             return;
         }
-        self.receipt = self.owner.attach();
-        self.editor = Some(cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(6, 14)
-                .placeholder("Clipboard entry")
-        }));
+        if !self.receipt.is_current() {
+            self.receipt = self.owner.attach();
+        }
+        if self.editor.is_none() {
+            self.editor = Some(cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(6, 14)
+                    .placeholder("Clipboard entry")
+            }));
+        }
         self.open = true;
         self.edit = None;
         self.decision = None;
@@ -249,6 +403,35 @@ impl ClipboardHistory {
         })
         .detach();
     }
+    pub(super) fn restart_draft(&self, cx: &App) -> Option<RestartDraft> {
+        if !self.open {
+            return None;
+        }
+        let edit = self.edit.as_ref().and_then(|edit| {
+            self.editor
+                .as_ref()
+                .map(|editor| (edit.clone(), editor.read(cx).value().to_string()))
+        });
+        if edit.is_none() && self.decision.is_none() {
+            None
+        } else {
+            Some(RestartDraft {
+                edit,
+                decision: self.decision.clone(),
+            })
+        }
+    }
+    fn current_event(&self, receipt: &utility_mount::MountReceipt, window: &Window) -> bool {
+        self.open
+            && !self.rehosting
+            && receipt.is_current()
+            && receipt.matches(&self.receipt)
+            && self.host.window_id() == window.window_handle().window_id()
+            && window.is_window_active()
+            && self
+                .native
+                .is_some_and(|native| current_foreground_identity() == Some(native.identity))
+    }
     pub(super) fn busy(&self) -> bool {
         self.busy
     }
@@ -266,6 +449,7 @@ impl ClipboardHistory {
     fn effect(&mut self, effect: Effect, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx)
             || self.busy
+            || self.rehosting
             || !self.open
             || !self.receipt.is_current()
             || self.admission.is_fenced()
@@ -294,19 +478,12 @@ impl ClipboardHistory {
         }
         let is_copy = matches!(&effect, Effect::Copy(_));
         let host = window.window_handle();
-        let native = self
-            .root
-            .upgrade()
-            .and_then(|root| root.read(cx).native_window);
+        let native = self.native;
         let Some(native) = native else {
             return;
         };
         if !window.is_window_active()
-            || self
-                .root
-                .upgrade()
-                .and_then(|root| root.read(cx).root_window)
-                .is_none_or(|host| host.window_id() != window.window_handle().window_id())
+            || self.host.window_id() != window.window_handle().window_id()
             || current_foreground_identity() != Some(native.identity)
         {
             return;
@@ -321,6 +498,7 @@ impl ClipboardHistory {
         let epoch = self.effect_epoch.clone();
         let expected_epoch = epoch.load(Ordering::Acquire);
         let visibility = self.visibility.clone();
+        let popout = self.popout;
         let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
         let admission = self.admission.clone();
         let path = self.path.clone();
@@ -335,7 +513,7 @@ impl ClipboardHistory {
                         &visibility,
                         visibility_revision,
                         Some(native),
-                        false,
+                        popout,
                     )
                     && current_foreground_identity() == Some(native.identity)
             };
@@ -448,16 +626,23 @@ impl ClipboardHistory {
         cx.notify();
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.busy {
+        if !self.open || self.busy || self.rehosting {
             return;
         }
-        self.effect_epoch.fetch_add(1, Ordering::AcqRel);
-        self.open = false;
-        self.owner.retire();
-        self.edit = None;
-        self.editor = None;
-        self.loading = false;
+        let popout = self.popout;
+        if popout {
+            let _ = self.root.update(cx, |root, cx| {
+                root.drain_clipboard_native_geometry(cx, true)
+            });
+        }
+        self.shutdown();
+        if popout {
+            window.remove_window();
+            cx.notify();
+            return;
+        }
         let _ = self.root.update(cx, |root, cx| {
+            panel_stack::retire(&mut root.panel_stack, Panel::ClipboardDialog);
             root.query.focus_handle(cx).focus(window, cx);
             cx.notify();
         });
@@ -473,15 +658,25 @@ impl Render for ClipboardHistory {
         let close = receipt.clone();
         let cancel = receipt.clone();
         let edit_instance = self.edit.as_ref().map(|edit| edit.instance);
+        let key_mount = receipt.clone();
+        let rehost_mount = receipt.clone();
         let mut panel = div()
             .id("clipboard-history")
             .track_focus(&self.focus)
-            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                if window.default_prevented() {
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if !view.current_event(&key_mount, window)
+                    || window.default_prevented()
+                    || window.has_active_dialog(cx)
+                    || !window.is_window_active()
+                    || !view.native.is_some_and(|native| {
+                        current_foreground_identity() == Some(native.identity)
+                    })
+                {
                     return;
                 }
                 if view.decision.is_some()
                     && !view.busy
+                    && !view.rehosting
                     && event.keystroke.key == "escape"
                     && event.keystroke.modifiers == Modifiers::default()
                     && (view.decision_focus.is_focused(window)
@@ -496,6 +691,25 @@ impl Render for ClipboardHistory {
                         view.version = None;
                         view.refresh(cx);
                         cx.notify();
+                    }
+                    return;
+                }
+                let contexts = window.context_stack();
+                if close_key(&event.keystroke.key, event.keystroke.modifiers)
+                    && view.contains_focus(window, cx)
+                    && window.is_window_active()
+                    && view.native.is_some_and(|native| {
+                        current_foreground_identity() == Some(native.identity)
+                    })
+                    && !window.has_active_dialog(cx)
+                    && !context_stack_has_primary(&contexts, "PopupMenu")
+                    && !context_stack_has_primary(&contexts, "Dialog")
+                    && !context_stack_has_primary(&contexts, "AlertDialog")
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    if !event.is_held {
+                        view.close(window, cx);
                     }
                     return;
                 }
@@ -551,7 +765,7 @@ impl Render for ClipboardHistory {
             panel = panel
                 .child(
                     Textarea::new(editor)
-                        .readonly(self.busy)
+                        .readonly(self.busy || self.rehosting)
                         .aria_label("Edit clipboard entry"),
                 )
                 .child(
@@ -561,8 +775,10 @@ impl Render for ClipboardHistory {
                         .disabled(self.busy || !self.valid(edit))
                         .on_click({
                             let edit = edit.clone();
+                            let save_mount = receipt.clone();
                             cx.listener(move |view, _, window, cx| {
-                                if view.busy
+                                if !view.current_event(&save_mount, window)
+                                    || view.busy
                                     || !view
                                         .edit
                                         .as_ref()
@@ -586,11 +802,10 @@ impl Render for ClipboardHistory {
                 .child(
                     Button::new("clipboard-edit-cancel")
                         .label("Cancel")
-                        .disabled(self.busy)
+                        .disabled(self.busy || self.rehosting)
                         .on_click(cx.listener(move |view, _, window, cx| {
-                            if cancel.is_current()
-                                && cancel.matches(&view.receipt)
-                                && view.open
+                            if view.current_event(&cancel, window)
+                                && !window.has_active_dialog(cx)
                                 && edit_instance.is_some()
                                 && view.edit.as_ref().map(|edit| edit.instance) == edit_instance
                                 && !view.busy
@@ -607,51 +822,55 @@ impl Render for ClipboardHistory {
         } else if let Some(decision) = &self.decision {
             let confirm = decision.clone();
             let cancel = decision.clone();
-            panel = panel.child(
-                div()
-                    .track_focus(&self.decision_focus)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(Label::new(format!(
-                        "Remove this entry? {}",
-                        preview(&decision.rows[decision.index])
-                    )))
-                    .child(
-                        Button::new("clipboard-remove-confirm")
-                            .label("Confirm remove")
-                            .disabled(self.busy || !self.valid(decision))
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                if view
-                                    .decision
-                                    .as_ref()
-                                    .is_some_and(|current| current.instance == confirm.instance)
-                                {
-                                    view.effect(Effect::Remove(confirm.clone()), window, cx);
-                                }
-                            })),
-                    )
-                    .child(
-                        Button::new("clipboard-remove-cancel")
-                            .label("Cancel")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                if !view.busy
-                                    && view
-                                        .decision
-                                        .as_ref()
-                                        .is_some_and(|current| current.instance == cancel.instance)
-                                {
-                                    view.decision = None;
-                                    view.instance = view.instance.wrapping_add(1);
-                                    view.focus.focus(window, cx);
-                                    view.version = None;
-                                    view.refresh(cx);
-                                    cx.notify();
-                                }
-                            })),
-                    ),
-            );
+            let confirm_mount = receipt.clone();
+            let cancel_mount = receipt.clone();
+            panel =
+                panel.child(
+                    div()
+                        .track_focus(&self.decision_focus)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(Label::new(format!(
+                            "Remove this entry? {}",
+                            preview(&decision.rows[decision.index])
+                        )))
+                        .child(
+                            Button::new("clipboard-remove-confirm")
+                                .label("Confirm remove")
+                                .disabled(self.busy || !self.valid(decision))
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if view.current_event(&confirm_mount, window)
+                                        && view.decision.as_ref().is_some_and(|current| {
+                                            current.instance == confirm.instance
+                                        })
+                                    {
+                                        view.effect(Effect::Remove(confirm.clone()), window, cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("clipboard-remove-cancel")
+                                .label("Cancel")
+                                .disabled(self.busy || self.rehosting)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if view.current_event(&cancel_mount, window)
+                                        && !window.has_active_dialog(cx)
+                                        && !view.busy
+                                        && view.decision.as_ref().is_some_and(|current| {
+                                            current.instance == cancel.instance
+                                        })
+                                    {
+                                        view.decision = None;
+                                        view.instance = view.instance.wrapping_add(1);
+                                        view.focus.focus(window, cx);
+                                        view.version = None;
+                                        view.refresh(cx);
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                );
         } else {
             let rows = self.rows.clone();
             let generation = self.generation;
@@ -680,6 +899,7 @@ impl Render for ClipboardHistory {
                                       receipt: &utility_mount::MountReceipt,
                                       expected: &Arc<Vec<String>>| {
                                     view.open
+                                        && !view.rehosting
                                         && receipt.is_current()
                                         && receipt.matches(&view.receipt)
                                         && view.edit.is_none()
@@ -708,13 +928,16 @@ impl Render for ClipboardHistory {
                                         .selected(selected == Some((generation, index)))
                                         .disabled(!ready)
                                         .on_click(
-                                            move |_, _, app| {
+                                            move |_, window, app| {
                                                 let _ = owner_select.update(app, |view, cx| {
-                                                    if row_live(
-                                                        view,
-                                                        &select_receipt,
-                                                        &selected_rows,
-                                                    ) && view.rows.get(index).is_some()
+                                                    if view.current_event(&select_receipt, window)
+                                                        && !window.has_active_dialog(cx)
+                                                        && row_live(
+                                                            view,
+                                                            &select_receipt,
+                                                            &selected_rows,
+                                                        )
+                                                        && view.rows.get(index).is_some()
                                                     {
                                                         view.selected = Some((generation, index));
                                                         cx.notify();
@@ -733,11 +956,15 @@ impl Render for ClipboardHistory {
                                             move |_, window, app| {
                                                 let _ =
                                                     owner_edit.update(app, |view, cx| {
-                                                        if !row_live(
-                                                            view,
-                                                            &edit_receipt,
-                                                            &edit_rows,
-                                                        ) {
+                                                        if !view
+                                                            .current_event(&edit_receipt, window)
+                                                            || window.has_active_dialog(cx)
+                                                            || !row_live(
+                                                                view,
+                                                                &edit_receipt,
+                                                                &edit_rows,
+                                                            )
+                                                        {
                                                             return;
                                                         }
                                                         let (
@@ -791,6 +1018,8 @@ impl Render for ClipboardHistory {
                     };
                     let copy = item.clone();
                     let remove = item.clone();
+                    let copy_mount = receipt.clone();
+                    let remove_mount = receipt.clone();
                     panel = panel.child(
                         div()
                             .flex()
@@ -801,7 +1030,9 @@ impl Render for ClipboardHistory {
                                     .track_focus(&self.copy_focus)
                                     .disabled(!ready)
                                     .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.effect(Effect::Copy(copy.clone()), window, cx);
+                                        if view.current_event(&copy_mount, window) {
+                                            view.effect(Effect::Copy(copy.clone()), window, cx);
+                                        }
                                     })),
                             )
                             .child(
@@ -809,8 +1040,10 @@ impl Render for ClipboardHistory {
                                     .label("Remove…")
                                     .disabled(!ready)
                                     .on_click(cx.listener(move |view, _, window, cx| {
-                                        if !window.has_active_dialog(cx)
+                                        if view.current_event(&remove_mount, window)
+                                            && !window.has_active_dialog(cx)
                                             && !view.busy
+                                            && !view.rehosting
                                             && view.valid(&remove)
                                             && view.selected
                                                 == Some((remove.generation, remove.index))
@@ -831,20 +1064,97 @@ impl Render for ClipboardHistory {
             }
             panel = panel.child(
                 Button::new("clipboard-history-close")
-                    .disabled(self.busy)
+                    .disabled(self.busy || self.rehosting)
                     .label("Close")
                     .on_click(cx.listener(move |view, _, window, cx| {
-                        if close.is_current() && close.matches(&view.receipt) {
+                        if view.current_event(&close, window) {
                             view.close(window, cx);
                         }
                     })),
             );
+        }
+        panel = panel.child(
+            Button::new("clipboard-rehost")
+                .label(if self.popout { "Dock" } else { "Pop Out" })
+                .disabled(self.busy || self.rehosting)
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    if view.current_event(&rehost_mount, window)
+                        && !window.has_active_dialog(cx)
+                        && window.is_window_active()
+                        && view.native.is_some_and(|native| {
+                            current_foreground_identity() == Some(native.identity)
+                        })
+                    {
+                        view.request_rehost(!view.popout, cx);
+                    }
+                })),
+        );
+        if let Some(error) = &self.presentation_error {
+            panel = panel.child(Label::new(error.clone()));
+        }
+        if let Some(error) = &self.geometry_error {
+            panel = panel.child(Label::new(error.clone()));
         }
         panel
     }
 }
 impl RootWindow {
     pub(super) fn open_clipboard_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.restart_admission.is_fenced()
+            || self
+                .clipboard_history
+                .as_ref()
+                .is_some_and(|view| view.read(cx).rehosting)
+        {
+            return;
+        }
+        if let (Some(popup), Some(view), Some(root_native)) = (
+            &self.clipboard_popup,
+            &self.clipboard_history,
+            self.native_window,
+        ) {
+            let Some(native) = popup.native else {
+                return;
+            };
+            if current_foreground_identity() != Some(root_native.identity) {
+                return;
+            }
+            let Some(permit) = self.restart_admission.admit() else {
+                return;
+            };
+            let popup_window = popup.window;
+            let view = view.clone();
+            let receipt = view.read(cx).mount_receipt();
+            let guard = view.read(cx).activation_revision.clone();
+            let revision = guard.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+            let worker = guard.clone();
+            cx.spawn(async move |_, cx| {
+                let _permit = permit;
+                cx.background_executor()
+                    .spawn(async move {
+                        activate_for_secondary_window(
+                            &worker,
+                            revision,
+                            native,
+                            Some(root_native.identity),
+                        );
+                    })
+                    .await;
+                if !receipt.is_current()
+                    || guard.load(Ordering::Acquire) != revision
+                    || current_foreground_identity() != Some(native.identity)
+                {
+                    return;
+                }
+                let _ = update_kit_window_content(popup_window, &view, cx, |view, window, cx| {
+                    if receipt.is_current() && view.popout && !view.rehosting {
+                        view.open(window, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
         let path = {
             #[cfg(windows)]
             {
@@ -857,15 +1167,43 @@ impl RootWindow {
                 PathBuf::from(multi_launcher::plugins::clipboard::CLIPBOARD_FILE)
             }
         };
+        let Some(host) = self.root_window else {
+            return;
+        };
+        let native = self.native_window;
         let root = cx.entity().downgrade();
         let admission = self.restart_admission.clone();
         let visibility = self.root_visibility.clone();
         let view = self.clipboard_history.clone().unwrap_or_else(|| {
-            cx.new(|cx| ClipboardHistory::new(window, cx, root, path, admission, visibility))
+            cx.new(|cx| {
+                ClipboardHistory::new(window, cx, root, path, admission, visibility, host, native)
+            })
         });
-        view.update(cx, |view, cx| view.open(window, cx));
-        self.clipboard_history = Some(view);
-        let host = window.window_handle().window_id();
+        let was_open = view.read(cx).open;
+        view.update(cx, |view, cx| {
+            if !view.open && !view.is_mounted_in(host.window_id(), false) {
+                view.popout = false;
+                view.replace_mount(host, native, window, cx);
+            }
+            view.open(window, cx);
+        });
+        self.clipboard_history = Some(view.clone());
+        panel_stack::ensure(&mut self.panel_stack, Panel::ClipboardDialog);
+        self.scroll_to_clipboard(window.window_handle().window_id(), cx);
+        if !was_open {
+            let popout = multi_launcher::settings::UtilityToolKey::parse("clipboard-history")
+                .ok()
+                .is_some_and(|key| {
+                    self.utility_presentations.preference(key)
+                        == Some(multi_launcher::settings::RememberedPresentation::Popout)
+                });
+            if popout {
+                view.update(cx, |view, cx| view.request_rehost(true, cx));
+            }
+        }
+        cx.notify();
+    }
+    pub(super) fn scroll_to_clipboard(&self, host: WindowId, cx: &App) {
         let mut index = self.file_search_scroll_item();
         index += usize::from(
             self.file_search
@@ -906,14 +1244,86 @@ impl RootWindow {
                 .is_some_and(|view| view.read(cx).is_mounted_in(host, false)),
         );
         self.root_scroll.scroll_to_top_of_item(index);
-        cx.notify();
     }
 }
 #[cfg(test)]
 mod tests {
-    use super::{EditReceipt, current_provider, load, preview, same_unreadable_snapshot};
+    use super::super::Modifiers;
+    use super::super::utility_mount::MountOwner;
+    use super::{
+        EditReceipt, RestartDraft, close_key, current_provider, load, preview,
+        same_unreadable_snapshot,
+    };
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    #[test]
+    fn restart_snapshot_detects_exact_draft_and_review_changes() {
+        let rows = Arc::new(vec!["duplicate".to_owned(), "duplicate".to_owned()]);
+        let entry = EditReceipt {
+            version: 3,
+            generation: 5,
+            index: 1,
+            rows,
+            instance: 2,
+        };
+        let edit = RestartDraft {
+            edit: Some((entry.clone(), "  猫\ntext ".into())),
+            decision: None,
+        };
+        let mut changed = edit.clone();
+        changed.edit.as_mut().unwrap().1.push('!');
+        assert_ne!(edit, changed);
+        let decision = RestartDraft {
+            edit: None,
+            decision: Some(entry),
+        };
+        assert_ne!(edit, decision);
+        let mut changed = decision.clone();
+        changed.decision.as_mut().unwrap().index = 0;
+        assert_ne!(decision, changed);
+    }
+    #[test]
+    fn close_keys_are_exact_and_do_not_capture_modified_escape() {
+        assert!(close_key("escape", Modifiers::default()));
+        assert!(close_key(
+            "w",
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            }
+        ));
+        assert!(!close_key(
+            "escape",
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            }
+        ));
+        assert!(!close_key("w", Modifiers::default()));
+    }
+    #[test]
+    fn rehost_retires_old_mount_without_changing_reviewed_history() {
+        let owner = MountOwner::default();
+        let old = owner.attach();
+        let rows = Arc::new(vec![
+            "same".to_owned(),
+            "other".to_owned(),
+            "same".to_owned(),
+        ]);
+        let review = EditReceipt {
+            version: 4,
+            generation: 9,
+            index: 2,
+            rows: rows.clone(),
+            instance: 7,
+        };
+        let new = owner.attach();
+        assert!(!old.is_current());
+        assert!(new.is_current());
+        assert!(!old.matches(&new));
+        assert!(review.current(Some(4), 4, 9, &rows, false, false));
+        assert_eq!(review.rows[review.index], "same");
+    }
     #[test]
     fn unreadable_retry_preserves_only_exact_unchanged_publication() {
         let rows = Arc::new(vec!["a".to_owned(), "a".to_owned()]);

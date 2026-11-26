@@ -327,6 +327,104 @@ impl HostedUtility for super::regex_tester::RegexWorkspace {
         false
     }
 }
+impl HostedUtility for super::clipboard_history::ClipboardHistory {
+    const KIND: utility_mount::UtilityKind = utility_mount::UtilityKind::ClipboardHistory;
+    const PANEL: Panel = Panel::ClipboardDialog;
+    const KEY: &'static str = "clipboard-history";
+    const TITLE: &'static str = "Clipboard History";
+    const INITIAL: (f32, f32) = (360.0, 240.0);
+    const MINIMUM: (f32, f32) = (100.0, 100.0);
+    fn workspace(root: &RootWindow) -> Option<Entity<Self>> {
+        root.clipboard_history.clone()
+    }
+    fn popup(root: &RootWindow) -> Option<&UtilityPopup> {
+        root.clipboard_popup.as_ref()
+    }
+    fn popup_mut(root: &mut RootWindow) -> &mut Option<UtilityPopup> {
+        &mut root.clipboard_popup
+    }
+    fn retiring(root: &mut RootWindow) -> &mut Vec<RetiringHashWindow> {
+        &mut root.clipboard_retiring
+    }
+    fn drain(root: &mut RootWindow, cx: &mut Context<RootWindow>, detach: bool) {
+        root.drain_clipboard_native_geometry(cx, detach);
+    }
+    fn reattach(root: &mut RootWindow, cx: &mut Context<RootWindow>) {
+        root.reattach_clipboard_geometry(cx);
+    }
+    fn size_error(root: &mut RootWindow, message: Option<String>, cx: &mut Context<RootWindow>) {
+        root.set_clipboard_size_error(message, cx);
+    }
+    fn remember(root: &mut RootWindow, mode: RememberedPresentation, cx: &mut Context<RootWindow>) {
+        root.remember_host_presentation(Self::KEY, mode, cx);
+    }
+    fn retire(root: &mut RootWindow, cx: &mut Context<RootWindow>) {
+        if let Some(view) = root.clipboard_history.clone() {
+            view.update(cx, |view, _| view.shutdown());
+        }
+    }
+    fn observe(_: &mut RootWindow, _: WindowId, _: &mut Context<RootWindow>) {}
+    fn root(&self) -> WeakEntity<RootWindow> {
+        self.root.clone()
+    }
+    fn open(&self) -> bool {
+        self.open
+    }
+    fn rehosting(&self) -> bool {
+        self.rehosting
+    }
+    fn close_blocked(&self) -> bool {
+        self.busy()
+    }
+    fn popout(&self) -> bool {
+        self.popout
+    }
+    fn fenced(&self) -> bool {
+        self.admission.is_fenced()
+    }
+    fn receipt(&self) -> utility_mount::MountReceipt {
+        self.mount_receipt()
+    }
+    fn mounted(&self, id: WindowId, popout: bool) -> bool {
+        self.is_mounted_in(id, popout)
+    }
+    fn replace(
+        &mut self,
+        host: AnyWindowHandle,
+        native: Option<NativeWindow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_mount(host, native, window, cx);
+    }
+    fn set_popout(&mut self, value: bool) {
+        self.popout = value;
+    }
+    fn set_rehosting(&mut self, value: bool) {
+        self.rehosting = value;
+    }
+    fn set_error(&mut self, value: Option<String>) {
+        self.presentation_error = value;
+    }
+    fn set_geometry_error(&mut self, value: Option<String>) {
+        self.geometry_error = value;
+    }
+    fn after_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_dock_focus(window, cx);
+    }
+    fn after_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_popout_focus(window, cx);
+    }
+    fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_editor(window, cx);
+    }
+    fn shutdown(&mut self, _: &mut Context<Self>) {
+        super::clipboard_history::ClipboardHistory::shutdown(self);
+    }
+    fn pinned(_: &RootWindow) -> bool {
+        false
+    }
+}
 struct UtilityShell<T: HostedUtility> {
     workspace: Entity<T>,
     _activation: Subscription,
@@ -355,6 +453,7 @@ fn retiring_utilities(
         utility_mount::UtilityKind::Xml => &mut root.xml_retiring,
         utility_mount::UtilityKind::Json => &mut root.json_retiring,
         utility_mount::UtilityKind::Regex => &mut root.regex_retiring,
+        utility_mount::UtilityKind::ClipboardHistory => &mut root.clipboard_retiring,
     }
 }
 
@@ -412,6 +511,7 @@ pub(super) async fn retire_failed_utility_candidate(
 }
 
 impl RootWindow {
+    fn reattach_clipboard_geometry(&mut self, cx: &mut Context<Self>) { self.reattach_host_geometry::<super::clipboard_history::ClipboardHistory>(cx); }
     fn reattach_json_geometry(&mut self, cx: &mut Context<Self>) {
         self.reattach_host_geometry::<JsonWorkspace>(cx);
     }
@@ -461,6 +561,7 @@ impl RootWindow {
             ),
         }
     }
+    pub(super) fn drain_clipboard_native_geometry(&mut self, cx: &mut Context<Self>, detach: bool) { self.drain_host_geometry::<super::clipboard_history::ClipboardHistory>(cx, detach); }
     pub(super) fn drain_json_native_geometry(&mut self, cx: &mut Context<Self>, detach: bool) {
         self.drain_host_geometry::<JsonWorkspace>(cx, detach);
     }
@@ -517,6 +618,7 @@ impl RootWindow {
             _ => {}
         }
     }
+    pub(super) fn set_clipboard_size_error(&mut self, message: Option<String>, cx: &mut Context<Self>) { if let Some(view) = self.clipboard_history.clone() { view.update(cx, |view, cx| { view.geometry_error = message; cx.notify(); }); } }
     pub(super) fn set_regex_size_error(&mut self, message: Option<String>, cx: &mut Context<Self>) {
         if let Some(view) = self.regex_view.clone() {
             view.update(cx, |view, cx| {
@@ -553,6 +655,8 @@ impl RootWindow {
                         cx.notify();
                     });
                 }
+            } else if UtilityToolKey::parse("clipboard-history").ok() == Some(key) {
+                if let Some(view) = self.clipboard_history.clone() { view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); }); }
             } else if UtilityToolKey::parse("regex-tester").ok() == Some(key) {
                 if let Some(view) = self.regex_view.clone() {
                     view.update(cx, |view, cx| {
@@ -618,6 +722,9 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         self.start_hosted_rehost::<JsonWorkspace>(popout, gesture, source, cx);
+    }
+    pub(super) fn start_clipboard_rehost(&mut self, popout: bool, gesture: Option<hash_dock::Gesture>, source: utility_mount::MountReceipt, cx: &mut Context<Self>) {
+        self.start_hosted_rehost::<super::clipboard_history::ClipboardHistory>(popout, gesture, source, cx);
     }
     pub(super) fn start_regex_rehost(
         &mut self,

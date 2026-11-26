@@ -9,6 +9,7 @@ pub(super) enum UtilityKind {
     Json,
     Xml,
     Regex,
+    ClipboardHistory,
 }
 
 pub(super) struct UtilityPopup {
