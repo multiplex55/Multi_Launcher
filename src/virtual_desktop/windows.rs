@@ -765,8 +765,13 @@ impl InternalSession {
     }
 
     fn move_window(&self, hwnd: HWND, target: &Desktop) -> Result<(), VirtualDesktopError> {
+        self.move_window_guarded(hwnd, target, None)
+    }
+
+    fn move_window_guarded(&self, hwnd: HWND, target: &Desktop, guard: Option<&dyn Fn() -> bool>) -> Result<(), VirtualDesktopError> {
         validate_window(hwnd, "move window to desktop")?;
         let view = self.view_for_window(hwnd)?;
+        ensure_move_authorized(guard)?;
         self.manager
             .move_view(&view, target)
             .map_err(|e| native_error("move shell application view to desktop", e))
@@ -1051,9 +1056,17 @@ fn foreground_desktop_for_restore() -> Result<VirtualDesktopId, VirtualDesktopEr
     Ok(id_from_guid(desktop))
 }
 
+fn ensure_move_authorized(guard: Option<&dyn Fn() -> bool>) -> Result<(), VirtualDesktopError> {
+    if guard.is_some_and(|current| !current()) {
+        return Err(VirtualDesktopError::new(VirtualDesktopErrorKind::Native, "move window to desktop", "Request was superseded"));
+    }
+    Ok(())
+}
+
 pub(super) fn try_move_owned_window_public(
     hwnd: HWND,
     desktop: &VirtualDesktopId,
+    guard: Option<&dyn Fn() -> bool>,
 ) -> Option<Result<(), VirtualDesktopError>> {
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
@@ -1068,6 +1081,7 @@ pub(super) fn try_move_owned_window_public(
         return None;
     }
     Some(PublicSession::open(OPERATION).and_then(|session| {
+        ensure_move_authorized(guard)?;
         unsafe { session.manager.MoveWindowToDesktop(hwnd, &guid_from_id(desktop)) }
             .map_err(|error| native_error(OPERATION, error))
     }))
@@ -1076,10 +1090,11 @@ pub(super) fn try_move_owned_window_public(
 pub(super) fn move_window_to_desktop(
     hwnd: HWND,
     desktop: &VirtualDesktopId,
+    guard: Option<&dyn Fn() -> bool>,
 ) -> Result<(), VirtualDesktopError> {
     let session = InternalSession::open()?;
     let target = session.find(desktop)?;
-    session.move_window(hwnd, &target).map_err(|error| {
+    session.move_window_guarded(hwnd, &target, guard).map_err(|error| {
         error
             .context("desktop_id", desktop.to_string())
             .context("hwnd", format!("{:?}", hwnd))

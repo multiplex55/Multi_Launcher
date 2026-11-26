@@ -212,7 +212,7 @@ impl VirtualDesktopService {
         hwnd: ::windows::Win32::Foundation::HWND,
         desktop: &VirtualDesktopId,
     ) -> Option<Result<(), VirtualDesktopError>> {
-        windows::try_move_owned_window_public(hwnd, desktop)
+        windows::try_move_owned_window_public(hwnd, desktop, None)
     }
 
     #[cfg(windows)]
@@ -221,7 +221,19 @@ impl VirtualDesktopService {
         hwnd: ::windows::Win32::Foundation::HWND,
         desktop: &VirtualDesktopId,
     ) -> Result<(), VirtualDesktopError> {
-        windows::move_window_to_desktop(hwnd, desktop)
+        windows::move_window_to_desktop(hwnd, desktop, None)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn try_move_owned_window_guarded(&self, hwnd: ::windows::Win32::Foundation::HWND,
+        desktop: &VirtualDesktopId, guard: &dyn Fn() -> bool) -> Option<Result<(), VirtualDesktopError>> {
+        windows::try_move_owned_window_public(hwnd, desktop, Some(guard))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn move_window_to_desktop_guarded(&self, hwnd: ::windows::Win32::Foundation::HWND,
+        desktop: &VirtualDesktopId, guard: &dyn Fn() -> bool) -> Result<(), VirtualDesktopError> {
+        windows::move_window_to_desktop(hwnd, desktop, Some(guard))
     }
 
     pub fn move_windows_to_desktops(

@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+GPUI now prepares the exact retained launcher on the current virtual desktop before an authorized hidden-root hotkey reveal. All 24 focused tests passed. Actual two-desktop reveal, known-duration F2 and mixed DPI remain open. G07 typed Content and selected-match Preview follow. [Cross-desktop checkpoint](CHECKPOINTS.md#g01-checked-cross-desktop-hotkey-reveal)
+
 GPUI Directory Content Search streams grouped matches through the shared worker and can reveal the exact selected file. All 20 focused tests passed. Matched Windows replay, typed Content and selected-match Preview remain open. G01 guarded cross-desktop hotkey reveal follows. [Content Search checkpoint](CHECKPOINTS.md#g07-manual-directory-content-search)
 
 Create Temp File supports retained draft editing, checked no-clobber publication and opening the exact file. All 10 focused tests passed. Matched native association, resize persistence and dashboard invocation remain open. G07 Directory Content Search follows. [Tempfile checkpoint](CHECKPOINTS.md#g13-checked-create-temp-file)
@@ -159,7 +161,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Implement checked G01 cross-desktop preparation for an authorized hidden-root hotkey reveal. G07 typed Content and selected Preview follow. Matched G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
+| Current next action | Complete G07 typed Directory Content and retained selected-match Preview using the shared parser, request and preview service. Matched G01, G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

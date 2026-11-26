@@ -117,7 +117,7 @@ fn activate_window_with_fence(
 ) -> Result<(), WindowActivationError> {
     #[cfg(windows)]
     {
-        activate_with_fence(&mut WindowsActivationBackend { checked: None }, request, fence.as_ref())
+        activate_with_fence(&mut WindowsActivationBackend { checked: None, root: None }, request, fence.as_ref())
     }
     #[cfg(not(windows))]
     {
@@ -159,7 +159,7 @@ pub fn activate_checked_window_switch(checked: CheckedWindowSwitch) -> Result<()
     #[cfg(windows)]
     {
         let request = WindowActivationRequest::current_desktop_only(checked.selected.native.hwnd);
-        activate_with_fence(&mut WindowsActivationBackend { checked: Some(checked) }, request, None)
+        activate_with_fence(&mut WindowsActivationBackend { checked: Some(checked), root: None }, request, None)
     }
     #[cfg(not(windows))]
     {
@@ -168,7 +168,71 @@ pub fn activate_checked_window_switch(checked: CheckedWindowSwitch) -> Result<()
     }
 }
 
+/// Authority to move one owned launcher root, without showing or activating it.
+#[derive(Clone)]
+pub struct CheckedRootDesktop {
+    pub identity: crate::window_catalog::WindowNativeIdentity,
+    pub is_current: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+#[cfg(any(test, windows))]
+fn sticky_root_authority(current: Arc<dyn Fn() -> bool + Send + Sync>) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    let alive = AtomicBool::new(true);
+    Arc::new(move || {
+        if !alive.load(Ordering::Acquire) { return false; }
+        let valid = current();
+        if !valid { alive.store(false, Ordering::Release); }
+        valid
+    })
+}
+
+/// Move an exact owned root to the current virtual desktop, leaving visibility
+/// and foreground ownership to its caller. Every native move is fenced.
+pub fn prepare_checked_root_desktop(root: CheckedRootDesktop) -> Result<(), WindowActivationError> {
+    if root.identity.hwnd == 0 || root.identity.pid != std::process::id() || root.identity.tid == 0 {
+        return Err(WindowActivationError::new(WindowActivationErrorKind::InvalidWindow, "Invalid owned launcher root identity"));
+    }
+    #[cfg(windows)]
+    {
+        let hwnd = root.identity.hwnd;
+        let original = root.clone();
+        let guarded = CheckedRootDesktop { identity: root.identity, is_current: sticky_root_authority(Arc::new(move || {
+            (original.is_current)()
+                && crate::window_catalog::native_window_identity(original.identity.hwnd) == Some(original.identity)
+                && (original.is_current)()
+        })) };
+        let mut backend = WindowsActivationBackend { checked: None, root: Some(guarded) };
+        prepare_checked_root_with(&mut backend, hwnd)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = root;
+        Err(WindowActivationError::new(WindowActivationErrorKind::Desktop, "Virtual desktop preparation is available only on Windows"))
+    }
+}
+
+#[cfg(any(test, windows))]
+fn check_root_identity(backend: &mut impl ActivationBackend, root: &CheckedRootDesktop, hwnd: usize) -> Result<(), WindowActivationError> {
+    if hwnd != root.identity.hwnd || !(root.is_current)()
+        || backend.root_native_identity(hwnd) != Some(root.identity) || !(root.is_current)() {
+        return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Launcher root desktop request is no longer current"));
+    }
+    Ok(())
+}
+
+#[cfg(any(test, windows))]
+fn prepare_checked_root_with(backend: &mut impl ActivationBackend, hwnd: usize) -> Result<(), WindowActivationError> {
+    ensure_current(backend, None, hwnd)?;
+    let mut effects = ActivationEffects::default();
+    prepare_desktop(backend, WindowActivationRequest::move_to_current_desktop(hwnd), None, &mut effects)?;
+    ensure_current(backend, None, hwnd)
+}
+
 trait ActivationBackend {
+    fn root_native_identity(&mut self, hwnd: usize) -> Option<crate::window_catalog::WindowNativeIdentity> {
+        if !self.is_window(hwnd) { return None; }
+        Some(crate::window_catalog::WindowNativeIdentity { hwnd, pid: self.target_process(hwnd), tid: self.window_thread(hwnd) })
+    }
     fn check_checked(&mut self, _hwnd: usize) -> Result<(), WindowActivationError> { Ok(()) }
     fn checked_attachment_allowed(&self, _thread: u32) -> bool { true }
     fn checked_success(&mut self, _hwnd: usize) -> Result<(), WindowActivationError> { Ok(()) }
@@ -1844,6 +1908,7 @@ fn desktop_error(
 #[cfg(windows)]
 struct WindowsActivationBackend {
     checked: Option<CheckedWindowSwitch>,
+    root: Option<CheckedRootDesktop>,
 }
 
 #[cfg(windows)]
@@ -1903,6 +1968,9 @@ fn native_window_intersects_physical_display(hwnd: usize) -> Option<bool> {
 
 #[cfg(windows)]
 impl ActivationBackend for WindowsActivationBackend {
+    fn root_native_identity(&mut self, hwnd: usize) -> Option<crate::window_catalog::WindowNativeIdentity> {
+        crate::window_catalog::native_window_identity(hwnd)
+    }
     fn checked_attachment_allowed(&self, thread: u32) -> bool {
         self.checked.as_ref().is_none_or(|checked| {
             thread == checked.initiating.tid || thread == checked.selected.native.tid
@@ -1919,6 +1987,9 @@ impl ActivationBackend for WindowsActivationBackend {
         Ok(())
     }
     fn check_checked(&mut self, hwnd: usize) -> Result<(), WindowActivationError> {
+        if let Some(root) = self.root.clone() {
+            check_root_identity(self, &root, hwnd)?;
+        }
         let Some(checked) = self.checked.clone() else { return Ok(()); };
         if !(checked.is_current)() {
             return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Window switch is no longer current"));
@@ -1966,7 +2037,9 @@ impl ActivationBackend for WindowsActivationBackend {
         desktop: &VirtualDesktopId,
     ) -> Option<Result<(), VirtualDesktopError>> {
         use windows::Win32::Foundation::HWND;
-        VirtualDesktopService.try_move_owned_window_public(HWND(hwnd as *mut _), desktop)
+        if let Some(root) = &self.root {
+            VirtualDesktopService.try_move_owned_window_guarded(HWND(hwnd as *mut _), desktop, root.is_current.as_ref())
+        } else { VirtualDesktopService.try_move_owned_window_public(HWND(hwnd as *mut _), desktop) }
     }
 
     fn move_window(
@@ -1975,7 +2048,9 @@ impl ActivationBackend for WindowsActivationBackend {
         desktop: &VirtualDesktopId,
     ) -> Result<(), VirtualDesktopError> {
         use windows::Win32::Foundation::HWND;
-        VirtualDesktopService.move_window_to_desktop(HWND(hwnd as *mut _), desktop)
+        if let Some(root) = &self.root {
+            VirtualDesktopService.move_window_to_desktop_guarded(HWND(hwnd as *mut _), desktop, root.is_current.as_ref())
+        } else { VirtualDesktopService.move_window_to_desktop(HWND(hwnd as *mut _), desktop) }
     }
 
     fn restore(&mut self, hwnd: usize) -> bool {
@@ -2085,6 +2160,7 @@ mod tests {
         events: Vec<String>,
         valid: bool,
         checked_guard: Option<(usize, usize, Arc<AtomicBool>)>,
+        root_guard: Option<CheckedRootDesktop>,
         checked_allowed_threads: Option<Vec<u32>>,
         reject_checked_success: bool,
         target: VirtualDesktopId,
@@ -2129,6 +2205,7 @@ mod tests {
                 events: Vec::new(),
                 valid: true,
                 checked_guard: None,
+                root_guard: None,
                 checked_allowed_threads: None,
                 reject_checked_success: false,
                 target: id(2),
@@ -2239,6 +2316,7 @@ mod tests {
             Ok(())
         }
         fn check_checked(&mut self, hwnd: usize) -> Result<(), WindowActivationError> {
+            if let Some(root) = self.root_guard.clone() { check_root_identity(self, &root, hwnd)?; }
             if let Some((launcher, target, current)) = &self.checked_guard {
                 if !current.load(Ordering::Acquire) || hwnd != *target
                     || !matches!(self.foreground, Some(value) if value == *launcher || value == *target)
@@ -3645,6 +3723,45 @@ mod tests {
             .position(|event| event == "set:42")
             .unwrap();
         assert!(minimized < restore && restore < foreground);
+    }
+
+    #[test]
+    fn root_authority_remains_revoked_after_foreground_returns() {
+        let live = Arc::new(AtomicBool::new(true));
+        let captured = live.clone();
+        let guard = sticky_root_authority(Arc::new(move || captured.load(Ordering::Acquire)));
+        assert!(guard());
+        live.store(false, Ordering::Release);
+        assert!(!guard());
+        live.store(true, Ordering::Release);
+        assert!(!guard());
+    }
+
+    #[test]
+    fn checked_root_prepares_desktop_without_visibility_or_focus() {
+        let mut backend = FakeBackend::new();
+        backend.root_guard = Some(CheckedRootDesktop { identity: crate::window_catalog::WindowNativeIdentity { hwnd: 42, pid: 99, tid: 3 }, is_current: Arc::new(|| true) });
+        prepare_checked_root_with(&mut backend, 42).unwrap();
+        assert!(backend.events.iter().any(|event| event.starts_with("move:")));
+        assert!(!backend.events.iter().any(|event| event.contains("foreground") || event.contains("restore") || event.contains("show") || event.contains("attach") || event.starts_with("switch:")));
+    }
+
+    #[test]
+    fn checked_root_rejects_reused_identity_and_revoked_fallback() {
+        let mut backend = FakeBackend::new();
+        backend.root_guard = Some(CheckedRootDesktop { identity: crate::window_catalog::WindowNativeIdentity { hwnd: 42, pid: 99, tid: 77 }, is_current: Arc::new(|| true) });
+        assert_eq!(prepare_checked_root_with(&mut backend, 42).unwrap_err().kind, WindowActivationErrorKind::Superseded);
+        assert!(!backend.events.iter().any(|event| event.starts_with("move:")));
+
+        let mut backend = FakeBackend::new();
+        let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let shared = checks.clone();
+        backend.root_guard = Some(CheckedRootDesktop { identity: crate::window_catalog::WindowNativeIdentity { hwnd: 42, pid: 99, tid: 3 },
+            is_current: Arc::new(move || shared.fetch_add(1, Ordering::AcqRel) < 4) });
+        backend.public_move_result = Some(Err(VirtualDesktopError::new(crate::virtual_desktop::VirtualDesktopErrorKind::Native, "public", "injected")));
+        assert_eq!(prepare_checked_root_with(&mut backend, 42).unwrap_err().kind, WindowActivationErrorKind::Superseded);
+        assert!(backend.events.iter().any(|event| event.starts_with("public_move:")));
+        assert!(!backend.events.iter().any(|event| event.starts_with("move:")));
     }
 
     #[test]
