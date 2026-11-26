@@ -9,6 +9,7 @@ mod external_launch;
 mod file_search;
 mod file_search_preview;
 mod settings_actions;
+mod settings_search;
 mod date_search;
 mod calculator_search;
 mod base_convert_search;
@@ -611,44 +612,13 @@ struct PendingCompletionChange {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SettingsSaveAttempt {
-    id: u64,
-    expected_baseline: bool,
-    desired: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SettingsReadAttempt {
-    id: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SettingsRestartDraft {
-    open: bool,
-    available: bool,
-    baseline: bool,
-    draft: bool,
-    read_pending: bool,
-    pending_request: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsOpenOrigin {
     Search,
     Menu,
 }
 
-struct SettingsEditorState {
-    open: bool,
-    available: bool,
-    baseline: bool,
-    draft: bool,
-    status: Option<String>,
-    read_pending: Option<SettingsReadAttempt>,
-    next_read_id: u64,
-    pending: Option<SettingsSaveAttempt>,
-    next_request_id: u64,
-}
+#[derive(Default)]
+struct SettingsEditorState { open: bool, status: Option<String> }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CommandHelpSaveAttempt {
@@ -757,163 +727,6 @@ enum CommandHelpOpenOrigin {
 enum QuickHelpOpenOrigin {
     Menu,
     Shortcut,
-}
-
-impl SettingsEditorState {
-    fn new(startup_value: bool) -> Self {
-        Self {
-            open: false,
-            available: true,
-            baseline: startup_value,
-            draft: startup_value,
-            status: None,
-            read_pending: None,
-            next_read_id: 0,
-            pending: None,
-            next_request_id: 0,
-        }
-    }
-
-    fn begin_read(&mut self) -> Option<SettingsReadAttempt> {
-        if self.open || self.read_pending.is_some() || self.pending.is_some() {
-            return None;
-        }
-        self.next_read_id = self.next_read_id.wrapping_add(1).max(1);
-        let attempt = SettingsReadAttempt {
-            id: self.next_read_id,
-        };
-        self.open = true;
-        self.available = false;
-        self.read_pending = Some(attempt);
-        self.pending = None;
-        self.status = Some("Reading current Settings…".to_owned());
-        Some(attempt)
-    }
-
-    fn open_with_baseline(&mut self, baseline: bool) {
-        self.open = true;
-        self.available = true;
-        self.baseline = baseline;
-        self.draft = baseline;
-        self.status = None;
-        self.read_pending = None;
-        self.pending = None;
-    }
-
-    fn open_unavailable(&mut self, message: String) {
-        self.open = true;
-        self.available = false;
-        self.draft = self.baseline;
-        self.status = Some(message);
-        self.read_pending = None;
-        self.pending = None;
-    }
-
-    fn finish_read(
-        &mut self,
-        attempt: SettingsReadAttempt,
-        result: Result<bool, String>,
-    ) -> bool {
-        if self.read_pending != Some(attempt) {
-            return false;
-        }
-        match result {
-            Ok(baseline) => self.open_with_baseline(baseline),
-            Err(error) => self.open_unavailable(format!(
-                "Could not read the current Settings value: {error}"
-            )),
-        }
-        true
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.available && self.draft != self.baseline
-    }
-
-    fn begin_save(&mut self) -> Option<SettingsSaveAttempt> {
-        if !self.open
-            || !self.available
-            || self.read_pending.is_some()
-            || self.pending.is_some()
-            || !self.is_dirty()
-        {
-            return None;
-        }
-        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
-        let attempt = SettingsSaveAttempt {
-            id: self.next_request_id,
-            expected_baseline: self.baseline,
-            desired: self.draft,
-        };
-        self.pending = Some(attempt);
-        self.status = None;
-        Some(attempt)
-    }
-
-    fn fail_to_start(&mut self, request_id: u64, message: String) {
-        if self.pending.is_some_and(|pending| pending.id == request_id) {
-            self.pending = None;
-            self.status = Some(message);
-        }
-    }
-
-    fn finish_save(
-        &mut self,
-        request_id: u64,
-        result: Result<
-            multi_launcher::settings::SettingsBooleanSaveAcknowledgement,
-            multi_launcher::settings::SettingsBooleanSaveError,
-        >,
-    ) -> Option<bool> {
-        let pending = self.pending.filter(|pending| pending.id == request_id)?;
-        self.pending = None;
-        match result {
-            Ok(acknowledgement)
-                if acknowledgement.preference()
-                    == multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete
-                    && acknowledgement.value() == pending.desired =>
-            {
-                self.baseline = acknowledgement.value();
-                self.draft = acknowledgement.value();
-                self.status = Some("Settings saved.".to_owned());
-                Some(acknowledgement.value())
-            }
-            Ok(acknowledgement) => {
-                self.status = Some(format!(
-                    "Settings Boolean acknowledgement for {:?}={} did not match the requested query-autocomplete value {}.",
-                    acknowledgement.preference(), acknowledgement.value(), pending.desired
-                ));
-                None
-            }
-            Err(error) => {
-                self.status = Some(format!("Could not save Settings: {error}"));
-                None
-            }
-        }
-    }
-
-    fn cancel_idle(&mut self) -> bool {
-        if self.pending.is_some() || self.read_pending.is_some() {
-            return false;
-        }
-        self.draft = self.baseline;
-        self.open = false;
-        self.available = true;
-        self.status = None;
-        self.read_pending = None;
-        true
-    }
-
-    fn restart_draft(&self) -> SettingsRestartDraft {
-        SettingsRestartDraft {
-            open: self.open,
-            available: self.available,
-            baseline: self.baseline,
-            draft: self.draft,
-            read_pending: self.read_pending.is_some(),
-            pending_request: self.pending.map(|pending| pending.id),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1362,19 +1175,12 @@ impl RenderOnce for ToastLogViewerPanel {
 #[derive(IntoElement)]
 struct SettingsEditorPanel {
     root: WeakEntity<RootWindow>,
+    search: Option<Entity<settings_search::SearchSettings>>,
     actions: Option<Entity<settings_actions::ActionsSettings>>,
-    draft: bool,
-    saving: bool,
-    reading: bool,
-    available: bool,
-    dirty: bool,
-    status: Option<String>,
-    index_busy: bool,
-    index_status: Option<String>,
-    width: f32,
+    busy: bool,
+    status: Option<String>, index_busy: bool, index_status: Option<String>, width: f32,
     metrics: multi_launcher::gui::theme::ThemeMetrics,
     palette: multi_launcher::gui::theme::SemanticPalette,
-    settings_focus_handle: FocusHandle,
     settings_owner_focus_handle: FocusHandle,
 }
 
@@ -1803,149 +1609,24 @@ impl RenderOnce for QuickHelpPanel {
 
 impl RenderOnce for SettingsEditorPanel {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let busy = self.saving || self.reading;
-        let checkbox_disabled = busy || !self.available;
-        let save_disabled = checkbox_disabled || !self.dirty;
-        let status = if self.saving {
-            Some("Saving Settings…".to_owned())
-        } else if self.reading {
-            Some("Reading current Settings…".to_owned())
-        } else {
-            self.status
-        };
-        let status_color = if self.saving || self.reading {
-            self.palette.warning
-        } else if !self.available || self.dirty {
-            self.palette.error
-        } else {
-            self.palette.success
-        };
-
-        let checkbox_root = self.root.clone();
-        let checkbox = Checkbox::new("settings-query-autocomplete")
-            .checked(self.draft)
-            .track_focus(&self.settings_focus_handle)
-            .disabled(checkbox_disabled)
-            .accessibility_label("Enable query autocomplete")
-            .on_change(move |state, _, _, app| {
-                let _ = checkbox_root.update(app, |root, cx| {
-                    if root.settings_editor.read_pending.is_some()
-                        || root.settings_editor.pending.is_some()
-                        || !root.settings_editor.available
-                    {
-                        return;
-                    }
-                    root.settings_editor.draft = state == CheckboxState::Checked;
-                    root.settings_editor.status = None;
-                    clear_stale_settings_restart_status(
-                        &mut root.restart_status,
-                        !root.settings_editor.is_dirty(),
-                    );
-                    cx.notify();
-                });
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_x(px(self.metrics.item_spacing_x))
-                    .child(
-                        CheckboxIndicator::new()
-                            .checked(self.draft)
-                            .size(px(18.0))
-                            .rounded(px(3.0))
-                            .border_1()
-                            .border_color(appearance::to_hsla(self.palette.control_border))
-                            .when(self.draft, |indicator| {
-                                indicator
-                                    .bg(appearance::to_hsla(self.palette.accent))
-                                    .text_color(appearance::to_hsla(self.palette.primary_text))
-                            })
-                            .text_size(px(self.metrics.small_text_size))
-                            .items_center()
-                            .justify_center()
-                            .child(if self.draft { "✓" } else { "" }),
-                    )
-                    .child(Label::new("Enable query autocomplete")),
-            );
-
-        let save_root = self.root.clone();
         let reload_root = self.root.clone();
         let cancel_root = self.root;
-        div()
-            .id("settings-editor")
-            .track_focus(&self.settings_owner_focus_handle)
-            .key_context("SettingsEditor")
-            .flex()
-            .flex_col()
-            .gap_y(px(self.metrics.item_spacing_y))
-            .w(px(self.width))
-            .max_w_full()
-            .p(px(self.metrics.panel_padding))
-            .bg(appearance::to_hsla(self.palette.panel_surface))
-            .rounded(px(self.metrics.corner_radius))
-            .text_color(appearance::to_hsla(self.palette.primary_text))
-            .text_size(px(self.metrics.body_text_size))
-            .line_height(px(self.metrics.line_height))
-            .child(
-                Label::new("Settings")
-                    .text_size(px(self.metrics.heading_text_size))
-                    .line_height(px(self.metrics.line_height)),
-            )
-            .child(
-                Label::new("Search & Results")
-                    .text_size(px(self.metrics.body_text_size))
-                    .line_height(px(self.metrics.line_height)),
-            )
-            .child(checkbox)
+        div().id("settings-editor").track_focus(&self.settings_owner_focus_handle).key_context("SettingsEditor")
+            .flex().flex_col().gap_y(px(self.metrics.item_spacing_y)).w(px(self.width)).max_w_full()
+            .p(px(self.metrics.panel_padding)).bg(appearance::to_hsla(self.palette.panel_surface))
+            .rounded(px(self.metrics.corner_radius)).text_color(appearance::to_hsla(self.palette.primary_text))
+            .text_size(px(self.metrics.body_text_size)).line_height(px(self.metrics.line_height))
+            .child(Label::new("Settings").text_size(px(self.metrics.heading_text_size)))
+            .when_some(self.search, |panel, search| panel.child(search))
             .when_some(self.actions, |panel, actions| panel.child(actions))
-            .child(
-                Button::new("settings-reload-application-index")
-                    .label("Reload application index")
-                    .disabled(self.index_busy || self.saving || self.reading)
-                    .on_click(move |_, _, app| {
-                        let _ = reload_root.update(app, |root, cx| root.reload_application_index(cx));
-                    }),
-            )
-            .children(self.index_status.map(|status| {
-                Label::new(status).id("settings-index-status")
-                    .text_size(px(self.metrics.small_text_size))
-                    .line_height(px(self.metrics.line_height))
-            }))
-            .children(status.map(|message| {
-                Label::new(message)
-                    .id("settings-save-status")
-                    .text_color(appearance::to_hsla(status_color))
-                    .text_size(px(self.metrics.small_text_size))
-                    .line_height(px(self.metrics.line_height))
-            }))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_x(px(self.metrics.item_spacing_x))
-                    .child(
-                        Button::new("settings-save")
-                            .label(if self.saving { "Saving…" } else { "Save Search Settings" })
-                            .disabled(save_disabled)
-                            .on_click(move |_, _, app| {
-                                let _ = save_root.update(app, |root, cx| {
-                                    root.save_settings_editor(cx);
-                                });
-                            }),
-                    )
-                    .child(
-                        Button::new("settings-cancel")
-                            .label("Cancel")
-                            .disabled(busy)
-                            .on_click(move |_, window, app| {
-                                let _ = cancel_root.update(app, |root, cx| {
-                                    root.cancel_settings_editor(window, cx, true);
-                                });
-                            }),
-                    ),
-            )
+            .child(Button::new("settings-reload-application-index").label("Reload application index")
+                .disabled(self.index_busy || self.busy).on_click(move |_, _, app| {
+                    let _ = reload_root.update(app, |root, cx| root.reload_application_index(cx));
+                }))
+            .children(self.index_status.map(|status| Label::new(status).id("settings-index-status")))
+            .children(self.status.map(|status| Label::new(status).id("settings-save-status")))
+            .child(Button::new("settings-cancel").label("Cancel").disabled(self.busy)
+                .on_click(move |_, window, app| { let _ = cancel_root.update(app, |root, cx| root.cancel_settings_editor(window, cx, true)); }))
     }
 }
 
@@ -2618,6 +2299,7 @@ struct RootWindow {
     search_completion: SearchCompletion,
     search_completion_focus_revision: Option<u64>,
     settings_editor: SettingsEditorState,
+    settings_search: Option<Entity<settings_search::SearchSettings>>,
     settings_actions: Option<Entity<settings_actions::ActionsSettings>>,
     app_editor: add_action::AppEditorState,
     plugin_editor: Option<Entity<plugin_editor::PluginEditorView>>,
@@ -2638,9 +2320,6 @@ struct RootWindow {
     quick_help_sequence_starts: Arc<[String]>,
     settings_path: String,
     settings_save_workers: SettingsSaveWorkerRegistry,
-    settings_save_permit: Option<EffectPermit>,
-    settings_save_token: Option<multi_launcher::settings::SettingsBooleanSaveToken>,
-    settings_read_permit: Option<EffectPermit>,
     command_help_save_permit: Option<EffectPermit>,
     command_help_save_token: Option<multi_launcher::settings::SettingsBooleanSaveToken>,
     preference_close_after_terminal: bool,
@@ -2908,6 +2587,16 @@ impl LauncherSearchResults {
             return None;
         }
         self.actions.get(index).cloned()
+    }
+}
+
+fn decorate_folder_descriptions(rows: &mut [LauncherSearchResult], grid: bool, show_full_path: bool, aliases: &HashMap<String, HashSet<String>>) {
+    for row in rows {
+        if matches!(&row.origin, LauncherResultOrigin::Provider(name) if name == "folders") {
+            row.hide_description = !grid && !show_full_path && row.action.args.is_none()
+                && row.action.desc == row.action.action
+                && aliases.get(&row.action.action).is_some_and(|labels| labels.contains(&row.action.label));
+        }
     }
 }
 
@@ -4673,7 +4362,7 @@ fn update_kit_window_content<T: 'static, C: AppContext, R>(
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RestartDrafts {
     search: String,
     utility: Option<String>,
@@ -4687,7 +4376,7 @@ struct RestartDrafts {
     tempfile: Option<(String, String)>,
     hash: HashDraft,
     hash_window_open: bool,
-    settings: SettingsRestartDraft,
+    settings_search: Option<settings_search::RestartDraft>,
     show_examples: bool,
     file_search_open: bool,
     downloads_triage_open: bool,
@@ -4894,13 +4583,7 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.hash.algorithm != HashAlgorithm::Sha256 {
         names.push("non-default Hash Generator algorithm");
     }
-    if drafts.settings.read_pending {
-        names.push("Settings loading");
-    } else if drafts.settings.pending_request.is_some() {
-        names.push("pending Settings save");
-    } else if drafts.settings.open && drafts.settings.draft != drafts.settings.baseline {
-        names.push("unsaved Settings preference");
-    }
+    if drafts.settings_search.as_ref().is_some_and(|draft| draft.dirty()) { names.push("unsaved Settings preference"); }
     if drafts.file_search_open {
         names.push("File Search form and results");
     }
@@ -5675,18 +5358,7 @@ impl RootWindow {
         if let Some(blocker) = self.result_favorites.restart_blocker() {
             return Err(blocker.to_owned());
         }
-        if self.settings_editor.read_pending.is_some() {
-            return Err(
-                "The current Settings value is still loading. Wait for it to finish before restarting in egui."
-                    .to_owned(),
-            );
-        }
-        if self.settings_editor.pending.is_some() {
-            return Err(
-                "A Settings preference save is still pending. Wait for its acknowledgement before restarting in egui."
-                    .to_owned(),
-            );
-        }
+        if self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_search::WAIT.to_owned()); }
         if self.command_help.pending.is_some() {
             return Err(
                 "The Show examples preference save is still pending. Wait for its acknowledgement before restarting in egui."
@@ -5695,7 +5367,7 @@ impl RootWindow {
         }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_actions::WAIT.to_owned()); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).restart_draft(cx).dirty()) { return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned()); }
-        if self.settings_editor.open && self.settings_editor.is_dirty() {
+        if self.settings_search.as_ref().is_some_and(|view| view.read(cx).restart_draft(cx).dirty()) {
             return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned());
         }
         if self
@@ -5952,7 +5624,7 @@ impl RootWindow {
                 tempfile: self.tempfile_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 hash: hash_draft,
                 hash_window_open,
-                settings: self.settings_editor.restart_draft(),
+                settings_search: self.settings_search.as_ref().map(|view| view.read(cx).restart_draft(cx)),
                 show_examples: self.command_help.show_examples,
                 file_search_open: self.file_search.as_ref().is_some_and(|view| view.read(cx).open),
                 downloads_triage_open: self.downloads_triage_open(cx),
@@ -6856,7 +6528,9 @@ impl RootWindow {
         self.command_help_save_permit.take();
         clear_stale_settings_restart_status(
             &mut self.restart_status,
-            !self.settings_editor.is_dirty() && self.command_help.pending.is_none(),
+            self.settings_search.as_ref().is_none_or(|view| !view.read(cx).restart_draft(cx).dirty())
+                && self.settings_actions.as_ref().is_none_or(|view| !view.read(cx).restart_draft(cx).dirty())
+                && self.command_help.pending.is_none(),
         );
         self.finish_deferred_preference_close(failed, cx);
         cx.notify();
@@ -6867,7 +6541,7 @@ impl RootWindow {
             return;
         }
         self.preference_close_failed |= failed;
-        let another_pending = self.settings_editor.pending.is_some() || self.command_help.pending.is_some();
+        let another_pending = self.settings_search.as_ref().is_some_and(|view| view.read(cx).pending_token().is_some()) || self.command_help.pending.is_some();
         if another_pending {
             return;
         }
@@ -6885,12 +6559,9 @@ impl RootWindow {
     fn prepare_boolean_preference_close(&mut self, cx: &mut Context<Self>) -> bool {
         let mut pending = false;
         let mut cancellation_accepted = true;
-        if self.settings_editor.pending.is_some() {
+        if let Some(token) = self.settings_search.as_ref().and_then(|view| view.read(cx).pending_token()) {
             pending = true;
-            cancellation_accepted &= self
-                .settings_save_token
-                .as_ref()
-                .is_some_and(|token| token.request_cancel());
+            cancellation_accepted &= token.request_cancel();
         }
         if self.command_help.pending.is_some() {
             pending = true;
@@ -6909,97 +6580,22 @@ impl RootWindow {
         false
     }
 
-    fn open_settings_editor(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        origin: SettingsOpenOrigin,
-    ) {
+    fn open_settings_editor(&mut self, window: &mut Window, cx: &mut Context<Self>, origin: SettingsOpenOrigin) {
         if self.settings_editor.open {
-            self.root_scroll
-                .scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
-            self.settings_focus_handle.focus(window, cx);
-            cx.notify();
-            return;
+            self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
+            self.settings_focus_handle.focus(window, cx); cx.notify(); return;
         }
-
-        let Some(operation) = self.restart_admission.admit() else {
-            self.restart_status =
-                Some("GPUI is closing; Settings can no longer be opened.".to_owned());
-            cx.notify();
-            return;
-        };
-
-        let return_focus = match origin {
-            SettingsOpenOrigin::Search => self.query.focus_handle(cx),
-            SettingsOpenOrigin::Menu => self
-                .root_menu_previous_focus
-                .clone()
-                .unwrap_or_else(|| self.settings_menu_focus_handle.clone()),
-        };
-        let Some(attempt) = self.settings_editor.begin_read() else {
-            drop(operation);
-            return;
-        };
+        if self.restart_admission.is_fenced() { self.restart_status = Some("GPUI is closing; Settings can no longer be opened.".into()); cx.notify(); return; }
+        let return_focus = match origin { SettingsOpenOrigin::Search => self.query.focus_handle(cx),
+            SettingsOpenOrigin::Menu => self.root_menu_previous_focus.clone().unwrap_or_else(|| self.settings_menu_focus_handle.clone()) };
+        self.settings_editor.open = true; self.settings_editor.status = None;
         panel_stack::promote(&mut self.panel_stack, Panel::Settings);
-        if origin == SettingsOpenOrigin::Menu && self.settings_menu_open {
-            self.root_menu_action_routed_focus = true;
-        }
-        self.settings_return_focus = Some(return_focus);
-        self.settings_return_scroll_offset = Some(self.root_scroll.offset());
-        self.fresh_search_enter = None;
-        self.root_scroll
-            .scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
-        self.settings_focus_handle.focus(window, cx);
+        if origin == SettingsOpenOrigin::Menu && self.settings_menu_open { self.root_menu_action_routed_focus = true; }
+        self.settings_return_focus = Some(return_focus); self.settings_return_scroll_offset = Some(self.root_scroll.offset());
+        self.fresh_search_enter = None; self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
+        self.open_search_settings(window, cx);
         self.open_actions_settings(window, cx);
-        let receiver = match self.settings_save_workers.begin_boolean_preference_read(
-            self.settings_path.clone(),
-            multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete,
-        ) {
-            Ok(receiver) => receiver,
-            Err(error) => {
-                self.settings_editor.finish_read(attempt, Err(error));
-                drop(operation);
-                cx.notify();
-                return;
-            }
-        };
-        self.settings_read_permit = Some(operation);
-        cx.notify();
-
-        let root = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| {
-            let result = loop {
-                match receiver.try_recv() {
-                    Ok(result) => break result,
-                    Err(TryRecvError::Disconnected) => {
-                        break Err("Settings reader ended without a receipt.".to_owned());
-                    }
-                    Err(TryRecvError::Empty) => {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(20))
-                            .await;
-                    }
-                }
-            };
-            let _ = root.update(cx, |root, cx| {
-                root.finish_settings_editor_read(attempt, result, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn finish_settings_editor_read(
-        &mut self,
-        attempt: SettingsReadAttempt,
-        result: Result<bool, String>,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.settings_editor.finish_read(attempt, result) {
-            return;
-        }
-        self.settings_read_permit.take();
-        cx.notify();
+        self.settings_focus_handle.focus(window, cx); cx.notify();
     }
 
     fn toggle_settings_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -7007,20 +6603,8 @@ impl RootWindow {
             if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) {
                 self.settings_editor.status = Some(settings_actions::WAIT.into()); cx.notify(); return;
             }
-            if self.settings_editor.pending.is_some()
-                || self.settings_editor.read_pending.is_some()
-            {
-                self.settings_editor.status = Some(
-                    if self.settings_editor.pending.is_some() {
-                        "Wait for the Settings save to finish before closing this editor."
-                    } else {
-                        "Wait for Settings to finish loading before closing this editor."
-                    }
-                    .into(),
-                );
-                self.settings_focus_handle.focus(window, cx);
-                cx.notify();
-                return;
+            if self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy()) {
+                self.settings_editor.status = Some(settings_search::WAIT.into()); cx.notify(); return;
             }
             let settings_owned_focus = settings_return_focus_is_still_owned(
                 self.settings_owner_focus_handle.contains_focused(window, cx),
@@ -7063,21 +6647,12 @@ impl RootWindow {
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) {
             self.settings_editor.status = Some(settings_actions::WAIT.into()); cx.notify(); return;
         }
-        if self.settings_editor.pending.is_some()
-            || self.settings_editor.read_pending.is_some()
-            || !self.settings_editor.cancel_idle()
-        {
-            self.settings_editor.status = Some(
-                if self.settings_editor.pending.is_some() {
-                    "Wait for the Settings save to finish before closing this editor."
-                } else {
-                    "Wait for Settings to finish loading before closing this editor."
-                }
-                .into(),
-            );
-            cx.notify();
-            return;
+        if self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy()) {
+            self.settings_editor.status = Some(settings_search::WAIT.into()); cx.notify(); return;
         }
+        self.settings_editor.open = false;
+        self.settings_editor.status = None;
+        if let Some(view) = self.settings_search.take() { view.update(cx, |view, _| view.retire()); }
         if let Some(view) = self.settings_actions.take() { view.update(cx, |view, _| view.retire()); }
         panel_stack::retire(&mut self.panel_stack, Panel::Settings);
         clear_stale_settings_restart_status(&mut self.restart_status, true);
@@ -7106,103 +6681,6 @@ impl RootWindow {
             self.settings_return_focus = None;
             self.settings_return_scroll_offset = None;
         }
-        cx.notify();
-    }
-
-    fn save_settings_editor(&mut self, cx: &mut Context<Self>) {
-        if self.settings_editor.pending.is_some() {
-            return;
-        }
-        let Some(operation) = self.restart_admission.admit() else {
-            self.settings_editor.status =
-                Some("GPUI is closing; the Settings save was not started.".into());
-            cx.notify();
-            return;
-        };
-        let Some(attempt) = self.settings_editor.begin_save() else {
-            drop(operation);
-            return;
-        };
-        let request = multi_launcher::settings::SettingsBooleanSaveRequest::new(
-            multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete,
-            attempt.expected_baseline,
-            attempt.desired,
-        );
-        let (receiver, token) = match self.settings_save_workers.begin_boolean_preference_save(
-            self.settings_path.clone(),
-            request,
-        ) {
-            Ok(pending) => pending,
-            Err(error) => {
-                self.settings_editor.fail_to_start(attempt.id, error);
-                drop(operation);
-                cx.notify();
-                return;
-            }
-        };
-        self.settings_save_permit = Some(operation);
-        self.settings_save_token = Some(token);
-        cx.notify();
-
-        let root = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| {
-            let result = loop {
-                match receiver.try_recv() {
-                    Ok(result) => break result,
-                    Err(TryRecvError::Disconnected) => {
-                        break Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
-                            "Settings writer ended without an acknowledgement.".into(),
-                        ));
-                    }
-                    Err(TryRecvError::Empty) => {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(20))
-                            .await;
-                    }
-                }
-            };
-            let _ = root.update(cx, |root, cx| {
-                root.finish_settings_editor_save(attempt.id, result, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn finish_settings_editor_save(
-        &mut self,
-        request_id: u64,
-        result: Result<
-            multi_launcher::settings::SettingsBooleanSaveAcknowledgement,
-            multi_launcher::settings::SettingsBooleanSaveError,
-        >,
-        cx: &mut Context<Self>,
-    ) {
-        if !self
-            .settings_editor
-            .pending
-            .is_some_and(|pending| pending.id == request_id)
-        {
-            return;
-        }
-        let canceled = matches!(
-            &result,
-            Err(multi_launcher::settings::SettingsBooleanSaveError::Cancelled)
-        );
-        let save_failed = result.is_err() && !canceled;
-        let acknowledged = self.settings_editor.finish_save(request_id, result);
-        if let Some(token) = self.settings_save_token.take() {
-            self.settings_save_workers
-                .acknowledge_boolean_preference_save(token.id());
-        }
-        self.settings_save_permit.take();
-        if let Some(value) = acknowledged {
-            self.search_catalog.query_autocomplete = value;
-            let query = self.query.read(cx).value().to_string();
-            self.search_completion
-                .reset_for_query(&self.search_catalog, &query);
-            clear_stale_settings_restart_status(&mut self.restart_status, true);
-        }
-        self.finish_deferred_preference_close(save_failed, cx);
         cx.notify();
     }
 
@@ -7334,12 +6812,7 @@ impl RootWindow {
             .is_some_and(|caps| caps.iter().any(|cap| cap == "show_full_path"));
         if !layout.grid && !show_full_path && actions.iter().any(|row| matches!(&row.origin, LauncherResultOrigin::Provider(name) if name == "folders")) {
             let aliases = self.search_catalog.providers.aliased_folder_rows();
-            for row in &mut actions {
-                row.hide_description = matches!(&row.origin, LauncherResultOrigin::Provider(name) if name == "folders")
-                    && row.action.args.is_none()
-                    && row.action.desc == row.action.action
-                    && aliases.get(&row.action.action).is_some_and(|labels| labels.contains(&row.action.label));
-            }
+            decorate_folder_descriptions(&mut actions, layout.grid, show_full_path, &aliases);
         }
         self.launcher_results
             .replace(query.clone(), actions, layout, self.search_catalog.page_jump);
@@ -10289,7 +9762,7 @@ impl RootWindow {
                     clipboard_message,
                     file_picker_pending,
                     self.toast_log_external_open_pending,
-                    self.settings_editor.pending.is_some(),
+                    self.settings_search.as_ref().is_some_and(|view| view.read(cx).pending_token().is_some()),
                     self.command_help.pending.is_some(),
                 )
             })
@@ -10721,20 +10194,11 @@ impl Render for RootWindow {
             xml_pin_focus_handle: self.xml_pin_focus_handle.clone(),
         };
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
-            root: cx.entity().downgrade(),
-            actions: self.settings_actions.clone(),
-            draft: self.settings_editor.draft,
-            saving: self.settings_editor.pending.is_some(),
-            reading: self.settings_editor.read_pending.is_some(),
-            available: self.settings_editor.available,
-            dirty: self.settings_editor.is_dirty(),
-            status: self.settings_editor.status.clone(),
-            index_busy: self.indexed_applications.busy(),
-            index_status: self.indexed_applications.status.clone(),
-            width: root_controls_width,
-            metrics,
-            palette,
-            settings_focus_handle: self.settings_focus_handle.clone(),
+            root: cx.entity().downgrade(), search: self.settings_search.clone(), actions: self.settings_actions.clone(),
+            busy: self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy())
+                || self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()),
+            status: self.settings_editor.status.clone(), index_busy: self.indexed_applications.busy(),
+            index_status: self.indexed_applications.status.clone(), width: root_controls_width, metrics, palette,
             settings_owner_focus_handle: self.settings_owner_focus_handle.clone(),
         });
         let toast_log_viewer_panel = self.toast_log_viewer.open.then(|| ToastLogViewerPanel {
@@ -12813,9 +12277,7 @@ pub(crate) fn run_foundation_window(
             if let Some(root) = root_for_quit_callback.borrow().clone() {
                 let _ = root.update(app, |root, cx| {
                     root.snippets_search.wake.close();
-                    if let Some(token) = root.settings_save_token.as_ref() {
-                        token.request_cancel();
-                    }
+                    if let Some(token) = root.settings_search.as_ref().and_then(|view| view.read(cx).pending_token()) { token.request_cancel(); }
                     root.retire_search_jump_mode();
                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.retire_json_workspace(cx);
@@ -12899,7 +12361,7 @@ pub(crate) fn run_foundation_window(
             let resize_focus_handle = cx.focus_handle();
             let search_catalog_for_root = launcher_search_catalog;
             let settings_editor_for_root =
-                SettingsEditorState::new(search_catalog_for_root.query_autocomplete);
+                SettingsEditorState::default();
             let command_help_for_root =
                 CommandHelpState::new(search_catalog_for_root.startup_show_examples);
             let command_help_filter =
@@ -12953,6 +12415,7 @@ pub(crate) fn run_foundation_window(
                 search_completion: SearchCompletion::default(),
                 search_completion_focus_revision: None,
                 settings_editor: settings_editor_for_root,
+                settings_search: None,
                 settings_actions: None,
                 app_editor: add_action::AppEditorState::new(cx),
                 plugin_editor: None,
@@ -12974,9 +12437,6 @@ pub(crate) fn run_foundation_window(
                 quick_help_sequence_starts: Vec::<String>::new().into(),
                 settings_path: settings_path_for_root.clone(),
                 settings_save_workers: settings_save_workers_for_root.clone(),
-                settings_save_permit: None,
-                settings_save_token: None,
-                settings_read_permit: None,
                 command_help_save_permit: None,
                 command_help_save_token: None,
                 preference_close_after_terminal: false,
@@ -14496,7 +13956,6 @@ mod tests {
         root_search_focus_is_current, root_tab_traversed_to_search,
         jump_badge_placement, search_jump_result_target_id, search_jump_search_target_id, select_search_result_state,
         search_completion_session_is_current, search_input_is_current, selection_from_args,
-        SettingsEditorState, SettingsReadAttempt,
         RootCloseBlocker, ToastLogViewerState,
         clear_stale_settings_restart_status, clear_toast_log_open_pending_status,
         command_help_escape_capture_should_close,
@@ -15226,7 +14685,7 @@ mod tests {
         assert_eq!(multi_character_hint.0.generation(), TargetGeneration(31));
     }
 
-    fn completion_catalog(
+    pub(super) fn completion_catalog(
         actions: Vec<multi_launcher::actions::Action>,
         query_autocomplete: bool,
         enabled_plugins: Option<&HashSet<String>>,
@@ -15265,6 +14724,21 @@ mod tests {
         let catalog = completion_catalog(Vec::new(), true, None);
         let rows = catalog.compose(query, vec![("file_search".into(), action.clone())], false);
         assert!(rows.iter().any(|row| row.action == action && matches!(&row.origin, super::LauncherResultOrigin::Provider(name) if name == "file_search")));
+    }
+
+    #[test]
+    fn folder_description_redecoration_updates_only_folder_rows() {
+        let folder = multi_launcher::actions::Action { label: "Alias".into(), desc: "C:/owned".into(), action: "C:/owned".into(), args: None };
+        let other = multi_launcher::actions::Action { label: "Other".into(), desc: "Text".into(), action: "other".into(), args: None };
+        let mut rows = vec![super::LauncherSearchResult { action: folder, origin: super::LauncherResultOrigin::Provider("folders".into()), display_label: None, hide_description: false },
+            super::LauncherSearchResult { action: other, origin: super::LauncherResultOrigin::Saved, display_label: None, hide_description: true }];
+        let aliases = HashMap::from([("C:/owned".to_owned(), HashSet::from(["Alias".to_owned()]))]);
+        super::decorate_folder_descriptions(&mut rows, false, false, &aliases);
+        assert!(rows[0].hide_description && rows[1].hide_description);
+        super::decorate_folder_descriptions(&mut rows, true, false, &HashMap::new());
+        assert!(!rows[0].hide_description && rows[1].hide_description);
+        super::decorate_folder_descriptions(&mut rows, false, true, &aliases);
+        assert!(!rows[0].hide_description && rows[1].hide_description);
     }
 
     #[test]
@@ -16554,34 +16028,6 @@ mod tests {
         assert!(help.pending.is_none());
         assert!(help.cancel_idle());
         assert!(!help.open);
-    }
-
-    #[test]
-    fn settings_editor_rejects_acknowledgement_for_another_boolean_preference() {
-        let mut editor = SettingsEditorState::new(true);
-        editor.open_with_baseline(true);
-        editor.draft = false;
-        let attempt = editor.begin_save().expect("dirty Settings admits a save");
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("settings.json");
-        std::fs::write(&path, br#"{"show_examples":false}"#).unwrap();
-        let acknowledgement = multi_launcher::settings::Settings::save_boolean_preference_checked(
-            &path,
-            multi_launcher::settings::SettingsBooleanSaveRequest::new(
-                multi_launcher::settings::SettingsBooleanPreference::ShowExamples,
-                false,
-                false,
-            ),
-        )
-        .unwrap();
-
-        assert_eq!(editor.finish_save(attempt.id, Ok(acknowledgement)), None);
-        assert_eq!(editor.baseline, true);
-        assert_eq!(editor.draft, false);
-        assert!(editor.is_dirty());
-        assert!(editor.pending.is_none());
-        assert!(editor.status.as_deref().unwrap().contains("ShowExamples"));
     }
 
     #[test]
@@ -17980,107 +17426,12 @@ mod tests {
     }
 
     #[test]
-    fn settings_editor_keeps_draft_until_store_ack_and_blocks_pending_dismissal() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("settings.json");
-        std::fs::write(&path, br#"{"query_autocomplete":true}"#).unwrap();
-        let mut editor = SettingsEditorState::new(true);
-        editor.open_with_baseline(true);
-        editor.draft = false;
-
-        let attempt = editor.begin_save().expect("dirty editor admits one save");
-        assert!(editor.is_dirty());
-        assert!(!editor.cancel_idle());
-        assert_eq!(editor.pending, Some(attempt));
-        assert_eq!(
-            editor.finish_save(
-                attempt.id + 1,
-                Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
-                    "stale receipt".into()
-                )),
-            ),
-            None,
-            "a receipt for another request cannot release the current save"
-        );
-        assert_eq!(editor.pending, Some(attempt));
-
-        let acknowledgement = multi_launcher::settings::Settings::save_boolean_preference_checked(
-            &path,
-            multi_launcher::settings::SettingsBooleanSaveRequest::new(
-                multi_launcher::settings::SettingsBooleanPreference::QueryAutocomplete,
-                true,
-                false,
-            ),
-        )
-        .unwrap();
-        assert_eq!(editor.finish_save(attempt.id, Ok(acknowledgement)), Some(false));
-        assert!(editor.open, "Save keeps the retained editor open");
-        assert!(!editor.is_dirty());
-        assert_eq!(editor.baseline, false);
-        assert_eq!(editor.draft, false);
-        assert_eq!(editor.status.as_deref(), Some("Settings saved."));
-        assert!(editor.pending.is_none());
-        assert!(editor.cancel_idle());
-        assert!(!editor.open);
-    }
-
-    #[test]
-    fn settings_editor_applies_only_the_current_baseline_read_receipt() {
-        let mut editor = SettingsEditorState::new(true);
-        let attempt = editor.begin_read().expect("closed editor admits one read");
-        assert!(editor.open);
-        assert!(editor.read_pending.is_some());
-        assert!(!editor.available);
-        assert!(!editor.cancel_idle(), "a current read retains its editor");
-
-        assert!(
-            !editor.finish_read(
-                SettingsReadAttempt { id: attempt.id + 1 },
-                Ok(false),
-            ),
-            "an obsolete read cannot replace the current baseline"
-        );
-        assert_eq!(editor.read_pending, Some(attempt));
-        assert!(editor.finish_read(attempt, Ok(false)));
-        assert!(editor.available);
-        assert_eq!(editor.baseline, false);
-        assert_eq!(editor.draft, false);
-        assert!(editor.read_pending.is_none());
-
-        assert!(
-            editor.begin_read().is_none(),
-            "a retained open editor does not start a second baseline read"
-        );
-        assert!(editor.cancel_idle(), "an idle read result can be dismissed");
-        assert!(!editor.open);
-        let failed = editor.begin_read().expect("completed editor can reread");
-        assert!(editor.finish_read(failed, Err("malformed Settings".into())));
-        assert!(!editor.available);
-        assert!(editor.status.as_deref().unwrap().contains("malformed Settings"));
-    }
-
-    #[test]
     fn settings_cleaning_clears_only_the_stale_dirty_restart_message() {
-        let mut editor = SettingsEditorState::new(true);
-        editor.open_with_baseline(true);
-        editor.draft = false;
-        assert!(editor.is_dirty());
-
         let mut status = Some(SETTINGS_DIRTY_RESTART_STATUS.to_owned());
-        assert!(!clear_stale_settings_restart_status(&mut status, !editor.is_dirty()));
-        assert_eq!(status.as_deref(), Some(SETTINGS_DIRTY_RESTART_STATUS));
-
-        editor.draft = editor.baseline;
-        assert!(!editor.is_dirty());
-        assert!(clear_stale_settings_restart_status(&mut status, !editor.is_dirty()));
-        assert_eq!(status, None);
-
+        assert!(!clear_stale_settings_restart_status(&mut status, false));
+        assert!(clear_stale_settings_restart_status(&mut status, true));
         let mut unrelated = Some("A Hash Generator operation is still pending.".to_owned());
         assert!(!clear_stale_settings_restart_status(&mut unrelated, true));
-        assert_eq!(
-            unrelated.as_deref(),
-            Some("A Hash Generator operation is still pending.")
-        );
     }
 
     #[test]
@@ -18101,37 +17452,6 @@ mod tests {
             "closing Settings from a popup opened over Search or Hash leaves that live origin alone"
         );
         assert!(!settings_menu_close_needs_trigger_focus(false, false, true));
-    }
-
-    #[test]
-    fn settings_editor_failure_preserves_retryable_draft_and_restart_snapshot() {
-        let mut editor = SettingsEditorState::new(true);
-        editor.open_with_baseline(true);
-        editor.draft = false;
-        let attempt = editor.begin_save().unwrap();
-        assert_eq!(
-            editor.finish_save(
-                attempt.id,
-                Err(multi_launcher::settings::SettingsBooleanSaveError::Store(
-                    "write failed".into()
-                )),
-            ),
-            None
-        );
-        assert!(editor.open);
-        assert!(editor.is_dirty());
-        assert_eq!(editor.baseline, true);
-        assert_eq!(editor.draft, false);
-        assert!(editor.pending.is_none());
-        assert!(editor.status.as_deref().unwrap().contains("write failed"));
-        let snapshot = editor.restart_draft();
-        assert!(snapshot.open);
-        assert_eq!(snapshot.baseline, true);
-        assert_eq!(snapshot.draft, false);
-        assert!(!snapshot.read_pending);
-        assert_eq!(snapshot.pending_request, None);
-        assert!(editor.cancel_idle());
-        assert_eq!(editor.draft, true);
     }
 
     #[test]

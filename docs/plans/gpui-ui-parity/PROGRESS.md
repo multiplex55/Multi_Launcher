@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+GPUI now saves and applies Search Results ranking, navigation and Grid preferences. All 15 focused launcher tests passed. Page Jump retains selection and ranking Save preserves current Calculator scalar work. Matched Windows verification remains open. Typed Settings navigation follows. [Search Results checkpoint](CHECKPOINTS.md#g06-and-g05-live-search-results-settings)
+
 GPUI Settings now saves live Actions and Feedback preferences through the canonical checked transaction. All 16 focused tests passed, including sparse and positional Settings and exact live acknowledgement. Matched Windows readback and launch effects remain open. Search Results controls follow. [Settings checkpoint](CHECKPOINTS.md#g06-and-g05-live-actions-and-feedback-settings)
 
 Selected-match Preview now opens the exact file in Explorer and can copy its full path or original matching line through a checked effect. All seven focused tests passed. Native effects and fuller preview navigation remain open. G06/G05 live Launcher Settings follows. [Preview actions checkpoint](CHECKPOINTS.md#g07-checked-preview-actions)
@@ -167,7 +169,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add launcher-only Search Results preferences and typed Settings navigation. Matched Settings, G01, G07, G13 and G14 replay, full Preview navigation, mixed DPI and known-duration F2 remain open. |
+| Current next action | Add typed Settings search and exact navigation to mounted controls. Matched Settings, G01, G07, G13 and G14 replay, full Preview navigation, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

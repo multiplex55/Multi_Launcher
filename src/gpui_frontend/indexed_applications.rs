@@ -385,8 +385,8 @@ impl RootWindow {
 
     pub(super) fn reload_application_index(&mut self, cx: &mut Context<Self>) {
         if !self.settings_editor.open
-            || self.settings_editor.pending.is_some()
-            || self.settings_editor.read_pending.is_some()
+            || self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy())
+            || self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy())
             || self.restart_admission.is_fenced()
         {
             return;

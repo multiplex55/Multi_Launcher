@@ -75,6 +75,12 @@ Existing JSON object roots keep unowned raw member values. A legacy positional r
 
 ## Live Actions and Feedback
 
-The retained GPUI Settings pane offers Clear Query, Hide Window, Enable Toasts, Toast Duration, Inline Errors and Error Toasts. Save Actions and Feedback writes the changed fields in one checked transaction. Its acknowledgement applies the values to later launch admissions. Existing launch attempts keep their captured preferences. The Search Settings Save remains available for Query Autocomplete.
+The retained GPUI Settings pane offers Clear Query, Hide Window, Enable Toasts, Toast Duration, Inline Errors and Error Toasts. Save Actions and Feedback writes the changed fields in one checked transaction. Its acknowledgement applies the values to later launch admissions. Existing launch attempts keep their captured preferences.
 
 Use paired owned profiles at 1516 × 937 with matching display scale and both Paste Sequences shortcuts disabled. Open Settings through Menu and Search, change two preferences, and check a subsequent owned application launch for the resulting query, visibility and feedback. Toggle toast notifications and edit duration using the visible control. Exercise Cancel and a controlled read-sharing replacement failure with a retry. Reopen the same owned profile through egui and compare the touched values and raw unowned siblings. Native replay remains open.
+
+## Live Search Results
+
+The Search Results section applies the acknowledged Autocomplete, Match Exact, weights, Page Jump and Grid preferences to the current launcher. Page Jump preserves the selected row, while Grid changes update the presentation of current results. Ranking changes refresh ordinary results while preserving Calculator scalar state. Grid Rows and Plugin Opt-Out authoring remain open.
+
+Extend the paired Settings replay with a retained query and known result order. Change one ranking field and Grid, confirm the anchored query stays in place and check the updated rows. Verify Page Jump retains the selected result. Reopen through egui and verify the stored values and untouched layout keys. [Search Results checkpoint](../CHECKPOINTS.md#g06-and-g05-live-search-results-settings)

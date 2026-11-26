@@ -430,7 +430,7 @@ impl ActionsSettings {
     }
 }
 
-fn ack_matches(changes: &[Change], ack: &ScopedSettingsAcknowledgement) -> bool {
+pub(super) fn ack_matches(changes: &[Change], ack: &ScopedSettingsAcknowledgement) -> bool {
     ack.values.len() == changes.len()
         && changes.iter().all(|change| {
             ack.values
