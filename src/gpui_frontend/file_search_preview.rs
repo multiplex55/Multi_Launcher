@@ -36,6 +36,10 @@ fn line_navigation(offset: usize, count: usize, key: &str) -> Option<usize> {
     })
 }
 
+fn popup_action_authorized(selection: bool, action: bool, parent: bool, native: bool, foreground: bool, live: bool) -> bool {
+    selection && action && parent && native && foreground && live
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PreviewAction { Explorer, CopyPath, CopyLine }
 impl PreviewAction {
@@ -63,6 +67,10 @@ pub(super) struct FileSearchPreview {
     receipt: file_search::SelectionReceipt,
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
+    action_owner: utility_mount::MountOwner,
+    action_mount: utility_mount::MountReceipt,
+    parent_mount: utility_mount::MountReceipt,
+    popup: bool,
     focus: FocusHandle,
     document_focus: FocusHandle,
     explorer_focus: FocusHandle,
@@ -78,7 +86,7 @@ pub(super) struct FileSearchPreview {
     host: AnyWindowHandle,
     visibility: RootVisibility,
     revision: u64,
-    native: NativeWindow,
+    native: Option<NativeWindow>,
     admission: Arc<RestartAdmission>,
     state: PreviewLoadStateMachine,
     found: Option<multi_launcher::file_search::model::ContentMatch>,
@@ -93,9 +101,11 @@ pub(super) struct FileSearchPreview {
 impl FileSearchPreview {
     pub(super) fn new(parent: WeakEntity<file_search::FileSearchView>, root: WeakEntity<RootWindow>, receipt: file_search::SelectionReceipt,
         return_focus: FocusHandle, return_scroll: Point<Pixels>, host: AnyWindowHandle, found: Option<multi_launcher::file_search::model::ContentMatch>, owner: utility_mount::MountOwner,
-        mount: utility_mount::MountReceipt, visibility: RootVisibility, revision: u64, native: NativeWindow,
-        admission: Arc<RestartAdmission>, cx: &mut Context<Self>) -> Self {
-        Self { parent, root, receipt, owner, mount, focus: cx.focus_handle(), document_focus: cx.focus_handle(), explorer_focus: cx.focus_handle(),
+        mount: utility_mount::MountReceipt, visibility: RootVisibility, revision: u64, native: Option<NativeWindow>,
+        admission: Arc<RestartAdmission>, parent_mount: utility_mount::MountReceipt, popup: bool, cx: &mut Context<Self>) -> Self {
+        let action_owner = utility_mount::MountOwner::default();
+        let action_mount = action_owner.attach();
+        Self { parent, root, receipt, owner, mount, action_owner, action_mount, parent_mount, popup, focus: cx.focus_handle(), document_focus: cx.focus_handle(), explorer_focus: cx.focus_handle(),
             copy_path_focus: cx.focus_handle(), copy_line_focus: cx.focus_handle(), pending: false,
             effect_lease: None, focus_guard: None, activation_guard: None, feedback: None,
             return_focus, return_scroll, host, visibility, revision, native, admission,
@@ -105,28 +115,34 @@ impl FileSearchPreview {
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool {
         self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
     }
+    pub(super) fn effect_pending(&self) -> bool { self.pending }
+    pub(super) fn action_receipt(&self) -> utility_mount::MountReceipt { self.action_mount.clone() }
+    pub(super) fn native(&self) -> Option<NativeWindow> { self.native }
+    pub(super) fn native_matches(&self, native: NativeWindow) -> bool { self.native == Some(native) }
     pub(super) fn host(&self) -> WindowId { self.host.window_id() }
     pub(super) fn receipt(&self) -> &file_search::SelectionReceipt { &self.receipt }
     pub(super) fn scope_current(&self) -> bool {
-        self.mount.is_current() && !self.admission.is_fenced()
-            && json_utility::native_host_current(&self.visibility, self.revision, Some(self.native), false)
+        self.mount.is_current() && self.action_mount.is_current() && self.parent_mount.is_current() && !self.admission.is_fenced()
+            && self.native.is_some_and(|native| if self.popup { native_window_is_valid(native) }
+               else { json_utility::native_host_current(&self.visibility, self.revision, Some(native), false) })
     }
     pub(super) fn retire(&mut self) {
         if let Some(lease) = &self.effect_lease { lease.store(false, Ordering::Release); }
-        self.owner.retire(); self.state.clear(); self.rendered.clear();
+        self.action_owner.retire(); self.owner.retire(); self.state.clear(); self.rendered.clear();
     }
     fn start_action(&mut self, action: PreviewAction, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(native) = self.native else { return; };
         if (action == PreviewAction::CopyLine && self.found.is_none()) || self.pending || !self.scope_current()
             || self.host.window_id() != window.window_handle().window_id() || !window.is_window_active()
-            || window.has_active_dialog(cx) || current_foreground_identity() != Some(self.native.identity) { return; }
+            || window.has_active_dialog(cx) || current_foreground_identity() != Some(native.identity) { return; }
         let Some(parent) = self.parent.upgrade() else { return; };
         if !parent.read(cx).preview_is_current(cx.entity_id(), &self.receipt) { return; }
         let Some(root) = self.root.upgrade() else { return; };
         let before = window.focused(cx);
         {
             let root_state = root.read(cx);
-            if root_state.root_window.is_none_or(|host| host.window_id() != self.host.window_id())
-                || root_state.native_window != Some(self.native)
+            if (!self.popup && (root_state.root_window.is_none_or(|host| host.window_id() != self.host.window_id())
+                || root_state.native_window != Some(native)))
                 || !root_state.external_owner_is_current(before.as_ref(), window, cx) { return; }
         }
         let focus = match action { PreviewAction::Explorer => &self.explorer_focus, PreviewAction::CopyPath => &self.copy_path_focus, PreviewAction::CopyLine => &self.copy_line_focus }.clone();
@@ -136,7 +152,7 @@ impl FileSearchPreview {
         let lease = Arc::new(AtomicBool::new(true));
         let admitted = root.update(cx, |root, cx| {
             if !root.external_owner_is_current(Some(&focus), window, cx) || window.has_active_dialog(cx)
-                || !window.is_window_active() || current_foreground_identity() != Some(self.native.identity) { return false; }
+                || !window.is_window_active() || current_foreground_identity() != Some(native.identity) { return false; }
             if action.is_clipboard() && (root.clipboard_modify_startup.pending
                 || root.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close())) { return false; }
             if !root.external_launch.begin_auxiliary_effect(lease.clone(), action.is_clipboard()) { return false; }
@@ -160,17 +176,24 @@ impl FileSearchPreview {
         let payload = action.payload(&self.receipt.path, self.found.as_ref().map(|found| found.line.as_str()));
         let path = self.receipt.path.clone();
         let directory = self.receipt.kind == multi_launcher::file_search::model::FileKind::Directory;
-        let mount = self.mount.clone();
+        let mount = self.action_mount.clone();
         let worker_mount = mount.clone();
+        let selection_mount = self.mount.clone();
+        let parent_mount = self.parent_mount.clone();
+        let popup = self.popup;
         let visibility = self.visibility.clone();
         let revision = self.revision;
-        let native = self.native;
         let admission = self.admission.clone();
         let worker_lease = lease.clone();
         let task = cx.background_executor().spawn(async move {
-            let current = || worker_lease.load(Ordering::Acquire) && worker_mount.is_current() && !admission.is_fenced()
-                && json_utility::native_host_current(&visibility, revision, Some(native), false)
-                && current_foreground_identity() == Some(native.identity);
+            let current = || {
+                let live = worker_lease.load(Ordering::Acquire) && !admission.is_fenced();
+                let foreground = current_foreground_identity() == Some(native.identity);
+                if popup { popup_action_authorized(selection_mount.is_current(), worker_mount.is_current(), parent_mount.is_current(),
+                    native_window_is_valid(native), foreground, live) }
+                else { live && worker_mount.is_current() && selection_mount.is_current() && parent_mount.is_current()
+                    && json_utility::native_host_current(&visibility, revision, Some(native), false) && foreground }
+            };
             match action {
                 PreviewAction::Explorer => {
                     #[cfg(windows)]
@@ -203,7 +226,7 @@ impl FileSearchPreview {
             let _ = weak.update(cx, |view, cx| {
                 view.pending = false;
                 view.focus_guard = None; view.activation_guard = None; view.effect_lease = None;
-                if mount.is_current() && mount.matches(&view.mount) && view.scope_current()
+                if mount.is_current() && mount.matches(&view.action_mount) && view.scope_current()
                     && lease.load(Ordering::Acquire)
                     && view.parent.upgrade().is_some_and(|parent| parent.read(cx).preview_is_current(cx.entity_id(), &view.receipt)) {
                     view.feedback = Some(match result { Ok(()) if action.is_clipboard() => "Copied to clipboard.".into(),
@@ -257,12 +280,14 @@ impl FileSearchPreview {
         let worker_mount = mount.clone();
         let visibility = self.visibility.clone();
         let revision = self.revision;
-        let native = self.native;
+        let Some(native) = self.native else { return; };
         let admission = self.admission.clone();
         let found = self.found.clone();
+        let parent_mount = self.parent_mount.clone();
+        let popup = self.popup;
         let task = cx.background_executor().spawn(async move {
-            if !worker_mount.is_current() || admission.is_fenced()
-                || !json_utility::native_host_current(&visibility, revision, Some(native), false) { return None; }
+            if !worker_mount.is_current() || !parent_mount.is_current() || admission.is_fenced()
+                || !(if popup { native_window_is_valid(native) } else { json_utility::native_host_current(&visibility, revision, Some(native), false) }) { return None; }
             let mut preview = preview_file(&request);
             let selected_index = found.as_ref().and_then(|found| preview.lines.iter().position(|line| line.line_number == found.line_number)).unwrap_or(0);
             let match_present = found.as_ref().is_some_and(|found| preview.lines.get(selected_index)
@@ -295,8 +320,18 @@ impl FileSearchPreview {
 
 impl Render for FileSearchPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let parent_escape = self.parent.clone();
+        let child_id = cx.entity_id();
         let mut pane = div().id("file-search-preview-document").track_focus(&self.document_focus).flex().flex_col().gap_2()
-            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if view.popup && event.keystroke.key == "escape" && event.keystroke.modifiers == Modifiers::default()
+                    && view.owns_focus(window, cx) {
+                    window.prevent_default(); cx.stop_propagation();
+                    if !event.is_held { let parent = parent_escape.clone(); window.defer(cx, move |window, app| {
+                        let _ = parent.update(app, |parent, cx| parent.close_preview(child_id, window, cx));
+                    }); }
+                    return;
+                }
                 if event.keystroke.modifiers == Modifiers::default() && view.document_focus.is_focused(window)
                     && view.navigate(&event.keystroke.key, cx) {
                     window.prevent_default(); cx.stop_propagation();
@@ -415,6 +450,32 @@ mod tests {
         }
         #[cfg(not(windows))]
         assert_eq!(allowed.ordinary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn popup_action_requires_live_selection_parent_child_and_foreground() {
+        use super::popup_action_authorized as current;
+        assert!(current(true, true, true, true, true, true));
+        assert!(!current(false, true, true, true, true, true));
+        assert!(!current(true, false, true, true, true, true));
+        assert!(!current(true, true, false, true, true, true));
+        assert!(!current(true, true, true, false, true, true));
+        assert!(!current(true, true, true, true, false, true));
+        assert!(!current(true, true, true, true, true, false));
+    }
+
+    #[test]
+    fn replacing_action_mount_keeps_selection_and_load_owner_current() {
+        let selection_owner = super::super::utility_mount::MountOwner::default();
+        let selection = selection_owner.attach();
+        let action_owner = super::super::utility_mount::MountOwner::default();
+        let old = action_owner.attach();
+        let replacement = action_owner.attach();
+        assert!(selection.is_current());
+        assert!(!old.is_current());
+        assert!(replacement.is_current());
+        selection_owner.retire();
+        assert!(!selection.is_current());
     }
 
     #[test]

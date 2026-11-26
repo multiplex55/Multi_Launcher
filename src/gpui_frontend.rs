@@ -3633,11 +3633,13 @@ enum HashOpenIntent {
     Default,
     Reactivate,
     File(PathBuf),
+    InheritedFile(PathBuf),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 enum HashReturnReceipt {
     FileSearch(file_search::SelectionReceipt),
+    FileSearchPopup { receipt: file_search::SelectionReceipt, mount: utility_mount::MountReceipt, host: AnyWindowHandle, native: NativeWindow },
     #[cfg(windows)]
     Downloads(downloads_triage::InspectReceipt),
 }
@@ -4481,6 +4483,22 @@ async fn restore_root_search_focus_after_hash_close(
     retired_docked_focus: Option<FocusHandle>,
     cx: &mut AsyncApp,
 ) {
+    if let Some(HashReturnReceipt::FileSearchPopup { receipt, mount, host, native }) = return_receipt.as_ref() {
+        let view = root.update(cx, |root, cx| {
+            if root.hash_window_revision.load(Ordering::Acquire) != close_revision || root.restart_admission.is_fenced()
+                || !mount.is_current() || current_foreground_identity() != Some(native.identity) { return None; }
+            root.file_search.clone().filter(|view| view.entity_id() == receipt.owner && view.read(cx).is_mounted_in(host.window_id(), true))
+        }).ok().flatten();
+        if let Some(view) = view {
+            let _ = update_kit_window_content(*host, &view, cx, |view, window, cx| {
+                if mount.is_current() && window.is_window_active() && current_foreground_identity() == Some(native.identity)
+                    && window.focused(cx).is_none_or(|focus| focus == view.hash_action_focus(cx)) {
+                    view.restore_receipt_focus(receipt, cx.entity_id(), window, cx);
+                }
+            });
+        }
+        return;
+    }
     let target = root.update(cx, |root, cx| {
         let may_restore_search = root.action_sheet.is_none()
             && root.context_favorite_popup.is_none()
@@ -4539,6 +4557,7 @@ async fn restore_root_search_focus_after_hash_close(
                     || retired_docked_focus.as_ref().is_some_and(|owner| owner.contains(&focus, window))
             });
             let restored = match receipt {
+                HashReturnReceipt::FileSearchPopup { .. } => false,
                 HashReturnReceipt::FileSearch(receipt) => {
                     if let Some(view) = root.file_search.clone().filter(|view| view.entity_id() == receipt.owner) {
                         if may_leave_focus || view.read(cx).hash_action_is_focused(window) {
@@ -5159,7 +5178,7 @@ impl RootWindow {
     }
 
     fn poll_utility_size_writer(&mut self, cx: &mut Context<Self>) -> bool {
-        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged, clipboard_failure, clipboard_acknowledged, modify_failure, modify_acknowledged, search_failure, search_acknowledged) = {
+        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged, clipboard_failure, clipboard_acknowledged, modify_failure, modify_acknowledged, search_failure, search_acknowledged, preview_failure, preview_acknowledged) = {
             let mut store = self
                 .utility_size_store
                 .lock()
@@ -5177,9 +5196,12 @@ impl RootWindow {
             let clipboard_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == clipboard_key));
             let modify_key = UtilityToolKey::parse("clipboard-modify").ok();
             let modify_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == modify_key));
+            let preview_key = UtilityToolKey::parse("file-preview").ok();
+            let preview_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == preview_key));
             let search_key = UtilityToolKey::parse("file-search").ok();
             let search_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == search_key));
             let failures = store.take_new_write_failures();
+            let preview_failure = failures.iter().find(|failure| Some(failure.key) == preview_key).map(|failure| failure.message.clone());
             let search_failure = failures.iter().find(|failure| Some(failure.key) == search_key).map(|failure| failure.message.clone());
             let modify_failure = failures.iter().find(|failure| Some(failure.key) == modify_key).map(|failure| failure.message.clone());
             let clipboard_failure = failures.iter().find(|failure| Some(failure.key) == clipboard_key).map(|failure| failure.message.clone());
@@ -5202,7 +5224,7 @@ impl RootWindow {
                 clipboard_acknowledged,
                 modify_failure,
                 modify_acknowledged,
-                search_failure, search_acknowledged,
+                search_failure, search_acknowledged, preview_failure, preview_acknowledged,
             )
         };
         if let Some(error) = poll_error {
@@ -5234,6 +5256,9 @@ impl RootWindow {
         else if modify_acknowledged { self.set_clipboard_modify_size_error(None, cx); }
         if let Some(error) = search_failure { self.set_file_search_size_error(Some(format!("Could not save File Search window geometry: {error}")), cx); }
         else if search_acknowledged { self.set_file_search_size_error(None, cx); }
+        if preview_failure.is_some() || preview_acknowledged {
+            if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| view.set_preview_geometry_error(preview_failure, cx)); }
+        }
         if !pending {
             self.utility_size_polling.store(false, Ordering::Release);
         }
@@ -5442,6 +5467,7 @@ impl RootWindow {
         self.drain_xml_native_geometry(cx, false);
         self.drain_regex_native_geometry(cx, false);
         self.drain_file_search_geometry(cx, false);
+        self.drain_file_preview_geometry(cx, false);
         self.drain_clipboard_native_geometry(cx, false);
         self.drain_clipboard_modify_geometry(cx, false);
         let _ = self.poll_utility_size_writer(cx);
@@ -5487,6 +5513,11 @@ impl RootWindow {
             if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The File Search window geometry is still being saved.".to_owned()); }
             if let Some((_, error)) = status.failure { return Err(format!("The File Search window geometry could not be saved: {error}")); }
         }
+        if let Ok(key) = UtilityToolKey::parse("file-preview") {
+            let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
+            if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The File Search Preview window geometry is still being saved.".to_owned()); }
+            if let Some((_, error)) = status.failure { return Err(format!("The File Search Preview window geometry could not be saved: {error}")); }
+        }
         if let Some(message) = hash_clipboard_close_message(self.hash_clipboard_pending.kind()) {
             return Err(format!("{message} Then retry the egui restart."));
         }
@@ -5525,6 +5556,11 @@ impl RootWindow {
 
         let mut child_windows = Vec::new();
         let mut native_windows = self.native_window.into_iter().collect::<Vec<_>>();
+        if let Some(view) = self.file_search.clone() {
+            for (host, native) in view.update(cx, |view, cx| view.preview_windows_for_restart(cx))? {
+                child_windows.push(host); native_windows.push(native);
+            }
+        }
         if let Some(popup) = &self.clipboard_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Clipboard History window has no checked native handle.".to_owned()); } }
         if let Some(popup) = &self.clipboard_modify_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Clipboard Modify window has no checked native handle.".to_owned()); } }
 
@@ -5844,7 +5880,8 @@ impl RootWindow {
         self.indexed_applications.retire();
         self.retire_search_jump_mode();
         self.drain_file_search_geometry(cx, true);
-        if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
+        self.drain_file_preview_geometry(cx, true);
+        if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| view.shutdown(cx)); }
         self.retire_json_workspace(cx);
         self.drain_regex_native_geometry(cx, true);
         self.drain_clipboard_native_geometry(cx, true);
@@ -7443,22 +7480,29 @@ impl RootWindow {
             return;
         };
         let source = view.read(cx);
+        let source_popup = source.is_mounted_in(window.window_handle().window_id(), true);
         let current = self.file_search.as_ref().is_some_and(|mounted| mounted.entity_id() == receipt.owner)
             && view.entity_id() == receipt.owner
-            && self.root_window.is_some_and(|root| root.window_id() == window.window_handle().window_id())
-            && self.root_visibility.active.load(Ordering::Acquire)
-            && self.root_visibility.visible.load(Ordering::Acquire)
-            && window.is_window_active()
-            && self.action_sheet.is_none()
-            && self.context_favorite_popup.is_none()
-            && source.hash_action_is_focused(window)
-            && source.receipt_is_current(&receipt, view.entity_id());
-        if !current {
-            return;
-        }
-        #[cfg(windows)]
-        if !self.native_window.is_some_and(|native| native_window_is_valid(native)
-            && current_foreground_identity() == Some(native.identity)) {
+            && source.is_mounted_in(window.window_handle().window_id(), source_popup)
+            && !source.rehosting && (source_popup || (self.root_visibility.active.load(Ordering::Acquire)
+                && self.root_visibility.visible.load(Ordering::Acquire)))
+            && window.is_window_active() && self.action_sheet.is_none() && self.context_favorite_popup.is_none()
+            && source.hash_action_is_focused(window) && source.receipt_is_current(&receipt, view.entity_id());
+        if !current { return; }
+        let Some(source_native) = source.host_native() else { return; };
+        if !native_window_is_valid(source_native) || current_foreground_identity() != Some(source_native.identity) { return; }
+        let source_mount = source.mount_receipt();
+        let source_host = window.window_handle();
+        if source_popup {
+            let Some(operation) = self.restart_admission.admit() else { return; };
+            match self.open_hash_generator_window(HashOpenIntent::InheritedFile(receipt.path.clone()), operation, window, cx) {
+                Ok(()) => {
+                    self.hash_return = Some(HashReturnReceipt::FileSearchPopup { receipt, mount: source_mount,
+                        host: source_host, native: source_native });
+                    cx.notify();
+                }
+                Err(error) => view.update(cx, |view, cx| view.report_hash_error(error, cx)),
+            }
             return;
         }
         let Some(operation) = self.restart_admission.admit() else {
@@ -8165,13 +8209,17 @@ impl RootWindow {
             self.hash_pin.remount_revision = None;
         }
         let reactivation = matches!(&intent, HashOpenIntent::Reactivate);
+        let inherited = matches!(&intent, HashOpenIntent::InheritedFile(_));
+        if inherited && self.hash_window.mode() == Some(HashPresentationMode::Docked) {
+            return Err("Docked Hash Generator must be popped out before opening from File Search.".into());
+        }
         let file = match intent {
             HashOpenIntent::Default => {
                 self.hash_return = None;
                 None
             }
             HashOpenIntent::Reactivate => None,
-            HashOpenIntent::File(path) => {
+            HashOpenIntent::File(path) | HashOpenIntent::InheritedFile(path) => {
                 if self.hash_rehost_pending.load(Ordering::Acquire)
                     || self.hash_file_picker_pending.load(Ordering::Acquire)
                     || self.hash_clipboard_pending.is_pending()
@@ -8298,9 +8346,9 @@ impl RootWindow {
             HashDraft::from_session(&session)
         };
         let mount_generation = self.next_hash_mount_generation();
-        let mode = HashPresentationMode::from_saved(
+        let mode = if inherited { HashPresentationMode::Popout } else { HashPresentationMode::from_saved(
             self.utility_presentations.preference(self.hash_tool_key),
-        );
+        ) };
         let root = cx.entity().downgrade();
         let mount_config = HashMountConfig {
             jump_controller: self.search_jump_mode.fresh(),
@@ -9772,7 +9820,8 @@ impl RootWindow {
         self.retire_json_workspace(cx);
         self.drain_regex_native_geometry(cx, true);
         self.drain_file_search_geometry(cx, true);
-        if let Some(view) = &self.file_search { view.update(cx, |view, _| view.shutdown()); }
+        self.drain_file_preview_geometry(cx, true);
+        if let Some(view) = &self.file_search { view.update(cx, |view, cx| view.shutdown(cx)); }
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         self.window_search.retire();
         self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
@@ -9788,7 +9837,8 @@ impl RootWindow {
         if let Some(popup) = self.clipboard_modify_popup.take() { retiring_clipboard.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, _| view.shutdown_host()); }
         if let Some(view) = &self.clipboard_history { view.update(cx, |view, _| view.shutdown()); }
-        let mut retiring_search = std::mem::take(&mut self.file_search_retiring);
+        let mut retiring_search = self.file_search.clone().map(|view| view.update(cx, |view, _| view.take_preview_retiring())).unwrap_or_default();
+        retiring_search.extend(std::mem::take(&mut self.file_search_retiring));
         if let Some(popup) = self.file_search_popup.take() { retiring_search.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         let mut retiring_regex = std::mem::take(&mut self.regex_retiring);
         if let Some(popup) = self.regex_popup.take() { retiring_regex.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
@@ -9818,7 +9868,7 @@ impl RootWindow {
     ) -> Option<RootCloseBlocker> {
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
-        if self.external_launch.auxiliary_effect_pending() || self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting || view.read(cx).host_effect_pending()) { return Some(RootCloseBlocker::FileSearchEffect); }
+        if self.external_launch.auxiliary_effect_pending() || self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting || view.read(cx).host_effect_pending(cx)) { return Some(RootCloseBlocker::FileSearchEffect); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Some(RootCloseBlocker::TempfileSave); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SnippetsSave); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardHistory); }
@@ -12376,7 +12426,8 @@ pub(crate) fn run_foundation_window(
                     if let Some(token) = root.settings_search.as_ref().and_then(|view| view.read(cx).pending_token()) { token.request_cancel(); }
                     root.retire_search_jump_mode();
                     root.drain_file_search_geometry(cx, true);
-                    if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
+                    root.drain_file_preview_geometry(cx, true);
+                    if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.shutdown(cx)); }
                     root.retire_json_workspace(cx);
                     root.drain_regex_native_geometry(cx, true);
                     root.drain_clipboard_native_geometry(cx, true);
@@ -13222,6 +13273,7 @@ pub(crate) fn run_foundation_window(
                         root.drain_xml_native_geometry(cx, false);
                         root.drain_regex_native_geometry(cx, false);
                         root.drain_file_search_geometry(cx, false);
+                        root.drain_file_preview_geometry(cx, false);
                         root.drain_clipboard_native_geometry(cx, false);
                         root.drain_clipboard_modify_geometry(cx, false);
                         root.hash_session
@@ -13757,14 +13809,14 @@ pub(crate) fn run_foundation_window(
                                     root.retire_search_jump_mode();
                                     root.cancel_docked_hash_preview();
                                     root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
-                                    if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.retire_preview(cx)); }
+                                    if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { if !view.popout { view.retire_preview(cx); } }); }
                                 },
                             );
                         } else {
                             let _ = root_view.update(&mut *cx, |root, cx| {
                                 root.window_search.retire();
                                 root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
-                                if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.retire_preview(cx)); }
+                                if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { if !view.popout { view.retire_preview(cx); } }); }
                             });
                         }
                     }

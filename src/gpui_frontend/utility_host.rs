@@ -107,7 +107,7 @@ trait HostedUtility: Render + Sized + 'static {
     fn root(&self) -> WeakEntity<RootWindow>;
     fn open(&self) -> bool;
     fn rehosting(&self) -> bool;
-    fn close_blocked(&self) -> bool { false }
+    fn close_blocked(&self, _: &App) -> bool { false }
     fn activation_lost(&mut self, _: &mut Context<Self>) {}
     fn activated(&mut self, _: &mut Window, _: &mut Context<Self>) {}
     fn outer_scroll(&self) -> Option<ScrollHandle> { None }
@@ -276,7 +276,7 @@ impl HostedUtility for super::regex_tester::RegexWorkspace {
         self.rehosting
     }
     fn outer_scroll(&self) -> Option<ScrollHandle> { Some(self.mount.outer_scroll.clone()) }
-    fn close_blocked(&self) -> bool {
+    fn close_blocked(&self, _: &App) -> bool {
         self.clipboard_pending || self.presets.blocks_host()
     }
     fn popout(&self) -> bool {
@@ -374,7 +374,7 @@ impl HostedUtility for super::clipboard_history::ClipboardHistory {
     fn rehosting(&self) -> bool {
         self.rehosting
     }
-    fn close_blocked(&self) -> bool {
+    fn close_blocked(&self, _: &App) -> bool {
         self.busy()
     }
     fn popout(&self) -> bool {
@@ -449,7 +449,7 @@ impl HostedUtility for super::clipboard_modify_view::ClipboardModifyView {
     fn root(&self) -> WeakEntity<RootWindow> { self.root.clone() }
     fn open(&self) -> bool { self.open }
     fn rehosting(&self) -> bool { self.rehosting }
-    fn close_blocked(&self) -> bool { self.blocks_close() }
+    fn close_blocked(&self, _: &App) -> bool { self.blocks_close() }
     fn popout(&self) -> bool { self.popout }
     fn fenced(&self) -> bool { self.admission.is_fenced() }
     fn receipt(&self) -> utility_mount::MountReceipt { self.mount_receipt() }
@@ -483,12 +483,12 @@ impl HostedUtility for super::file_search::FileSearchView {
         if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { view.geometry_error = message; cx.notify(); }); }
     }
     fn remember(root: &mut RootWindow, mode: RememberedPresentation, cx: &mut Context<RootWindow>) { root.remember_host_presentation(Self::KEY, mode, cx); }
-    fn retire(root: &mut RootWindow, cx: &mut Context<RootWindow>) { if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); } }
+    fn retire(root: &mut RootWindow, cx: &mut Context<RootWindow>) { if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.shutdown(cx)); } }
     fn observe(_: &mut RootWindow, _: WindowId, _: &mut Context<RootWindow>) {}
     fn root(&self) -> WeakEntity<RootWindow> { self.root.clone() }
     fn open(&self) -> bool { self.open }
     fn rehosting(&self) -> bool { self.rehosting }
-    fn close_blocked(&self) -> bool { self.host_effect_pending() }
+    fn close_blocked(&self, cx: &App) -> bool { self.host_effect_pending(cx) }
     fn activation_lost(&mut self, _: &mut Context<Self>) { self.retire_explorer(); }
     fn activated(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.wake_pending_popup(window, cx); }
     fn outer_scroll(&self) -> Option<ScrollHandle> { Some(self.outer_scroll.clone()) }
@@ -504,7 +504,7 @@ impl HostedUtility for super::file_search::FileSearchView {
     fn after_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
     fn after_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
     fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
-    fn shutdown(&mut self, _: &mut Context<Self>) { self.shutdown(); }
+    fn shutdown(&mut self, cx: &mut Context<Self>) { self.shutdown(cx); }
     fn pinned(_: &RootWindow) -> bool { false }
 }
 
@@ -928,7 +928,7 @@ impl RootWindow {
                                 if !view.mounted(local_id, true) {
                                     return true;
                                 }
-                                if view.rehosting() || view.close_blocked() {
+                                if view.rehosting() || view.close_blocked(cx) {
                                     return false;
                                 }
                                 let _ = view.root().update(cx, |root, cx| T::drain(root, cx, true));
