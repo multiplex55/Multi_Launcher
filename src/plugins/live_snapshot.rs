@@ -18,8 +18,8 @@ impl<T: Clone> LiveSnapshotRegistry<T> {
         }
     }
 
-    pub(crate) fn get_or_create(&self, path: &str, initial: Option<Vec<T>>) -> Arc<Mutex<Vec<T>>> {
-        let key = normalized_path(Path::new(path));
+    pub(crate) fn get_or_create(&self, path: impl AsRef<Path>, initial: Option<Vec<T>>) -> Arc<Mutex<Vec<T>>> {
+        let key = normalized_path(path.as_ref());
         let mut snapshots = self
             .snapshots
             .lock()
@@ -38,7 +38,7 @@ impl<T: Clone> LiveSnapshotRegistry<T> {
         snapshot
     }
 
-    pub(crate) fn publish(&self, path: &str, committed: &[T]) {
+    pub(crate) fn publish(&self, path: impl AsRef<Path>, committed: &[T]) {
         let snapshot = self.get_or_create(path, None);
         *snapshot
             .lock()

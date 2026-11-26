@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Clipboard Modify uses the shared remembered Dock and Pop Out host. Source, previews, management drafts and idle reviews move with the session. All 33 focused tests passed on the final source. Matched Windows replay remains open. The next G13 implementation is the retained Snippets editor. [Clipboard Modify host checkpoint](CHECKPOINTS.md#g13-clipboard-modify-remembered-dock-and-pop-out)
+Bare `cs` opens the retained GPUI Snippets editor. The saved list has stock filters and masked hidden previews. Checked Edit, Save and Cancel use the canonical store and exact row occurrence. All 24 focused tests passed. Matched Windows replay remains open. Add and exact Remove review follow. [Snippets editor checkpoint](CHECKPOINTS.md#g13-retained-snippets-editor)
+
+Clipboard Modify uses the shared remembered Dock and Pop Out host. Source, previews, management drafts and idle reviews move with the session. All 33 focused tests passed on the final source. Matched Windows replay remains open. [Clipboard Modify host checkpoint](CHECKPOINTS.md#g13-clipboard-modify-remembered-dock-and-pop-out)
 
 Clipboard Modify runs checked named templates, saved pipelines and inline stages directly from Search. The launcher owns one shared canonical catalog. All 26 focused tests passed across two runs from one linked batch. Matched Windows replay remains open. [Direct Execute checkpoint](CHECKPOINTS.md#g13-clipboard-modify-direct-execute)
 
@@ -135,11 +137,11 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Goals with active or completed work | G00–G07, G11 Downloads Triage, G13 Clipboard History and Clipboard Modify, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11, G13, G14 and G23 have open criteria. |
+| Goals with active or completed work | G00–G07, G11 Downloads Triage, G13 Clipboard History, Clipboard Modify and Snippets, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11, G13, G14 and G23 have open criteria. |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 197 Specified, 21 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 196 Specified, 22 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |

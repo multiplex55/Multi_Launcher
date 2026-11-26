@@ -27,6 +27,48 @@ const SNIPPET_RUN_PREFIX: &str = "snippet:run:";
 
 static SNIPPETS_VERSION: AtomicU64 = AtomicU64::new(0);
 static SNIPPETS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+/// Stock bare editor opener, without creating a watcher or reading the store.
+pub fn bare_dialog_opener(query: &str) -> Option<Action> {
+    query.trim().eq_ignore_ascii_case("cs").then(|| Action {
+        label: "cs: edit snippets".into(),
+        desc: "Snippet".into(),
+        action: "snippet:dialog".into(),
+        args: None,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotRejection {
+    StaleSnapshot,
+    DuplicateAlias,
+}
+
+pub fn alias_is_duplicate(current: &[SnippetEntry], edited_index: Option<usize>, alias: &str) -> bool {
+    let unchanged = edited_index.and_then(|index| current.get(index))
+        .is_some_and(|entry| entry.alias == alias);
+    !unchanged && current.iter().enumerate().any(|(index, entry)| {
+        Some(index) != edited_index && entry.alias == alias
+    })
+}
+
+/// Shared stock full-list and exact, case-sensitive alias policy.
+pub fn snapshot_edit_decision(
+    current: &[SnippetEntry],
+    expected: &[SnippetEntry],
+    candidate: &[SnippetEntry],
+    alias: Option<(Option<usize>, &str)>,
+) -> Result<bool, SnapshotRejection> {
+    if current != expected {
+        return Err(SnapshotRejection::StaleSnapshot);
+    }
+    if let Some((edited_index, alias)) = alias {
+        if alias_is_duplicate(current, edited_index, alias) {
+            return Err(SnapshotRejection::DuplicateAlias);
+        }
+    }
+    Ok(current != candidate)
+}
 static VERSIONED_SNIPPETS: Lazy<Mutex<Option<(PathBuf, Vec<SnippetEntry>)>>> =
     Lazy::new(|| Mutex::new(None));
 static LIVE_SNIPPETS: Lazy<super::live_snapshot::LiveSnapshotRegistry<SnippetEntry>> =
@@ -201,6 +243,11 @@ pub(crate) fn prepare_snippet_text(
     Ok(candidate)
 }
 
+/// Prepare a detached editor candidate with the same prompted-field policy.
+pub fn prepare_snippet_draft(entry: &SnippetEntry, text: &str) -> Result<SnippetEntry, String> {
+    prepare_snippet_text(entry, text).map_err(|error| error.to_string())
+}
+
 fn readable_field_label(name: &str) -> String {
     let label = name
         .split('_')
@@ -357,7 +404,7 @@ fn normalize_tag_whitespace(tag: &str) -> String {
     tag.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub(crate) fn normalize_snippet_tags(tags: Vec<String>) -> Result<Vec<String>, &'static str> {
+pub fn normalize_snippet_tags(tags: Vec<String>) -> Result<Vec<String>, &'static str> {
     let mut normalized = Vec::with_capacity(tags.len().min(MAX_SNIPPET_TAGS));
     let mut seen = HashSet::new();
 
@@ -529,6 +576,18 @@ pub fn snippet_preview_text(entry: &SnippetEntry) -> String {
     preview
 }
 
+/// The saved-list filter matches hidden text without revealing it in labels.
+pub fn snippet_matches_list_filter(entry: &SnippetEntry, filter: &str, selected_tags: &[String]) -> bool {
+    let filter = filter.trim().to_lowercase();
+    let text_matches = filter.is_empty()
+        || entry.alias.to_lowercase().contains(&filter)
+        || entry.text.to_lowercase().contains(&filter)
+        || entry.tags.iter().any(|tag| tag.to_lowercase().contains(&filter));
+    text_matches && selected_tags.iter().all(|selected| {
+        entry.tags.iter().any(|tag| tag.to_lowercase() == selected.to_lowercase())
+    })
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -547,7 +606,7 @@ pub fn load_snippets_typed(
     load_json(path)
 }
 
-pub(crate) fn load_snippets_for_reload(
+pub fn load_snippets_for_reload(
     path: impl AsRef<Path>,
 ) -> Result<LoadState<Vec<SnippetEntry>>, PersistenceError> {
     let _transaction = snippets_transaction_guard();
@@ -576,6 +635,72 @@ pub fn update_snippets(
     update_snippets_with_save(path, mutate, |path, snippets| {
         save_json_atomic(path, snippets).map_err(Into::into)
     })
+}
+
+#[derive(Debug)]
+pub enum CheckedSnapshotUpdate {
+    Saved(Vec<SnippetEntry>),
+    Unchanged(Vec<SnippetEntry>),
+    Rejected(SnapshotRejection),
+    Superseded,
+    DiskChanged,
+}
+
+/// Compare and replace one complete snapshot under the canonical transaction.
+/// The final guard checks both native authority and the exact bytes observed
+/// before preparing the durable replacement.
+pub fn update_snapshot_checked(
+    path: impl AsRef<Path>,
+    expected: &[SnippetEntry],
+    mut candidate: Vec<SnippetEntry>,
+    alias: Option<(Option<usize>, &str)>,
+    current: impl Fn() -> bool,
+) -> anyhow::Result<CheckedSnapshotUpdate> {
+    use std::cell::Cell;
+    use std::io::ErrorKind;
+    let path = path.as_ref();
+    let _transaction = snippets_transaction_guard();
+    if !current() { return Ok(CheckedSnapshotUpdate::Superseded); }
+    let read = || -> Result<Option<Vec<u8>>, PersistenceError> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(PersistenceError::Read { path: path.to_owned(), source }),
+        }
+    };
+    let observed = read()?;
+    let existing: Vec<SnippetEntry> = match observed.as_deref() {
+        None => Vec::new(),
+        Some(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Vec::new(),
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|source| PersistenceError::MalformedJson {
+            path: path.to_owned(), source,
+        })?,
+    };
+    if !current() { return Ok(CheckedSnapshotUpdate::Superseded); }
+    match snapshot_edit_decision(&existing, expected, &candidate, alias) {
+        Err(reason) => return Ok(CheckedSnapshotUpdate::Rejected(reason)),
+        Ok(false) => return Ok(CheckedSnapshotUpdate::Unchanged(existing)),
+        Ok(true) => {}
+    }
+    normalize_snippet_entries(&mut candidate)?;
+    let bytes = serde_json::to_vec_pretty(&candidate).map_err(|source| PersistenceError::SerializeJson {
+        path: path.to_owned(), source,
+    })?;
+    let rejected = Cell::new(None);
+    let write = crate::common::atomic_file::save_atomic_if(path, &bytes, || {
+        if !current() { rejected.set(Some(false)); return false; }
+        let latest = read();
+        if !current() { rejected.set(Some(false)); return false; }
+        if latest.ok().as_ref() != Some(&observed) { rejected.set(Some(true)); return false; }
+        true
+    });
+    if let Some(changed) = rejected.get() {
+        return Ok(if changed { CheckedSnapshotUpdate::DiskChanged } else { CheckedSnapshotUpdate::Superseded });
+    }
+    write.map_err(|source| PersistenceError::AtomicWrite { path: path.to_owned(), source })?;
+    LIVE_SNIPPETS.publish(path, &candidate);
+    record_versioned_snippets(path, &candidate);
+    Ok(CheckedSnapshotUpdate::Saved(candidate))
 }
 
 fn update_snippets_with_save(
@@ -647,11 +772,11 @@ fn bump_snippets_version() {
     SNIPPETS_VERSION.fetch_add(1, Ordering::SeqCst);
 }
 
-fn record_versioned_snippets(path: &str, snippets: &[SnippetEntry]) {
+fn record_versioned_snippets(path: impl AsRef<Path>, snippets: &[SnippetEntry]) {
     *VERSIONED_SNIPPETS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((PathBuf::from(path), snippets.to_vec()));
+        Some((path.as_ref().to_path_buf(), snippets.to_vec()));
     bump_snippets_version();
 }
 
@@ -748,15 +873,8 @@ impl Default for SnippetsPlugin {
 impl Plugin for SnippetsPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs")
-            && rest.is_empty()
-        {
-            return vec![Action {
-                label: "cs: edit snippets".into(),
-                desc: "Snippet".into(),
-                action: "snippet:dialog".into(),
-                args: None,
-            }];
+        if let Some(action) = bare_dialog_opener(query) {
+            return vec![action];
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs rm") {
             let filter = rest.trim();
@@ -940,6 +1058,80 @@ mod persistence_tests {
             fields: Vec::new(),
             tags: Vec::new(),
         }
+    }
+
+    #[test]
+    fn checked_snapshot_preserves_external_bytes_and_rejects_retired_authority() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = vec![snippet("one", "old"), snippet("two", "value")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        let mut draft = original.clone();
+        draft[0].text = "new".into();
+        let version = snippets_version();
+        assert!(matches!(update_snapshot_checked(&path, &original, draft.clone(), Some((Some(0), "one")), || false).unwrap(), CheckedSnapshotUpdate::Superseded));
+        assert_eq!(load_snippets(path.to_str().unwrap()).unwrap(), original);
+        assert_eq!(snippets_version(), version);
+        let calls = std::cell::Cell::new(0);
+        let external = vec![snippet("one", "external"), snippet("two", "value")];
+        let external_bytes = serde_json::to_vec_pretty(&external).unwrap();
+        let result = update_snapshot_checked(&path, &original, draft, Some((Some(0), "one")), || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 { std::fs::write(&path, &external_bytes).unwrap(); }
+            true
+        }).unwrap();
+        assert!(matches!(result, CheckedSnapshotUpdate::DiskChanged));
+        assert_eq!(std::fs::read(&path).unwrap(), external_bytes);
+        assert_eq!(snippets_version(), version);
+    }
+
+    #[test]
+    fn shared_snapshot_alias_policy_keeps_legacy_duplicate_and_exact_case() {
+        let rows = vec![snippet("same", "one"), snippet("same", "two")];
+        assert_eq!(snapshot_edit_decision(&rows, &rows, &rows, Some((Some(0), "same"))), Ok(false));
+        assert_eq!(snapshot_edit_decision(&rows, &rows, &rows, Some((None, "same"))), Err(SnapshotRejection::DuplicateAlias));
+        assert_eq!(snapshot_edit_decision(&rows, &rows, &rows, Some((None, "Same"))), Ok(false));
+        assert_eq!(snapshot_edit_decision(&rows, &rows[..1], &rows, None), Err(SnapshotRejection::StaleSnapshot));
+    }
+
+    #[test]
+    fn hidden_list_filter_matches_without_exposing_preview_and_requires_all_tags() {
+        let mut entry = snippet("fixture", "private Ω text");
+        entry.hide_contents = true;
+        entry.tags = vec!["Work".into(), "Review".into()];
+        assert!(snippet_matches_list_filter(&entry, "Ω TEXT", &["work".into(), "REVIEW".into()]));
+        assert!(!snippet_matches_list_filter(&entry, "Ω TEXT", &["work".into(), "missing".into()]));
+        assert_eq!(snippet_preview_text(&entry), "******");
+    }
+
+    #[test]
+    fn checked_snapshot_saves_exact_occurrence_and_preserves_malformed_file() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = vec![snippet("same", "first"), snippet("same", "second")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        let mut draft = original.clone();
+        draft[1].text = "changed".into();
+        let before = std::fs::read(&path).unwrap();
+        let version = snippets_version();
+        let calls = std::cell::Cell::new(0);
+        let revoked = update_snapshot_checked(&path, &original, draft.clone(), Some((Some(1), "same")), || {
+            calls.set(calls.get() + 1);
+            calls.get() < 4
+        }).unwrap();
+        assert!(matches!(revoked, CheckedSnapshotUpdate::Superseded));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(snippets_version(), version);
+        assert!(matches!(update_snapshot_checked(&path, &original, draft.clone(), Some((Some(1), "same")), || true).unwrap(), CheckedSnapshotUpdate::Saved(_)));
+        assert_eq!(LIVE_SNIPPETS.snapshot(path.to_str().unwrap()), Some(draft.clone()));
+        assert_eq!(snippets_version(), version + 1);
+        assert_eq!(load_snippets(path.to_str().unwrap()).unwrap(), draft);
+        assert!(matches!(update_snapshot_checked(&path, &original, original.clone(), None, || true).unwrap(), CheckedSnapshotUpdate::Rejected(SnapshotRejection::StaleSnapshot)));
+        std::fs::write(&path, b"{invalid secret").unwrap();
+        assert!(update_snapshot_checked(&path, &draft, original, None, || true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{invalid secret");
     }
 
     fn prompted_snippet(alias: &str, text: &str) -> SnippetEntry {

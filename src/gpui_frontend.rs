@@ -32,6 +32,7 @@ mod regex_inspectors;
 mod regex_syntax;
 mod regex_jump;
 mod clipboard_history;
+mod snippets;
 mod clipboard_modify_view;
 mod clipboard_modify_startup;
 mod regex_history;
@@ -2684,6 +2685,7 @@ struct RootWindow {
     xml_view: Option<Entity<xml_utility::XmlWorkspace>>,
     regex_view: Option<Entity<regex_tester::RegexWorkspace>>,
     clipboard_history: Option<Entity<clipboard_history::ClipboardHistory>>,
+    snippets_view: Option<Entity<snippets::SnippetsView>>,
     clipboard_modify_view: Option<Entity<clipboard_modify_view::ClipboardModifyView>>,
     clipboard_modify_startup: clipboard_modify_startup::Owner,
     clipboard_popup: Option<utility_mount::UtilityPopup>,
@@ -3806,6 +3808,7 @@ enum RootCloseBlocker {
     RegexClipboard,
     ClipboardHistory,
     ClipboardModifyBlocked,
+    SnippetsSave,
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -4665,6 +4668,7 @@ struct RestartDrafts {
     regex: Option<multi_launcher::regex_tester::RegexDraft>,
     clipboard_history: Option<clipboard_history::RestartDraft>,
     clipboard_modify: Option<clipboard_modify_view::RestartDraft>,
+    snippets: Option<snippets::RestartDraft>,
     hash: HashDraft,
     hash_window_open: bool,
     settings: SettingsRestartDraft,
@@ -4853,6 +4857,7 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.regex.is_some() { names.push("Regex Tester draft"); }
     if drafts.clipboard_history.is_some() { names.push("Clipboard History edit or review"); }
     if drafts.clipboard_modify.is_some() { names.push("Clipboard Modify draft"); }
+    if drafts.snippets.is_some() { names.push("Snippets draft"); }
     if !drafts.hash.text.is_empty() {
         names.push("Hash Generator text");
     }
@@ -5693,6 +5698,7 @@ impl RootWindow {
             );
         }
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Err(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
+        if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(snippets::SAVE_WAIT.to_owned()); }
         self.clipboard_modify_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
         if !self.clipboard_modify_retiring.is_empty() { return Err("A previous Clipboard Modify window has not retired.".to_owned()); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Err(clipboard_history::WAIT.to_owned()); }
@@ -5916,6 +5922,7 @@ impl RootWindow {
                 regex: self.regex_view.as_ref().and_then(|view| view.read(cx).draft()),
                 clipboard_history: self.clipboard_history.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 clipboard_modify: self.clipboard_modify_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
+                snippets: self.snippets_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 hash: hash_draft,
                 hash_window_open,
                 settings: self.settings_editor.restart_draft(),
@@ -7250,6 +7257,8 @@ impl RootWindow {
                             }))
                 } else if provider == "clipboard" {
                     clipboard_history::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                } else if provider == "snippets" {
+                    snippets::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "favorites" {
                     favorite_search::is_executable(action) || is_supported_launcher_search_action(action)
                 } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
@@ -8116,6 +8125,14 @@ impl RootWindow {
             if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard_modify")
                 && clipboard_modify_view::current_undo_provider(&clipboard_provider_query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 self.start_clipboard_undo(result.action, query, source, window, cx);
+            }
+            return;
+        }
+        if result.action.action == "snippet:dialog" {
+            if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "snippets")
+                && snippets::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+            {
+                self.open_snippets(window, cx);
             }
             return;
         }
@@ -10048,6 +10065,7 @@ impl RootWindow {
             }
             Some(RootCloseBlocker::RegexHistory) => { self.restart_status = Some(regex_history::WAIT_QUIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardModifyBlocked) => { self.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
+            Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
             Some(RootCloseBlocker::RegexPresets) => { self.restart_status = Some(regex_presets::WAIT_QUIT.to_owned()); }
             Some(RootCloseBlocker::RegexClipboard) => { self.restart_status = Some("Wait for the Regex Tester clipboard operation before quitting.".to_owned()); }
@@ -10133,6 +10151,7 @@ impl RootWindow {
         cx: &App,
     ) -> Option<RootCloseBlocker> {
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
+        if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SnippetsSave); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardHistory); }
         if self.structured_pins.busy() { return Some(RootCloseBlocker::StructuredPinWrite); }
         if self.regex_view.as_ref().is_some_and(|view| view.read(cx).clipboard_pending) { return Some(RootCloseBlocker::RegexClipboard); }
@@ -11017,6 +11036,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.clipboard_modify_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.snippets_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -12842,6 +12864,7 @@ pub(crate) fn run_foundation_window(
                 xml_view: None,
                 regex_view: None,
                 clipboard_history: None,
+                snippets_view: None,
                 clipboard_modify_view: None,
                 clipboard_modify_startup: clipboard_modify_startup::Owner::default(),
                 clipboard_popup: None,
@@ -13319,6 +13342,7 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::RegexHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_history::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardModifyBlocked) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::RegexPresets) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_presets::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::RegexClipboard) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for the Regex Tester clipboard operation before closing.".to_owned()); cx.notify(); }); false }

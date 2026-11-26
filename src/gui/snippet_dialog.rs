@@ -8,7 +8,7 @@ use crate::plugins::snippet_template::{TemplateError, parse_template};
 use crate::plugins::snippets::{
     MAX_SNIPPET_TAG_CHARS, MAX_SNIPPET_TAGS, SNIPPETS_FILE, SnippetEntry, SnippetFieldDefinition,
     SnippetInputKind, SnippetPreparationError, load_snippets, normalize_snippet_tags,
-    prepare_snippet_text, snippet_preview_text, update_snippets,
+    prepare_snippet_text, snippet_preview_text, snapshot_edit_decision, SnapshotRejection, update_snippets,
 };
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -131,18 +131,7 @@ pub struct SnippetDialog {
 }
 
 fn matches_snippet_filter(entry: &SnippetEntry, filter: &str) -> bool {
-    let filter = filter.trim();
-    if filter.is_empty() {
-        return true;
-    }
-
-    let lowered_filter = filter.to_lowercase();
-    entry.alias.to_lowercase().contains(&lowered_filter)
-        || entry.text.to_lowercase().contains(&lowered_filter)
-        || entry
-            .tags
-            .iter()
-            .any(|tag| tag.to_lowercase().contains(&lowered_filter))
+    crate::plugins::snippets::snippet_matches_list_filter(entry, filter, &[])
 }
 
 #[cfg(test)]
@@ -388,17 +377,7 @@ fn single_line_alias(alias: &str) -> String {
 }
 
 fn alias_is_duplicate(snippets: &[SnippetEntry], validation: &AliasValidation) -> bool {
-    if validation.edited_index.is_some_and(|index| {
-        snippets
-            .get(index)
-            .is_some_and(|entry| entry.alias == validation.alias)
-    }) {
-        return false;
-    }
-
-    snippets.iter().enumerate().any(|(index, entry)| {
-        Some(index) != validation.edited_index && entry.alias == validation.alias
-    })
+    crate::plugins::snippets::alias_is_duplicate(snippets, validation.edited_index, &validation.alias)
 }
 
 fn update_snapshot(
@@ -409,18 +388,12 @@ fn update_snapshot(
 ) -> Result<Vec<SnippetEntry>, CommitFailure> {
     let mut rejection = None;
     let committed = update_snippets(path, |current| {
-        if current.as_slice() != expected {
-            rejection = Some(CommitRejection::StaleSnapshot);
-            return Ok(false);
-        }
-        if let Some(validation) = &alias_validation
-            && alias_is_duplicate(current, validation)
-        {
-            rejection = Some(CommitRejection::DuplicateAlias);
-            return Ok(false);
-        }
-        if current.as_slice() == candidate.as_slice() {
-            return Ok(false);
+        let alias = alias_validation.as_ref().map(|validation| (validation.edited_index, validation.alias.as_str()));
+        match snapshot_edit_decision(current, expected, &candidate, alias) {
+            Err(SnapshotRejection::StaleSnapshot) => { rejection = Some(CommitRejection::StaleSnapshot); return Ok(false); }
+            Err(SnapshotRejection::DuplicateAlias) => { rejection = Some(CommitRejection::DuplicateAlias); return Ok(false); }
+            Ok(false) => return Ok(false),
+            Ok(true) => {}
         }
 
         *current = candidate;

@@ -99,6 +99,29 @@ impl multi_launcher::plugin::Plugin for ClipboardBare {
     fn commands(&self) -> Vec<Action> { vec![Action { label: "cb".into(), desc: "Clipboard".into(), action: "query:cb".into(), args: None }] }
 }
 
+struct SnippetsBare;
+impl multi_launcher::plugin::Plugin for SnippetsBare {
+    fn name(&self) -> &str { "snippets" }
+    fn description(&self) -> &str { "Search saved text snippets (prefix: `cs`)" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["cs"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        multi_launcher::plugins::snippets::bare_dialog_opener(query).into_iter().collect()
+    }
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "cs".into(), desc: "Snippet".into(), action: "query:cs".into(), args: None }]
+    }
+}
+
+pub(super) fn snippets_rows(
+    query: &str,
+    enabled: Option<&HashSet<String>>,
+    caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Vec<Action> {
+    search_routed([&SnippetsBare as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
+        .into_iter().map(|(_, action)| action).collect()
+}
+
 /// Providers admitted by GPUI Search, including the owners of watched stores.
 pub(super) struct InstalledLauncherProviders {
     pub(super) hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
@@ -110,6 +133,7 @@ pub(super) struct InstalledLauncherProviders {
     xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
     regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
     clipboard: ClipboardBare,
+    snippets: SnippetsBare,
     clipboard_modify: ClipboardModifyBare,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
@@ -162,6 +186,7 @@ impl InstalledLauncherProviders {
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             clipboard: ClipboardBare,
+            snippets: SnippetsBare,
             clipboard_modify: ClipboardModifyBare {
                 catalog: multi_launcher::clipboard_modify::runtime::shared_default_catalog(),
                 ready: std::sync::atomic::AtomicBool::new(false),
@@ -201,6 +226,7 @@ impl InstalledLauncherProviders {
             Some(&self.xml_toolkit as &dyn multi_launcher::plugin::Plugin),
             Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.snippets as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard_modify as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
@@ -372,6 +398,23 @@ mod tests {
         plugin::{Plugin, search_filtered_plugins_with_origin},
     };
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn snippets_bare_provider_admits_only_stock_dialog_with_search_capability() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        let enabled = HashSet::from(["snippets".to_owned()]);
+        for query in ["cs", " CS "] {
+            let rows = super::search_routed(providers.plugins(), query, Some(&enabled), None);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, "snippets");
+            assert_eq!(rows[0].1, multi_launcher::plugins::snippets::bare_dialog_opener(query).unwrap());
+        }
+        for query in ["cs edit sample", "cs add sample text", "csfoo"] {
+            assert!(super::search_routed(providers.plugins(), query, Some(&enabled), None).is_empty());
+        }
+        let no_search = HashMap::from([("snippets".to_owned(), Vec::new())]);
+        assert!(super::search_routed(providers.plugins(), "cs", Some(&enabled), Some(&no_search)).is_empty());
+    }
 
     #[test]
     fn clipboard_catalog_receipt_rejects_same_id_with_changed_body() {
