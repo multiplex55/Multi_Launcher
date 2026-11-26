@@ -315,15 +315,10 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted["version"], 1);
         for entry in persisted["entries"].as_array().unwrap() {
-            assert_eq!(
-                entry
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                ["flags", "pattern"]
-            );
+            let object = entry.as_object().unwrap();
+            assert_eq!(object.len(), 2);
+            assert!(object.contains_key("flags"));
+            assert!(object.contains_key("pattern"));
         }
     }
 

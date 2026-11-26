@@ -1,12 +1,12 @@
 //! History integration delegates persistence and corruption protection to the store.
 
 use super::JumpTargets;
-use crate::regex_tester::{EvaluationResult, HistoryEntry, HistoryStore, RegexSession};
+use crate::regex_tester::{AcceptedHistory, HistoryStore, RegexSession};
 use eframe::egui;
 
 pub(super) struct HistoryState {
     pub store: HistoryStore,
-    attempted: Option<HistoryEntry>,
+    attempted: AcceptedHistory,
     view_generation: u64,
 }
 
@@ -114,7 +114,7 @@ impl HistoryState {
     pub fn open(path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             store: HistoryStore::open(path),
-            attempted: None,
+            attempted: AcceptedHistory::default(),
             view_generation: 0,
         }
     }
@@ -124,35 +124,16 @@ impl HistoryState {
     }
 
     pub fn record_success(&mut self, session: &RegexSession) {
-        if !matches!(session.result(), Some(EvaluationResult::Success { .. }))
-            || session.evaluated_revision() != Some(session.revision())
-            || session.draft.pattern.is_empty()
-        {
-            return;
-        }
-        let draft = &session.draft;
-        if self
-            .attempted
-            .as_ref()
-            .is_some_and(|entry| entry.pattern == draft.pattern && entry.flags == draft.flags)
-        {
-            return;
-        }
-        // Remember attempted pairs even on failure: frames and text-only edits
-        // cannot repeatedly retry disk writes. Recovery is an explicit action.
-        self.attempted = Some(HistoryEntry {
-            pattern: draft.pattern.clone(),
-            flags: draft.flags,
-        });
+        let Some(entry) = self.attempted.admit(session) else { return; };
         let before = self.store.entries().to_vec();
-        let _ = self.store.record(&draft.pattern, draft.flags);
+        let _ = self.store.record(&entry.pattern, entry.flags);
         if self.store.entries() != before {
             self.view_generation = self.view_generation.wrapping_add(1);
         }
     }
 
     pub fn retry(&mut self, session: &RegexSession) {
-        self.attempted = None;
+        self.attempted.retry();
         self.record_success(session);
     }
 

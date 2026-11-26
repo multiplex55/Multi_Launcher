@@ -85,7 +85,8 @@ pub(super) struct RegexWorkspace {
     pub(super) root: WeakEntity<RootWindow>,
     pub(super) admission: Arc<RestartAdmission>,
     visibility: RootVisibility,
-    session: RegexSession,
+    pub(super) session: RegexSession,
+    pub(super) history: super::regex_history::HistoryLane,
     mount_owner: utility_mount::MountOwner,
     mount: RegexMount,
     return_focus: Option<FocusHandle>,
@@ -178,6 +179,7 @@ impl RegexWorkspace {
         root: WeakEntity<RootWindow>,
         admission: Arc<RestartAdmission>,
         visibility: RootVisibility,
+        history_path: Option<std::path::PathBuf>,
         host: AnyWindowHandle,
         native: Option<NativeWindow>,
     ) -> Self {
@@ -193,6 +195,7 @@ impl RegexWorkspace {
             admission,
             visibility,
             session: RegexSession::default(),
+            history: super::regex_history::HistoryLane::new(history_path),
             mount_owner,
             mount,
             return_focus: None,
@@ -305,7 +308,9 @@ impl RegexWorkspace {
                         if !timer_current(view.open, view.generation, generation) {
                             return false;
                         }
-                        view.session.tick(Instant::now());
+                        if view.session.tick(Instant::now()) {
+                            view.record_accepted_history(cx);
+                        }
                         let more = view.session.pending_delay(Instant::now()).is_some();
                         if !more {
                             view.pumping = false;
@@ -708,6 +713,12 @@ impl Render for RegexWorkspace {
                             })),
                     ),
             )
+            .children(self.history.diagnostic.as_ref().map(|message| {
+                div().id("regex-history-warning").role(Role::Alert).child(
+                    Label::new(format!("Regex history could not be saved: {message}"))
+                        .id("regex-history-warning-text"),
+                )
+            }))
             .children(
                 self.presentation_error
                     .as_ref()
@@ -825,10 +836,23 @@ impl RootWindow {
         let root = cx.entity().downgrade();
         let admission = self.restart_admission.clone();
         let visibility = self.root_visibility.clone();
+        #[cfg(windows)]
+        let history_path = Some(self.app_data_root.path().join("regex_history.json"));
+        #[cfg(not(windows))]
+        let history_path = None;
         let native = self.native_window;
         let view = self.regex_view.clone().unwrap_or_else(|| {
             cx.new(|cx| {
-                RegexWorkspace::new(window, cx, root, admission, visibility, root_window, native)
+                RegexWorkspace::new(
+                    window,
+                    cx,
+                    root,
+                    admission,
+                    visibility,
+                    history_path,
+                    root_window,
+                    native,
+                )
             })
         });
         let origin = self.query.focus_handle(cx);

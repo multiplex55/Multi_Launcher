@@ -1,6 +1,7 @@
 //! Local, Rust-compatible regular-expression tester domain.
 
 pub mod engine;
+mod history_policy;
 pub mod examples;
 pub mod explanation;
 pub mod model;
@@ -10,6 +11,7 @@ pub mod reference;
 pub mod session;
 pub mod visualization;
 
+pub use history_policy::AcceptedHistory;
 pub use engine::{
     evaluate, evaluate_substitution, evaluate_substitution_with_policy, evaluate_test_cases,
     evaluate_with_policy,

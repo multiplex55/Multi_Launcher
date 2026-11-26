@@ -18,4 +18,6 @@ Stock exact `regex` Search opens the retained tester. Pattern, the five flags an
 
 Regex defaults to the stock Pop Out and honors saved Dock and native geometry. A checked host move retains the same session, draft, pending evaluation and selected match. Window-local editor and interaction authority retires with the old mount. Dock acknowledges the exact launcher focus delivery and foreground before retiring its source. Escape and Ctrl+W close only the owned standalone workspace outside nested overlays. Grouped tests passed for typed Search, session state and host receipts. Native tests at the matched 1516 × 937 launcher baseline must still exercise actual editor remount, Windows foreground, geometry and close.
 
-Automatic accepted-history recording is next. Substitution, Test Cases, explicit clipboard, History and Presets, explanation, syntax, reference, examples and scoped Jump remain open.
+Automatic history records only the exact current accepted pattern and flags. A single owned lane uses the shared store, preserves accepted order, survives host moves and settles before Quit or restart. Its warning preserves the store diagnostic and corrupt bytes. Scoped policy, privacy, persistence and restart tests passed. Native recording and reload evidence remain pending.
+
+Substitution and Test Cases are next. Explicit clipboard, History controls and Presets, explanation, syntax, reference, examples and scoped Jump remain open.

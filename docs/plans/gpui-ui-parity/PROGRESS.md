@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Regex uses the shared checked host for remembered Dock and Pop Out. The grouped launcher run passed all 19 tests, including the first matcher, mount, focus receipt and close policy. Windows replay remains pending. Automatic accepted history is next. [Regex host checkpoint](CHECKPOINTS.md#g14-c-shared-checked-regex-host)
+Regex records accepted pattern and flag pairs through the shared canonical History store. Sixteen focused shared and launcher tests passed across two runs. Matched native history replay remains pending. Substitution and Test Cases follow. [Accepted Regex history checkpoint](CHECKPOINTS.md#g14-c-automatic-accepted-regex-history)
+
+Regex uses the shared checked host for remembered Dock and Pop Out. The grouped launcher run passed all 19 tests, including the first matcher, mount, focus receipt and close policy. Windows replay remains pending. [Regex host checkpoint](CHECKPOINTS.md#g14-c-shared-checked-regex-host)
 
 The stock `regex` Search route opens a retained GPUI matcher with exact Pattern, flags, Test Text, match and capture byte ranges, and scoped F3 navigation. Shared Regex baseline tests passed from the reused library. Advanced controls remain open. [Regex Tester](gui/regex-tester.md#gpui-retained-matcher)
 
