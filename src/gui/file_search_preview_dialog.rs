@@ -125,32 +125,7 @@ impl FileSearchPreviewDialogState {
         content_match: ContentMatch,
         settings: &FileSearchSettings,
     ) {
-        let mut request = PreviewRequest::for_match(
-            path.as_ref(),
-            content_match.line_number,
-            content_match
-                .column
-                .map(|column| column.saturating_add(1))
-                .unwrap_or(1),
-        );
-        request.max_bytes_full_file_preview = settings
-            .max_full_preview_file_size_bytes
-            .try_into()
-            .unwrap_or(usize::MAX);
-        if let Some(selection) = request.selected_match.as_mut() {
-            selection.source_line = Some(content_match.line.clone());
-            selection.match_length = Some(
-                content_match
-                    .byte_end
-                    .saturating_sub(content_match.byte_start)
-                    .max(1),
-            );
-            selection.end_column = Some(
-                selection
-                    .start_column
-                    .saturating_add(selection.match_length.unwrap_or(1)),
-            );
-        }
+        let request = PreviewRequest::from_search_result(path.as_ref(), Some(&content_match), settings.max_full_preview_file_size_bytes);
 
         self.open = true;
         self.close_requested = false;

@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+GPUI Directory Content Search streams grouped matches through the shared worker and can reveal the exact selected file. All 20 focused tests passed. Matched Windows replay, typed Content and selected-match Preview remain open. G01 guarded cross-desktop hotkey reveal follows. [Content Search checkpoint](CHECKPOINTS.md#g07-manual-directory-content-search)
+
 Create Temp File supports retained draft editing, checked no-clobber publication and opening the exact file. All 10 focused tests passed. Matched native association, resize persistence and dashboard invocation remain open. G07 Directory Content Search follows. [Tempfile checkpoint](CHECKPOINTS.md#g13-checked-create-temp-file)
 
 Stock Snippet Run reaches checked literal and automatic Copy and standalone Fill with live result and exact retries. All 16 focused launcher tests and three reused stock cases passed. Native Windows replay remains open. [Standalone Fill checkpoint](CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)
@@ -147,7 +149,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Goals with active or completed work | G00–G07, G11 Downloads Triage, G13 Clipboard History, Clipboard Modify and Snippets, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11, G13, G14 and G23 have open criteria. |
+| Goals with active or completed work | G00–G07, G11 Downloads Triage, G13 Clipboard History, Clipboard Modify, Snippets and Create Temp File, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11, G13, G14 and G23 have open criteria. |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
@@ -157,7 +159,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add remembered Clipboard Modify Dock and Pop Out using the shared retained host. Matched Clipboard History and Modify replay, remaining structured text targets, and broader native acceptance stay open. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Implement checked G01 cross-desktop preparation for an authorized hidden-root hotkey reveal. G07 typed Content and selected Preview follow. Matched G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

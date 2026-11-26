@@ -119,6 +119,27 @@ impl PreviewRequest {
         }
     }
 
+    /// Construct the same preview request for a file or its exact content match.
+    pub fn from_search_result(path: impl Into<PathBuf>, content_match: Option<&super::model::ContentMatch>, max_full_bytes: u64) -> Self {
+        let path = path.into();
+        let mut request = match content_match {
+            Some(found) => {
+                let mut request = Self::for_match(path, found.line_number,
+                    found.column.map(|column| column.saturating_add(1)).unwrap_or(1));
+                if let Some(selection) = request.selected_match.as_mut() {
+                    selection.source_line = Some(found.line.clone());
+                    let length = found.byte_end.saturating_sub(found.byte_start).max(1);
+                    selection.match_length = Some(length);
+                    selection.end_column = Some(selection.start_column.saturating_add(length));
+                }
+                request
+            }
+            None => Self::new(path),
+        };
+        request.max_bytes_full_file_preview = max_full_bytes.try_into().unwrap_or(usize::MAX);
+        request
+    }
+
     fn effective_line_range(&self) -> Option<PreviewLineRange> {
         self.line_range.or_else(|| {
             self.selected_match.as_ref().map(|selected| {
@@ -742,6 +763,20 @@ mod tests {
             lossy_utf8: false,
             cache_hit: false,
         }
+    }
+
+    #[test]
+    fn search_result_request_preserves_unicode_match_and_limits() {
+        let found = crate::file_search::model::ContentMatch::new(8, "café needle".into(), 6, 12);
+        let request = PreviewRequest::from_search_result("owned.txt", Some(&found), 1234);
+        assert_eq!(request.max_bytes_full_file_preview, 1234);
+        let selected = request.selected_match.unwrap();
+        assert_eq!(selected.line, 8);
+        assert_eq!(selected.source_line.as_deref(), Some("café needle"));
+        assert_eq!(selected.start_column, 7);
+        assert_eq!(selected.match_length, Some(6));
+        assert_eq!(selected.end_column, Some(13));
+        assert!(PreviewRequest::from_search_result("owned.txt", None, 1).selected_match.is_none());
     }
 
     #[test]

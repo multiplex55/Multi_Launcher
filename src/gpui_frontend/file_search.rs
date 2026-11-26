@@ -4,8 +4,8 @@ use gpui_kit::{KeyUpEvent, base::Selectable};
 use multi_launcher::file_search::{
     coordinator::SearchCoordinator,
     model::{
-        FileKind, FilenameResult, SearchBackend, SearchDiagnostic, SearchEvent, SearchId,
-        SearchKind, SearchResult, SearchStatus,
+        ContentFileResult, ContentMatch, FileKind, FileSearchResultKey, FilenameResult, PathIdentity,
+        SearchBackend, SearchDiagnostic, SearchEvent, SearchId, SearchKind, SearchResult, SearchStatus,
     },
     request::{RequestInput, RootScope, build_request},
     settings::FileSearchSettings,
@@ -41,6 +41,45 @@ pub(super) struct SelectionReceipt {
     pub index: usize,
     pub path: PathBuf,
     pub kind: FileKind,
+    pub content_key: Option<FileSearchResultKey>,
+}
+
+#[derive(Clone, Debug)]
+struct ContentRow {
+    path: PathBuf,
+    key: FileSearchResultKey,
+    found: ContentMatch,
+    heading: String,
+    first_in_file: bool,
+}
+
+fn match_excerpt(found: &ContentMatch) -> String {
+    let line = &found.line;
+    let mut split = found.byte_start.min(line.len());
+    while !line.is_char_boundary(split) { split -= 1; }
+    let left_reversed: String = line[..split].chars().rev().take(60).collect();
+    let left: String = left_reversed.chars().rev().collect();
+    let right: String = line[split..].chars().take(120).collect();
+    let mut excerpt = String::new();
+    if left.len() < split { excerpt.push('…'); }
+    excerpt.extend(left.chars().map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch }));
+    excerpt.extend(right.chars().map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch }));
+    if right.len() < line.len() - split { excerpt.push('…'); }
+    excerpt
+}
+
+fn append_content_rows(rows: &mut Vec<ContentRow>, occurrences: &mut HashMap<(PathIdentity, usize, usize, usize), usize>, file: ContentFileResult) {
+    let identity = PathIdentity::from_path(&file.path);
+    let heading = format!("{} — {} · {} matches{}", file.file_name, file.path.display(), file.total_matches,
+        if file.truncated { " (per-file limit reached)" } else { "" });
+    for (index, found) in file.matches.into_iter().enumerate() {
+        let count = occurrences.entry((identity.clone(), found.line_number, found.byte_start, found.byte_end)).or_default();
+        let occurrence = *count;
+        *count = count.saturating_add(1);
+        let key = FileSearchResultKey::Content { path: identity.clone(), line_number: found.line_number,
+            byte_start: found.byte_start, byte_end: found.byte_end, occurrence };
+        rows.push(ContentRow { path: file.path.clone(), key, found, heading: heading.clone(), first_in_file: index == 0 });
+    }
 }
 
 pub(super) struct FileSearchView {
@@ -63,6 +102,11 @@ pub(super) struct FileSearchView {
     status: String,
     backend: Option<SearchBackend>,
     results: Vec<FilenameResult>,
+    content_rows: Vec<ContentRow>,
+    content_files: usize,
+    content_total_matches: usize,
+    content_occurrences: HashMap<(PathIdentity, usize, usize, usize), usize>,
+    kind: SearchKind,
     selected: Option<usize>,
     page: usize,
     results_scroll: ScrollHandle,
@@ -78,7 +122,7 @@ impl FileSearchView {
         admission: Arc<RestartAdmission>,
         settings: FileSearchSettings,
     ) -> Self {
-        let term = cx.new(|cx| InputState::new(window, cx).placeholder("Filename to find"));
+        let term = cx.new(|cx| InputState::new(window, cx).placeholder("Search text"));
         let directory = cx.new(|cx| InputState::new(window, cx).placeholder("Directory to search"));
         let focus = cx.focus_handle();
         let explorer_focus = cx.focus_handle();
@@ -134,6 +178,11 @@ impl FileSearchView {
             status: "Enter a directory and filename, then search.".into(),
             backend: None,
             results: Vec::new(),
+            content_rows: Vec::new(),
+            content_files: 0,
+            content_total_matches: 0,
+            content_occurrences: HashMap::new(),
+            kind: SearchKind::Filename,
             selected: None,
             page: 0,
             results_scroll: ScrollHandle::new(),
@@ -152,6 +201,10 @@ impl FileSearchView {
         }
         self.validating = false;
         self.results.clear();
+        self.content_rows.clear();
+        self.content_files = 0;
+        self.content_total_matches = 0;
+        self.content_occurrences.clear();
         self.set_page(0);
         self.truncated = false;
         self.backend = None;
@@ -160,7 +213,10 @@ impl FileSearchView {
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open {
-            self.status = "Enter a directory and filename, then search.".to_owned();
+            self.status = match self.kind {
+                SearchKind::Filename => "Enter a directory and filename, then search.",
+                SearchKind::Content => "Enter a directory and content, then search.",
+            }.to_owned();
         }
         self.open = true;
         self.term.focus_handle(cx).focus(window, cx);
@@ -210,15 +266,19 @@ impl FileSearchView {
         ) {
             return None;
         }
-        let row = self.results.get(index)?;
-        matches!(row.kind, FileKind::File | FileKind::Directory).then(|| SelectionReceipt {
-            owner,
-            search,
-            generation: self.generation,
-            index,
-            path: row.path.clone(),
-            kind: row.kind,
-        })
+        match self.kind {
+            SearchKind::Filename => {
+                let row = self.results.get(index)?;
+                matches!(row.kind, FileKind::File | FileKind::Directory).then(|| SelectionReceipt {
+                    owner, search, generation: self.generation, index, path: row.path.clone(), kind: row.kind, content_key: None,
+                })
+            }
+            SearchKind::Content => {
+                let row = self.content_rows.get(index)?;
+                Some(SelectionReceipt { owner, search, generation: self.generation, index,
+                    path: row.path.clone(), kind: FileKind::File, content_key: Some(row.key.clone()) })
+            }
+        }
     }
 
     pub(super) fn receipt_is_current(&self, receipt: &SelectionReceipt, owner: EntityId) -> bool {
@@ -232,7 +292,7 @@ impl FileSearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if receipt.kind != FileKind::File || !self.receipt_is_current(receipt, owner) {
+        if receipt.kind != FileKind::File || receipt.content_key.is_some() || !self.receipt_is_current(receipt, owner) {
             return false;
         }
         self.calculate_focus.focus(window, cx);
@@ -252,7 +312,7 @@ impl FileSearchView {
     ) {
         if !window.is_window_active()
             || self.admission.is_fenced()
-            || receipt.kind != FileKind::File || !self.receipt_is_current(&receipt, cx.entity_id())
+            || receipt.kind != FileKind::File || receipt.content_key.is_some() || !self.receipt_is_current(&receipt, cx.entity_id())
             || !self.results.get(receipt.index).is_some_and(|row| eligible_file_row(row, &receipt.path))
         {
             return;
@@ -349,9 +409,13 @@ impl FileSearchView {
         true
     }
 
+    fn row_count(&self) -> usize {
+        match self.kind { SearchKind::Filename => self.results.len(), SearchKind::Content => self.content_rows.len() }
+    }
+
     fn visible_rows(&self) -> std::ops::Range<usize> {
         let start = self.page.saturating_mul(MOUNTED_ROWS);
-        let end = start.saturating_add(MOUNTED_ROWS).min(self.results.len());
+        let end = start.saturating_add(MOUNTED_ROWS).min(self.row_count());
         start..end
     }
 
@@ -371,6 +435,7 @@ impl FileSearchView {
 
     fn start_typed(&mut self, receipt: ScopedReceipt, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
+        self.kind = SearchKind::Filename;
         self.term.update(cx, |input, cx| input.set_value(receipt.draft.search_text, window, cx));
         let directory = receipt.draft.root.unwrap_or_default().to_string_lossy().into_owned();
         self.directory.update(cx, |input, cx| input.set_value(directory, window, cx));
@@ -390,13 +455,14 @@ impl FileSearchView {
         let term = self.term.read(cx).value().to_string();
         let directory = self.directory.read(cx).value().to_string();
         let settings = self.settings.clone();
+        let kind = self.kind;
         let task = cx.background_executor().spawn(async move {
             let preferences = settings.ui_preferences.clone();
             let request = if expected_root.is_some() && !checked_root(std::path::Path::new(&directory)) {
                 Err(multi_launcher::file_search::request::RequestError::EmptyDirectoryRoots)
             } else { build_request(&RequestInput {
                 text: &term,
-                kind: SearchKind::Filename,
+                kind,
                 scope: RootScope::Directory,
                 custom_roots: vec![PathBuf::from(directory)],
                 case_sensitive: settings.case_sensitive,
@@ -476,17 +542,23 @@ impl FileSearchView {
                     result: SearchResult::Filename(row),
                     ..
                 } => self.results.push(row),
+                SearchEvent::Result { result: SearchResult::ContentFile(file), .. } => {
+                    self.truncated |= file.truncated;
+                    self.content_files = self.content_files.saturating_add(1);
+                    self.content_total_matches = self.content_total_matches.saturating_add(file.total_matches);
+                    append_content_rows(&mut self.content_rows, &mut self.content_occurrences, file);
+                }
                 SearchEvent::Progress { progress, .. } => {
                     self.truncated |= progress.global_truncated;
-                    self.status = format!(
-                        "Searching… {} files scanned, {} results",
-                        progress.files_scanned, progress.results_found
-                    );
+                    let noun = if self.kind == SearchKind::Content { "matching files" } else { "results" };
+                    self.status = format!("Searching… {} files scanned, {} {noun}", progress.files_scanned, progress.results_found);
                 }
                 SearchEvent::Diagnostic { diagnostic, .. } => {
                     self.truncated |= matches!(
                         &diagnostic,
                         SearchDiagnostic::FilenameResultsTruncated { .. }
+                            | SearchDiagnostic::GlobalMatchedFilesTruncated { .. }
+                            | SearchDiagnostic::PerFileContentTruncated { .. }
                     );
                     self.status = format!("Search: {diagnostic:?}");
                 }
@@ -500,8 +572,11 @@ impl FileSearchView {
                     } else {
                         ""
                     };
-                    self.status =
-                        format!("Completed{backend} · {} results{limit}", self.results.len());
+                    self.status = match self.kind {
+                        SearchKind::Filename => format!("Completed{backend} · {} results{limit}", self.row_count()),
+                        SearchKind::Content => format!("Completed{backend} · {} matching files · {} of {} matches shown{limit}",
+                            self.content_files, self.content_rows.len(), self.content_total_matches),
+                    };
                 }
                 SearchEvent::Cancelled { .. } => {
                     self.invalidate("Search cancelled.");
@@ -510,7 +585,6 @@ impl FileSearchView {
                 SearchEvent::Failed { error, .. } => {
                     self.status = format!("Search failed: {error}")
                 }
-                _ => {}
             }
         }
         if changed {
@@ -535,11 +609,12 @@ impl Render for FileSearchView {
         let generation = self.generation;
         let active = self.active;
         let selected_receipt = self.selected_receipt(cx.entity_id());
-        let hash_receipt = selected_receipt.clone().filter(|receipt| receipt.kind == FileKind::File);
+        let hash_receipt = selected_receipt.clone().filter(|receipt| receipt.kind == FileKind::File && receipt.content_key.is_none());
         let selected_path = selected_receipt
             .as_ref()
             .map(|receipt| receipt.path.display().to_string());
-        let rows = self
+        let rows = if self.kind == SearchKind::Filename {
+            self
             .results
             .iter()
             .enumerate()
@@ -571,7 +646,28 @@ impl Render for FileSearchView {
                 }));
                 div().flex_shrink_0().child(button)
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+        } else {
+            self.content_rows.iter().enumerate().skip(start).take(MOUNTED_ROWS).map(|(index, row)| {
+                let key = row.key.clone();
+                let path = row.path.clone();
+                let label = format!("{}:{}  {}", row.found.line_number,
+                    row.found.column.map(|column| column.saturating_add(1)).unwrap_or(1), match_excerpt(&row.found));
+                let button = Button::new(SharedString::from(format!("file-search-content-{generation}-{index}")))
+                    .accessibility_label(format!("Content match: {label}"))
+                    .label(label).tab_stop(true).selected(self.selected == Some(index))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.kind == SearchKind::Content && current_row(this.open, this.generation, this.active,
+                            generation, active, index, this.visible_rows())
+                            && this.content_rows.get(index).is_some_and(|row| row.key == key && row.path == path) {
+                            this.explorer_authority.store(false, Ordering::Release);
+                            this.selected = Some(index); cx.notify();
+                        }
+                    }));
+                let heading = (row.first_in_file || index == start).then(|| row.heading.clone());
+                div().flex_shrink_0().flex().flex_col().when_some(heading, |row, heading| row.child(Label::new(heading))).child(button)
+            }).collect::<Vec<_>>()
+        };
         div()
             .id("file-search-pane")
             .key_context("FileSearchPane")
@@ -604,11 +700,20 @@ impl Render for FileSearchView {
             .gap_2()
             .w_full()
             .p_3()
-            .child(Label::new("File Search · Filename"))
+            .child(Label::new("File Search"))
+            .child(div().flex().gap_2()
+                .child(Button::new("file-search-filename-mode").label("Filename").selected(self.kind == SearchKind::Filename)
+                    .on_click(cx.listener(|this, _, _, cx| { if this.kind != SearchKind::Filename {
+                        this.invalidate("Mode changed. Search again."); this.kind = SearchKind::Filename; cx.notify();
+                    } })))
+                .child(Button::new("file-search-content-mode").label("Content").selected(self.kind == SearchKind::Content)
+                    .on_click(cx.listener(|this, _, _, cx| { if this.kind != SearchKind::Content {
+                        this.invalidate("Mode changed. Search again."); this.kind = SearchKind::Content; cx.notify();
+                    } }))))
             .child(Label::new("Directory"))
             .child(Input::new(&self.directory).aria_label("Search directory"))
-            .child(Label::new("Filename"))
-            .child(Input::new(&self.term).aria_label("Filename search text"))
+            .child(Label::new(if self.kind == SearchKind::Filename { "Filename" } else { "Content" }))
+            .child(Input::new(&self.term).aria_label(if self.kind == SearchKind::Filename { "Filename search text" } else { "Content search text" }))
             .child(
                 div()
                     .flex()
@@ -666,7 +771,7 @@ impl Render for FileSearchView {
                 pane.child(Label::new("Selected result"))
                     .child(Label::new(path).id("file-search-selected-path"))
             })
-            .when(self.results.len() > MOUNTED_ROWS, |pane| {
+            .when(self.row_count() > MOUNTED_ROWS, |pane| {
                 pane.child(
                     div()
                         .flex()
@@ -685,15 +790,15 @@ impl Render for FileSearchView {
                             "Results {}–{} of {}",
                             start + 1,
                             end,
-                            self.results.len()
+                            self.row_count()
                         )))
                         .child(
                             Button::new("file-search-next-page")
                                 .tab_stop(true)
                                 .label("Next page")
-                                .disabled(end >= self.results.len())
+                                .disabled(end >= self.row_count())
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if (this.page + 1) * MOUNTED_ROWS < this.results.len() {
+                                    if (this.page + 1) * MOUNTED_ROWS < this.row_count() {
                                         this.set_page(this.page + 1);
                                         cx.notify();
                                     }
@@ -908,6 +1013,37 @@ mod typed_tests {
     use super::{ProbeOwner, ProbeRequest, ScopedReceipt, validated_root_matches};
     use std::{collections::HashSet, path::PathBuf};
     use multi_launcher::file_search::{model::{SearchKind, SearchScope}, query::SearchRequestDraft};
+
+    #[test]
+    fn content_excerpt_is_bounded_utf8_and_keeps_match_near_center() {
+        let line = format!("{}éneedle{}", "λ".repeat(1000), "界".repeat(1000));
+        let found = multi_launcher::file_search::model::ContentMatch::new(1, line, 2001, 2008);
+        let excerpt = super::match_excerpt(&found);
+        assert!(excerpt.chars().count() <= 182);
+        assert!(excerpt.contains("éneedle"));
+        assert!(excerpt.starts_with('…') && excerpt.ends_with('…'));
+    }
+
+    #[test]
+    fn content_rows_keep_exact_file_match_and_duplicate_occurrence() {
+        use super::{append_content_rows, ContentRow};
+        use multi_launcher::file_search::model::{ContentFileResult, ContentMatch, FileSearchResultKey};
+        let found = ContentMatch::new(7, "café needle".into(), 6, 12);
+        let file = ContentFileResult { path: PathBuf::from("folder/é.txt"), file_name: "é.txt".into(),
+            modified: None, filename_relevance: None, arrival_index: 0, total_matches: 2,
+            matches: vec![found.clone(), found.clone()], truncated: false };
+        let mut rows: Vec<ContentRow> = Vec::new();
+        let mut occurrences = std::collections::HashMap::new();
+        append_content_rows(&mut rows, &mut occurrences, file.clone());
+        append_content_rows(&mut rows, &mut occurrences, file);
+        assert_eq!(rows.len(), 4);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row.path, PathBuf::from("folder/é.txt"));
+            assert_eq!(row.found, found);
+            assert!(matches!(&row.key, FileSearchResultKey::Content { occurrence, .. } if *occurrence == index));
+        }
+        assert!(rows[0].first_in_file && !rows[1].first_in_file && rows[2].first_in_file);
+    }
 
     #[test]
     fn typed_receipt_allows_repeat_and_rejects_stale_authority() {

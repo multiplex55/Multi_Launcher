@@ -38,16 +38,26 @@ pub fn parse_file_search_query_with_root(query: &str, root: &Path) -> Option<Fil
     parse_file_search_query_with(query, |path| path == root)
 }
 
-/// Identify an explicit filename root without touching the filesystem.
-pub fn explicit_filename_root_candidate(query: &str) -> Option<PathBuf> {
+/// Identify an explicit filename or content root without touching the filesystem.
+fn explicit_search_candidate(query: &str) -> Option<(PathBuf, SearchKind)> {
     let tokens = split_shell_words_preserving_backslashes(query).ok()?;
     let (first, rest) = tokens.split_first()?;
     if !first.eq_ignore_ascii_case("fs") { return None; }
     let rest = if rest.first().is_some_and(|word| word.eq_ignore_ascii_case("here")) { &rest[1..] } else { rest };
-    if rest.len() < 3 || parse_kind(&rest[0]) != Some(SearchKind::Filename) { return None; }
+    if rest.len() < 3 || parse_kind(&rest[0]).is_none() { return None; }
     let root = PathBuf::from(rest.last()?);
     let FileSearchCommand::StartSearch(draft) = parse_file_search_query_with_root(query, &root)? else { return None; };
-    (root.is_absolute() && !draft.search_text.trim().is_empty()).then_some(root)
+    (root.is_absolute() && !draft.search_text.trim().is_empty()).then_some((root, draft.kind))
+}
+
+pub fn explicit_search_root_candidate(query: &str) -> Option<PathBuf> {
+    explicit_search_candidate(query).map(|(root, _)| root)
+}
+
+/// Compatibility helper for the existing filename-only GPUI route.
+pub fn explicit_filename_root_candidate(query: &str) -> Option<PathBuf> {
+    let (root, kind) = explicit_search_candidate(query)?;
+    (kind == SearchKind::Filename).then_some(root)
 }
 
 fn parse_file_search_query_with(query: &str, is_directory: impl Fn(&Path) -> bool) -> Option<FileSearchCommand> {
@@ -200,6 +210,18 @@ mod tests {
 
     fn parse(query: &str) -> FileSearchCommand {
         parse_file_search_query(query).expect("query should be recognized as file search")
+    }
+
+    #[test]
+    fn explicit_content_aliases_require_a_nonempty_term_and_absolute_root() {
+        let root = std::env::current_dir().unwrap();
+        for mode in ["content", "contents", "text"] {
+            let query = format!("fs {mode} \"café needle\" \"{}\"", root.display());
+            assert_eq!(explicit_search_root_candidate(&query), Some(root.clone()));
+            assert_eq!(explicit_filename_root_candidate(&query), None);
+        }
+        assert!(explicit_search_root_candidate("fs content \"needle\"").is_none());
+        assert!(explicit_search_root_candidate("fs content \"\" relative").is_none());
     }
 
     #[test]

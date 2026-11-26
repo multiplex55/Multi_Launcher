@@ -3048,47 +3048,12 @@ impl FileSearchDialogState {
         self.open_selected_result()
     }
 
-    fn apply_preview_settings_to_request(&self, request: &mut PreviewRequest) {
-        request.max_bytes_full_file_preview = self
-            .settings
-            .max_full_preview_file_size_bytes
-            .try_into()
-            .unwrap_or(usize::MAX);
-    }
-
     pub fn request_preview(
         &mut self,
         path: &std::path::Path,
         first_match: Option<&ContentMatch>,
     ) -> PreviewRequest {
-        let mut request = first_match
-            .map(|content_match| {
-                let mut request = PreviewRequest::for_match(
-                    path,
-                    content_match.line_number,
-                    content_match
-                        .column
-                        .map(|column| column.saturating_add(1))
-                        .unwrap_or(1),
-                );
-                if let Some(selection) = request.selected_match.as_mut() {
-                    selection.source_line = Some(content_match.line.clone());
-                    selection.match_length = Some(
-                        content_match
-                            .byte_end
-                            .saturating_sub(content_match.byte_start)
-                            .max(1),
-                    );
-                    selection.end_column = Some(
-                        selection
-                            .start_column
-                            .saturating_add(selection.match_length.unwrap_or(1)),
-                    );
-                }
-                request
-            })
-            .unwrap_or_else(|| PreviewRequest::new(path));
-        self.apply_preview_settings_to_request(&mut request);
+        let request = PreviewRequest::from_search_result(path, first_match, self.settings.max_full_preview_file_size_bytes);
         if self.preview_dialog.open && self.preview_dialog.current_request.as_ref() == Some(&request)
             && self.preview_dialog.selected_match.as_ref() == first_match
         { self.preview_dialog.cancel_close_request(); return request; }

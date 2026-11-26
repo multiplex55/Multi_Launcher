@@ -699,23 +699,39 @@ pub fn start_action(request: SearchRequestDraft) -> Action {
     }
 }
 
-/// Admit only the exact stock scoped filename row for the filtered query.
-pub fn scoped_filename_start(query: &str, action: &Action) -> Option<SearchRequestDraft> {
+/// Admit only the exact stock scoped search row for the filtered query.
+pub fn scoped_search_start(query: &str, action: &Action) -> Option<SearchRequestDraft> {
     use crate::file_search::actions::{decode_action_payload, FileSearchStartPayload};
     let encoded = action.action.strip_prefix(START_PREFIX)?;
     let payload: FileSearchStartPayload = decode_action_payload(encoded).ok()?;
-    if payload.search_kind() != crate::file_search::model::SearchKind::Filename || payload.text.trim().is_empty() {
+    if payload.text.trim().is_empty() {
         return None;
     }
     let root = std::path::PathBuf::from(payload.root.as_ref()?);
     let (filtered, _) = crate::common::query::split_action_filters(query);
     let FileSearchCommand::StartSearch(request) = crate::file_search::query::parse_file_search_query_with_root(&filtered, &root)? else { return None; };
-    (request.kind == crate::file_search::model::SearchKind::Filename && request.root.as_ref() == Some(&root) && start_action(request.clone()) == *action).then_some(request)
+    (request.kind == payload.search_kind() && request.root.as_ref() == Some(&root) && start_action(request.clone()) == *action).then_some(request)
+}
+
+pub fn scoped_filename_start(query: &str, action: &Action) -> Option<SearchRequestDraft> {
+    scoped_search_start(query, action).filter(|request| request.kind == SearchKind::Filename)
 }
 
 #[cfg(test)]
 mod scoped_filename_start_tests {
     use super::*;
+
+    #[test]
+    fn scoped_content_requires_exact_kind_query_and_stock_action() {
+        let draft = SearchRequestDraft { kind: SearchKind::Content, root: Some(PathBuf::from(r"C:\Owned Corpus")), search_text: "café needle".into() };
+        let row = start_action(draft.clone());
+        let query = r#"fs content "café needle" "C:\Owned Corpus""#;
+        assert_eq!(scoped_search_start(query, &row), Some(draft));
+        assert!(scoped_filename_start(query, &row).is_none());
+        assert!(scoped_search_start(r#"fs file "café needle" "C:\Owned Corpus""#, &row).is_none());
+        let mut forged = row; forged.label.push('!');
+        assert!(scoped_search_start(query, &forged).is_none());
+    }
 
     #[test]
     fn quoted_scoped_filename_requires_exact_stock_row() {
