@@ -10,3 +10,7 @@ G14 owns `xml-toolkit-overwrite`, mapped to runtime `xml-overwrite-confirmation`
 Select `m7f_xml_file_size_and_atomic_save_confirmation_are_enforced`, `host_move_keeps_session_and_frozen_overwrite_identity`, `m7f_xml_overwrite_confirmation_controls_remain_reachable_in_small_viewport` and `xml_toolkit_host_moves_keep_the_session_and_discarded_replace_keeps_the_file`. Paired desktop evidence remains pending.
 
 GPUI displays the complete destination in a bounded scroller and keeps the exact frozen payload across Dock and Pop Out. Each host issues a fresh confirmation with its own mount and visibility receipt. The old confirmation loses authority before its window is retired. Current Replace consumes one review and uses the shared guarded atomic worker. Cancel Save, Escape and title close discard the current review without writing. The grouped file checks covered no-clobber, one-shot receipts and Windows replacement retry revocation. Matched desktop replay still needs both transfer directions, cancellation with unchanged target bytes, replacement with the exact frozen bytes, and compact reachability.
+
+## GPUI scoped Jump
+
+Cancel Save, Replace existing file and Dock or Pop Out have focus-only hints in the active review. Fresh Enter dispatches the focused action, and fresh Space uses the focused Kit button. Held activation is consumed. Focused tests cover key ownership and the one-shot frozen review. Matched Windows key and file evidence remains pending. [Checkpoint](../CHECKPOINTS.md#g14-d-xml-overwrite-child-jump)

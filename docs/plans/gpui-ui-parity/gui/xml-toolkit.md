@@ -42,4 +42,4 @@ Fresh typed Open uses the saved presentation, with Pop Out as the stock default.
 
 ## GPUI scoped Jump
 
-Source, XPath tab, XPath expression, Run XPath and Save Source As hints focus eligible controls in the active mount. Their existing handlers require fresh activation. An active chooser or exact Overwrite review suspends the parent scope. Focused input tests passed. The modal targets, additional controls and matched Windows replay remain pending. [Checkpoint](../CHECKPOINTS.md#g14-d-xml-workspace-jump)
+Source, XPath tab, XPath expression, Run XPath and Save Source As hints focus eligible controls in the active mount. Their existing handlers require fresh activation. An active chooser or exact Overwrite review suspends the parent scope. Focused input tests passed. Additional workspace controls and matched Windows replay remain pending. [Checkpoint](../CHECKPOINTS.md#g14-d-xml-workspace-jump)

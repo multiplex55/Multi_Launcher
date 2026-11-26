@@ -145,7 +145,9 @@ impl XmlJump {
 }
 impl XmlWorkspace {
     pub(super) fn retire_jump(&mut self, cx: &mut Context<Self>) {
-        if self.host.jump.core.controller.retire() {
+        let parent = self.host.jump.core.controller.retire();
+        let child = self.retire_review_jump();
+        if parent || child {
             cx.notify();
         }
     }

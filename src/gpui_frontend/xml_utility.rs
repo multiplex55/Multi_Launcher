@@ -122,6 +122,16 @@ struct XmlReadReceipt {
     root_window: AnyWindowHandle,
     open_focus: Option<FocusHandle>,
 }
+struct XmlReviewJump {
+    id: u64,
+    presentation: u64,
+    mount: utility_mount::MountReceipt,
+    receipt: XmlReadReceipt,
+    core: super::scoped_jump::ScopedJump,
+    cancel: FocusHandle,
+    replace: FocusHandle,
+    transfer: FocusHandle,
+}
 struct XmlSaveReview {
     path: std::path::PathBuf,
     payload: Arc<str>,
@@ -191,6 +201,7 @@ pub(super) struct XmlWorkspace {
     save_review: Option<(u64, XmlSaveReview)>,
     next_save_review: u64,
     review_presentation: super::xml_save::ReviewPresentation,
+    review_jump: Option<XmlReviewJump>,
     review_shell: Option<FocusHandle>,
     review_shortcut: Option<Subscription>,
     review_transfer: bool,
@@ -318,6 +329,7 @@ impl XmlWorkspace {
             save_review: None,
             next_save_review: 0,
             review_presentation: Default::default(),
+            review_jump: None,
             review_shell: None,
             review_shortcut: None,
             review_transfer: false,
@@ -413,6 +425,7 @@ impl XmlWorkspace {
         if self.save_review.is_some() {
             if self.review_receipt(window).is_none() { return; }
             self.review_presentation.revoke();
+            self.review_jump = None;
             self.review_transfer = true;
         }
         self.request_rehost(popout, cx);
@@ -590,6 +603,7 @@ impl XmlWorkspace {
         self.open = false;
         self.save_review = None;
         self.review_presentation.revoke();
+        self.review_jump = None;
         self.review_shell = None;
         self.review_shortcut = None;
         self.review_transfer = false;
@@ -1677,6 +1691,72 @@ impl XmlWorkspace {
         !self.rehosting && mount.is_current() && self.review_presentation.is_current(id, presentation)
             && self.save_review.as_ref().is_some_and(|(current, _)| *current == id)
     }
+    fn review_dialog_current(&self, id: u64, presentation: u64, mount: &utility_mount::MountReceipt, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.review_callback_current(id, presentation, mount) && window.is_window_active()
+            && window.has_active_dialog(cx)
+            && self.review_shell.as_ref().is_some_and(|shell| shell.contains_focused(window, cx))
+    }
+    pub(super) fn retire_review_jump(&mut self) -> bool {
+        self.review_jump.as_mut().is_some_and(|review| review.core.controller.retire())
+    }
+    fn review_jump_controls(&mut self, id: u64, presentation: u64, mount: &utility_mount::MountReceipt, target_popout: bool, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
+        if !self.review_callback_current(id, presentation, mount) { return (div().into_any_element(), div().into_any_element()); }
+        let Some(review) = self.review_jump.as_ref() else { return (div().into_any_element(), div().into_any_element()); };
+        let draft = review.core.begin();
+        let cancel_focus = review.cancel.clone(); let replace_focus = review.replace.clone(); let transfer_focus = review.transfer.clone();
+        let review_receipt = review.receipt.clone();
+        let transfer_mount = mount.clone(); let transfer_receipt = review_receipt.clone();
+        let transfer = Button::new("xml-save-review-rehost").label(if target_popout { "Pop Out" } else { "Dock" }).track_focus(&transfer_focus)
+            .on_click(cx.listener(move |view, _, window, cx| view.transfer_xml_save_review(id, presentation, &transfer_mount, &transfer_receipt, target_popout, window, cx)));
+        let cancel_mount = mount.clone();
+        let cancel = Button::new("xml-save-review-cancel").label("Cancel Save").track_focus(&cancel_focus).on_click(cx.listener(move |view, _, window, cx| {
+            if view.review_dialog_current(id, presentation, &cancel_mount, window, cx) { view.cancel_xml_save(id, cx); window.close_dialog(cx); }
+        }));
+        let replace_mount = mount.clone();
+        let replace = Button::new("xml-save-review-replace").label("Replace existing file").track_focus(&replace_focus).on_click(cx.listener(move |view, _, window, cx| {
+            if view.confirm_xml_save(id, presentation, &replace_mount, &review_receipt, window, cx) { window.close_dialog(cx); }
+        }));
+        let Some(review) = self.review_jump.as_ref() else { return (div().into_any_element(), div().into_any_element()); };
+        let transfer = review.core.wrap(transfer, "transfer".into(), "Dock or Pop Out", TargetKind::Button, 0, draft.clone(), cx);
+        let cancel = review.core.wrap(cancel, "cancel".into(), "Cancel Save", TargetKind::Button, 1, draft.clone(), cx);
+        let replace = review.core.wrap(replace, "replace".into(), "Replace existing file", TargetKind::Button, 2, draft.clone(), cx);
+        let captured_mount = mount.clone(); let host = window.window_handle().window_id();
+        let publisher = draft.map(|draft| review.core.publish(draft, cx, move |view, frame, window, cx, changed| {
+            if host != window.window_handle().window_id() || !view.review_callback_current(id, presentation, &captured_mount) { return; }
+            let Some(review) = view.review_jump.as_mut().filter(|review| review.id == id && review.presentation == presentation) else { return; };
+            let retired = review.core.controller.reconcile_frame(Some(frame));
+            if retired || (changed && review.core.controller.is_active() && frame.matches_active_session) { cx.notify(); }
+        }));
+        (transfer, div().flex().gap_2().child(cancel).child(replace).children(publisher).into_any_element())
+    }
+    pub(super) fn handle_review_jump(&mut self, receipt: PhysicalKeydown, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.review_owned_jump_latch(receipt, window, cx) { return true; }
+        let Some(review) = self.review_jump.as_ref() else { return false; };
+        let id = review.id; let presentation = review.presentation; let mount = review.mount.clone(); let saved = review.receipt.clone();
+        if !self.review_callback_current(id, presentation, &mount) || self.review_receipt(window).is_none()
+            || !window.has_active_dialog(cx) || !self.review_shell.as_ref().is_some_and(|shell| shell.contains_focused(window, cx)) { return false; }
+        let slot = review.core.frame.clone(); let generation = review.core.generation;
+        let frame = slot.borrow();
+        let Some(review) = self.review_jump.as_mut() else { return false; };
+        let retired = review.core.controller.reconcile_frame(frame.as_ref());
+        let outcome = review.core.controller.process_key_down(receipt, frame.as_ref(), generation);
+        if let Some(target) = outcome.selected_target.filter(|target| frame.as_ref().is_some_and(|frame| frame.has_target(target))) {
+            if let SemanticTargetId::Named(name) = target.semantic() {
+                match name.as_str() { "cancel" => review.cancel.focus(window, cx), "replace" => review.replace.focus(window, cx), "transfer" => review.transfer.focus(window, cx), _ => {} }
+            }
+        }
+        if retired || outcome.repaint { cx.notify(); }
+        if outcome.consumed { return true; }
+        let decision = super::xml_save::review_key_decision(receipt.virtual_key, receipt.modifiers == Modifiers::default(), receipt.held, review.cancel.is_focused(window), review.replace.is_focused(window), review.transfer.is_focused(window));
+        let super::xml_save::ReviewKeyDecision::Consume(action) = decision else { return false; };
+        match action {
+            Some(super::xml_save::ReviewAction::Cancel) => { self.cancel_xml_save(id, cx); window.close_dialog(cx); }
+            Some(super::xml_save::ReviewAction::Replace) => { if self.confirm_xml_save(id, presentation, &mount, &saved, window, cx) { window.close_dialog(cx); } }
+            Some(super::xml_save::ReviewAction::Transfer) => self.transfer_xml_save_review(id, presentation, &mount, &saved, !self.popout, window, cx),
+            None => {}
+        }
+        true
+    }
     fn present_xml_save_review(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some((_, review)) = self.save_review.as_ref().filter(|(current, _)| *current == id) else { return; };
         let Some(description) = super::xml_save::review_description(&review.path) else {
@@ -1704,36 +1784,25 @@ impl XmlWorkspace {
         let owner = cx.entity().downgrade();
         let mount = self.mount.clone();
         let target_popout = !self.popout;
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let cancel = owner.clone();
+        self.review_jump = Some(XmlReviewJump { id, presentation, mount: mount.clone(), receipt: receipt.clone(), core: super::scoped_jump::ScopedJump::new("xml-save-review", self.host.jump.core.controller.fresh()), cancel: cx.focus_handle(), replace: cx.focus_handle(), transfer: cx.focus_handle() });
+        window.open_alert_dialog(cx, move |alert, window, app| {
             let close = owner.clone();
-            let confirm = owner.clone();
-            let transfer = owner.clone();
-            let cancel_mount = mount.clone();
             let close_mount = mount.clone();
-            let confirm_mount = mount.clone();
-            let transfer_mount = mount.clone();
-            let confirm_receipt = receipt.clone();
-            let transfer_receipt = receipt.clone();
+            let cancel = owner.clone();
+            let cancel_mount = mount.clone();
+            let controls = owner.update(app, |view, cx| view.review_jump_controls(id, presentation, &mount, target_popout, window, cx)).ok();
+            let (transfer, footer) = controls.unwrap_or_else(|| (div().into_any_element(), div().into_any_element()));
             alert.title(Label::new("Replace existing XML file?"))
                 .description(div().id("xml-save-review-description").w_full().flex().flex_col().gap_2()
-                    .child(div().id("xml-save-full-path").w_full().max_h(px(120.0))
-                        .overflow_y_scroll().overflow_x_scroll()
+                    .child(div().id("xml-save-full-path").w_full().max_h(px(120.0)).overflow_y_scroll().overflow_x_scroll()
                         .child(Label::new(description.clone()).whitespace_normal()))
-                    .child(Button::new("xml-save-review-rehost")
-                        .label(if target_popout { "Pop Out" } else { "Dock" })
-                        .on_click(move |_, window, app| {
-                            let _ = transfer.update(app, |view, cx| {
-                                view.transfer_xml_save_review(id, presentation, &transfer_mount, &transfer_receipt, target_popout, window, cx);
-                            });
-                        })))
+                    .child(transfer))
+                .footer(footer)
                 .close_button(true).keyboard(true).confirm()
-                .ok_text("Replace existing file").cancel_text("Cancel Save")
                 .on_cancel(move |_, _, app| {
                     cancel.update(app, |view, cx| {
                         if !view.review_callback_current(id, presentation, &cancel_mount) { return false; }
-                        view.cancel_xml_save(id, cx);
-                        true
+                        view.cancel_xml_save(id, cx); true
                     }).unwrap_or(false)
                 })
                 .on_close(move |_, _, app| {
@@ -1741,17 +1810,14 @@ impl XmlWorkspace {
                         if view.review_callback_current(id, presentation, &close_mount) { view.cancel_xml_save(id, cx); }
                     });
                 })
-                .on_ok(move |_, window, app| {
-                    confirm.update(app, |view, cx| {
-                        view.confirm_xml_save(id, presentation, &confirm_mount, &confirm_receipt, window, cx)
-                    }).unwrap_or(false)
-                })
+                .on_ok(|_, _, _| false)
         });
         self.review_shell = window.focused(cx);
         let shortcut_owner = cx.entity().downgrade();
         let shortcut_mount = self.mount.clone();
         let shortcut_window = window.window_handle().window_id();
         self.review_shortcut = Some(cx.intercept_keystrokes(move |event, window, app| {
+            if window.default_prevented() { return; }
             if event.keystroke.key != "w" || event.keystroke.modifiers != (Modifiers { control: true, ..Modifiers::default() })
                 || window.window_handle().window_id() != shortcut_window { return; }
             let handled = shortcut_owner.update(app, |view, cx| {
@@ -1775,6 +1841,7 @@ impl XmlWorkspace {
             return;
         }
         self.review_presentation.revoke();
+        self.review_jump = None;
         self.review_shell = None;
         self.review_shortcut = None;
         self.review_transfer = true;
@@ -1807,6 +1874,7 @@ impl XmlWorkspace {
         if self.rehosting { return; }
         if super::xml_save::take_review(&mut self.save_review, id).is_some() {
             self.review_presentation.revoke();
+            self.review_jump = None;
             self.review_shell = None;
             self.review_shortcut = None;
             self.feedback = None;
@@ -1814,12 +1882,13 @@ impl XmlWorkspace {
         }
     }
     fn confirm_xml_save(&mut self, id: u64, presentation: u64, mount: &utility_mount::MountReceipt, receipt: &XmlReadReceipt, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.review_callback_current(id, presentation, mount) || self.file_write_pending
-            || !window.is_window_active() || !self.save_receipt_current(receipt, window)
+        if !self.review_dialog_current(id, presentation, mount, window, cx) || self.file_write_pending
+            || !self.save_receipt_current(receipt, window)
             || current_foreground_identity() != Some(receipt.owner.identity) { return false; }
         let Some(permit) = self.admission.admit() else { return false; };
         let Some(review) = super::xml_save::take_review(&mut self.save_review, id) else { return false; };
         self.review_presentation.revoke();
+        self.review_jump = None;
         self.review_shell = None;
         self.review_shortcut = None;
         self.start_xml_save(review.path, review.payload, receipt.clone(), permit, true, cx);

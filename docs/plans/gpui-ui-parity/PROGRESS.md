@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-XML workspace Jump focuses Source, the XPath tab and expression, Run XPath and Save Source As in Dock and Pop Out. All nine focused tests passed, including shared JSON, Search and Hash regressions and modal held-key ownership. The Overwrite child targets follow. [XML workspace Jump checkpoint](CHECKPOINTS.md#g14-d-xml-workspace-jump)
+XML Overwrite Jump focuses Cancel, Replace and Dock or Pop Out in the exact current review. All five focused tests passed. Matched Windows key, focus and file checks remain open. [Overwrite Jump checkpoint](CHECKPOINTS.md#g14-d-xml-overwrite-child-jump)
+
+XML workspace Jump focuses Source, the XPath tab and expression, Run XPath and Save Source As in Dock and Pop Out. All nine focused tests passed, including shared JSON, Search and Hash regressions and modal held-key ownership. [XML workspace Jump checkpoint](CHECKPOINTS.md#g14-d-xml-workspace-jump)
 
 JSON Jump targets Source, Format, Tree Search and visible Tree rows through the existing native interceptor in Dock and Pop Out. All seven focused launcher tests passed, including Search and Hash regressions. Matched Windows replay remains open. [Scoped JSON Jump checkpoint](CHECKPOINTS.md#g14-d-first-scoped-json-jump-targets)
 

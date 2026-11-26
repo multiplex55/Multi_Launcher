@@ -147,7 +147,7 @@ pub(super) fn dispatch(
                 return false;
             }
             return view.update(cx, |view, cx| {
-                view.review_owned_jump_latch(receipt, window, cx)
+                view.handle_review_jump(receipt, window, cx)
             });
         }
         if popup {
