@@ -25,3 +25,5 @@ Owned `g06-app-editor-catalog-candidate` started with two distinct rows sharing 
 ## Read-only indexed catalog
 
 App Editor shows the acknowledged stock index after the saved rows in one scrollable body. Its existing literal case-insensitive filter covers Label, Description and command. Whitespace-only input shows every row. Indexed rows preserve stock order and exact displayed fields, including formats outside the checked Search projection, and have read-only labels. Saved rows keep checked Edit, Remove and Refresh. Refresh remeasures the saved prefix and preserves the current indexed viewport. A live resize keeps the editor footer and pinned launcher Search reachable. [Validation log](../VALIDATION_LOG.md#g06-read-only-indexed-app-editor-catalog)
+
+Add and Edit include native Browse against the current launcher owner. A selection stages the exact representable file path and preserves the other draft fields. Cancel keeps the draft. The explicit Add or Save uses the same checked store. Focused receipt and path tests passed. Matched Windows Add/Edit Browse and Cancel are still open. [Browse checkpoint](../CHECKPOINTS.md#p002-and-g06-checked-app-editor-browse)

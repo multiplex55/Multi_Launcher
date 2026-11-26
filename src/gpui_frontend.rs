@@ -4853,6 +4853,7 @@ impl RootWindow {
     ) {
         if open {
             self.external_launch.retire_focus_bound_effects();
+            self.app_editor.revoke_picker_prelaunch();
             self.retire_context_favorite();
         }
         let was_menu_open = self.file_menu_open || self.settings_menu_open || self.help_menu_open;
@@ -5897,6 +5898,7 @@ impl RootWindow {
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.external_launch.retire_focus_bound_effects();
+        self.app_editor.revoke_picker_prelaunch();
         self.retire_action_sheet_now(window, cx, true);
         if self.action_sheet.is_some() { return false; }
         self.retire_context_favorite();
@@ -7563,6 +7565,7 @@ impl RootWindow {
             return;
         }
         self.external_launch.retire_focus_bound_effects();
+        self.app_editor.revoke_picker_prelaunch();
         self.context_favorite_popup = Some(ContextFavoritePopup {
             receipt: receipt.clone(),
             position,
@@ -10227,7 +10230,7 @@ impl RootWindow {
                 self.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
             }
             Some(RootCloseBlocker::AppWrite) => {
-                self.restart_status = Some(add_action::APP_WRITE_CLOSE_STATUS.to_owned());
+                self.restart_status = Some(self.app_editor.close_wait_status().to_owned());
             }
             Some(RootCloseBlocker::ExternalLaunch) => {
                 self.restart_status = Some(external_launch::CLOSE_STATUS.to_owned());
@@ -10956,6 +10959,7 @@ impl Render for RootWindow {
             }))
             .capture_any_mouse_down(cx.listener(|root, _, _, _| {
                 root.external_launch.retire_focus_bound_effects();
+                root.app_editor.revoke_picker_prelaunch();
             }))
             .role(Role::Group)
             .flex()
@@ -11015,7 +11019,9 @@ impl Render for RootWindow {
                 }
             }))
             .on_action(cx.listener(|root, _: &gpui_kit::base::input::Escape, window, cx| {
-                  if root.app_editor_escape(window, cx) {
+                  if root.pane_escape_latched && root.app_editor.open && root.app_editor.owns_focus_for_escape(window, cx) {
+                      cx.stop_propagation();
+                  } else if root.app_editor_escape(window, cx) {
                       cx.stop_propagation();
                   } else if quick_help_escape_capture_should_close(
                       &window.context_stack(),
@@ -13250,6 +13256,7 @@ pub(crate) fn run_foundation_window(
                                 if root.native_window.is_some_and(|native| native.identity.hwnd == receipt.hwnd)
                                     && root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id()) {
                                     root.external_launch.retire_focus_bound_effects();
+                                    root.app_editor.revoke_picker_prelaunch();
                                 }
                             });
                         }
@@ -13508,6 +13515,7 @@ pub(crate) fn run_foundation_window(
                         }
                     } else {
                         root.external_launch.retire_focus_bound_effects();
+                        root.app_editor.revoke_picker_prelaunch();
                         if let Some(view) = root.json_view.clone() {
                             if !view.read(cx).popout { view.update(cx, |view, cx| view.retire_jump(cx)); }
                         }
@@ -13633,7 +13641,7 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::AppWrite) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
-                            root.restart_status = Some(add_action::APP_WRITE_CLOSE_STATUS.to_owned());
+                            root.restart_status = Some(root.app_editor.close_wait_status().to_owned());
                             cx.notify();
                         });
                         false

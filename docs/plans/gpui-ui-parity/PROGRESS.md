@@ -2,7 +2,7 @@
 
 ## Current direction
 
-Use the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption), including the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md) and [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md). The November 26 amendment moves scheduling to Pass A after the verified read-only Duplicate Finder increment `3a6cc8974`. Begin P0.02 App Editor Browse, then canonical Folder and Bookmark authoring and Explorer drop. Historical checkpoint continuations below record the order at the time.
+Use the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption), including the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md) and [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md). The November 26 amendment moves scheduling to Pass A after the verified read-only Duplicate Finder increment `3a6cc8974`. P0.02 App Editor Browse has focused evidence, and its essential native replay is still open. Implement P0.03 canonical Folder authoring next. Historical checkpoint continuations below record the order at the time.
 
 Daily-driver readiness has 19 P0 workflows, with 9 at Stage 2 and 3 at Stage 3 or higher. The 91 Windows built-ins include 30 with real GPUI routes, comprising 23 at Stage 2 and 7 at Stage 3. The remaining 61 are Stage 1. Stage 4 and 5 and Search-admission-only counts are zero. The [maturity register](PLUGIN_MATURITY_REGISTER.md#reporting-baseline) holds tier totals. The [readiness register](DAILY_DRIVER_READINESS.md#current-readiness) lists daily-driver blockers and essential replay by workflow.
 
@@ -179,7 +179,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Implement P0.02 native App Editor Browse with the existing Add/Edit draft and checked Actions store. Follow with P0.03 canonical Folder and P0.04 Bookmark authoring, then Explorer drop and Omni. Matched Settings, G01, G04, G07, G10, G13 and G14 replay, mixed DPI and known-duration F2 remain open. [User priority order](USER_PRIORITIES.md) |
+| Current next action | Implement P0.03 canonical Folder Add, reviewed Remove and Alias, then P0.04 Bookmark authoring and Explorer drop. P0.02 native App Browse, Settings, G01, G04, G07, G10, G13 and G14 replay, mixed DPI and known-duration F2 remain open. [User priority order](USER_PRIORITIES.md) |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

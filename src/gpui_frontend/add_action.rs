@@ -68,6 +68,7 @@ pub(super) const APP_WRITE_CLOSE_STATUS: &str =
     "Wait for the App Editor save to finish before closing Multi Launcher.";
 pub(super) const APP_WRITE_RESTART_STATUS: &str =
     "Wait for the App Editor save to finish before restarting in egui.";
+pub(super) const APP_PICKER_STATUS: &str = "Wait for the App Editor file picker to finish.";
 pub(super) const APP_DRAFT_RESTART_STATUS: &str =
     "Save or Cancel the App Editor draft before restarting in egui.";
 
@@ -88,7 +89,7 @@ fn checked_action_error(error: multi_launcher::actions::CheckedActionError) -> A
 fn clear_app_diagnostic(status: &mut Option<String>) {
     if matches!(
         status.as_deref(),
-        Some(APP_WRITE_CLOSE_STATUS | APP_WRITE_RESTART_STATUS | APP_DRAFT_RESTART_STATUS)
+        Some(APP_WRITE_CLOSE_STATUS | APP_WRITE_RESTART_STATUS | APP_DRAFT_RESTART_STATUS | APP_PICKER_STATUS)
     ) {
         *status = None;
     }
@@ -112,6 +113,10 @@ pub(super) struct AppEditorState {
     indexed_filter: String,
     status: Option<String>,
     writes: AddAppWrites,
+    picker: AddAppWrites,
+    browse_focus: FocusHandle,
+    picker_lease: Option<Arc<AtomicBool>>,
+    picker_guard: Option<Subscription>,
     owner_focus: FocusHandle,
     new_focus: FocusHandle,
     arguments_focus: FocusHandle,
@@ -142,6 +147,14 @@ impl AddAppWrites {
         self.pending = None;
         true
     }
+}
+
+fn selected_path_text(path: &std::path::Path) -> Option<&str> {
+    path.to_str().filter(|value| !value.contains(['\r', '\n']))
+}
+
+fn picker_may_apply(open: bool, current_draft: bool, current_host: bool, selected: bool) -> bool {
+    open && current_draft && current_host && selected
 }
 
 #[derive(Clone)]
@@ -271,6 +284,10 @@ impl AppEditorState {
             indexed_filter: String::new(),
             status: None,
             writes: AddAppWrites::default(),
+            picker: AddAppWrites::default(),
+            browse_focus: cx.focus_handle(),
+            picker_lease: None,
+            picker_guard: None,
             owner_focus: cx.focus_handle(),
             new_focus: cx.focus_handle(),
             arguments_focus: cx.focus_handle(),
@@ -280,6 +297,7 @@ impl AppEditorState {
     }
 
     pub(super) fn restart_blocker(&self, cx: &App) -> Option<&'static str> {
+        if self.picker.pending.is_some() { return Some(APP_PICKER_STATUS); }
         if self.write_pending() {
             return Some(APP_WRITE_RESTART_STATUS);
         }
@@ -341,7 +359,18 @@ impl AppEditorState {
     }
 
     pub(super) fn write_pending(&self) -> bool {
-        self.writes.pending.is_some()
+        self.writes.pending.is_some() || self.picker.pending.is_some()
+    }
+
+    pub(super) fn owns_focus_for_escape(&self, window: &Window, cx: &App) -> bool {
+        self.owner_focus.contains_focused(window, cx)
+    }
+    pub(super) fn close_wait_status(&self) -> &'static str {
+        if self.picker.pending.is_some() { APP_PICKER_STATUS } else { APP_WRITE_CLOSE_STATUS }
+    }
+
+    pub(super) fn revoke_picker_prelaunch(&mut self) {
+        if let Some(lease) = &self.picker_lease { lease.store(false, Ordering::Release); }
     }
 
     fn begin_write(&mut self) -> Option<u64> {
@@ -570,6 +599,13 @@ impl RootWindow {
                 })
             })
             .collect();
+        subscriptions.push(cx.on_focus(&self.app_editor.browse_focus, window, move |root, window, cx| {
+            if window.is_window_active() && root.app_editor.is_current_draft(draft_id) {
+                root.root_scroll.scroll_to_top_of_item(root.app_editor_scroll_item());
+                if let Some(draft) = &root.app_editor.draft { draft.scroll.scroll_to_item(2); }
+                cx.notify();
+            }
+        }));
         let mut last_viewport = window.viewport_size();
         subscriptions.push(cx.observe_window_bounds(window, move |root, window, cx| {
             let viewport = window.viewport_size();
@@ -585,7 +621,9 @@ impl RootWindow {
             }
             root.root_scroll
                 .scroll_to_top_of_item(root.app_editor_scroll_item());
-            if let Some(index) = handles.iter().position(|handle| handle.is_focused(window)) {
+            if root.app_editor.browse_focus.is_focused(window) {
+                if let Some(draft) = &root.app_editor.draft { draft.scroll.scroll_to_item(2); }
+            } else if let Some(index) = handles.iter().position(|handle| handle.is_focused(window)) {
                 if let Some(draft) = &root.app_editor.draft {
                     draft.scroll.scroll_to_item(index);
                 }
@@ -607,6 +645,77 @@ impl RootWindow {
             draft.label.focus_handle(cx).focus(window, cx);
         }
         self.app_editor.status = None;
+        cx.notify();
+    }
+
+    fn browse_app_path(&mut self, draft_id: EntityId, path_id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.app_editor.is_current_draft(draft_id) || self.restart_admission.is_fenced()
+            || !self.app_editor.draft.as_ref().is_some_and(|draft| draft.path.entity_id() == path_id)
+            || !window.is_window_active()
+            || window.has_active_dialog(cx) || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+            || self.root_window.is_none_or(|host| host.window_id() != window.window_handle().window_id()) { return; }
+        let Ok(Some(native)) = checked_active_dialog_owner(window) else { return; };
+        let revision = self.root_visibility.request_revision.load(Ordering::Acquire);
+        if self.native_window != Some(native) || current_foreground_identity() != Some(native.identity)
+            || !json_utility::native_host_current(&self.root_visibility, revision, Some(native), false) { return; }
+        self.app_editor.browse_focus.focus(window, cx);
+        if !self.app_editor.browse_focus.is_focused(window) { return; }
+        let Some(permit) = self.restart_admission.admit() else { return; };
+        let Some(attempt) = self.app_editor.picker.begin() else { return; };
+        let lease = Arc::new(AtomicBool::new(true));
+        let blur_lease = lease.clone();
+        self.app_editor.picker_guard = Some(cx.on_blur(&self.app_editor.browse_focus, window, move |_, _, _| {
+            blur_lease.store(false, Ordering::Release);
+        }));
+        self.app_editor.picker_lease = Some(lease.clone());
+        let picker = rfd::FileDialog::new().set_parent(&*window);
+        let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone();
+        let task = cx.background_executor().spawn(async move {
+            if !lease.load(Ordering::Acquire) || admission.is_fenced() || current_foreground_identity() != Some(native.identity)
+                || !json_utility::native_host_current(&visibility, revision, Some(native), false) { return None; }
+            picker.pick_file()
+        });
+        let root = cx.entity().downgrade(); let host = window.window_handle();
+        cx.spawn(async move |_, cx| {
+            let selected = task.await;
+            let mut result = Some(selected);
+            let updated = host.update(cx, |_, window, app| { let _ = root.update(app, |root, cx| {
+                if !root.app_editor.picker.finish(attempt) { return; }
+                root.app_editor.picker_lease = None; root.app_editor.picker_guard = None;
+                #[cfg(windows)]
+                if result.as_ref().is_some_and(Option::is_none) { root.pane_escape_latched = true; }
+                let current_draft = root.app_editor.draft.as_ref().is_some_and(|draft| draft.label.entity_id() == draft_id && draft.path.entity_id() == path_id);
+                let current_host = !root.restart_admission.is_fenced()
+                    && root.root_window.is_some_and(|live| live.window_id() == host.window_id())
+                    && root.native_window == Some(native) && current_foreground_identity() == Some(native.identity)
+                    && json_utility::native_host_current(&root.root_visibility, revision, Some(native), false)
+                    && !window.has_active_dialog(cx)
+                    && root.app_editor.browse_focus.is_focused(window)
+                    && root.external_owner_is_current(window.focused(cx).as_ref(), window, cx);
+                if picker_may_apply(root.app_editor.open, current_draft, current_host, result.as_ref().is_some_and(Option::is_some))
+                    && let Some(path) = result.take().flatten() {
+                    if let Some(value) = selected_path_text(&path) {
+                        if let Some(draft) = &root.app_editor.draft {
+                            match &draft.path {
+                                AppDraftField::Single(input) => input.update(cx, |input, cx| input.set_value(value.to_owned(), window, cx)),
+                                AppDraftField::Multiline(input) => input.update(cx, |input, cx| input.set_value(value.to_owned(), window, cx)),
+                            }
+                            root.app_editor.status = None;
+                        }
+                    } else { root.app_editor.status = Some("The selected path cannot be represented in this editor.".into()); }
+                }
+                if root.restart_status.as_deref() == Some(APP_PICKER_STATUS) { root.restart_status = None; }
+                cx.notify();
+            }); });
+            if updated.is_err() { let _ = root.update(cx, |root, cx| {
+                if root.app_editor.picker.finish(attempt) {
+                    root.app_editor.picker_lease = None; root.app_editor.picker_guard = None;
+                    if root.restart_status.as_deref() == Some(APP_PICKER_STATUS) { root.restart_status = None; }
+                    cx.notify();
+                }
+            }); }
+            drop(permit);
+        }).detach();
         cx.notify();
     }
 
@@ -835,6 +944,7 @@ pub(super) struct AppEditorPanel {
     owner_focus: FocusHandle,
     new_focus: FocusHandle,
     arguments_focus: FocusHandle,
+    browse_focus: FocusHandle,
     draft: Option<AddAppPanelDraft>,
     filter: Option<Entity<InputState>>,
     catalog: Arc<[CatalogAction]>,
@@ -879,6 +989,7 @@ impl AppEditorPanel {
             owner_focus: state.owner_focus.clone(),
             new_focus: state.new_focus.clone(),
             arguments_focus: state.arguments_focus.clone(),
+            browse_focus: state.browse_focus.clone(),
             status: state.status.clone(),
             filter: state.filter.clone(),
             catalog: state.catalog.clone(),
@@ -1039,6 +1150,8 @@ impl RenderOnce for AppEditorPanel {
                 );
             let cancel_root = self.root.clone();
             let submit_root = self.root.clone();
+            let browse_root = self.root.clone();
+            let path_id = draft.path.entity_id();
             let tab_root = self.root.clone();
             panel = panel.capture_key_down(move |event: &KeyDownEvent, window, app| {
                 if event.keystroke.key != "tab" || !window.is_window_active() {
@@ -1093,7 +1206,11 @@ impl RenderOnce for AppEditorPanel {
                         .flex_col()
                         .flex_shrink_0()
                         .child(Label::new("Path"))
-                        .child(draft.path.render("Path", self.pending)),
+                        .child(draft.path.render("Path", self.pending))
+                        .child(Button::new("add-app-browse").label("Browse…").track_focus(&self.browse_focus)
+                            .disabled(self.pending).on_click(move |_, window, app| {
+                                let _ = browse_root.update(app, |root, cx| root.browse_app_path(draft_id, path_id, window, cx));
+                            })),
                 )
                 .child(div().flex_shrink_0().child(checkbox))
                 .child(
@@ -1272,6 +1389,32 @@ mod tests {
         assert!(matches("TOOLS"));
         assert!(!matches(" app "));
         assert!(!matches("secret"));
+    }
+
+    #[test]
+    fn browse_path_preserves_unicode_and_rejects_unrepresentable_values() {
+        use std::path::Path;
+        assert_eq!(super::selected_path_text(Path::new("C:\\音楽\\café.exe")), Some("C:\\音楽\\café.exe"));
+        assert_eq!(super::selected_path_text(Path::new("bad\npath")), None);
+        #[cfg(windows)] {
+            use std::os::windows::ffi::OsStringExt;
+            let invalid = std::ffi::OsString::from_wide(&[0xd800]);
+            assert_eq!(super::selected_path_text(Path::new(&invalid)), None);
+        }
+    }
+
+    #[test]
+    fn browse_receipt_rejects_cancel_stale_draft_and_hidden_host() {
+        assert!(super::picker_may_apply(true, true, true, true));
+        assert!(!super::picker_may_apply(true, true, true, false));
+        assert!(!super::picker_may_apply(true, false, true, true));
+        assert!(!super::picker_may_apply(true, true, false, true));
+        assert!(!super::picker_may_apply(false, true, true, true));
+        let mut receipts = super::AddAppWrites::default();
+        let attempt = receipts.begin().unwrap();
+        assert!(receipts.begin().is_none());
+        assert!(receipts.finish(attempt));
+        assert!(!receipts.finish(attempt));
     }
 
     #[test]
