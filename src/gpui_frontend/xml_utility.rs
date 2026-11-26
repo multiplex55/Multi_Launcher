@@ -108,7 +108,10 @@ fn snapshot_pending(snapshot: &XmlSessionSnapshot) -> bool {
 enum XmlPickerKind {
     Schema,
     Open,
+    SaveSource,
+    SaveOutput,
 }
+#[derive(Clone)]
 struct XmlReadReceipt {
     mount: utility_mount::MountReceipt,
     source_epoch: u64,
@@ -117,6 +120,11 @@ struct XmlReadReceipt {
     visibility_revision: u64,
     root_window: AnyWindowHandle,
     open_focus: Option<FocusHandle>,
+}
+struct XmlSaveReview {
+    path: std::path::PathBuf,
+    payload: Arc<str>,
+    receipt: XmlReadReceipt,
 }
 enum Engine {
     Idle,
@@ -150,6 +158,9 @@ pub(super) struct XmlWorkspace {
     pub(super) schema_tab: bool,
     schema_picker: bool,
     file_read_pending: bool,
+    file_write_pending: bool,
+    save_review: Option<(u64, XmlSaveReview)>,
+    next_save_review: u64,
     next_file_request: u64,
     schema_path_draft: Option<std::path::PathBuf>,
     pub(super) xpath: XmlToolkitXPathViewState,
@@ -260,6 +271,9 @@ impl XmlWorkspace {
             schema_tab: false,
             schema_picker: false,
             file_read_pending: false,
+            file_write_pending: false,
+            save_review: None,
+            next_save_review: 0,
             next_file_request: 0,
             schema_path_draft: None,
             xpath: XmlToolkitXPathViewState::default(),
@@ -438,6 +452,7 @@ impl XmlWorkspace {
     }
     pub(super) fn shutdown(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.save_review = None;
         self.owner.retire();
         self.tree_epoch.fetch_add(1, Ordering::AcqRel);
         self.tree.revoke_copy_authority();
@@ -467,11 +482,17 @@ impl XmlWorkspace {
     pub(super) fn shutdown_failure(&self) -> Option<String> {
         self.shutdown_error.clone()
     }
+    pub(super) fn save_review_pending(&self) -> bool {
+        self.save_review.is_some()
+    }
     pub(super) fn schema_picker_pending(&self) -> bool {
         self.schema_picker
     }
     pub(super) fn file_effect_pending(&self) -> bool {
-        super::xml_schema::file_effect_pending(self.schema_picker, self.file_read_pending)
+        super::xml_schema::file_effect_pending(
+            self.schema_picker,
+            self.file_read_pending || self.file_write_pending,
+        )
     }
     pub(super) fn schema_path_draft(&self) -> Option<&std::path::Path> {
         self.schema_path_draft.as_deref()
@@ -503,7 +524,7 @@ impl XmlWorkspace {
         cx.notify();
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if super::xml_schema::pane_close_blocked(self.schema_picker) {
+        if super::xml_schema::pane_close_blocked(self.schema_picker || self.file_write_pending) {
             return;
         }
         let restore = window.is_window_active() && self.focus.contains_focused(window, cx);
@@ -1023,14 +1044,29 @@ impl XmlWorkspace {
         if !self.schema_live() {
             return;
         }
-        self.begin_xml_picker(XmlPickerKind::Schema, window, cx);
+        self.begin_xml_picker(XmlPickerKind::Schema, None, window, cx);
     }
     fn open_xml_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.begin_xml_picker(XmlPickerKind::Open, window, cx);
+        self.begin_xml_picker(XmlPickerKind::Open, None, window, cx);
+    }
+    fn save_source_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let payload: Arc<str> = Arc::from(self.source.as_str());
+        self.begin_xml_picker(XmlPickerKind::SaveSource, Some(payload), window, cx);
+    }
+    fn save_output_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        let Some(output) = multi_launcher::xml_source::current_output(&snapshot) else {
+            return;
+        };
+        let payload: Arc<str> = Arc::from(output.text.as_str());
+        self.begin_xml_picker(XmlPickerKind::SaveOutput, Some(payload), window, cx);
     }
     fn begin_xml_picker(
         &mut self,
         kind: XmlPickerKind,
+        payload: Option<Arc<str>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1038,6 +1074,7 @@ impl XmlWorkspace {
             || !self.mount.is_current()
             || self.admission.is_fenced()
             || self.file_effect_pending()
+            || self.save_review.is_some()
             || self.clipboard_pending
             || window.window_handle().window_id() != self.root_window.window_id()
         {
@@ -1080,7 +1117,11 @@ impl XmlWorkspace {
         let source_revision = snapshot.revision;
         let schema_revision = snapshot.schema.revision;
         let root_window = self.root_window;
-        if matches!(kind, XmlPickerKind::Open) && !self.focus.contains_focused(window, cx) {
+        if matches!(
+            kind,
+            XmlPickerKind::Open | XmlPickerKind::SaveSource | XmlPickerKind::SaveOutput
+        ) && !self.focus.contains_focused(window, cx)
+        {
             self.focus.focus(window, cx);
         }
         self.schema_picker = true;
@@ -1088,6 +1129,9 @@ impl XmlWorkspace {
         let picker = match kind {
             XmlPickerKind::Schema => picker.add_filter("XML Schema", &["xsd"]),
             XmlPickerKind::Open => picker.add_filter("XML document", &["xml", "xsl", "xslt"]),
+            XmlPickerKind::SaveSource | XmlPickerKind::SaveOutput => {
+                picker.add_filter("XML document", &["xml"])
+            }
         };
         let worker_mount = mount.clone();
         let worker_epoch = self.epoch.clone();
@@ -1110,7 +1154,10 @@ impl XmlWorkspace {
             ) {
                 return None;
             }
-            Some(picker.pick_file())
+            Some(match kind {
+                XmlPickerKind::Schema | XmlPickerKind::Open => picker.pick_file(),
+                XmlPickerKind::SaveSource | XmlPickerKind::SaveOutput => picker.save_file(),
+            })
         });
         let weak = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
@@ -1166,7 +1213,9 @@ impl XmlWorkspace {
                                     }
                                 }
                             }
-                            XmlPickerKind::Open => {
+                            XmlPickerKind::Open
+                            | XmlPickerKind::SaveSource
+                            | XmlPickerKind::SaveOutput => {
                                 if let Some(permit) = permit.take() {
                                     let receipt = XmlReadReceipt {
                                         mount: mount.clone(),
@@ -1179,7 +1228,19 @@ impl XmlWorkspace {
                                             .focused(cx)
                                             .filter(|focus| view.focus.contains(focus, window)),
                                     };
-                                    view.start_xml_load(path, receipt, permit, cx);
+                                    match kind {
+                                        XmlPickerKind::Open => {
+                                            view.start_xml_load(path, receipt, permit, cx)
+                                        }
+                                        XmlPickerKind::SaveSource | XmlPickerKind::SaveOutput => {
+                                            if let Some(payload) = payload.clone() {
+                                                view.start_xml_save(
+                                                    path, payload, receipt, permit, false, cx,
+                                                );
+                                            }
+                                        }
+                                        XmlPickerKind::Schema => {}
+                                    }
                                 }
                             }
                         }
@@ -1298,6 +1359,230 @@ impl XmlWorkspace {
         })
         .detach();
         cx.notify();
+    }
+    fn save_receipt_current(&self, receipt: &XmlReadReceipt, window: &Window) -> bool {
+        self.open
+            && receipt.mount.is_current()
+            && !self.admission.is_fenced()
+            && self.native == Some(receipt.owner)
+            && window.window_handle().window_id() == receipt.root_window.window_id()
+            && json_utility::native_host_current(
+                &self.visibility,
+                receipt.visibility_revision,
+                Some(receipt.owner),
+                false,
+            )
+    }
+    fn start_xml_save(
+        &mut self,
+        path: std::path::PathBuf,
+        payload: Arc<str>,
+        receipt: XmlReadReceipt,
+        permit: EffectPermit,
+        overwrite: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_write_pending {
+            return;
+        }
+        let Some(next) = self.next_file_request.checked_add(1) else {
+            self.feedback = Some("XML file request identifiers are exhausted.".into());
+            return;
+        };
+        self.next_file_request = next;
+        let operation = if overwrite {
+            multi_launcher::activity::ActivityOperation::SaveXmlFile
+        } else {
+            multi_launcher::activity::ActivityOperation::PrepareXmlSave
+        };
+        let activity = self.activity.start(
+            multi_launcher::activity::ActivityOwner::Xml,
+            multi_launcher::activity::ActivitySlot::Primary,
+            multi_launcher::activity::ActivityIncarnation::new(next),
+            operation,
+        );
+        self.file_write_pending = true;
+        self.feedback = Some("Saving XML file…".into());
+        let worker_path = path.clone();
+        let worker_payload = payload.clone();
+        let mount = receipt.mount.clone();
+        let owner = receipt.owner;
+        let visibility_revision = receipt.visibility_revision;
+        let visibility = self.visibility.clone();
+        let admission = self.admission.clone();
+        let task = cx.background_executor().spawn(async move {
+            multi_launcher::xml_file_load::run_xml_save_if(
+                &worker_path,
+                worker_payload.as_bytes(),
+                overwrite,
+                activity.as_ref(),
+                || {
+                    mount.is_current()
+                        && !admission.is_fenced()
+                        && native_window_is_valid(owner)
+                        && json_utility::native_host_current(
+                            &visibility,
+                            visibility_revision,
+                            Some(owner),
+                            false,
+                        )
+                },
+            )
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let result = task.await;
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            let update =
+                update_kit_window_content(receipt.root_window, &view, cx, |view, window, cx| {
+                    view.file_write_pending = false;
+                    if view.feedback.as_deref() == Some("Saving XML file…") {
+                        view.feedback = None;
+                    }
+                    if !view.save_receipt_current(&receipt, window) {
+                        cx.notify();
+                        return;
+                    }
+                    match result {
+                        Ok(multi_launcher::xml_file_load::SaveOutcome::Saved) => {
+                            view.feedback = Some("Saved XML file.".into())
+                        }
+                        Ok(multi_launcher::xml_file_load::SaveOutcome::OverwriteRequired) => {
+                            let Some(id) = view.next_save_review.checked_add(1) else {
+                                view.feedback =
+                                    Some("XML save review identifiers are exhausted.".into());
+                                cx.notify();
+                                return;
+                            };
+                            view.next_save_review = id;
+                            let may_present = receipt.open_focus.as_ref().is_some_and(|focus| {
+                                focus.is_focused(window) && view.focus.contains(focus, window)
+                            });
+                            view.save_review = Some((
+                                id,
+                                XmlSaveReview {
+                                    path,
+                                    payload,
+                                    receipt,
+                                },
+                            ));
+                            if may_present {
+                                view.present_xml_save_review(id, window, cx);
+                            } else {
+                                view.feedback = Some(
+                                    "Review the existing XML file before replacing it.".into(),
+                                );
+                            }
+                        }
+                        Err(error) => view.feedback = Some(error),
+                    }
+                    cx.notify();
+                });
+            if update.is_err() {
+                let _ = view.update(cx, |view, cx| {
+                    view.file_write_pending = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    fn present_xml_save_review(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, review)) = self
+            .save_review
+            .as_ref()
+            .filter(|(current, _)| *current == id)
+        else {
+            return;
+        };
+        if !self.save_receipt_current(&review.receipt, window)
+            || !window.is_window_active()
+            || current_foreground_identity() != Some(review.receipt.owner.identity)
+            || window.has_active_dialog(cx)
+        {
+            self.feedback = Some("Review the existing XML file before replacing it.".into());
+            cx.notify();
+            return;
+        }
+        let Some(description) = super::xml_save::review_description(&review.path) else {
+            self.feedback = Some(
+                "This file path cannot be displayed exactly; cancel and choose another path."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
+        let owner = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let cancel = owner.clone();
+            let close = owner.clone();
+            let confirm = owner.clone();
+            alert
+                .title(Label::new("Replace existing XML file?"))
+                .description(
+                    div()
+                        .id("xml-save-full-path")
+                        .w_full()
+                        .max_h(px(120.0))
+                        .overflow_y_scroll()
+                        .overflow_x_scroll()
+                        .child(Label::new(description.clone()).whitespace_normal()),
+                )
+                .close_button(true)
+                .keyboard(true)
+                .confirm()
+                .ok_text("Replace existing file")
+                .cancel_text("Cancel Save")
+                .on_cancel(move |_, _, app| {
+                    let _ = cancel.update(app, |view, cx| view.cancel_xml_save(id, cx));
+                    true
+                })
+                .on_close(move |_, _, app| {
+                    let _ = close.update(app, |view, cx| view.cancel_xml_save(id, cx));
+                })
+                .on_ok(move |_, window, app| {
+                    let _ = confirm.update(app, |view, cx| view.confirm_xml_save(id, window, cx));
+                    true
+                })
+        });
+    }
+    fn cancel_xml_save(&mut self, id: u64, cx: &mut Context<Self>) {
+        if super::xml_save::take_review(&mut self.save_review, id).is_some() {
+            self.feedback = None;
+            cx.notify();
+        }
+    }
+    fn confirm_xml_save(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .save_review
+            .as_ref()
+            .is_some_and(|(review_id, review)| {
+                *review_id == id
+                    && self.save_receipt_current(&review.receipt, window)
+                    && window.is_window_active()
+                    && current_foreground_identity() == Some(review.receipt.owner.identity)
+            });
+        if !current || self.file_write_pending {
+            return;
+        }
+        let Some(permit) = self.admission.admit() else {
+            return;
+        };
+        let Some(review) = super::xml_save::take_review(&mut self.save_review, id) else {
+            return;
+        };
+        self.start_xml_save(
+            review.path,
+            review.payload,
+            review.receipt,
+            permit,
+            true,
+            cx,
+        );
     }
     pub(super) fn schema_clear(
         &mut self,
@@ -1592,6 +1877,8 @@ impl Render for XmlWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let escape_mount = self.mount.clone();
         let open_mount = self.mount.clone();
+        let save_source_mount = self.mount.clone();
+        let save_output_mount = self.mount.clone();
         let paste_mount = self.mount.clone();
         let copy_mount = self.mount.clone();
         let clear_mount = self.mount.clone();
@@ -1609,6 +1896,7 @@ impl Render for XmlWorkspace {
         let output_epoch = self.output_epoch.load(Ordering::Acquire);
         let snapshot = self.current_snapshot();
         let can_open_file = self.open
+            && self.save_review.is_none()
             && !self.file_effect_pending()
             && !self.clipboard_pending
             && !self.admission.is_fenced()
@@ -1690,7 +1978,12 @@ impl Render for XmlWorkspace {
                         && !context_stack_has_primary(&contexts, "Dialog")
                         && !context_stack_has_primary(&contexts, "AlertDialog")
                     {
-                        view.close(window, cx);
+                        if let Some((id, _)) = view.save_review.as_ref() {
+                            let id = *id;
+                            view.cancel_xml_save(id, cx);
+                        } else {
+                            view.close(window, cx);
+                        }
                         cx.stop_propagation();
                     }
                 },
@@ -1854,6 +2147,28 @@ impl Render for XmlWorkspace {
                     .flex_wrap()
                     .gap_2()
                     .child(
+                        Button::new("xml-save-source")
+                            .label("Save Source As…")
+                            .disabled(!can_open_file)
+                            .tab_stop(can_open_file)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if save_source_mount.is_current() {
+                                    view.save_source_as(window, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("xml-save-output")
+                            .label("Save Output As…")
+                            .disabled(!can_open_file || output.is_none())
+                            .tab_stop(can_open_file && output.is_some())
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if save_output_mount.is_current() {
+                                    view.save_output_as(window, cx);
+                                }
+                            })),
+                    )
+                    .child(
                         Button::new("xml-open-file")
                             .label("Open XML…")
                             .disabled(!can_open_file)
@@ -1969,8 +2284,8 @@ impl Render for XmlWorkspace {
                     .child(
                         Button::new("xml-close")
                             .label("Close")
-                            .disabled(self.schema_picker)
-                            .tab_stop(!self.schema_picker)
+                            .disabled(self.schema_picker || self.file_write_pending)
+                            .tab_stop(!self.schema_picker && !self.file_write_pending)
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if close_mount.is_current()
                                     && view.open
@@ -1981,6 +2296,32 @@ impl Render for XmlWorkspace {
                             })),
                     ),
             )
+            .children(self.save_review.as_ref().map(|(id, _)| {
+                let id = *id;
+                let present_mount = self.mount.clone();
+                let cancel_mount = self.mount.clone();
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("xml-review-save")
+                            .label("Review replacement")
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if present_mount.is_current() {
+                                    view.present_xml_save_review(id, window, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("xml-cancel-save")
+                            .label("Cancel Save")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if cancel_mount.is_current() {
+                                    view.cancel_xml_save(id, cx);
+                                }
+                            })),
+                    )
+            }))
             .child(div().id("xml-status").role(Role::Status).child(status))
             .children(self.feedback.as_ref().map(|text| Label::new(text.clone())))
     }

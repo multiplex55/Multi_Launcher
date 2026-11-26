@@ -32,4 +32,6 @@ The XPath tab uses the stock expression and namespace request model. It distingu
 
 The Validation tab chooses a local XSD through the checked native owner, retains the selected path, and validates only on demand through the existing engine. Both frontends share bounded status and diagnostic rules. Four focused launcher tests cover owner, source, mount and session receipt checks. The grouped replay still needs actual picker ownership, Cancel, Clear and validation against the relative and missing include fixtures.
 
-Owned file effects and remembered native presentation and pin retain their assigned criteria.
+## GPUI file effects
+
+Open uses the checked native picker and shared bounded UTF-8 loader. Source and full Output can be saved through an owned picker. An existing destination opens the exact overwrite review. The grouped file and XSD tests passed, including Windows retry authorization and stock confirmation behavior. Paired desktop replay, remembered native presentation and pin retain their assigned criteria.

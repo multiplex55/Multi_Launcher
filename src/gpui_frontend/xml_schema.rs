@@ -42,7 +42,8 @@ pub(super) fn render(view: &mut XmlWorkspace, cx: &mut Context<XmlWorkspace>) ->
     let validate_mount = mount.clone();
     let snapshot = view.current_snapshot();
     let live = view.schema_live();
-    let can_choose = live && view.clipboard_available() && snapshot.is_some();
+    let can_choose =
+        live && !view.save_review_pending() && view.clipboard_available() && snapshot.is_some();
     let can_clear = live
         && snapshot
             .as_ref()

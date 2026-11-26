@@ -27,6 +27,7 @@ mod xml_utility;
 mod xml_tree;
 mod xml_xpath;
 mod xml_schema;
+mod xml_save;
 mod json_tree;
 mod json_host;
 mod utility_mount;

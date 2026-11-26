@@ -24,7 +24,7 @@ use crate::xml_toolkit_session::{
 };
 use eframe::egui;
 use files::{
-    SaveOutcome, save_xml_file, validate_local_path,
+    SaveOutcome, validate_local_path,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -225,28 +225,9 @@ impl XmlFileWorker {
                             overwrite_confirmed,
                             activity,
                         } => {
-                            if let Some(activity) = activity.as_ref() {
-                                activity.mark_running();
-                            }
-                            let result =
-                                save_xml_file(&path, payload.as_bytes(), overwrite_confirmed);
-                            if let Some(activity) = activity.as_ref() {
-                                let (outcome, diagnostic) = match &result {
-                                    Ok(SaveOutcome::Saved) => (ActivityOutcome::Completed, None),
-                                    Ok(SaveOutcome::OverwriteRequired) => {
-                                        (ActivityOutcome::Completed, None)
-                                    }
-                                    Err(_) => (
-                                        ActivityOutcome::Failed,
-                                        Some(ActivityDiagnostic::WorkerFailed),
-                                    ),
-                                };
-                                activity.finish(
-                                    outcome,
-                                    diagnostic,
-                                    ActivityRetirement::Unavailable,
-                                );
-                            }
+                            let result = crate::xml_file_load::run_xml_save(
+                                &path, payload.as_bytes(), overwrite_confirmed, activity.as_ref(),
+                            );
                             FileCompletion {
                                 id,
                                 source_generation: None,

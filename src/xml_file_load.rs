@@ -1,12 +1,11 @@
 //! Secure, bounded local XML file loading shared by both frontends.
 use crate::xml_source::{validate_local_path, validate_utf8_declaration};
 use crate::xml_toolkit_engine::MAX_XML_INPUT_BYTES;
-#[cfg(not(windows))]
 use std::fs;
 use std::fs::File;
 #[cfg(windows)]
 use std::fs::OpenOptions;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 #[cfg(not(windows))]
 use std::path::PathBuf;
@@ -108,6 +107,176 @@ pub fn run_xml_load(
     result
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SaveOutcome {
+    Saved,
+    OverwriteRequired,
+}
+
+fn save_paths_current(parent: &Path, target: &Path) -> bool {
+    if validate_local_path(parent).is_err() || validate_local_path(target).is_err() {
+        return false;
+    }
+    #[cfg(windows)]
+    if crate::xml_toolkit_engine::validate_local_xml_path(parent).is_err() {
+        return false;
+    }
+    #[cfg(not(windows))]
+    if reject_symlink_components(parent).is_err() {
+        return false;
+    }
+    if !fs::metadata(parent).is_ok_and(|metadata| metadata.is_dir()) {
+        return false;
+    }
+    match fs::symlink_metadata(target) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return false;
+            }
+            #[cfg(windows)]
+            if crate::xml_toolkit_engine::validate_local_xml_path(target).is_err() {
+                return false;
+            }
+            #[cfg(not(windows))]
+            if reject_symlink_components(target).is_err() {
+                return false;
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+pub fn save_xml_file(
+    path: &Path,
+    payload: &[u8],
+    overwrite_confirmed: bool,
+) -> Result<SaveOutcome, String> {
+    save_xml_file_if(path, payload, overwrite_confirmed, || true)
+}
+
+pub fn save_xml_file_if(
+    path: &Path,
+    payload: &[u8],
+    overwrite_confirmed: bool,
+    is_current: impl Fn() -> bool,
+) -> Result<SaveOutcome, String> {
+    validate_local_path(path)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    validate_local_path(parent)?;
+    #[cfg(windows)]
+    crate::xml_toolkit_engine::validate_local_xml_path(parent)?;
+    #[cfg(not(windows))]
+    reject_symlink_components(parent)?;
+    let resolved_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the destination folder: {error}"))?;
+    validate_local_path(&resolved_parent)?;
+    #[cfg(windows)]
+    crate::xml_toolkit_engine::validate_local_xml_path(&resolved_parent)?;
+    let parent_metadata = fs::metadata(&resolved_parent)
+        .map_err(|error| format!("Could not inspect the destination folder: {error}"))?;
+    if !parent_metadata.is_dir() {
+        return Err("The destination folder is not a directory.".into());
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "Choose a destination file name.".to_owned())?;
+    let target = resolved_parent.join(file_name);
+    validate_local_path(&target)?;
+    let target_exists = match fs::symlink_metadata(&target) {
+        Ok(metadata) => {
+            #[cfg(windows)]
+            crate::xml_toolkit_engine::validate_local_xml_path(&target)?;
+            #[cfg(not(windows))]
+            reject_symlink_components(&target)?;
+            if !metadata.is_file() {
+                return Err("The destination must be a regular file.".into());
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("Could not inspect the destination file: {error}")),
+    };
+    if target_exists && !overwrite_confirmed {
+        return Ok(SaveOutcome::OverwriteRequired);
+    }
+
+    let can_commit = || save_paths_current(&resolved_parent, &target) && is_current();
+    if !can_commit() {
+        return Err(
+            "XML save request was superseded or its target is no longer admissible.".into(),
+        );
+    }
+    if overwrite_confirmed {
+        crate::common::atomic_file::save_atomic_if(&target, payload, &can_commit)
+            .map_err(|error| format!("Could not save XML file: {error:#}"))?;
+    } else {
+        let mut temporary = tempfile::NamedTempFile::new_in(&resolved_parent)
+            .map_err(|error| format!("Could not prepare XML file: {error}"))?;
+        temporary
+            .write_all(payload)
+            .and_then(|()| temporary.flush())
+            .and_then(|()| temporary.as_file().sync_all())
+            .map_err(|error| format!("Could not write XML file: {error}"))?;
+        if !can_commit() {
+            return Err(
+                "XML save request was superseded or its target is no longer admissible.".into(),
+            );
+        }
+        if let Err(error) = temporary.persist_noclobber(&target) {
+            if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                return Ok(SaveOutcome::OverwriteRequired);
+            }
+            return Err(format!(
+                "Could not create XML file without overwriting: {}",
+                error.error
+            ));
+        }
+    }
+    Ok(SaveOutcome::Saved)
+}
+
+pub fn run_xml_save(
+    path: &Path,
+    payload: &[u8],
+    overwrite_confirmed: bool,
+    activity: Option<&crate::activity::ActivityTask>,
+) -> Result<SaveOutcome, String> {
+    run_xml_save_if(path, payload, overwrite_confirmed, activity, || true)
+}
+
+pub fn run_xml_save_if(
+    path: &Path,
+    payload: &[u8],
+    overwrite_confirmed: bool,
+    activity: Option<&crate::activity::ActivityTask>,
+    is_current: impl Fn() -> bool,
+) -> Result<SaveOutcome, String> {
+    use crate::activity::{ActivityDiagnostic, ActivityOutcome, ActivityRetirement};
+    if let Some(activity) = activity {
+        activity.mark_running();
+    }
+    let result = save_xml_file_if(path, payload, overwrite_confirmed, is_current);
+    if let Some(activity) = activity {
+        let outcome = if result.is_ok() {
+            ActivityOutcome::Completed
+        } else {
+            ActivityOutcome::Failed
+        };
+        activity.finish(
+            outcome,
+            (outcome == ActivityOutcome::Failed).then_some(ActivityDiagnostic::WorkerFailed),
+            ActivityRetirement::Unavailable,
+        );
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::run_xml_load;
@@ -115,6 +284,45 @@ mod tests {
         ActivityCenter, ActivityIncarnation, ActivityLifecycle, ActivityOperation, ActivityOutcome,
         ActivityOwner, ActivitySlot,
     };
+
+    #[test]
+    fn xml_save_race_never_clobbers_and_explicit_confirmation_replaces() {
+        use super::{save_xml_file, save_xml_file_if, SaveOutcome};
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.xml");
+        let calls = Cell::new(0);
+        let outcome = save_xml_file_if(&path, b"frozen", false, || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                std::fs::write(&path, b"other").unwrap();
+            }
+            true
+        })
+        .unwrap();
+        assert_eq!(outcome, SaveOutcome::OverwriteRequired);
+        assert_eq!(std::fs::read(&path).unwrap(), b"other");
+        assert_eq!(
+            save_xml_file(&path, b"frozen", true).unwrap(),
+            SaveOutcome::Saved
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"frozen");
+    }
+    #[test]
+    fn xml_save_revoked_before_commit_leaves_target_unchanged() {
+        use super::save_xml_file_if;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target.xml");
+        std::fs::write(&path, b"original").unwrap();
+        let calls = std::cell::Cell::new(0);
+        assert!(save_xml_file_if(&path, b"replacement", true, || {
+            calls.set(calls.get() + 1);
+            calls.get() == 1
+        })
+        .is_err());
+        assert_eq!(calls.get(), 2);
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    }
 
     #[test]
     fn xml_load_runner_publishes_activity_for_exact_secure_read() {

@@ -8,6 +8,13 @@ pub fn save_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     save_atomic_with_replace(path, bytes, replace_existing)
 }
 
+/// Atomically replace a destination only while its owner's admission remains current.
+pub fn save_atomic_if(path: &Path, bytes: &[u8], is_current: impl Fn() -> bool) -> Result<()> {
+    save_atomic_with_replace(path, bytes, |source, destination| {
+        replace_existing_if(source, destination, &is_current)
+    })
+}
+
 /// Atomically replace high-frequency, replaceable state without forcing the
 /// file or rename through stable storage before returning.
 ///
@@ -109,16 +116,21 @@ fn timestamp() -> String {
 
 #[cfg(windows)]
 fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
-    replace_existing_with_flags(src, dst, true)
+    replace_existing_with_flags(src, dst, true, || true)
 }
 
 #[cfg(windows)]
 fn replace_existing_replaceable(src: &Path, dst: &Path) -> Result<()> {
-    replace_existing_with_flags(src, dst, false)
+    replace_existing_with_flags(src, dst, false, || true)
 }
 
 #[cfg(windows)]
-fn replace_existing_with_flags(src: &Path, dst: &Path, write_through: bool) -> Result<()> {
+fn replace_existing_if(src: &Path, dst: &Path, is_current: impl Fn() -> bool) -> Result<()> {
+    replace_existing_with_flags(src, dst, true, is_current)
+}
+
+#[cfg(windows)]
+fn replace_existing_with_flags(src: &Path, dst: &Path, write_through: bool, is_current: impl Fn() -> bool) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -136,6 +148,9 @@ fn replace_existing_with_flags(src: &Path, dst: &Path, write_through: bool) -> R
         } else {
             MOVEFILE_REPLACE_EXISTING
         };
+        if !is_current() {
+            anyhow::bail!("atomic save request was superseded");
+        }
         match unsafe { MoveFileExW(PCWSTR(s.as_ptr()), PCWSTR(d.as_ptr()), flags) } {
             Ok(()) => return Ok(()),
             Err(error) => {
@@ -177,6 +192,14 @@ fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
 }
 
 #[cfg(not(windows))]
+fn replace_existing_if(src: &Path, dst: &Path, is_current: impl Fn() -> bool) -> Result<()> {
+    if !is_current() {
+        anyhow::bail!("atomic save request was superseded");
+    }
+    replace_existing(src, dst)
+}
+
+#[cfg(not(windows))]
 fn replace_existing_replaceable(src: &Path, dst: &Path) -> Result<()> {
     replace_existing(src, dst)
 }
@@ -184,6 +207,26 @@ fn replace_existing_replaceable(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn guarded_atomic_replace_rechecks_authority_before_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("guarded.xml");
+        fs::write(&target, b"original").unwrap();
+        let lock = OpenOptions::new().read(true).share_mode(0).open(&target).unwrap();
+        let checks = AtomicUsize::new(0);
+        let result = save_atomic_if(&target, b"replacement", || {
+            checks.fetch_add(1, Ordering::SeqCst) == 0
+        });
+        assert!(result.is_err());
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        drop(lock);
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
 
     #[test]
     fn save_atomic_failed_replace_preserves_existing_destination_and_removes_temp() {
