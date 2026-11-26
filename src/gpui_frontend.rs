@@ -40,6 +40,8 @@ mod xml_schema;
 mod xml_save;
 mod json_tree;
 mod json_jump;
+mod scoped_jump;
+mod xml_jump;
 mod utility_host;
 mod utility_mount;
 use wake::HashWakeSignal;
@@ -10629,6 +10631,7 @@ impl Render for RootWindow {
             .track_focus(&self.focus_handle)
             .key_context("RootWindow")
             .capture_key_down(cx.listener(|root, event: &KeyDownEvent, window, cx| {
+                if window.default_prevented() { return; }
                 if event.keystroke.key != "escape"
                     || event.keystroke.modifiers != Modifiers::default()
                 {
@@ -12719,25 +12722,10 @@ pub(crate) fn run_foundation_window(
                         let Some(receipt) = receipt else {
                             return;
                         };
-                        if context_stack_has_primary(&event.context_stack, "JsonUtilityWindow")
-                            && !context_stack_has_primary(&event.context_stack, "PopupMenu")
-                            && !context_stack_has_primary(&event.context_stack, "Dialog")
-                            && !context_stack_has_primary(&event.context_stack, "AlertDialog") {
-                            let consumed = root.update(cx, |root, cx| {
-                                let Some(view) = root.json_view.clone() else { return false; };
-                                let state = view.read(cx);
-                                let (native, host_matches, visible) = if state.popout {
-                                    let Some(popup) = root.json_popup.as_ref() else { return false; };
-                                    (popup.native, popup.window.window_id() == window.window_handle().window_id(), true)
-                                } else {
-                                    (root.native_window, root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id()),
-                                        root.root_visibility.active.load(Ordering::Acquire) && root.root_visibility.visible.load(Ordering::Acquire))
-                                };
-                                let Some(native) = native.filter(|native| native_window_is_valid(*native)) else { return false; };
-                                if !host_matches || !visible || (state.popout && !window.is_window_active()) || receipt.hwnd != native.identity.hwnd || current_foreground_identity() != Some(native.identity) { return false; }
-                                view.update(cx, |view, cx| view.handle_json_jump(receipt, window, cx))
-                            }).unwrap_or(false);
-                            if consumed { cx.stop_propagation(); return; }
+                        if scoped_jump::dispatch(&root, &event.context_stack, receipt, window, cx) {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            return;
                         }
                         if intercept_root_pane_escape(&root, receipt, event, window, cx) {
                             cx.stop_propagation();
@@ -12981,6 +12969,9 @@ pub(crate) fn run_foundation_window(
                 cx.observe_window_activation(window, |root, window, cx| {
                     if !window.is_window_active() {
                         if let Some(view) = root.json_view.clone() {
+                            if !view.read(cx).popout { view.update(cx, |view, cx| view.retire_jump(cx)); }
+                        }
+                        if let Some(view) = root.xml_view.clone() {
                             if !view.read(cx).popout { view.update(cx, |view, cx| view.retire_jump(cx)); }
                         }
                         root.retire_action_sheet_now(window, cx, false);

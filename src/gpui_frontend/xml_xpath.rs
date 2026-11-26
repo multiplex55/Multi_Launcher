@@ -6,7 +6,7 @@ use gpui_kit::component::Sizable as _;
 use multi_launcher::xml_toolkit_engine::{XmlNodeDetailKind, XmlTreeNodeKind};
 use multi_launcher::xml_xpath_model::{self, NavigationDirection, VisibleXPathStatus};
 
-pub(super) fn render(view: &mut XmlWorkspace, cx: &mut Context<XmlWorkspace>) -> AnyElement {
+pub(super) fn render(view: &mut XmlWorkspace, jump_draft: Option<std::rc::Rc<std::cell::RefCell<JumpGeometryDraft>>>, cx: &mut Context<XmlWorkspace>) -> AnyElement {
     let mount = view.tree_mount();
     let generation = view.xpath.generation();
     let run_mount = mount.clone();
@@ -19,7 +19,7 @@ pub(super) fn render(view: &mut XmlWorkspace, cx: &mut Context<XmlWorkspace>) ->
         .flex_col()
         .gap_2()
         .child(Label::new("XPath 1.0"))
-        .child(Input::new(&view.xpath_expression).disabled(view.rehosting).aria_label("XPath expression"))
+        .child(view.host.jump.wrap(Input::new(&view.xpath_expression).disabled(view.rehosting).aria_label("XPath expression"), super::xml_jump::Role::Expression, jump_draft.clone(), cx))
         .child(
             Button::new("xpath-namespaces-toggle")
                 .label("Namespace prefix mappings")
@@ -99,15 +99,16 @@ pub(super) fn render(view: &mut XmlWorkspace, cx: &mut Context<XmlWorkspace>) ->
             ) && s.parse == multi_launcher::xml_toolkit_session::XmlParseStatus::Ready
         });
     panel = panel.child(
-        Button::new("xpath-run")
+        view.host.jump.wrap(Button::new("xpath-run")
             .label("Run XPath")
+            .track_focus(&view.host.jump.run_focus)
             .disabled(!can_run)
             .tab_stop(can_run)
             .on_click(cx.listener(move |view, _, _, cx| {
                 if run_mount.is_current() && view.xpath.generation() == generation {
                     view.xpath_run(cx);
                 }
-            })),
+            })), super::xml_jump::Role::Run, if can_run { jump_draft.clone() } else { None }, cx),
     );
     let Some(snapshot) = snapshot else {
         return panel.child("No XML source is loaded.").into_any_element();

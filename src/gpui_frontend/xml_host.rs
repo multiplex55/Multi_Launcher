@@ -249,7 +249,11 @@ impl RootWindow {
                         });
                         app.new(|cx| {
                             let activation = cx.observe_window_activation(window, |shell: &mut XmlShell, window, cx| {
-                                if window.is_window_active() {
+                                if !window.is_window_active() {
+                                    if shell.workspace.read(cx).is_mounted_in(window.window_handle().window_id(), true) {
+                                        shell.workspace.update(cx, |view, cx| view.retire_jump(cx));
+                                    }
+                                } else {
                                     let root = shell.workspace.read(cx).root.clone();
                                     let id = window.window_handle().window_id();
                                     let _ = root.update(cx, |root, cx| root.observe_structured_pin_activation(Panel::XmlToolkitDialog, id, cx));

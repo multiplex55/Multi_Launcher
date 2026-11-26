@@ -780,6 +780,7 @@ impl Render for JsonWorkspace {
                 }),
             )
             .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if window.default_prevented() { return; }
                 if escape_key.is_current() && event.keystroke.key == "w" && event.keystroke.modifiers.control
                     && view.focus.contains_focused(window, cx) && !window.has_active_dialog(cx)
                     && view.root.upgrade().is_some_and(|root| root.read(cx).structured_pins.saved(Panel::JsonUtilityDialog)) {

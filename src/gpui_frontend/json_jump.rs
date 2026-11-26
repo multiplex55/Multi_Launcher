@@ -3,13 +3,11 @@ use super::json_utility::JsonWorkspace;
 use super::*;
 use multi_launcher::json_transform::JsonTreeNodeId;
 use multi_launcher::json_utility_session::TreeStamp;
-use multi_launcher::launcher::jump_mode::{
-    SemanticTargetId, SurfaceId, TargetGeneration, TargetId, TargetKind, TargetMetadata,
-};
+use multi_launcher::launcher::jump_mode::{SemanticTargetId, TargetId, TargetKind};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-static NEXT_MOUNT: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone, Copy)]
 pub(super) enum Role {
     Source,
@@ -39,13 +37,6 @@ impl Role {
         }
     }
 }
-fn target_id(generation: u64, role: Role) -> TargetId {
-    TargetId::new(
-        SurfaceId::dialog("json-utility", generation),
-        SemanticTargetId::named(role.name()),
-        TargetGeneration(generation),
-    )
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Scope {
     pub tree: bool,
@@ -66,21 +57,28 @@ fn scope_allows(captured: Scope, live: Scope) -> bool {
 }
 type RowMap = Rc<RefCell<HashMap<TargetId, (TreeStamp, JsonTreeNodeId, FocusHandle)>>>;
 pub(super) struct JsonJump {
-    pub controller: JumpModeController,
-    generation: u64,
-    frame: Rc<RefCell<Option<JumpGeometryFrame>>>,
+    core: super::scoped_jump::ScopedJump,
     rows: RowMap,
     row_focus: Rc<RefCell<HashMap<(u64, JsonTreeNodeId), FocusHandle>>>,
     scope: Option<Scope>,
     rendered: Rc<RefCell<std::collections::HashSet<(u64, JsonTreeNodeId)>>>,
     pub format: FocusHandle,
 }
+impl std::ops::Deref for JsonJump {
+    type Target = super::scoped_jump::ScopedJump;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+impl std::ops::DerefMut for JsonJump {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
+}
 impl JsonJump {
     pub fn new(controller: JumpModeController, cx: &mut Context<JsonWorkspace>) -> Self {
         Self {
-            controller,
-            generation: NEXT_MOUNT.fetch_add(1, Ordering::Relaxed),
-            frame: Rc::new(RefCell::new(None)),
+            core: super::scoped_jump::ScopedJump::new("json-utility", controller),
             rows: Rc::new(RefCell::new(HashMap::new())),
             row_focus: Rc::new(RefCell::new(HashMap::new())),
             scope: None,
@@ -89,7 +87,7 @@ impl JsonJump {
         }
     }
     fn id(&self, role: Role) -> TargetId {
-        target_id(self.generation, role)
+        self.core.id(role.name())
     }
     pub fn begin(
         &mut self,
@@ -123,27 +121,9 @@ impl JsonJump {
         draft: Option<Rc<RefCell<JumpGeometryDraft>>>,
         app: &App,
     ) -> AnyElement {
-        let Some(draft) = draft else {
-            return element.into_any_element();
-        };
-        let id = self.id(role);
         let (label, kind, order) = role.metadata();
-        let resolved = appearance::current(app);
-        let badge = jump_hint_badge(
-            self.controller.hint_for(&id),
-            &id,
-            self.generation,
-            self.frame.clone(),
-            resolved.palette,
-            resolved.metrics,
-        );
-        let body = div()
-            .id(SharedString::from(format!("json-jump-{}", role.name())))
-            .relative()
-            .child(element)
-            .children(badge);
-        JumpGeometryElement::new(body, TargetMetadata::new(id, label, kind, order), draft)
-            .into_any_element()
+        self.core
+            .wrap(element, role.name(), label, kind, order, draft, app)
     }
     pub fn row_focus(&self, stamp: TreeStamp, id: JsonTreeNodeId, app: &App) -> FocusHandle {
         self.rendered
@@ -169,15 +149,9 @@ impl JsonJump {
         host: WindowId,
         scope: Scope,
     ) -> AnyElement {
-        let resolved = appearance::current(cx);
-        jump_geometry_publisher(
+        self.core.publish(
             draft,
-            self.frame.clone(),
-            cx.entity().downgrade(),
-            self.controller.session_generation(),
-            Rc::new(self.controller.target_ids().to_vec()),
-            self.controller.alphabet.clone(),
-            resolved.metrics,
+            cx,
             move |view, frame, window, cx, geometry_changed| {
                 if !receipt.is_current()
                     || !receipt.matches(&view.mount_receipt())
@@ -220,7 +194,6 @@ impl JsonJump {
                 }
             },
         )
-        .into_any_element()
     }
 }
 impl JsonWorkspace {
@@ -269,11 +242,12 @@ impl JsonWorkspace {
         let frame_slot = self.mount.jump.frame.clone();
         let frame = frame_slot.borrow();
         let retired = self.mount.jump.controller.reconcile_frame(frame.as_ref());
-        let outcome = self.mount.jump.controller.process_key_down(
-            receipt,
-            frame.as_ref(),
-            self.mount.jump.generation,
-        );
+        let generation = self.mount.jump.generation;
+        let outcome =
+            self.mount
+                .jump
+                .controller
+                .process_key_down(receipt, frame.as_ref(), generation);
         if let Some(target) = outcome.selected_target {
             if frame
                 .as_ref()
@@ -313,7 +287,8 @@ impl JsonWorkspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, Scope, scope_allows, target_id};
+    use super::super::scoped_jump::target_id;
+    use super::{Role, Scope, scope_allows};
     #[test]
     fn scope_changes_on_mode_and_availability() {
         let text = Scope {
@@ -375,9 +350,21 @@ mod tests {
     }
     #[test]
     fn json_control_targets_are_distinct_and_mount_scoped() {
-        assert_eq!(target_id(1, Role::Source), target_id(1, Role::Source));
-        assert_ne!(target_id(1, Role::Source), target_id(2, Role::Source));
-        assert_ne!(target_id(1, Role::Source), target_id(1, Role::Search));
-        assert_ne!(target_id(1, Role::Search), target_id(1, Role::Format));
+        assert_eq!(
+            target_id("json-utility", 1, Role::Source.name()),
+            target_id("json-utility", 1, Role::Source.name())
+        );
+        assert_ne!(
+            target_id("json-utility", 1, Role::Source.name()),
+            target_id("json-utility", 2, Role::Source.name())
+        );
+        assert_ne!(
+            target_id("json-utility", 1, Role::Source.name()),
+            target_id("json-utility", 1, Role::Search.name())
+        );
+        assert_ne!(
+            target_id("json-utility", 1, Role::Search.name()),
+            target_id("json-utility", 1, Role::Format.name())
+        );
     }
 }

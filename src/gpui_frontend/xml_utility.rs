@@ -141,18 +141,19 @@ pub(super) struct XPathBinding {
     _subscriptions: Vec<Subscription>,
 }
 pub(super) struct XmlMount {
-    input: Entity<TextareaState>,
-    focus: FocusHandle,
+    pub(super) input: Entity<TextareaState>,
+    pub(super) jump: super::xml_jump::XmlJump,
+    pub(super) focus: FocusHandle,
     return_focus: Option<FocusHandle>,
     output_focus: FocusHandle,
     tree_focus: FocusHandle,
-    xpath_focus: FocusHandle,
+    pub(super) xpath_focus: FocusHandle,
     schema_focus: FocusHandle,
     pub(super) xpath_expression: Entity<InputState>,
     pub(super) xpath_bindings: Vec<XPathBinding>,
     pub(super) xpath_scroll: gpui_kit::UniformListScrollHandle,
     pub(super) tree_scroll: gpui_kit::UniformListScrollHandle,
-    root_window: AnyWindowHandle,
+    pub(super) root_window: AnyWindowHandle,
     native: Option<NativeWindow>,
     _subscriptions: Vec<Subscription>,
     xpath_subscription: Option<Subscription>,
@@ -174,17 +175,17 @@ pub(super) struct XmlWorkspace {
     pub(super) popout: bool,
     pub(super) rehosting: bool,
     activation_revision: Arc<AtomicU64>,
-    host: XmlMount,
+    pub(super) host: XmlMount,
     source: String,
     owner: utility_mount::MountOwner,
-    mount: utility_mount::MountReceipt,
+    pub(super) mount: utility_mount::MountReceipt,
     epoch: Arc<AtomicU64>,
     output_epoch: Arc<AtomicU64>,
-    output_tab: bool,
+    pub(super) output_tab: bool,
     pub(super) tree_tab: bool,
     pub(super) xpath_tab: bool,
     pub(super) schema_tab: bool,
-    schema_picker: bool,
+    pub(super) schema_picker: bool,
     file_read_pending: bool,
     file_write_pending: bool,
     save_review: Option<(u64, XmlSaveReview)>,
@@ -207,7 +208,7 @@ pub(super) struct XmlWorkspace {
     accepted_revision: Option<XmlSourceRevision>,
     pumping: bool,
     shutdown_error: Option<String>,
-    clipboard_pending: bool,
+    pub(super) clipboard_pending: bool,
     pub(super) feedback: Option<String>,
     pub(super) geometry_error: Option<String>,
     pub(super) root: WeakEntity<RootWindow>,
@@ -222,6 +223,7 @@ impl XmlMount {
         receipt: &utility_mount::MountReceipt,
         root_window: AnyWindowHandle,
         native: Option<NativeWindow>,
+        jump_controller: JumpModeController,
     ) -> Self {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -256,9 +258,14 @@ impl XmlMount {
         );
         let xpath_expression =
             cx.new(|cx| InputState::new(window, cx).placeholder("//item[@id='example']"));
+        let focus = cx.focus_handle();
+        let focus_receipt = receipt.clone();
+        let focus_sub = cx.on_focus_out(&focus, window, move |view: &mut XmlWorkspace, _, _, cx| { if focus_receipt.is_current() { view.retire_jump(cx); } });
+        let jump = super::xml_jump::XmlJump::new(jump_controller, cx);
         Self {
             input,
-            focus: cx.focus_handle(),
+            jump,
+            focus,
             return_focus: None,
             output_focus: cx.focus_handle(),
             tree_focus: cx.focus_handle(),
@@ -270,7 +277,7 @@ impl XmlMount {
             tree_scroll: gpui_kit::UniformListScrollHandle::default(),
             root_window,
             native,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, focus_sub],
             xpath_subscription: None,
         }
     }
@@ -285,10 +292,11 @@ impl XmlWorkspace {
         visibility: RootVisibility,
         admission: Arc<RestartAdmission>,
         activity: multi_launcher::activity::ActivityCenter,
+        jump_controller: JumpModeController,
     ) -> Self {
         let owner = utility_mount::MountOwner::default();
         let mount = owner.attach();
-        let host = XmlMount::new(window, cx, &mount, root_window, native);
+        let host = XmlMount::new(window, cx, &mount, root_window, native, jump_controller);
         Self {
             open: false,
             popout: false,
@@ -356,7 +364,8 @@ impl XmlWorkspace {
         cx: &mut Context<Self>,
     ) {
         let receipt = self.owner.attach();
-        let mut host = XmlMount::new(window, cx, &receipt, root_window, native);
+        let jump_controller = self.host.jump.core.controller.fresh();
+        let mut host = XmlMount::new(window, cx, &receipt, root_window, native, jump_controller);
         host.return_focus = self.host.return_focus.clone();
         host.input.update(cx, |input, cx| {
             input.set_value(self.source.clone(), window, cx)
@@ -422,6 +431,7 @@ impl XmlWorkspace {
             foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity),
             visibility_revision: self.visibility.request_revision.load(Ordering::Acquire),
         });
+        self.retire_jump(cx);
         self.rehosting = true;
         self.activation_revision.fetch_add(1, Ordering::AcqRel);
         let root = self.root.clone();
@@ -575,6 +585,7 @@ impl XmlWorkspace {
         .detach();
     }
     pub(super) fn shutdown(&mut self, cx: &mut Context<Self>) {
+        self.retire_jump(cx);
         self.activation_revision.fetch_add(1, Ordering::AcqRel);
         self.open = false;
         self.save_review = None;
@@ -1641,6 +1652,13 @@ impl XmlWorkspace {
         .detach();
         cx.notify();
     }
+    pub(super) fn review_owned_jump_latch(&mut self, receipt: PhysicalKeydown, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((id, _)) = self.save_review.as_ref() else { return false; };
+        if !self.review_presentation.owns_review(*id) || self.review_receipt(window).is_none()
+            || !window.has_active_dialog(cx)
+            || !self.review_shell.as_ref().is_some_and(|shell| shell.contains_focused(window, cx)) { return false; }
+        super::scoped_jump::consume_owned_held(&mut self.host.jump.core.controller, receipt)
+    }
     fn review_receipt(&self, window: &Window) -> Option<XmlReadReceipt> {
         let (_, review) = self.save_review.as_ref()?;
         let receipt = XmlReadReceipt {
@@ -2100,7 +2118,10 @@ impl XmlWorkspace {
     }
 }
 impl Render for XmlWorkspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scope = super::xml_jump::Scope::new(self);
+        let jump_draft = self.host.jump.begin(scope);
+        let jump_publisher = jump_draft.clone().map(|draft| self.host.jump.publish(draft, self.mount.clone(), self.host.root_window.window_id(), scope, cx));
         let escape_mount = self.mount.clone();
         let open_mount = self.mount.clone();
         let save_source_mount = self.mount.clone();
@@ -2193,6 +2214,7 @@ impl Render for XmlWorkspace {
         };
         div()
             .id("xml-workspace")
+            .key_context("XmlUtilityWindow")
             .track_focus(&self.focus)
             .capture_action(cx.listener(
                 move |view, _: &gpui_kit::base::input::Escape, window, cx| {
@@ -2221,6 +2243,7 @@ impl Render for XmlWorkspace {
                 },
             ))
             .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if window.default_prevented() { return; }
                 if event.keystroke.key == "w" && event.keystroke.modifiers.control
                     && view.focus.contains_focused(window, cx) && !window.has_active_dialog(cx)
                     && view.root.upgrade().is_some_and(|root| root.read(cx).structured_pins.saved(Panel::XmlToolkitDialog)) {
@@ -2310,7 +2333,7 @@ impl Render for XmlWorkspace {
                     })),
             )
             .child(
-                Button::new("xml-tab-xpath")
+                self.host.jump.wrap(Button::new("xml-tab-xpath")
                     .label("XPath")
                     .track_focus(&self.xpath_focus)
                     .on_click(cx.listener(move |view, _, window, cx| {
@@ -2331,7 +2354,7 @@ impl Render for XmlWorkspace {
                             view.service_current_tree(cx);
                             cx.notify();
                         }
-                    })),
+                    })), super::xml_jump::Role::XPathTab, jump_draft.clone(), cx),
             )
             .child(
                 Button::new("xml-tab-validation")
@@ -2358,16 +2381,16 @@ impl Render for XmlWorkspace {
                     })),
             )
             .children(self.schema_tab.then(|| super::xml_schema::render(self, cx)))
-            .children(self.xpath_tab.then(|| super::xml_xpath::render(self, cx)))
+            .children(self.xpath_tab.then(|| super::xml_xpath::render(self, jump_draft.clone(), cx)))
             .children(self.tree_tab.then(|| super::xml_tree::render(self, cx)))
             .when(
                 !self.output_tab && !self.tree_tab && !self.xpath_tab && !self.schema_tab,
                 |div| {
                     div.child(
-                        Textarea::new(&self.input)
+                        self.host.jump.wrap(Textarea::new(&self.input)
                             .disabled(self.rehosting)
                             .aria_label("XML Source")
-                            .tab_index(0),
+                            .tab_index(0), super::xml_jump::Role::Source, jump_draft.clone(), cx),
                     )
                 },
             )
@@ -2387,15 +2410,16 @@ impl Render for XmlWorkspace {
                     .flex_wrap()
                     .gap_2()
                     .child(
-                        Button::new("xml-save-source")
+                        self.host.jump.wrap(Button::new("xml-save-source")
                             .label("Save Source As…")
+                            .track_focus(&self.host.jump.save_focus)
                             .disabled(!can_open_file)
                             .tab_stop(can_open_file)
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if save_source_mount.is_current() {
                                     view.save_source_as(window, cx);
                                 }
-                            })),
+                            })), super::xml_jump::Role::Save, if can_open_file { jump_draft.clone() } else { None }, cx),
                     )
                     .child(
                         Button::new("xml-save-output")
@@ -2577,6 +2601,7 @@ impl Render for XmlWorkspace {
                     )
             }))
             .child(div().id("xml-status").role(Role::Status).child(status))
+            .children(jump_publisher)
             .children(self.feedback.as_ref().map(|text| Label::new(text.clone())))
             .children(
                 self.geometry_error
@@ -2590,7 +2615,7 @@ impl RootWindow {
         if self.xml_view.is_some() { return; }
         let Some(root_window) = self.root_window else { return; };
         let root = cx.entity().downgrade();
-        let view = cx.new(|cx| XmlWorkspace::new(window, cx, root, root_window, self.native_window, self.root_visibility.clone(), self.restart_admission.clone(), self.activity_center.clone()));
+        let view = cx.new(|cx| XmlWorkspace::new(window, cx, root, root_window, self.native_window, self.root_visibility.clone(), self.restart_admission.clone(), self.activity_center.clone(), self.search_jump_mode.fresh()));
         let native = self.native_window;
         view.update(cx, |view, cx| { view.replace_mount(root_window, native, window, cx); view.open = true; view.start(cx); });
         self.xml_view = Some(view.clone());
@@ -2660,6 +2685,7 @@ impl RootWindow {
                     self.root_visibility.clone(),
                     self.restart_admission.clone(),
                     self.activity_center.clone(),
+                    self.search_jump_mode.fresh(),
                 )
             })
         });
