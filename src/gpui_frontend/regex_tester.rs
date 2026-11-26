@@ -82,6 +82,7 @@ pub(super) struct RegexMount {
     pub(super) text: Entity<TextareaState>,
     pub(super) replacement: Entity<TextareaState>,
     pub(super) preset_name: Entity<InputState>,
+    pub(super) jump: super::regex_jump::RegexJump,
     pub(super) reference_filter: Entity<InputState>,
     pub(super) examples_filter: Entity<InputState>,
     pub(super) preset_confirmation_focus: FocusHandle,
@@ -91,7 +92,7 @@ pub(super) struct RegexMount {
     pub(super) case_receipt: utility_mount::MountReceipt,
     pub(super) cases:
         HashMap<multi_launcher::regex_tester::RegexTestCaseId, super::regex_cases::CaseEditor>,
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
     scroll: gpui_kit::UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -140,6 +141,7 @@ impl RegexMount {
         owner: &utility_mount::MountOwner,
         host: AnyWindowHandle,
         native: Option<NativeWindow>,
+        jump_controller: JumpModeController,
     ) -> Self {
         let receipt = owner.attach();
         let case_owner = utility_mount::MountOwner::default();
@@ -271,6 +273,10 @@ impl RegexMount {
                 }
             },
         );
+        let focus = cx.focus_handle();
+        let focus_receipt = receipt.clone();
+        let focus_sub = cx.on_focus_out(&focus, window, move |view: &mut RegexWorkspace, _, _, cx| { if focus_receipt.is_current() { view.retire_jump(cx); } });
+        let jump = super::regex_jump::RegexJump::new(jump_controller, cx);
         Self {
             receipt,
             window: host,
@@ -279,6 +285,7 @@ impl RegexMount {
             text,
             replacement,
             preset_name,
+            jump,
             reference_filter,
             examples_filter,
             preset_confirmation_focus: cx.focus_handle(),
@@ -287,9 +294,9 @@ impl RegexMount {
             case_owner,
             case_receipt,
             cases: HashMap::new(),
-            focus: cx.focus_handle(),
+            focus,
             scroll: Default::default(),
-            _subscriptions: vec![pattern_sub, text_sub, replacement_sub, preset_sub, reference_sub, examples_sub, selection_observer],
+            _subscriptions: vec![pattern_sub, text_sub, replacement_sub, preset_sub, reference_sub, examples_sub, selection_observer, focus_sub],
         }
     }
 }
@@ -303,9 +310,10 @@ impl RegexWorkspace {
         history_path: Option<std::path::PathBuf>,
         host: AnyWindowHandle,
         native: Option<NativeWindow>,
+        jump_controller: JumpModeController,
     ) -> Self {
         let mount_owner = utility_mount::MountOwner::default();
-        let mount = RegexMount::new(window, cx, &mount_owner, host, native);
+        let mount = RegexMount::new(window, cx, &mount_owner, host, native, jump_controller);
         Self {
             open: false,
             popout: false,
@@ -341,7 +349,8 @@ impl RegexWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mount = RegexMount::new(window, cx, &self.mount_owner, host, native);
+        let jump_controller = self.mount.jump.core.controller.fresh();
+        let mount = RegexMount::new(window, cx, &self.mount_owner, host, native, jump_controller);
         let pattern = self.session.draft.pattern.clone();
         let text = self.session.draft.test_text.clone();
         let replacement = self.session.draft.replacement.clone();
@@ -425,6 +434,7 @@ impl RegexWorkspace {
                 && current_foreground_identity() == Some(source.identity),
             visibility_revision: self.visibility.request_revision.load(Ordering::Acquire),
         });
+        self.retire_jump(cx);
         self.rehosting = true;
         self.activation_revision.fetch_add(1, Ordering::AcqRel);
         let root = self.root.clone();
@@ -510,6 +520,7 @@ impl RegexWorkspace {
         cx.notify();
     }
     pub(super) fn shutdown(&mut self) {
+        self.mount.jump.core.controller.retire();
         self.presets.cancel_confirmation();
         self.open = false;
         self.activation_revision.fetch_add(1, Ordering::AcqRel);
@@ -564,18 +575,29 @@ impl RegexWorkspace {
         (self.session.draft != multi_launcher::regex_tester::RegexDraft::default())
             .then(|| self.session.draft.clone())
     }
+    fn selection_changed(&mut self) {
+        self.clipboard_epochs.selection.fetch_add(1, Ordering::AcqRel);
+        self.clipboard_epochs.capture.fetch_add(1, Ordering::AcqRel);
+        self.selected_capture = 0;
+    }
+    pub(super) fn select_exact_match(&mut self, revision: u64, id: multi_launcher::regex_tester::MatchId, cx: &mut Context<Self>) -> bool {
+        if !self.open || self.rehosting || self.admission.is_fenced() || self.presets.has_confirmation() || self.session.evaluated_revision() != Some(revision) { return false; }
+        let Some(index) = super::regex_jump::exact_match_index(&self.session, revision, id) else { return false; };
+        self.selection_changed();
+        self.session.select_match(index);
+        cx.notify(); true
+    }
     fn navigate(&mut self, backwards: bool, cx: &mut Context<Self>) {
-        if self.rehosting || self.admission.is_fenced() {
+        if self.rehosting || self.admission.is_fenced() || self.presets.has_confirmation() {
             return;
         }
+        if self.session.matches().is_empty() { return; }
+        self.selection_changed();
         if if backwards {
             self.session.previous_match()
         } else {
             self.session.next_match()
         } {
-            self.clipboard_epochs.selection.fetch_add(1, Ordering::AcqRel);
-            self.clipboard_epochs.capture.fetch_add(1, Ordering::AcqRel);
-            self.selected_capture = 0;
             if let Some(index) = self.session.selected_index() {
                 self.scroll
                     .scroll_to_item(index, gpui_kit::ScrollStrategy::Nearest);
@@ -585,7 +607,10 @@ impl RegexWorkspace {
     }
 }
 impl Render for RegexWorkspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scope = super::regex_jump::Scope::new(self);
+        let jump_draft = self.mount.jump.begin(scope, window);
+        let jump_publisher = jump_draft.clone().map(|draft| self.mount.jump.publish(draft, self.mount.receipt.clone(), self.mount.window.window_id(), scope, cx));
         let render_receipt = self.mount.receipt.clone();
         let escape_receipt = render_receipt.clone();
         let key_receipt = render_receipt.clone();
@@ -672,6 +697,7 @@ impl Render for RegexWorkspace {
         let count = self.session.matches().len();
         let owner = cx.entity().downgrade();
         let rows_receipt = render_receipt.clone();
+        let row_draft = jump_draft.clone();
         let rows = gpui_kit::uniform_list("regex-match-rows", count, move |range, _, app| {
             let Some(view) = owner.upgrade() else {
                 return Vec::<AnyElement>::new();
@@ -690,40 +716,22 @@ impl Render for RegexWorkspace {
                         item.location.column,
                         preview(&item.text)
                     );
+                    let id = item.id;
+                    let evaluated = state.session.evaluated_revision()?;
+                    let focus = row_draft.as_ref().map(|_| state.mount.jump.row_focus(evaluated, id, app));
                     let target = owner.clone();
                     let receipt = rows_receipt.clone();
-                    Some(
-                        div()
-                            .id(SharedString::from(format!(
-                                "regex-match-{revision}-{index}"
-                            )))
-                            .h(px(32.0))
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "regex-select-{revision}-{index}"
-                                )))
-                                .small()
-                                .selected(state.session.selected_index() == Some(index))
-                                .label(label)
-                                .on_click(move |_, _, app| {
-                                    let _ = target.update(app, |view, cx| {
-                                        if receipt.is_current()
-                                            && view.open
-                                            && !view.admission.is_fenced()
-                                            && view.session.revision() == revision
-                                            && index < view.session.matches().len()
-                                        {
-                                            view.session.select_match(index);
-                                            view.clipboard_epochs.selection.fetch_add(1, Ordering::AcqRel);
-                                            view.clipboard_epochs.capture.fetch_add(1, Ordering::AcqRel);
-                                            view.selected_capture = 0;
-                                            cx.notify();
-                                        }
-                                    });
-                                }),
-                            )
-                            .into_any_element(),
-                    )
+                    let button = Button::new(SharedString::from(format!("regex-select-{revision}-{index}")))
+                        .small().selected(state.session.selected_index() == Some(index)).label(label)
+                        .on_click(move |_, _, app| {
+                            let _ = target.update(app, |view, cx| {
+                                if receipt.is_current() { view.select_exact_match(evaluated, id, cx); }
+                            });
+                        });
+                    let button = if let Some(focus) = focus {
+                        state.mount.jump.wrap(button.track_focus(&focus), super::regex_jump::Role::Match(evaluated, id), row_draft.clone(), app)
+                    } else { button.into_any_element() };
+                    Some(div().id(SharedString::from(format!("regex-match-{revision}-{index}"))).h(px(32.0)).child(button).into_any_element())
                 })
                 .collect()
         })
@@ -775,6 +783,7 @@ impl Render for RegexWorkspace {
         let geometry_scroll = if self.popout { Some(self.mount.outer_scroll.clone()) } else { self.root.upgrade().map(|root| root.read(cx).root_scroll.clone()) };
         div()
             .id("regex-workspace")
+            .key_context("RegexUtilityWindow")
             .track_focus(&self.focus)
             .w_full()
             .flex()
@@ -798,6 +807,7 @@ impl Render for RegexWorkspace {
                 },
             ))
             .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if window.default_prevented() { return; }
                 let contexts = window.context_stack();
                 let child_free = !window.has_active_dialog(cx)
                     && !context_stack_has_primary(&contexts, "PopupMenu")
@@ -848,6 +858,7 @@ impl Render for RegexWorkspace {
                     && !context_stack_has_primary(&contexts, "PopupMenu")
                     && !context_stack_has_primary(&contexts, "Dialog")
                     && !context_stack_has_primary(&contexts, "AlertDialog")
+                    && !view.presets.has_confirmation()
                     && event.keystroke.key == "f3"
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.alt
@@ -862,9 +873,9 @@ impl Render for RegexWorkspace {
             .child(Label::new("Regex Tester"))
             .child(
                 div().relative().w_full()
-                    .child(Input::new(&self.pattern)
+                    .child(self.mount.jump.wrap(Input::new(&self.pattern)
                         .disabled(self.rehosting || self.admission.is_fenced())
-                        .aria_label("Pattern"))
+                        .aria_label("Pattern"), super::regex_jump::Role::Pattern, jump_draft.clone(), cx))
                     .child(canvas(move |bounds, window, _| {
                         if geometry_receipt.is_current() && window.window_handle().window_id() == geometry_host.window_id() {
                             if let Some(scroll) = geometry_scroll { pattern_geometry.set(Some((bounds, scroll.offset()))); }
@@ -875,9 +886,9 @@ impl Render for RegexWorkspace {
             .when(
                 self.session.draft.test_text.len() <= self.session.policy().text_bytes,
                 |element| element.child(
-                    Textarea::new(&self.text)
+                    self.mount.jump.wrap(Textarea::new(&self.text)
                         .readonly(self.rehosting || self.admission.is_fenced())
-                        .aria_label("Test Text"),
+                        .aria_label("Test Text"), super::regex_jump::Role::Text, jump_draft.clone(), cx),
                 ),
             )
             .when(
@@ -904,24 +915,26 @@ impl Render for RegexWorkspace {
                     .flex()
                     .gap_2()
                     .child(
-                        Button::new("regex-previous")
+                        self.mount.jump.wrap(Button::new("regex-previous")
                             .label("Previous")
+                            .track_focus(&self.mount.jump.previous)
                             .disabled(count == 0)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if previous_receipt.is_current() {
                                     view.navigate(true, cx);
                                 }
-                            })),
+                            })), super::regex_jump::Role::Previous, if count > 0 { jump_draft.clone() } else { None }, cx),
                     )
                     .child(
-                        Button::new("regex-next")
+                        self.mount.jump.wrap(Button::new("regex-next")
                             .label("Next")
+                            .track_focus(&self.mount.jump.next)
                             .disabled(count == 0)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if next_receipt.is_current() {
                                     view.navigate(false, cx);
                                 }
-                            })),
+                            })), super::regex_jump::Role::Next, if count > 0 { jump_draft.clone() } else { None }, cx),
                     )
                     .child(
                         Button::new("regex-rehost")
@@ -1002,6 +1015,7 @@ impl Render for RegexWorkspace {
             .child(super::regex_clipboard::render(self, cx))
             .child(super::regex_history::render(self, cx))
             .child(super::regex_presets::render(self, cx))
+            .children(jump_publisher)
             .child(super::regex_inspectors::render(self, cx))
     }
 }
@@ -1112,6 +1126,7 @@ impl RootWindow {
                     history_path,
                     root_window,
                     native,
+                    self.search_jump_mode.fresh(),
                 )
             })
         });

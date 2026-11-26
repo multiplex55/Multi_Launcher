@@ -131,7 +131,8 @@ pub(super) fn dispatch(
     let popup = context_stack_has_primary(contexts, "PopupMenu");
     let json = context_stack_has_primary(contexts, "JsonUtilityWindow");
     let xml = context_stack_has_primary(contexts, "XmlUtilityWindow");
-    if !dialog && !json && !xml {
+    let regex = context_stack_has_primary(contexts, "RegexUtilityWindow");
+    if !dialog && !json && !xml && !regex {
         return false;
     }
     root.update(app, |root, cx| {
@@ -146,9 +147,7 @@ pub(super) fn dispatch(
             {
                 return false;
             }
-            return view.update(cx, |view, cx| {
-                view.handle_review_jump(receipt, window, cx)
-            });
+            return view.update(cx, |view, cx| view.handle_review_jump(receipt, window, cx));
         }
         if popup {
             return false;
@@ -168,6 +167,22 @@ pub(super) fn dispatch(
                 return false;
             }
             return view.update(cx, |view, cx| view.handle_json_jump(receipt, window, cx));
+        }
+        if regex {
+            let Some(view) = root.regex_view.clone() else {
+                return false;
+            };
+            let state = view.read(cx);
+            if !exact_host(
+                root,
+                root.regex_popup.as_ref(),
+                state.popout,
+                receipt,
+                window,
+            ) {
+                return false;
+            }
+            return view.update(cx, |view, cx| view.handle_regex_jump(receipt, window, cx));
         }
         if xml {
             let Some(view) = root.xml_view.clone() else {

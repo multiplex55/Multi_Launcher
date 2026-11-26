@@ -264,6 +264,7 @@ impl HostedUtility for super::regex_tester::RegexWorkspace {
         }
     }
     fn observe(_: &mut RootWindow, _: WindowId, _: &mut Context<RootWindow>) {}
+    fn activation_lost(&mut self, cx: &mut Context<Self>) { self.retire_jump(cx); }
     fn root(&self) -> WeakEntity<RootWindow> {
         self.root.clone()
     }

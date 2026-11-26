@@ -30,6 +30,7 @@ mod regex_substitution;
 mod regex_cases;
 mod regex_inspectors;
 mod regex_syntax;
+mod regex_jump;
 mod regex_history;
 mod regex_presets;
 mod regex_clipboard;
@@ -12969,6 +12970,9 @@ pub(crate) fn run_foundation_window(
                 cx.observe_window_activation(window, |root, window, cx| {
                     if !window.is_window_active() {
                         if let Some(view) = root.json_view.clone() {
+                            if !view.read(cx).popout { view.update(cx, |view, cx| view.retire_jump(cx)); }
+                        }
+                        if let Some(view) = root.regex_view.clone() {
                             if !view.read(cx).popout { view.update(cx, |view, cx| view.retire_jump(cx)); }
                         }
                         if let Some(view) = root.xml_view.clone() {

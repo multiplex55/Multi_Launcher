@@ -47,3 +47,7 @@ Explanation uses accepted session results. Reference offers search, category sel
 ## GPUI Syntax Structure
 
 The expandable virtualized tree uses accepted syntax nodes and maps Pattern selection to the relevant node. Choosing a current node reveals its exact Pattern span and associated explanations. Constructors share the stock transform and apply one checked editor edit. Matched Windows replay remains pending for selection, undo and source reveal. [Checkpoint](../CHECKPOINTS.md#g14-c-regex-syntax-structure-and-constructors)
+
+## GPUI scoped Jump
+
+Pattern, editable Test Text, Previous and Next hints focus their controls. A visible Match hint selects and focuses the exact row from the current evaluation. Preset review suspends the parent scope. Focused tests passed. Additional action targets, the inline review hints and matched Windows replay remain pending. [Checkpoint](../CHECKPOINTS.md#g14-d-regex-workspace-jump)

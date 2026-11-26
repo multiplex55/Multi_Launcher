@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+Regex workspace Jump focuses Pattern, Test Text and navigation and selects the exact visible Match row. All seven focused tests passed. Matched Windows and additional scoped targets remain open. The next source slice is disk-backed Clipboard History Browse, Edit and Cancel. [Regex Jump checkpoint](CHECKPOINTS.md#g14-d-regex-workspace-jump)
+
 XML Overwrite Jump focuses Cancel, Replace and Dock or Pop Out in the exact current review. All five focused tests passed. Matched Windows key, focus and file checks remain open. [Overwrite Jump checkpoint](CHECKPOINTS.md#g14-d-xml-overwrite-child-jump)
 
 XML workspace Jump focuses Source, the XPath tab and expression, Run XPath and Save Source As in Dock and Pop Out. All nine focused tests passed, including shared JSON, Search and Hash regressions and modal held-key ownership. [XML workspace Jump checkpoint](CHECKPOINTS.md#g14-d-xml-workspace-jump)

@@ -1306,3 +1306,11 @@ Locked launcher checks passed in 6.83 s and 3.06 s after compiler corrections. I
 The exact active Overwrite review owns scoped Cancel Save, Replace existing file and Dock or Pop Out targets. Hints focus their controls. Fresh Enter routes to the focused action, fresh Space uses the Kit button, and held activation is consumed. Replace checks the live review subtree and native receipt before taking the frozen path and payload for one write. Transfer invalidates the old presentation and remounts the review in the destination.
 
 Locked launcher checks passed in 6.09 s, 6.55 s and 3.14 s. Independent review cleared held Space, live review focus and the Ctrl+W routing guard. The focused link took 18.35 s. Run `77e002eb-59ee-4c02-9464-d1317a5df673` passed all five in 3.240 s with 338 skips. Matched Windows replay still needs the real dialog key ordering, both transfer directions, Cancel with unchanged owned bytes, exact Replace, and compact access. Remaining XML and JSON actions and the Regex Jump scopes stay in G14-D.
+
+### G14-D Regex workspace Jump
+
+Regex Pattern, editable Test Text and Previous or Next use real focus targets. Previous and Next require fresh activation. A visible Match hint uses the same checked selection path as a click, with the accepted evaluation revision, typed match ID and actual target geometry. Selection and capture clipboard receipts retire before mutation. The inline Preset review suspends parent navigation and consumes carried held activation within its own focus. Fresh Escape and the existing decision controls remain available.
+
+Locked launcher checks passed in 6.56 s, 3.18 s, 2.68 s and 2.84 s. Independent review cleared exact match admission, clipboard revocation and held-key ordering across frame changes. Reused stock run `d02c57d4-9c23-4488-bbba-07759646dcd3` passed both match navigation and pointer cases in 0.623 s. The focused launcher link took 20.58 s. Run `bdfca92f-6796-4b37-8221-13d1390f5cdf` passed seven in 4.343 s with 339 skips. Matched Windows still needs focus, scrolled matches, fresh activation and Preset review in both hosts.
+
+Continue with independent G13 Clipboard History Browse, Edit and Cancel through the existing disk-only bare `cb` route while matched replay waits. Remaining structured Jump controls, Regex's inline review hints and ordinary editor clipboard stay open in G14.
