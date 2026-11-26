@@ -17,4 +17,6 @@ The exact stock `cs` action opens a docked saved list backed by the current app-
 
 Edit binds the exact occurrence in the loaded snapshot. The form supports alias, multiline body, tags and preview privacy. It preserves unchanged legacy aliases, literal commas in tags and authored prompt metadata through the shared preparation path. Reveal creates the body editor and Hide retires it while keeping the exact draft. Cancel discards the draft without writing. Save uses the shared atomic transaction with live native and snapshot checks. A conflict keeps the draft and requires reload before editing again.
 
-Matched native replay, Add and exact Remove review, named Edit and Run, field authoring, Preview, remembered presentation and scoped Jump remain open. [Retained editor checkpoint](../CHECKPOINTS.md#g13-retained-snippets-editor)
+Add opens the same editor with a blank draft. Its Save appends to the exact captured list and refuses duplicates or changes made on disk since the draft opened. Remove stages a separate inline review for one exact occurrence. Cancel does not write, and recovery preserves the review only while its authority can still be used. [Add and Remove checkpoint](../CHECKPOINTS.md#g13-snippets-add-and-exact-remove-review)
+
+Matched native replay, named Edit and Run, field authoring, Preview, remembered presentation and scoped Jump remain open. [Retained editor checkpoint](../CHECKPOINTS.md#g13-retained-snippets-editor)
