@@ -1,5 +1,6 @@
 //! Retained Folder Size scanner backed by the shared session.
 mod report;
+mod actions;
 use super::*;
 use multi_launcher::batch_rename::ExplicitDirectoryRoot;
 use multi_launcher::folder_size::{FolderSizeSession, FolderSizeSessionStatus};
@@ -55,6 +56,13 @@ fn prefill_changes_root(current: Option<&ExplicitDirectoryRoot>, incoming: &Expl
 fn inherited_prefers_popout(source_popout: bool, fresh: bool, remembered_popout: bool) -> bool {
     source_popout || (fresh && remembered_popout)
 }
+#[derive(Debug, PartialEq, Eq)]
+enum EscapeDisposition { Hold, DismissMenu, Close }
+fn escape_disposition(menu_open: bool, held: bool) -> EscapeDisposition {
+    if held { EscapeDisposition::Hold }
+    else if menu_open { EscapeDisposition::DismissMenu }
+    else { EscapeDisposition::Close }
+}
 
 pub(super) struct FolderSizeView {
     pub(super) open: bool,
@@ -80,6 +88,18 @@ pub(super) struct FolderSizeView {
     pub(super) picker: bool,
     picker_attempt: u64,
     scan_permit: Option<EffectPermit>,
+    effect_lease: Option<Arc<AtomicBool>>,
+    effect_pending: bool,
+    effect_focus_guard: Option<Subscription>,
+    effect_activation_guard: Option<Subscription>,
+    copy_focus: FocusHandle,
+    reveal_focus: FocusHandle,
+    action_anchor: FocusHandle,
+    menu_focus: FocusHandle,
+    menu_focus_guard: Option<Subscription>,
+    menu_escape_waiting: bool,
+    menu_close_waiting: bool,
+    menu_activation_guard: Option<Subscription>,
     focus: FocusHandle,
     pub(super) choose_focus: FocusHandle,
     message: Option<String>,
@@ -94,6 +114,12 @@ impl FolderSizeView {
         let session = FolderSizeSession::new_with_activity_center(move || signal.notify(), activity);
         let owner = utility_mount::MountOwner::default();
         let mount = owner.attach();
+        let menu_activation_guard = cx.observe_window_activation(window, |view, window, cx| {
+            if !window.is_window_active() {
+                view.menu_escape_waiting = false; view.menu_close_waiting = false;
+                if view.report_ui.menu.is_some() { view.dismiss_report_menu(); cx.notify(); }
+            }
+        });
         let weak = cx.entity().downgrade();
         let receiver = wake.clone();
         cx.spawn(async move |_, cx| {
@@ -108,20 +134,25 @@ impl FolderSizeView {
         Self { open: true, root, host: window.window_handle(), native, visibility, admission, owner, mount,
             popout: false, rehosting: false, staging: false, presentation_error: None, geometry_error: None,
             session, wake, root_choice: None, report_root: None, report_ui: report::ReportUi::default(), report_recursive: true, recursive: true, picker: false, picker_attempt: 0,
-            scan_permit: None, focus: cx.focus_handle(), choose_focus: cx.focus_handle(), message: None }
+            scan_permit: None, effect_lease: None, effect_pending: false, effect_focus_guard: None, effect_activation_guard: None,
+            copy_focus: cx.focus_handle(), reveal_focus: cx.focus_handle(), action_anchor: cx.focus_handle(),
+            menu_focus: cx.focus_handle(), menu_focus_guard: None, menu_escape_waiting: false,
+            menu_close_waiting: false, menu_activation_guard: Some(menu_activation_guard),
+            focus: cx.focus_handle(), choose_focus: cx.focus_handle(), message: None }
     }
-    pub(super) fn host_close_blocked(&self) -> bool { self.picker || self.rehosting }
-    pub(super) fn busy(&self) -> bool { self.picker || self.session.view().is_busy() }
+    pub(super) fn host_close_blocked(&self) -> bool { self.picker || self.rehosting || self.effect_pending }
+    pub(super) fn busy(&self) -> bool { self.picker || self.effect_pending || self.session.view().is_busy() }
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool { self.open && self.focus.contains_focused(window, cx) }
     pub(super) fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true; self.choose_focus.focus(window, cx); cx.notify();
     }
     pub(super) fn shutdown(&mut self) {
+        if let Some(lease) = &self.effect_lease { lease.store(false, Ordering::Release); }
         self.owner.retire(); self.picker_attempt = self.picker_attempt.wrapping_add(1);
         self.open = false; self.rehosting = false; self.staging = false; self.session.close();
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.picker { self.message = Some(WAIT.into()); cx.notify(); return; }
+        if self.picker || self.effect_pending { self.message = Some(WAIT.into()); cx.notify(); return; }
         if !self.open || !self.mount.is_current() || self.host.window_id() != window.window_handle().window_id() { return; }
         if self.rehosting { return; }
         if self.popout { let _ = self.root.update(cx, |root, cx| root.drain_folder_size_geometry(cx, true)); self.shutdown(); window.remove_window(); return; }
@@ -146,15 +177,27 @@ impl FolderSizeView {
     }
     pub(super) fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>, held: bool) -> bool {
         if !self.owns_focus(window, cx) || !self.gesture_current(window, cx) { return false; }
-        if !held { self.close(window, cx); }
+        match escape_disposition(self.report_ui.menu.is_some(), held) {
+            EscapeDisposition::Hold => {}
+            EscapeDisposition::DismissMenu => { self.dismiss_report_menu(); self.action_anchor.focus(window, cx); cx.notify(); }
+            EscapeDisposition::Close => self.close(window, cx),
+        }
         true
     }
     pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool {
         self.open && (!self.staging || popout) && self.popout == popout && self.mount.is_current() && self.host.window_id() == id
     }
-    pub(super) fn replace_mount(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, cx: &mut Context<Self>) {
+    pub(super) fn replace_mount(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, window: &mut Window, cx: &mut Context<Self>) {
         self.mount = self.owner.attach(); self.host = host; self.native = native;
         self.focus = cx.focus_handle(); self.choose_focus = cx.focus_handle(); self.report_ui.reset_host();
+        self.copy_focus = cx.focus_handle(); self.reveal_focus = cx.focus_handle(); self.action_anchor = cx.focus_handle();
+        self.menu_focus = cx.focus_handle(); self.menu_focus_guard = None; self.menu_escape_waiting = false; self.menu_close_waiting = false;
+        self.menu_activation_guard = Some(cx.observe_window_activation(window, |view, window, cx| {
+            if !window.is_window_active() {
+                view.menu_escape_waiting = false; view.menu_close_waiting = false;
+                if view.report_ui.menu.is_some() { view.dismiss_report_menu(); cx.notify(); }
+            }
+        }));
     }
     pub(super) fn focus_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_mounted_in(window.window_handle().window_id(), self.popout) { self.choose_focus.focus(window, cx); }
@@ -170,7 +213,7 @@ impl FolderSizeView {
         cx.notify();
     }
     pub(super) fn request_rehost(&mut self, target: bool, cx: &mut Context<Self>) {
-        if !rehost_allowed(self.open, self.rehosting, self.picker, self.admission.is_fenced(), self.popout, target, &self.mount) { return; }
+        if self.effect_pending || !rehost_allowed(self.open, self.rehosting, self.picker, self.admission.is_fenced(), self.popout, target, &self.mount) { return; }
         let Some(root) = self.root.upgrade() else { return; };
         let revision = root.read(cx).root_visibility.request_revision.load(Ordering::Acquire);
         let gesture = self.native.map(|source| hash_dock::Gesture { source, foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity), visibility_revision: revision });
@@ -178,7 +221,7 @@ impl FolderSizeView {
         cx.spawn(async move |_, cx| { let _ = root.update(cx, |root, cx| root.start_folder_size_rehost(target, gesture, mount, cx)); }).detach(); cx.notify();
     }
     fn gesture_current(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.open && !self.rehosting && self.mount.is_current() && !self.admission.is_fenced() && self.host.window_id() == window.window_handle().window_id()
+        self.open && !self.rehosting && !self.effect_pending && self.mount.is_current() && !self.admission.is_fenced() && self.host.window_id() == window.window_handle().window_id()
             && window.is_window_active() && !window.has_active_dialog(cx)
             && self.native.is_some_and(|native| current_foreground_identity() == Some(native.identity)
                 && (json_utility::native_host_current(&self.visibility, self.visibility.request_revision.load(Ordering::Acquire), Some(native), self.popout)))
@@ -258,26 +301,44 @@ impl Render for FolderSizeView {
         let shortcut_mount = self.mount.clone();
         let mut panel = div().id("folder-size-pane").key_context("FolderSizePane").track_focus(&self.focus)
             .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && !event.is_held { view.menu_escape_waiting = false; }
+                if event.keystroke.key == "w" && !event.is_held { view.menu_close_waiting = false; }
                 if !window.default_prevented() && shortcut_mount.is_current() && shortcut_mount.matches(&view.mount)
                     && event.keystroke.key == "w"
                     && event.keystroke.modifiers == (Modifiers { control: true, ..Modifiers::default() })
                     && view.owns_focus(window, cx) && view.gesture_current(window, cx) {
-                    if !event.is_held { view.close(window, cx); }
+                    if view.menu_close_waiting { cx.stop_propagation(); return; }
+                    if !event.is_held {
+                        if view.report_ui.menu.is_some() {
+                            view.dismiss_report_menu(); view.menu_close_waiting = true;
+                            view.action_anchor.focus(window, cx); cx.notify();
+                        } else { view.close(window, cx); }
+                    }
                     cx.stop_propagation();
                 }
             }))
             .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Escape, window, cx| {
                 if view.owns_focus(window, cx) && view.popout {
-                    view.handle_escape(window, cx, false); cx.stop_propagation();
+                    if !view.menu_escape_waiting {
+                        let had_menu = view.report_ui.menu.is_some();
+                        view.handle_escape(window, cx, false);
+                        if had_menu { view.menu_escape_waiting = true; }
+                    }
+                    cx.stop_propagation();
                 } else if view.owns_focus(window, cx) {
                     let root = view.root.clone();
                     let latched = root.update(cx, |root, _| { let was = root.pane_escape_latched; root.pane_escape_latched = true; was }).unwrap_or(true);
                     if !latched { view.handle_escape(window, cx, false); }
                     cx.stop_propagation();
                 }
+            }))
+            .capture_key_up(cx.listener(|view, event: &gpui_kit::KeyUpEvent, _, _| {
+                if event.keystroke.key == "escape" { view.menu_escape_waiting = false; }
+                if event.keystroke.key == "w" { view.menu_close_waiting = false; }
             })).flex().flex_col().gap_2().w_full().p_3()
             .child(Label::new("Folder Size"))
-            .child(Label::new(self.root_choice.as_ref().map_or_else(|| "No folder selected".into(), |root| root.as_path().display().to_string())));
+            .child(Label::new(self.root_choice.as_ref().map_or_else(|| "No folder selected".into(), |root| root.as_path().display().to_string())))
+            .child(div().id("folder-size-action-anchor").track_focus(&self.action_anchor));
         let weak = cx.entity().downgrade(); let mount = self.mount.clone();
         let recursive = self.recursive; let generation = snapshot.generation(); let draft = ScanDraft::freeze(self.root_choice.as_ref(), recursive);
         let picker_attempt = self.picker_attempt;
@@ -288,7 +349,7 @@ impl Render for FolderSizeView {
             }).child(div().flex().gap_2().child(CheckboxIndicator::new().checked(self.recursive)).child(Label::new("Include subfolders"))));
         if let Some(error) = self.presentation_error.as_ref().or(self.geometry_error.as_ref()) { panel = panel.child(Label::new(error.clone())); }
         let target = !self.popout; let rehost_mount = self.mount.clone();
-        panel = panel.child(Button::new("folder-size-rehost").label(if self.popout { "Dock" } else { "Pop Out" }).disabled(self.picker || self.rehosting).on_click(cx.listener(move |view, _, window, cx| {
+        panel = panel.child(Button::new("folder-size-rehost").label(if self.popout { "Dock" } else { "Pop Out" }).disabled(self.picker || self.rehosting || self.effect_pending).on_click(cx.listener(move |view, _, window, cx| {
             if rehost_mount.is_current() && rehost_mount.matches(&view.mount) && view.gesture_current(window, cx) { view.request_rehost(target, cx); }
         })));
         panel = panel.child(div().flex().flex_wrap().gap_2()
@@ -303,6 +364,7 @@ impl Render for FolderSizeView {
             .child(Button::new("folder-size-close").label("Close").on_click({ let mount = self.mount.clone(); cx.listener(move |view, _, window, cx| {
                 if mount.is_current() && mount.matches(&view.mount) && view.gesture_current(window, cx) { view.close(window, cx); }
             }) })));
+        panel = panel.child(actions::toolbar(self, cx));
         if let Some(message) = &self.message { panel = panel.child(Label::new(message.clone())); }
         if show_report {
             panel = panel.child(Label::new(format!("{:?} · {}", snapshot.status(),
@@ -372,7 +434,7 @@ impl RootWindow {
             source.update(cx, |view, cx| view.report_folder_size_error("The previous Folder Size window is closing.", cx));
             return;
         }
-        if self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).rehosting || view.read(cx).picker || (fresh && view.read(cx).busy())) {
+        if self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).host_close_blocked() || (fresh && view.read(cx).busy())) {
             source.update(cx, |view, cx| view.report_folder_size_error("Folder Size is busy.", cx)); return;
         }
         let origin = FileSearchOrigin { receipt, mount: state.mount_receipt(), host: window.window_handle(), native,
@@ -507,7 +569,7 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{current_provider, inherited_prefers_popout, picker_current, prefill_changes_root, rehost_allowed, ScanDraft};
+    use super::{current_provider, escape_disposition, inherited_prefers_popout, picker_current, prefill_changes_root, rehost_allowed, EscapeDisposition, ScanDraft};
     use multi_launcher::plugin::Plugin;
     #[test]
     fn exact_installed_folder_size_admission_and_forgery() {
@@ -562,5 +624,11 @@ mod tests {
         assert!(inherited_prefers_popout(true, false, false));
         assert!(inherited_prefers_popout(false, true, true));
         assert!(!inherited_prefers_popout(false, false, true));
+    }
+    #[test]
+    fn held_escape_cannot_close_a_pane_after_menu_dismissal() {
+        assert_eq!(escape_disposition(true, false), EscapeDisposition::DismissMenu);
+        assert_eq!(escape_disposition(false, true), EscapeDisposition::Hold);
+        assert_eq!(escape_disposition(false, false), EscapeDisposition::Close);
     }
 }

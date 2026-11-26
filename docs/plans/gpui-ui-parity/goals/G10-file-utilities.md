@@ -1,6 +1,6 @@
 # G10 — Archives, Duplicate Finder, Folder Size, and File Lock
 
-**Status:** In implementation for Folder Size. **Owner:** G10 implementer, using the existing archive, scan and native diagnostic services. The stock Folder Size opener, shared scan, report modes, remembered host and exact File Search prefill have focused evidence. Checked report effects, matched native replay and the other G10 tool families remain open. [Directory prefill checkpoint](../CHECKPOINTS.md#g10-checked-file-search-directory-prefill)
+**Status:** In implementation for Folder Size. **Owner:** G10 implementer, using the existing archive, scan and native diagnostic services. The stock Folder Size opener, shared scan, report, remembered host, exact File Search prefill and checked effects have focused evidence. Matched native replay, pointer-anchored menu placement and the other G10 tool families remain open. Continue File Lock Inspector. [Report action checkpoint](../CHECKPOINTS.md#g10-checked-folder-size-report-actions)
 
 ## Objective and dependencies
 

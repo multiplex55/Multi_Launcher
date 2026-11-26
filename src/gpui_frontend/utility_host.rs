@@ -533,7 +533,7 @@ impl HostedUtility for super::folder_size::FolderSizeView {
     fn fenced(&self) -> bool { self.admission.is_fenced() }
     fn receipt(&self) -> utility_mount::MountReceipt { self.mount.clone() }
     fn mounted(&self, id: WindowId, popout: bool) -> bool { self.is_mounted_in(id, popout) }
-    fn replace(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, _: &mut Window, cx: &mut Context<Self>) { self.replace_mount(host, native, cx); }
+    fn replace(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, window: &mut Window, cx: &mut Context<Self>) { self.replace_mount(host, native, window, cx); }
     fn set_popout(&mut self, value: bool) { self.popout = value; }
     fn set_rehosting(&mut self, value: bool, _: &mut Context<Self>) { self.rehosting = value; }
     fn set_error(&mut self, value: Option<String>) { self.presentation_error = value; }

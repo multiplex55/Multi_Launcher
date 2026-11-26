@@ -53,7 +53,7 @@ impl PreviewAction {
     }
 }
 
-fn copy_if_current(backend: &dyn multi_launcher::clipboard_modify::clipboard::ClipboardBackend,
+pub(super) fn copy_if_current(backend: &dyn multi_launcher::clipboard_modify::clipboard::ClipboardBackend,
     payload: &str, current: &dyn Fn() -> bool) -> Result<(), String> {
     if payload.contains('\0') { return Err("Cannot copy text containing a NUL character.".into()); }
     if !current() { return Err("Action was superseded.".into()); }

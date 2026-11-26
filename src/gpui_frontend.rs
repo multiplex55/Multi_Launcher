@@ -3323,6 +3323,17 @@ fn intercept_root_pane_escape(
     }
     let Some(root) = root.upgrade() else { return false; };
     let state = root.read(cx);
+    if folder_size && state.folder_size_popup.as_ref().is_some_and(|popup| {
+        popup.window.window_id() == window.window_handle().window_id()
+            && popup.native.is_some_and(|native| native.identity.hwnd == receipt.hwnd
+                && native_window_is_valid(native) && current_foreground_identity() == Some(native.identity))
+    }) {
+        let view = state.folder_size_view.clone();
+        return view.is_some_and(|view| view.update(cx, |view, cx| {
+            if !view.is_mounted_in(window.window_handle().window_id(), true) { return false; }
+            view.handle_escape(window, cx, receipt.held)
+        }));
+    }
     if !state.root_visibility.active.load(Ordering::Acquire)
         || !state.root_visibility.visible.load(Ordering::Acquire)
         || !state.root_window.is_some_and(|handle| handle.window_id() == window.window_handle().window_id())

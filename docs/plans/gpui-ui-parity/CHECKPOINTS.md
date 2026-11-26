@@ -1700,3 +1700,13 @@ Independent review covered exact live source, staged rollback, focus and retirem
 The checked Shell selector accepts a typed ordinary local file or non-root directory and rechecks target kind and authority at the effect boundary. File Search keeps its existing file entry point. Folder Size exposes a read-only publication guard for native effects, including the current progress revision and the frozen cancelled subtotal. The guard leaves worker polling and queued scan promotion with the session owner.
 
 The locked scoped library and launcher check passed in 1 min 50 s. Independent review cleared the typed selector and publication guard. Fixture tests cover type mismatch, volume root, stale progress in the same generation and cancellation. Link these with the GPUI report actions in one batch. Native Explorer and clipboard replay remains open.
+
+### G10 checked Folder Size report actions
+
+The Folder Size toolbar and row or tile menu use the exact rendered report and its current selection. Toolbar Copy uses the chosen root only when the current report has no eligible visible row. A visible omitted row keeps its exact Copy Path target. Explorer opens a selected directory from the toolbar and selects a file or non-root directory from the row menu. A stale row or menu never changes the target to the root.
+
+The acquired clipboard writer and checked Shell selector verify their retained publication, mount and foreground authority at the effect. Shared arbitration serializes pending effects with another clipboard effect or tool close and rehost. The inline menu owns Escape and Ctrl+W dismissal and expires with its selection, native activation or outside click. The physical held bit prevents a repeated Escape from closing the pane after dismissal.
+
+Independent review cleared exact paths, final effect guards, menu dismissal and keyboard receipt. The final scoped locked launcher check passed in 6.93 s. One grouped library and launcher link took 25 min with zero corrective links. Nextest run `d50201d7-f8f3-48ab-aed2-dd71f0510c1e` passed all 14 in 6.768 s with 9310 skipped. The batch uses an owned Windows filesystem fixture and fake clipboard and Shell effects. It covers directory type, volume-root refusal, frozen cancelled progress, exact acquired copy and stale action retirement.
+
+Paired 1516 × 937 clipboard and Explorer replay remains open. Use the owned Unicode file and directory to witness exact path text, directory open and containing-folder selection. Pointer-anchored context menu placement remains open. Continue the launcher-only File Lock Inspector pane.
