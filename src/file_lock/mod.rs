@@ -1,6 +1,8 @@
 mod session;
 mod windows;
+mod format;
 
+pub use format::copy_snapshot;
 pub use session::{
     FileLockSession, FileLockSessionError, FileLockSessionStatus, FileLockSessionView,
 };

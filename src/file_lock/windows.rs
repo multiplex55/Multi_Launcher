@@ -1575,6 +1575,13 @@ mod tests {
                 "Restart Manager omitted fixture PID {process_id} with creation FILETIME {creation_filetime}; returned {} rows",
                 first.processes.len()
             );
+            let row = first.processes.iter().find(|process| process.process_id == process_id
+                && process.creation_filetime == creation_filetime).expect("exact owned child row");
+            let executable = row.executable_path.as_ref().expect("owned child executable provenance");
+            let verified = crate::file_lock::validate_reported_executable(process_id, creation_filetime, executable)
+                .expect("validate exact owned child identity and executable");
+            assert!(verified.ensure_process_is_alive().is_ok());
+            assert!(crate::file_lock::validate_reported_executable(process_id, creation_filetime.wrapping_add(1), executable).is_err());
 
             holder.send(b'R');
             holder.wait_for(
@@ -1595,6 +1602,7 @@ mod tests {
 
             holder.send(b'Q');
             assert!(holder.wait_exit(Duration::from_secs(10)).success());
+            assert!(verified.ensure_process_is_alive().is_err());
         }
 
         #[test]
