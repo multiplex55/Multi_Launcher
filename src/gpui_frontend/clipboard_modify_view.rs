@@ -10,6 +10,10 @@ use multi_launcher::clipboard_modify::{
     runtime::{self, ClipboardModifyRuntime},
 };
 use std::time::Duration;
+#[path = "clipboard_modify_manage.rs"]
+mod manage;
+#[path = "clipboard_modify_pipelines.rs"]
+mod pipelines;
 #[path = "clipboard_modify_sections.rs"]
 mod sections;
 use multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload as Section;
@@ -103,7 +107,7 @@ pub(super) fn current_provider(
             == Some(action)
         && matches!(
             parse_action(action),
-            Ok(Command::ClipboardModify(multi_launcher::commands::ClipboardModifyCommand::Open { section: multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Modify | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Templates | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::SavedPipelines | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Help }))
+            Ok(Command::ClipboardModify(multi_launcher::commands::ClipboardModifyCommand::Open { section: multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Modify | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Templates | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::SavedPipelines | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::ManageTemplates | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::ManagePipelines | multi_launcher::clipboard_modify::actions::ClipboardModifySectionPayload::Help }))
         )
 }
 pub(super) fn current_undo_provider(
@@ -127,15 +131,17 @@ pub(super) fn current_undo_provider(
 pub(super) struct RestartDraft {
     source: String,
     stages: Vec<StageSpec>,
+    templates: Option<manage::DraftSnapshot>,
+    pipelines: Option<pipelines::DraftSnapshot>,
 }
 struct StageEditor {
     id: u64,
     spec: StageSpec,
-    prefix: Entity<InputState>,
-    suffix: Entity<InputState>,
-    name: Entity<InputState>,
-    language: Entity<InputState>,
-    separator: Entity<InputState>,
+    prefix: Entity<TextareaState>,
+    suffix: Entity<TextareaState>,
+    name: Entity<TextareaState>,
+    language: Entity<TextareaState>,
+    separator: Entity<TextareaState>,
     _subscriptions: Vec<Subscription>,
 }
 #[derive(Clone, Copy)]
@@ -145,6 +151,26 @@ enum Arg {
     Name,
     Language,
     Separator,
+}
+#[derive(Clone, Copy)]
+enum StageOwner {
+    Modify,
+    Pipeline(u64),
+}
+fn stage_receipt_current(
+    owner: StageOwner,
+    section: Section,
+    expected_revision: u64,
+    current_revision: u64,
+    mounted: bool,
+) -> bool {
+    mounted
+        && current_revision == expected_revision
+        && section
+            == match owner {
+                StageOwner::Modify => Section::Modify,
+                StageOwner::Pipeline(_) => Section::ManagePipelines,
+            }
 }
 pub(super) struct ClipboardModifyView {
     pub open: bool,
@@ -180,6 +206,8 @@ pub(super) struct ClipboardModifyView {
     section: Section,
     section_revision: u64,
     sections: sections::SectionState,
+    management: manage::Management,
+    pipelines: pipelines::PipelineManagement,
     catalog: Option<Arc<ClipboardModifierCatalog>>,
     runtime: Option<ClipboardModifyRuntime>,
     preview: PreviewCoordinator,
@@ -222,8 +250,9 @@ impl ClipboardModifyView {
         )
     }
     fn subscribe_stage(
+        owner: StageOwner,
         id: u64,
-        inputs: [&Entity<InputState>; 5],
+        inputs: [&Entity<TextareaState>; 5],
         receipt: utility_mount::MountReceipt,
         section_revision: u64,
         cx: &mut Context<Self>,
@@ -241,22 +270,27 @@ impl ClipboardModifyView {
                 let receipt = receipt.clone();
                 cx.subscribe(
                     input,
-                    move |view: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
-                        if !receipt.is_current()
-                            || !receipt.matches(&view.mount)
-                            || !view.open
-                            || view.section != Section::Modify
-                            || view.section_revision != section_revision
+                    move |view: &mut Self, input: Entity<TextareaState>, event: &InputEvent, cx| {
+                        if !view.open
+                            || !stage_receipt_current(
+                                owner,
+                                view.section,
+                                section_revision,
+                                view.section_revision,
+                                receipt.is_current() && receipt.matches(&view.mount),
+                            )
                             || !matches!(event, InputEvent::Change)
                         {
                             return;
                         }
                         let value = input.read(cx).value().to_string();
-                        let Some(index) = view.stages.iter().position(|stage| stage.id == id)
-                        else {
+                        let stage = match owner {
+                            StageOwner::Modify => view.stages.iter().find(|stage| stage.id == id),
+                            StageOwner::Pipeline(row) => view.pipelines.stage(row, id),
+                        };
+                        let Some(stage) = stage else {
                             return;
                         };
-                        let stage = &view.stages[index];
                         let current = match arg {
                             Arg::Prefix => &stage.prefix,
                             Arg::Suffix => &stage.suffix,
@@ -268,7 +302,16 @@ impl ClipboardModifyView {
                             return;
                         }
                         view.retire_effect_for_edit(cx);
-                        let arguments = &mut view.stages[index].spec.arguments;
+                        let stage = match owner {
+                            StageOwner::Modify => {
+                                view.stages.iter_mut().find(|stage| stage.id == id)
+                            }
+                            StageOwner::Pipeline(row) => view.pipelines.stage_mut(row, id),
+                        };
+                        let Some(stage) = stage else {
+                            return;
+                        };
+                        let arguments = &mut stage.spec.arguments;
                         let field = match arg {
                             Arg::Prefix => &mut arguments.prefix,
                             Arg::Suffix => &mut arguments.suffix,
@@ -277,7 +320,15 @@ impl ClipboardModifyView {
                             Arg::Separator => &mut arguments.separator,
                         };
                         *field = Some(value);
-                        view.changed(cx);
+                        match owner {
+                            StageOwner::Modify => view.changed(cx),
+                            StageOwner::Pipeline(_) => {
+                                view.management.authority.fetch_add(1, Ordering::AcqRel);
+                                view.pipelines.changed();
+                                view.preview.cancel_and_invalidate();
+                                cx.notify();
+                            }
+                        }
                     },
                 )
             })
@@ -337,6 +388,8 @@ impl ClipboardModifyView {
             section: Section::Modify,
             section_revision: 0,
             sections: sections::SectionState::new(window, cx),
+            management: manage::Management::default(),
+            pipelines: pipelines::PipelineManagement::new(cx),
             catalog: None,
             runtime: None,
             preview: PreviewCoordinator::default(),
@@ -351,7 +404,9 @@ impl ClipboardModifyView {
     }
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open {
-            if self.review.is_some() && self.effect_pending.is_none() {
+            if self.pipelines.review.is_some() {
+                self.pipelines.focus_review(window, cx);
+            } else if self.review.is_some() && self.effect_pending.is_none() {
                 self.review_cancel_focus.focus(window, cx);
             } else if self.effect_pending.is_some() {
                 self.focus.focus(window, cx);
@@ -566,6 +621,8 @@ impl ClipboardModifyView {
                 view.active_read = None; view.reading = false; view.initializing = false; view.clear_block_wait(cx);
                 let installed = initialized.is_some() && view.runtime.is_none();
                 if view.runtime.is_none() { if let Some((runtime, loaded)) = initialized { view.catalog = Some(runtime.catalog_snapshot()); view.runtime = Some(runtime); if loaded.state.startup_diagnostic().is_some() { view.catalog_feedback = Some("Clipboard Modify settings could not be loaded; defaults are in use.".into()); } } }
+                if installed && view.section == Section::ManageTemplates { manage::ensure_templates(view, window, cx); }
+                if installed && view.section == Section::ManagePipelines { pipelines::ensure(view, window, cx); }
                 let current = read_result_current(view.open, &mount, &view.mount, request, view.read_revision, source_revision, view.source_revision)
                     && window.is_window_active() && !publication_admission.is_fenced()
                     && json_utility::native_host_current(&publication_visibility, visibility_revision, Some(native), false)
@@ -609,19 +666,73 @@ impl ClipboardModifyView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> StageEditor {
-        let prefix = cx.new(|cx| InputState::new(window, cx).placeholder("Prefix"));
-        let suffix = cx.new(|cx| InputState::new(window, cx).placeholder("Suffix"));
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
-        let language = cx.new(|cx| InputState::new(window, cx).placeholder("Language"));
-        let separator = cx.new(|cx| InputState::new(window, cx).placeholder("Separator"));
-        let inputs = [&prefix, &suffix, &name, &language, &separator];
-        let subs = Self::subscribe_stage(id, inputs, self.mount.clone(), self.section_revision, cx);
-        StageEditor {
+        self.build_stage_for(
+            StageOwner::Modify,
             id,
-            spec: StageSpec {
+            StageSpec {
                 operation: op,
                 arguments: StageArguments::default(),
             },
+            window,
+            cx,
+        )
+    }
+    fn build_stage_for(
+        &self,
+        owner: StageOwner,
+        id: u64,
+        spec: StageSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> StageEditor {
+        let prefix = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 4)
+                .placeholder("Prefix")
+        });
+        let suffix = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 4)
+                .placeholder("Suffix")
+        });
+        let name = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 4)
+                .placeholder("Name")
+        });
+        let language = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 4)
+                .placeholder("Language")
+        });
+        let separator = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 4)
+                .placeholder("Separator")
+        });
+        for (input, value) in [
+            (&prefix, &spec.arguments.prefix),
+            (&suffix, &spec.arguments.suffix),
+            (&name, &spec.arguments.name),
+            (&language, &spec.arguments.language),
+            (&separator, &spec.arguments.separator),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_value(value.clone().unwrap_or_default(), window, cx)
+            });
+        }
+        let inputs = [&prefix, &suffix, &name, &language, &separator];
+        let subs = Self::subscribe_stage(
+            owner,
+            id,
+            inputs,
+            self.mount.clone(),
+            self.section_revision,
+            cx,
+        );
+        StageEditor {
+            id,
+            spec,
             prefix,
             suffix,
             name,
@@ -643,10 +754,17 @@ impl ClipboardModifyView {
         });
     }
     pub(super) fn blocks_close(&self) -> bool {
-        self.initializing || self.effect_pending.is_some() || self.review.is_some()
+        self.initializing
+            || self.effect_pending.is_some()
+            || self.review.is_some()
+            || self.management.pending.is_some()
+            || self.pipelines.review.is_some()
     }
     fn blocked(&self) -> bool {
-        self.effect_pending.is_some() || self.review.is_some()
+        self.effect_pending.is_some()
+            || self.review.is_some()
+            || self.management.pending.is_some()
+            || self.pipelines.review.is_some()
     }
     fn sync_editor_readonly(&self, cx: &mut Context<Self>) {
         let readonly = self.blocked();
@@ -671,6 +789,14 @@ impl ClipboardModifyView {
                 input.update(cx, |input, cx| input.set_readonly(modify_readonly, cx));
             }
         }
+        self.management.set_readonly(
+            self.blocked() || self.section != Section::ManageTemplates,
+            cx,
+        );
+        self.pipelines.set_readonly(
+            self.blocked() || self.section != Section::ManagePipelines,
+            cx,
+        );
     }
     fn retire_effect_for_edit(&mut self, cx: &mut Context<Self>) {
         self.effect_epoch.fetch_add(1, Ordering::AcqRel);
@@ -920,14 +1046,21 @@ impl ClipboardModifyView {
             return None;
         }
         let source = self.source.read(cx).value().to_string();
-        (!source.is_empty() || !self.stages.is_empty()).then(|| RestartDraft {
+        let templates = self.management.restart_draft(cx);
+        let pipelines = self.pipelines.restart_draft(cx);
+        (!source.is_empty()
+            || !self.stages.is_empty()
+            || templates.is_some()
+            || pipelines.is_some())
+        .then(|| RestartDraft {
             source,
             stages: self.stages.iter().map(|stage| stage.spec.clone()).collect(),
+            templates,
+            pipelines,
         })
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.initializing || self.effect_pending.is_some() || self.review.is_some()
-        {
+        if !self.open || self.initializing || self.blocked() {
             return;
         }
         let owns_focus = self.focus.is_focused(window) || self.focus.contains_focused(window, cx);
@@ -940,6 +1073,8 @@ impl ClipboardModifyView {
         self.reset_resolved = false;
         self.reset_source.clear();
         self.stages.clear();
+        self.management.clear();
+        self.pipelines.clear();
         self.picker = None;
         self.large_allowed = false;
         self.feedback = None;
@@ -979,6 +1114,7 @@ impl ClipboardModifyView {
                 );
                 for stage in &mut self.stages {
                     stage._subscriptions = Self::subscribe_stage(
+                        StageOwner::Modify,
                         stage.id,
                         [
                             &stage.prefix,
@@ -995,6 +1131,14 @@ impl ClipboardModifyView {
             }
             self.sync_editor_readonly(cx);
             self.schedule(cx);
+        }
+        if section == Section::ManageTemplates {
+            manage::ensure_templates(self, window, cx);
+            self.sync_editor_readonly(cx);
+        }
+        if section == Section::ManagePipelines {
+            pipelines::ensure(self, window, cx);
+            self.sync_editor_readonly(cx);
         }
         self.focus_section(window, cx);
         cx.notify();
@@ -1013,7 +1157,7 @@ impl ClipboardModifyView {
                 .focus_handle(cx)
                 .focus(window, cx),
             Section::Help => self.sections.help_filter.focus_handle(cx).focus(window, cx),
-            _ => {}
+            Section::ManageTemplates | Section::ManagePipelines => self.focus.focus(window, cx),
         }
     }
 }
@@ -1055,6 +1199,9 @@ impl Render for ClipboardModifyView {
                 }
                 let key = event.keystroke.key.as_str();
                 let mods = event.keystroke.modifiers;
+                if pipelines::handle_review_key(view, event, window, cx) {
+                    return;
+                }
                 if view.review.is_some()
                     && (view.review_focus.is_focused(window)
                         || view.review_focus.contains_focused(window, cx))
@@ -1078,7 +1225,11 @@ impl Render for ClipboardModifyView {
                 if held_activation(event.is_held, mods, key)
                     && (view.apply_focus.is_focused(window)
                         || view.apply_close_focus.is_focused(window)
-                        || view.copy_focus.is_focused(window))
+                        || view.copy_focus.is_focused(window)
+                        || (view.section == Section::ManageTemplates
+                            && !view.management.input_focused(window, cx))
+                        || (view.section == Section::ManagePipelines
+                            && !view.pipelines.input_focused(window, cx)))
                 {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -1148,9 +1299,10 @@ impl Render for ClipboardModifyView {
                 Section::Templates => "Clipboard Modify — Templates",
                 Section::SavedPipelines => "Clipboard Modify — Saved Pipelines",
                 Section::Help => "Clipboard Modify — Help",
-                _ => "Clipboard Modify",
+                Section::ManageTemplates => "Clipboard Modify — Manage Templates",
+                Section::ManagePipelines => "Clipboard Modify — Manage Pipelines",
             }));
-        if self.blocked() {
+        if self.blocked() && self.management.pending.is_none() && self.pipelines.review.is_none() {
             if let Some(review) = &self.review {
                 let id = review.id;
                 let effect = review.effect;
@@ -1221,6 +1373,16 @@ impl Render for ClipboardModifyView {
                 "cm-tab-pipeline",
                 "Saved Pipelines",
                 Section::SavedPipelines,
+            ),
+            (
+                "cm-tab-manage-templates",
+                "Manage Templates",
+                Section::ManageTemplates,
+            ),
+            (
+                "cm-tab-manage-pipelines",
+                "Manage Pipelines",
+                Section::ManagePipelines,
             ),
             ("cm-tab-help", "Help", Section::Help),
         ] {
@@ -1422,13 +1584,13 @@ impl Render for ClipboardModifyView {
                 if let Some(info) = info {
                     row = match info.argument_requirements {
                         ArgumentRequirements::CustomWrap => row
-                            .child(Input::new(&stage.prefix).aria_label("Prefix"))
-                            .child(Input::new(&stage.suffix).aria_label("Suffix")),
+                            .child(Textarea::new(&stage.prefix).aria_label("Prefix"))
+                            .child(Textarea::new(&stage.suffix).aria_label("Suffix")),
                         ArgumentRequirements::NamedWrap | ArgumentRequirements::Template => {
-                            row.child(Input::new(&stage.name).aria_label("Template or wrapper"))
+                            row.child(Textarea::new(&stage.name).aria_label("Template or wrapper"))
                         }
                         ArgumentRequirements::CodeBlock => {
-                            row.child(Input::new(&stage.language).aria_label("Language"))
+                            row.child(Textarea::new(&stage.language).aria_label("Language"))
                         }
                         ArgumentRequirements::OptionalSeparator => {
                             let receipt = mount.clone();
@@ -1470,13 +1632,13 @@ impl Render for ClipboardModifyView {
                                     })),
                                 );
                             if present {
-                                row.child(Input::new(&stage.separator).aria_label("Separator"))
+                                row.child(Textarea::new(&stage.separator).aria_label("Separator"))
                             } else {
                                 row
                             }
                         }
                         ArgumentRequirements::RequiredSeparator => {
-                            row.child(Input::new(&stage.separator).aria_label("Separator"))
+                            row.child(Textarea::new(&stage.separator).aria_label("Separator"))
                         }
                         ArgumentRequirements::None => row,
                     };
@@ -1645,6 +1807,10 @@ impl Render for ClipboardModifyView {
                             })),
                     );
             }
+        } else if self.section == Section::ManageTemplates {
+            panel = manage::render_templates(self, panel, cx);
+        } else if self.section == Section::ManagePipelines {
+            panel = pipelines::render(self, panel, cx);
         } else {
             panel = sections::render(self, panel, cx);
             let close = mount.clone();
@@ -1694,7 +1860,7 @@ impl Render for ClipboardModifyView {
                     );
             }
         }
-        if self.section == Section::Help {
+        if matches!(self.section, Section::Help | Section::ManageTemplates) {
             return panel;
         }
         let (text, summary) = match self.preview.state() {
@@ -1908,6 +2074,38 @@ mod tests {
         assert!(!section_allows_effect(Section::Help, EffectKind::Apply));
     }
     #[test]
+    fn pipeline_stage_receipts_reject_old_section_and_mount() {
+        use super::{Section, StageOwner, stage_receipt_current};
+        assert!(stage_receipt_current(
+            StageOwner::Pipeline(7),
+            Section::ManagePipelines,
+            2,
+            2,
+            true
+        ));
+        assert!(!stage_receipt_current(
+            StageOwner::Pipeline(7),
+            Section::ManagePipelines,
+            2,
+            3,
+            true
+        ));
+        assert!(!stage_receipt_current(
+            StageOwner::Pipeline(7),
+            Section::ManagePipelines,
+            2,
+            2,
+            false
+        ));
+        assert!(!stage_receipt_current(
+            StageOwner::Pipeline(7),
+            Section::Modify,
+            2,
+            2,
+            true
+        ));
+    }
+    #[test]
     fn old_mount_pump_and_old_large_consent_are_rejected() {
         let owner = MountOwner::default();
         let old = owner.attach();
@@ -1982,7 +2180,13 @@ mod tests {
         assert!(current_provider("cm modify", &modify, None, None));
         assert!(!current_provider("cm help", &root, None, None));
         assert!(!current_provider("cm modify", &root, None, None));
-        for query in ["cm template", "cm apply", "cm help"] {
+        for query in [
+            "cm template",
+            "cm apply",
+            "cm help",
+            "cm manage-templates",
+            "cm manage-pipelines",
+        ] {
             let action =
                 multi_launcher::plugins::clipboard_modify::bare_modify_opener(query).unwrap();
             assert!(current_provider(query, &action, None, None));
@@ -2018,6 +2222,8 @@ mod tests {
                 "query:cm modify",
                 "query:cm template",
                 "query:cm apply",
+                "query:cm manage-templates",
+                "query:cm manage-pipelines",
                 "query:cm help",
                 "query:cm undo"
             ]

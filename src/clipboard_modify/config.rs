@@ -194,12 +194,55 @@ pub fn load_current_or_migrate(
     Ok((model, catalog))
 }
 
+/// Decode a current schema snapshot without creating, migrating or rewriting it.
+pub fn decode_current(
+    bytes: &[u8],
+) -> std::result::Result<(VersionedClipboardModifiersFile, ClipboardModifierCatalog), LoadError> {
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(LoadError::Oversized(bytes.len() as u64));
+    }
+    let root: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| LoadError::Json(e.to_string()))?;
+    let version = root
+        .get("schema_version")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| LoadError::Invalid("missing schema_version".into()))?;
+    if version > u64::from(CURRENT_SCHEMA_VERSION) {
+        return Err(LoadError::Future(
+            u32::try_from(version).unwrap_or(u32::MAX),
+        ));
+    }
+    if version != u64::from(CURRENT_SCHEMA_VERSION) {
+        return Err(LoadError::Invalid(
+            "older schema requires explicit migration".into(),
+        ));
+    }
+    let model: VersionedClipboardModifiersFile =
+        serde_json::from_slice(bytes).map_err(|e| LoadError::Json(e.to_string()))?;
+    let catalog = validate_model(&model).map_err(|e| LoadError::Invalid(e.to_string()))?;
+    Ok((model, catalog))
+}
+
 pub fn read_limited(path: &Path) -> std::result::Result<Vec<u8>, LoadError> {
     let md = std::fs::metadata(path).map_err(|e| LoadError::Io(e.to_string()))?;
     if md.len() > MAX_CONFIG_BYTES {
         return Err(LoadError::Oversized(md.len()));
     }
     std::fs::read(path).map_err(|e| LoadError::Io(e.to_string()))
+}
+
+/// Read a checked-save snapshot with a hard bound even if the file grows.
+pub fn read_checked_snapshot(path: &Path) -> std::result::Result<Vec<u8>, LoadError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| LoadError::Io(e.to_string()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| LoadError::Io(e.to_string()))?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(LoadError::Oversized(bytes.len() as u64));
+    }
+    Ok(bytes)
 }
 
 pub fn validate_model(model: &VersionedClipboardModifiersFile) -> Result<ClipboardModifierCatalog> {

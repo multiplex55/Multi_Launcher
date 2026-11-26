@@ -207,6 +207,8 @@ pub fn bare_modify_opener(query: &str) -> Option<Action> {
             "template" => ModifySection::Templates,
             "apply" => ModifySection::SavedPipelines,
             "help" => ModifySection::Help,
+            "manage-templates" => ModifySection::ManageTemplates,
+            "manage-pipelines" => ModifySection::ManagePipelines,
             _ => return None,
         };
         words.next().is_none().then(|| section_action(section))
@@ -223,7 +225,7 @@ pub fn bare_undo_action(query: &str) -> Option<Action> {
 }
 
 pub fn admitted_modify_commands() -> Vec<Action> {
-    cm_static_commands().into_iter().filter(|action| matches!(action.action.as_str(), "query:cm" | "query:cm modify" | "query:cm template" | "query:cm apply" | "query:cm help" | "query:cm undo")).collect()
+    cm_static_commands().into_iter().filter(|action| matches!(action.action.as_str(), "query:cm" | "query:cm modify" | "query:cm template" | "query:cm apply" | "query:cm manage-templates" | "query:cm manage-pipelines" | "query:cm help" | "query:cm undo")).collect()
 }
 
 fn is_exact_cm_root_query(query: &str) -> bool {

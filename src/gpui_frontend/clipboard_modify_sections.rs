@@ -108,10 +108,45 @@ pub(super) fn render(
 ) -> Stateful<Div> {
     panel = match view.section {
         Section::Templates => {
+            let manage = view.mount.clone();
+            let revision = view.section_revision;
+            panel = panel.child(
+                Button::new("cm-manage-templates")
+                    .label("Manage Templates")
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if !view.blocked()
+                            && manage.is_current()
+                            && manage.matches(&view.mount)
+                            && view.section == Section::Templates
+                            && view.section_revision == revision
+                        {
+                            view.select_section(Section::ManageTemplates, window, cx);
+                        }
+                    })),
+            );
             panel.child(Input::new(&view.sections.template_filter).aria_label("Filter templates"))
         }
-        Section::SavedPipelines => panel
-            .child(Input::new(&view.sections.pipeline_filter).aria_label("Filter saved pipelines")),
+        Section::SavedPipelines => {
+            let receipt = view.mount.clone();
+            let revision = view.section_revision;
+            panel = panel.child(
+                Button::new("cm-manage-pipelines")
+                    .label("Manage Pipelines")
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if !view.blocked()
+                            && receipt.is_current()
+                            && receipt.matches(&view.mount)
+                            && view.section == Section::SavedPipelines
+                            && view.section_revision == revision
+                        {
+                            view.select_section(Section::ManagePipelines, window, cx);
+                        }
+                    })),
+            );
+            panel.child(
+                Input::new(&view.sections.pipeline_filter).aria_label("Filter saved pipelines"),
+            )
+        }
         Section::Help => panel.child(
             Input::new(&view.sections.help_filter).aria_label("Filter Clipboard Modify help"),
         ),

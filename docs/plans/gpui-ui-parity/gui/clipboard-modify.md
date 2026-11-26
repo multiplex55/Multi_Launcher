@@ -36,4 +36,10 @@ The scoped evidence is in the [Undo checkpoint](../CHECKPOINTS.md#g13-clipboard-
 
 `cm template`, `cm apply` and `cm help` share the Modify workspace's protected first Load and retained source. Templates and Saved Pipelines use current canonical identities and the shared preview coordinator. Apply Template and Execute require the completed current preview for a visible selected row, and use the same checked Apply and Overwrite review. Saved Pipelines display the stock bounded source card. Help filters the real registry data and preserves distinct row identities.
 
-The scoped evidence is in the [catalog checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-templates-saved-pipelines-and-help). Windows replay, management, named immediate execution, Settings, Pop Out, pins and Jump remain open.
+The scoped evidence is in the [catalog checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-templates-saved-pipelines-and-help). Windows replay remains open.
+
+## GPUI Manage Templates and Manage Pipelines
+
+Both editors retain ordered, editable rows with stable identity. Drafts use the canonical model and checked store. Save compares the edited collection with its baseline and merges the latest validated sibling. Explicit reload reads the current file and offers draft replacement only while the original scope is current. Referenced templates keep their draft rows. A durable Pipeline Delete uses explicit review and retains the row until a checked success. Duplicate waits for explicit Save. Pipeline stages use shared typed editors and complete-output preview.
+
+The scoped evidence is in the [management checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-catalog-management). Windows replay, direct execution, Settings, Pop Out, pins and Jump remain open.
