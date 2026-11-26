@@ -15,6 +15,7 @@ pub(super) struct ReportUi {
     tile_generation: Option<u64>,
     tile_focus: HashMap<usize, FocusHandle>,
 }
+impl ReportUi { pub(super) fn reset_host(&mut self) { self.width = 0.0; self.tile_focus.clear(); } }
 impl Default for ReportUi {
     fn default() -> Self { Self { report: FolderSizeReport::default(), mode: Mode::Table, width: 0.0,
         scroll: gpui_kit::UniformListScrollHandle::default(), tile_generation: None, tile_focus: HashMap::new() } }

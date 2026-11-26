@@ -508,6 +508,47 @@ impl HostedUtility for super::file_search::FileSearchView {
     fn pinned(_: &RootWindow) -> bool { false }
 }
 
+impl HostedUtility for super::folder_size::FolderSizeView {
+    const KIND: utility_mount::UtilityKind = utility_mount::UtilityKind::FolderSize;
+    const PANEL: Panel = Panel::FolderSizeDialog;
+    const KEY: &'static str = "folder-size";
+    const TITLE: &'static str = "Folder Size";
+    const INITIAL: (f32, f32) = (900.0, 620.0);
+    const MINIMUM: (f32, f32) = (560.0, 360.0);
+    fn workspace(root: &RootWindow) -> Option<Entity<Self>> { root.folder_size_view.clone() }
+    fn popup(root: &RootWindow) -> Option<&UtilityPopup> { root.folder_size_popup.as_ref() }
+    fn popup_mut(root: &mut RootWindow) -> &mut Option<UtilityPopup> { &mut root.folder_size_popup }
+    fn retiring(root: &mut RootWindow) -> &mut Vec<RetiringHashWindow> { &mut root.folder_size_retiring }
+    fn drain(root: &mut RootWindow, cx: &mut Context<RootWindow>, detach: bool) { root.drain_host_geometry::<Self>(cx, detach); }
+    fn reattach(root: &mut RootWindow, cx: &mut Context<RootWindow>) { root.reattach_host_geometry::<Self>(cx); }
+    fn size_error(root: &mut RootWindow, value: Option<String>, cx: &mut Context<RootWindow>) { if let Some(view) = root.folder_size_view.clone() { view.update(cx, |view, cx| { view.geometry_error = value; cx.notify(); }); } }
+    fn remember(root: &mut RootWindow, mode: RememberedPresentation, cx: &mut Context<RootWindow>) { root.remember_host_presentation(Self::KEY, mode, cx); }
+    fn retire(root: &mut RootWindow, cx: &mut Context<RootWindow>) { if let Some(view) = root.folder_size_view.clone() { view.update(cx, |view, _| view.shutdown()); } }
+    fn observe(_: &mut RootWindow, _: WindowId, _: &mut Context<RootWindow>) {}
+    fn root(&self) -> WeakEntity<RootWindow> { self.root.clone() }
+    fn open(&self) -> bool { self.open }
+    fn rehosting(&self) -> bool { self.rehosting }
+    fn close_blocked(&self, _: &App) -> bool { self.host_close_blocked() }
+    fn popout(&self) -> bool { self.popout }
+    fn fenced(&self) -> bool { self.admission.is_fenced() }
+    fn receipt(&self) -> utility_mount::MountReceipt { self.mount.clone() }
+    fn mounted(&self, id: WindowId, popout: bool) -> bool { self.is_mounted_in(id, popout) }
+    fn replace(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, _: &mut Window, cx: &mut Context<Self>) { self.replace_mount(host, native, cx); }
+    fn set_popout(&mut self, value: bool) { self.popout = value; }
+    fn set_rehosting(&mut self, value: bool, _: &mut Context<Self>) { self.rehosting = value; }
+    fn set_error(&mut self, value: Option<String>) { self.presentation_error = value; }
+    fn set_geometry_error(&mut self, value: Option<String>) { self.geometry_error = value; }
+    fn after_dock(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+    fn after_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.is_window_active() && self.native.is_some_and(|native| current_foreground_identity() == Some(native.identity)) {
+            self.focus_host(window, cx);
+        }
+    }
+    fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
+    fn shutdown(&mut self, _: &mut Context<Self>) { self.shutdown(); }
+    fn pinned(_: &RootWindow) -> bool { false }
+}
+
 struct UtilityShell<T: HostedUtility> {
     workspace: Entity<T>,
     _activation: Subscription,
@@ -534,6 +575,7 @@ fn retiring_utilities(
 ) -> &mut Vec<RetiringHashWindow> {
     match kind {
         utility_mount::UtilityKind::FileSearch => &mut root.file_search_retiring,
+        utility_mount::UtilityKind::FolderSize => &mut root.folder_size_retiring,
         utility_mount::UtilityKind::Xml => &mut root.xml_retiring,
         utility_mount::UtilityKind::Json => &mut root.json_retiring,
         utility_mount::UtilityKind::Regex => &mut root.regex_retiring,
@@ -756,6 +798,8 @@ impl RootWindow {
                 }
             } else if UtilityToolKey::parse("file-preview").ok() == Some(key) {
                 if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| view.report_preview_presentation_error(error, cx)); }
+            } else if UtilityToolKey::parse("folder-size").ok() == Some(key) {
+                if let Some(view) = self.folder_size_view.clone() { view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); }); }
             } else if UtilityToolKey::parse("file-search").ok() == Some(key) {
                 if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); }); }
             } else if UtilityToolKey::parse("regex-tester").ok() == Some(key) {
@@ -815,6 +859,8 @@ impl RootWindow {
         })
         .detach();
     }
+    pub(super) fn drain_folder_size_geometry(&mut self, cx: &mut Context<Self>, detach: bool) { self.drain_host_geometry::<super::folder_size::FolderSizeView>(cx, detach); }
+    pub(super) fn start_folder_size_rehost(&mut self, popout: bool, gesture: Option<hash_dock::Gesture>, source: utility_mount::MountReceipt, cx: &mut Context<Self>) { self.start_hosted_rehost::<super::folder_size::FolderSizeView>(popout, gesture, source, cx); }
     pub(super) fn drain_file_search_geometry(&mut self, cx: &mut Context<Self>, detach: bool) { self.drain_host_geometry::<super::file_search::FileSearchView>(cx, detach); }
     pub(super) fn start_file_search_rehost(&mut self, popout: bool, gesture: Option<hash_dock::Gesture>, source: utility_mount::MountReceipt, cx: &mut Context<Self>) {
         self.start_hosted_rehost::<super::file_search::FileSearchView>(popout, gesture, source, cx);
