@@ -89,6 +89,7 @@ impl ShellGeometry {
 
 struct JsonShell {
     workspace: Entity<JsonWorkspace>,
+    _activation: Subscription,
 }
 impl Render for JsonShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -387,6 +388,7 @@ impl RootWindow {
                                 });
                                 let source_in_transfer = utility_mount::transfer_source_is_owned(view.rehosting, tracked_source, local_id);
                                 if source_in_transfer { return false; }
+                                if view.root.upgrade().is_some_and(|root| root.read(cx).structured_pins.saved(Panel::JsonUtilityDialog)) && view.is_mounted_in(local_id, true) { return false; }
                                 if !view.is_mounted_in(local_id, true) { return true; }
                                 if view.rehosting { return false; }
                                 let _ = view.root.update(cx, |root, cx| {
@@ -397,8 +399,15 @@ impl RootWindow {
                             })
                             .unwrap_or(true)
                         });
-                        app.new(|_| JsonShell {
-                            workspace: shell_workspace,
+                        app.new(|cx| {
+                            let activation = cx.observe_window_activation(window, |shell: &mut JsonShell, window, cx| {
+                                if window.is_window_active() {
+                                    let root = shell.workspace.read(cx).root.clone();
+                                    let id = window.window_handle().window_id();
+                                    let _ = root.update(cx, |root, cx| root.observe_structured_pin_activation(Panel::JsonUtilityDialog, id, cx));
+                                }
+                            });
+                            JsonShell { workspace: shell_workspace, _activation: activation }
                         })
                     })
                 });
@@ -642,9 +651,10 @@ impl RootWindow {
                                 view.rehosting = false;
                                 view.presentation_error =
                                     Some("Could not show JSON Utility window.".into());
-                                if root_native.is_some_and(|native| {
-                                    current_foreground_identity() == Some(native.identity)
-                                }) {
+                                if gesture.is_some_and(|gesture| gesture.foreground_authorized)
+                                    && root_native.is_some_and(|native| {
+                                        current_foreground_identity() == Some(native.identity)
+                                    }) {
                                     view.focus_editor(window, cx);
                                 }
                                 cx.notify();

@@ -191,6 +191,7 @@ pub(super) struct XmlWorkspace {
     next_save_review: u64,
     review_presentation: super::xml_save::ReviewPresentation,
     review_shell: Option<FocusHandle>,
+    review_shortcut: Option<Subscription>,
     review_transfer: bool,
     next_file_request: u64,
     schema_path_draft: Option<std::path::PathBuf>,
@@ -310,6 +311,7 @@ impl XmlWorkspace {
             next_save_review: 0,
             review_presentation: Default::default(),
             review_shell: None,
+            review_shortcut: None,
             review_transfer: false,
             next_file_request: 0,
             schema_path_draft: None,
@@ -333,6 +335,9 @@ impl XmlWorkspace {
             admission,
             activity,
         }
+    }
+    pub(super) fn pin_activation_guard(&self) -> (Arc<AtomicU64>, u64) {
+        (self.activation_revision.clone(), self.activation_revision.load(Ordering::Acquire))
     }
     pub(super) fn mount_receipt(&self) -> utility_mount::MountReceipt {
         self.mount.clone()
@@ -360,6 +365,7 @@ impl XmlWorkspace {
         self.mount = receipt;
         self.mount_xpath_editors(window, cx);
     }
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool { self.focus.contains_focused(window, cx) }
     pub(super) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rehosting {
             self.focus.focus(window, cx);
@@ -406,9 +412,12 @@ impl XmlWorkspace {
         self.rehosting || self.schema_picker || self.file_write_pending || self.save_review.is_some()
     }
     fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
+        self.request_rehost_with_intent(popout, false, cx);
+    }
+    fn request_rehost_with_intent(&mut self, popout: bool, passive: bool, cx: &mut Context<Self>) {
         if !self.can_rehost() || self.popout == popout { return; }
         let source = self.mount_receipt();
-        let gesture = self.native.map(|source| hash_dock::Gesture {
+        let gesture = (!passive).then_some(self.native).flatten().map(|source| hash_dock::Gesture {
             source,
             foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity),
             visibility_revision: self.visibility.request_revision.load(Ordering::Acquire),
@@ -571,6 +580,7 @@ impl XmlWorkspace {
         self.save_review = None;
         self.review_presentation.revoke();
         self.review_shell = None;
+        self.review_shortcut = None;
         self.review_transfer = false;
         self.owner.retire();
         self.tree_epoch.fetch_add(1, Ordering::AcqRel);
@@ -640,7 +650,8 @@ impl XmlWorkspace {
         }
         cx.notify();
     }
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.root.upgrade().is_some_and(|root| root.read(cx).structured_pins.saved(Panel::XmlToolkitDialog)) { return; }
         if self.rehosting || super::xml_schema::pane_close_blocked(self.schema_picker || self.file_write_pending) {
             return;
         }
@@ -1719,6 +1730,22 @@ impl XmlWorkspace {
                 })
         });
         self.review_shell = window.focused(cx);
+        let shortcut_owner = cx.entity().downgrade();
+        let shortcut_mount = self.mount.clone();
+        let shortcut_window = window.window_handle().window_id();
+        self.review_shortcut = Some(cx.intercept_keystrokes(move |event, window, app| {
+            if event.keystroke.key != "w" || event.keystroke.modifiers != (Modifiers { control: true, ..Modifiers::default() })
+                || window.window_handle().window_id() != shortcut_window { return; }
+            let handled = shortcut_owner.update(app, |view, cx| {
+                if !view.review_callback_current(id, presentation, &shortcut_mount)
+                    || !window.has_active_dialog(cx)
+                    || !view.review_shell.as_ref().is_some_and(|shell| shell.contains_focused(window, cx)) { return false; }
+                view.cancel_xml_save(id, cx);
+                window.close_dialog(cx);
+                true
+            }).unwrap_or(false);
+            if handled { app.stop_propagation(); }
+        }));
     }
     fn transfer_xml_save_review(&mut self, id: u64, presentation: u64, mount: &utility_mount::MountReceipt, receipt: &XmlReadReceipt, popout: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.review_callback_current(id, presentation, mount) || self.popout == popout
@@ -1731,6 +1758,7 @@ impl XmlWorkspace {
         }
         self.review_presentation.revoke();
         self.review_shell = None;
+        self.review_shortcut = None;
         self.review_transfer = true;
         window.close_dialog(cx);
         self.request_rehost(popout, cx);
@@ -1762,6 +1790,7 @@ impl XmlWorkspace {
         if super::xml_save::take_review(&mut self.save_review, id).is_some() {
             self.review_presentation.revoke();
             self.review_shell = None;
+            self.review_shortcut = None;
             self.feedback = None;
             cx.notify();
         }
@@ -1774,6 +1803,7 @@ impl XmlWorkspace {
         let Some(review) = super::xml_save::take_review(&mut self.save_review, id) else { return false; };
         self.review_presentation.revoke();
         self.review_shell = None;
+        self.review_shortcut = None;
         self.start_xml_save(review.path, review.payload, receipt.clone(), permit, true, cx);
         true
     }
@@ -2190,6 +2220,13 @@ impl Render for XmlWorkspace {
                     }
                 },
             ))
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "w" && event.keystroke.modifiers.control
+                    && view.focus.contains_focused(window, cx) && !window.has_active_dialog(cx)
+                    && view.root.upgrade().is_some_and(|root| root.read(cx).structured_pins.saved(Panel::XmlToolkitDialog)) {
+                    cx.stop_propagation();
+                }
+            }))
             .w_full()
             .flex()
             .flex_col()
@@ -2549,6 +2586,18 @@ impl Render for XmlWorkspace {
     }
 }
 impl RootWindow {
+    pub(super) fn mount_pinned_xml(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.xml_view.is_some() { return; }
+        let Some(root_window) = self.root_window else { return; };
+        let root = cx.entity().downgrade();
+        let view = cx.new(|cx| XmlWorkspace::new(window, cx, root, root_window, self.native_window, self.root_visibility.clone(), self.restart_admission.clone(), self.activity_center.clone()));
+        let native = self.native_window;
+        view.update(cx, |view, cx| { view.replace_mount(root_window, native, window, cx); view.open = true; view.start(cx); });
+        self.xml_view = Some(view.clone());
+        panel_stack::ensure(&mut self.panel_stack, Panel::XmlToolkitDialog);
+        let popout = multi_launcher::settings::UtilityToolKey::parse("xml-toolkit").ok().map(|key| self.utility_presentations.preference(key).unwrap_or(RememberedPresentation::Popout) == RememberedPresentation::Popout).unwrap_or(true);
+        if popout { view.update(cx, |view, cx| view.request_rehost_with_intent(true, true, cx)); }
+    }
     pub(super) fn scroll_to_xml(&self, cx: &App) {
         self.scroll_to_json(cx);
         if let Some(root) = self.root_window {

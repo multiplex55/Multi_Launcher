@@ -216,7 +216,7 @@ pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) 
         .flex_col()
         .gap_2()
         .w_full()
-        .child(Input::new(&view.tree_search).aria_label("Tree search query"))
+        .child(Input::new(&view.tree_search).disabled(view.rehosting).aria_label("Tree search query"))
         .child(fields)
         .child(controls)
         .child(

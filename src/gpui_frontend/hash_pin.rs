@@ -130,7 +130,7 @@ impl HashMountIntent {
 pub(super) fn startup_order(saved: &[Panel]) -> Vec<Panel> {
     let mut order = Vec::new();
     for panel in saved.iter().copied() {
-        if matches!(panel, Panel::FavDialog | Panel::HashGeneratorDialog) {
+        if matches!(panel, Panel::FavDialog | Panel::HashGeneratorDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog) {
             panel_stack::ensure(&mut order, panel);
         }
     }
@@ -186,7 +186,7 @@ impl RootWindow {
     }
 
     pub(super) fn pinned_hash_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.hash_pin.is_saved() || self.hash_pin.pending.is_some()
+        if !self.hash_pin.is_saved() || self.hash_pin.pending.is_some() || self.structured_pins.busy()
             || !self.restart_admission.is_ready() || self.hash_pin.remount_revision.is_some()
             || self.hash_rehost_pending.load(Ordering::Acquire)
             || self.hash_file_picker_pending.load(Ordering::Acquire)
@@ -290,6 +290,12 @@ mod tests {
         assert_eq!(saved_toolbar_action(&stack, Panel::HashGeneratorDialog), SavedToolbarAction::Unpin);
         assert!(!HashMountIntent::Passive.is_user_activation());
         assert!(HashMountIntent::User.is_user_activation());
+    }
+
+    #[test]
+    fn structured_pins_preserve_saved_order_with_hash_and_favorites() {
+        let saved = [Panel::XmlToolkitDialog, Panel::FavDialog, Panel::JsonUtilityDialog, Panel::HashGeneratorDialog, Panel::XmlToolkitDialog];
+        assert_eq!(startup_order(&saved), vec![Panel::XmlToolkitDialog, Panel::FavDialog, Panel::JsonUtilityDialog, Panel::HashGeneratorDialog]);
     }
 
     #[test]

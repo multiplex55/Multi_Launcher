@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+Saved JSON and XML pins now restore their remembered hosts passively. The toolbar focuses an exact live host or unpins the top panel through the canonical checked Settings write. Twelve grouped tests passed. The matched Windows replay and scoped Jump evidence remain pending. [Structured utility pins checkpoint](CHECKPOINTS.md#saved-json-and-xml-pins)
+
 An open XML Overwrite review can move between Dock and Pop Out with the exact frozen path and payload. Six focused launcher tests passed. Native confirmation and transfer evidence and saved JSON and XML pins remain pending. [Overwrite transfer checkpoint](CHECKPOINTS.md#xml-overwrite-review-transfer)
 
 G14 XML now reuses the shared checked utility host for remembered Dock and Pop Out. The same engine and draft survive moves, and Dock preserves a newer focus choice while the old popup retires. Ten focused host tests passed. Overwrite review transfer and saved JSON and XML pins follow. Matched desktop replay remains pending. [XML host checkpoint](CHECKPOINTS.md#xml-remembered-dock-and-pop-out)

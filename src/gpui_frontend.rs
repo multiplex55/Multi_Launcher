@@ -20,6 +20,7 @@ mod hash_jump;
 mod hash_progress;
 mod hash_layout;
 mod hash_pin;
+mod structured_pin;
 mod hash_dock;
 mod wake;
 mod json_utility;
@@ -972,6 +973,11 @@ struct LauncherMenuBar {
     hash_pin_focus_handle: FocusHandle,
     hash_pinned: bool,
     hash_toolbar_disabled: bool,
+    json_pinned: bool,
+    xml_pinned: bool,
+    structured_pin_disabled: bool,
+    json_pin_focus_handle: FocusHandle,
+    xml_pin_focus_handle: FocusHandle,
 }
 
 impl RenderOnce for LauncherMenuBar {
@@ -1156,6 +1162,18 @@ impl RenderOnce for LauncherMenuBar {
                     .on_click(move |_, window, app| {
                         let _ = root.update(app, |root, cx| root.pinned_hash_click(window, cx));
                     }).into_any_element())
+            }
+            Panel::JsonUtilityDialog if self.json_pinned => {
+                let root = self.root.clone();
+                Some(Button::new("pinned-json-toolbar").label(Panel::JsonUtilityDialog.display_label())
+                    .track_focus(&self.json_pin_focus_handle).tab_stop(true).disabled(self.structured_pin_disabled)
+                    .on_click(move |_, window, app| { let _ = root.update(app, |root, cx| root.pinned_structured_click(Panel::JsonUtilityDialog, window, cx)); }).into_any_element())
+            }
+            Panel::XmlToolkitDialog if self.xml_pinned => {
+                let root = self.root.clone();
+                Some(Button::new("pinned-xml-toolbar").label(Panel::XmlToolkitDialog.display_label())
+                    .track_focus(&self.xml_pin_focus_handle).tab_stop(true).disabled(self.structured_pin_disabled)
+                    .on_click(move |_, window, app| { let _ = root.update(app, |root, cx| root.pinned_structured_click(Panel::XmlToolkitDialog, window, cx)); }).into_any_element())
             }
             _ => None,
         }).collect::<Vec<_>>();
@@ -2563,6 +2581,7 @@ struct RootWindow {
     result_favorites: ResultFavorites,
     panel_stack: Vec<Panel>,
     hash_pin: hash_pin::HashPinState,
+    structured_pins: structured_pin::StructuredPins,
     launcher_results_scroll: ScrollHandle,
     query_history: QueryHistoryNavigator,
     fresh_search_enter: Option<FreshSearchEnter>,
@@ -2615,6 +2634,8 @@ struct RootWindow {
     settings_menu_focus_handle: FocusHandle,
     favorites_pin_focus_handle: FocusHandle,
     hash_pin_focus_handle: FocusHandle,
+    json_pin_focus_handle: FocusHandle,
+    xml_pin_focus_handle: FocusHandle,
     command_help_owner_focus_handle: FocusHandle,
     command_help_close_focus_handle: FocusHandle,
     command_help_scroll: ScrollHandle,
@@ -3747,6 +3768,7 @@ enum RootCloseBlocker {
     ToastLogOpen,
     FavoritesWrite,
     HashPinWrite,
+    StructuredPinWrite,
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -5606,6 +5628,7 @@ impl RootWindow {
                     .to_owned(),
             );
         }
+        if self.structured_pins.busy() { return Err("Wait for the utility pin update to finish before restarting.".to_owned()); }
         if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending()) { return Err("Wait for the XML file operation to finish before restarting.".to_owned()); }
         if let Some(error) = self.xml_view.as_ref().and_then(|view| view.read(cx).shutdown_failure()) {
             return Err(format!("Cannot restart because {error}. Close and rerun Multi Launcher."));
@@ -9840,6 +9863,9 @@ impl RootWindow {
             Some(RootCloseBlocker::FavoritesWrite) => {
                 self.restart_status = Some(FAVORITES_WRITE_PENDING.to_owned());
             }
+            Some(RootCloseBlocker::StructuredPinWrite) => {
+                self.restart_status = Some("Wait for the utility pin update to finish before quitting Multi Launcher.".to_owned());
+            }
             Some(RootCloseBlocker::HashPinWrite) => {
                 self.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
             }
@@ -9903,6 +9929,7 @@ impl RootWindow {
         file_picker_pending: bool,
         cx: &App,
     ) -> Option<RootCloseBlocker> {
+        if self.structured_pins.busy() { return Some(RootCloseBlocker::StructuredPinWrite); }
         if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending() || view.read(cx).rehosting || view.read(cx).save_review_pending()) { return Some(RootCloseBlocker::XmlFilePicker); }
         if self.calculator_search.active {
             return Some(RootCloseBlocker::CalculatorSearch);
@@ -10348,12 +10375,17 @@ impl Render for RootWindow {
             toast_log_open_pending: self.toast_log_external_open_pending,
             favorites_pin_focus_handle: self.favorites_pin_focus_handle.clone(),
             favorites_pinned: self.result_favorites.is_pinned(),
-            favorites_toolbar_disabled: self.result_favorites.toolbar_disabled(&self.panel_stack),
+            favorites_toolbar_disabled: self.result_favorites.toolbar_disabled(&self.panel_stack) || self.structured_pins.busy(),
             favorites_unpin_status: self.result_favorites.unpin_status().map(str::to_owned),
             saved_pin_order: self.hash_pin.order.clone(),
             hash_pin_focus_handle: self.hash_pin_focus_handle.clone(),
             hash_pinned: self.hash_pin.is_saved(),
-            hash_toolbar_disabled: self.hash_pin.pending.is_some(),
+            hash_toolbar_disabled: self.hash_pin.pending.is_some() || self.structured_pins.busy(),
+            json_pinned: self.structured_pins.saved(Panel::JsonUtilityDialog),
+            xml_pinned: self.structured_pins.saved(Panel::XmlToolkitDialog),
+            structured_pin_disabled: self.structured_pins.busy(),
+            json_pin_focus_handle: self.json_pin_focus_handle.clone(),
+            xml_pin_focus_handle: self.xml_pin_focus_handle.clone(),
         };
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
             root: cx.entity().downgrade(),
@@ -10438,6 +10470,7 @@ impl Render for RootWindow {
                 .child(div().flex().items_center().gap_2().w_full()
                     .child(gpui_kit::component::Icon::new(gpui_kit::component::IconName::Search))
                     .child(div().flex_1().min_w(px(0.0)).child(search_field)))
+                .children(self.structured_pins.error.clone().map(|status| Label::new(status)))
                 .children((if self.hash_pin.pending.is_some() { Some("Unpinning Hash Generator…".to_owned()) } else { self.hash_pin.error.clone() }).map(|status| {
                     Label::new(status).id("pinned-hash-toolbar-status").w_full().min_w(px(0.0))
                 })));
@@ -12407,6 +12440,8 @@ pub(crate) fn run_foundation_window(
             let settings_menu_focus_handle = cx.focus_handle();
             let favorites_pin_focus_handle = cx.focus_handle();
             let hash_pin_focus_handle = cx.focus_handle();
+            let json_pin_focus_handle = cx.focus_handle();
+            let xml_pin_focus_handle = cx.focus_handle();
             let command_help_owner_focus_handle = cx.focus_handle();
             let command_help_close_focus_handle = cx.focus_handle();
             let quick_help_owner_focus_handle = cx.focus_handle();
@@ -12437,6 +12472,7 @@ pub(crate) fn run_foundation_window(
                 result_favorites: ResultFavorites::new(saved_pinned_panels.contains(&Panel::FavDialog)),
                 panel_stack: Vec::new(),
                 hash_pin: hash_pin::HashPinState::new(&saved_pinned_panels),
+                structured_pins: structured_pin::StructuredPins::new(&saved_pinned_panels),
                 launcher_results_scroll: ScrollHandle::new(),
                 query_history:
                     QueryHistoryNavigator::default(),
@@ -12491,6 +12527,8 @@ pub(crate) fn run_foundation_window(
                 settings_menu_focus_handle,
                 favorites_pin_focus_handle,
                 hash_pin_focus_handle,
+                json_pin_focus_handle,
+                xml_pin_focus_handle,
                 command_help_owner_focus_handle,
                 command_help_close_focus_handle,
                 command_help_scroll: ScrollHandle::new(),
@@ -12958,6 +12996,10 @@ pub(crate) fn run_foundation_window(
                         });
                         false
                     }
+                    Some(RootCloseBlocker::StructuredPinWrite) => {
+                        let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for the utility pin update to finish before closing Multi Launcher.".to_owned()); cx.notify(); });
+                        false
+                    }
                     Some(RootCloseBlocker::HashPinWrite) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
                             root.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
@@ -12988,6 +13030,8 @@ pub(crate) fn run_foundation_window(
                     for panel in startup_pin_order {
                         match panel {
                             Panel::FavDialog => root.mount_pinned_favorites(window, cx),
+                            Panel::JsonUtilityDialog if root.structured_pins.saved(Panel::JsonUtilityDialog) => root.mount_pinned_json(window, cx),
+                            Panel::XmlToolkitDialog if root.structured_pins.saved(Panel::XmlToolkitDialog) => root.mount_pinned_xml(window, cx),
                             Panel::HashGeneratorDialog if root.hash_pin.is_saved() => {
                                 if let Some(operation) = root.restart_admission.admit() {
                                     if let Err(error) = root.open_hash_generator_with_mount_intent(

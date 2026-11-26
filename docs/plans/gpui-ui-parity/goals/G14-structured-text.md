@@ -64,6 +64,8 @@ Continue the retained host follow-up in order. First, XML uses the same checked 
 
 **Owner:** G14 frontend implementer with the regex session owner. Recreate all inventoried subpanels and editing tools, including saved state, test cases, substitution, inspection, visualization, and reference/help. Preserve raw pattern handling and current unsupported-construct errors; retain the established regex engine and resource policy.
 
+Begin with the stock `regex` Search route, retained host, live Pattern and flags, Test Text, match and capture inspection, navigation and automatic accepted-history recording. Continue with substitution, Test Cases and explicit protected clipboard. Bring History and Presets through the canonical stores, then add explanation, syntax structure, reference, examples and the remaining collapsed tools. Group focused linking at the functional boundaries and keep the shared host and native replay criteria in packet D.
+
 **Invariants:** Selecting a match/capture changes navigation without editing source. Empty/unmatched captures and Unicode ranges remain correct. Truncated output is labeled as displayed output. Oversized source remains retained with a bounded preview; idle frames do not reschedule evaluation. Opening, rendering, or inspecting does not implicitly access the clipboard.
 
 **Evidence and acceptance:** Fixture patterns exercise captures, empty matches, Unicode, invalid/unsupported constructs, replacement, test-case editing, preset removal cancellation, history, and oversized inputs. **Commit boundary:** Independent complete subpanel commits followed by Regex workspace integration; a basic matcher alone cannot close packet C.
