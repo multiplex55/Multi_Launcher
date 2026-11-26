@@ -9202,6 +9202,20 @@ fn rename_open_file_no_replace(
     parent: &OpenDirectory<std::fs::File>,
     leaf: &OsStr,
 ) -> std::io::Result<()> {
+    if Path::new(leaf).components().count() != 1
+        || !matches!(Path::new(leaf).components().next(), Some(Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+            "handle-based rename requires a single filename component"));
+    }
+    rename_open_file_no_replace_to_path(source, &parent.canonical_path.join(leaf))
+}
+
+#[cfg(windows)]
+pub(crate) fn rename_open_file_no_replace_to_path(
+    source: &std::fs::File,
+    destination_path: &Path,
+) -> std::io::Result<()> {
     use std::mem::{offset_of, size_of};
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{BOOLEAN, HANDLE};
@@ -9209,19 +9223,7 @@ fn rename_open_file_no_replace(
         FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
     };
 
-    if Path::new(leaf).components().count() != 1
-        || !matches!(
-            Path::new(leaf).components().next(),
-            Some(Component::Normal(_))
-        )
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "handle-based rename requires a single filename component",
-        ));
-    }
-    let destination_path = parent.canonical_path.join(leaf);
-    let name = extended_local_path(&destination_path)?;
+    let name = extended_local_path(destination_path)?;
     if name.is_empty() || name.contains(&0) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

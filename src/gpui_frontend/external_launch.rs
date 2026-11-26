@@ -1769,7 +1769,7 @@ impl RootWindow {
         cx.notify();
     }
 
-    fn external_notification(
+    pub(super) fn external_notification(
         &self,
         ticket: u64,
         index: usize,

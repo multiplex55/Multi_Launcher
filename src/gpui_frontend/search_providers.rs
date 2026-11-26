@@ -89,6 +89,27 @@ impl multi_launcher::plugin::Plugin for ClipboardModifyBare {
     fn commands(&self) -> Vec<Action> { multi_launcher::plugins::clipboard_modify::admitted_modify_commands() }
 }
 
+struct TempfileBare;
+impl multi_launcher::plugin::Plugin for TempfileBare {
+    fn name(&self) -> &str { "tempfile" }
+    fn description(&self) -> &str { "Create a temporary file" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["tmp"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if query.trim().eq_ignore_ascii_case("tmp") {
+            multi_launcher::plugin::Plugin::search(&multi_launcher::plugins::tempfile::TempfilePlugin, query)
+        } else { Vec::new() }
+    }
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "tmp".into(), desc: "Tempfile".into(), action: "query:tmp".into(), args: None }]
+    }
+}
+
+pub(super) fn tempfile_rows(query: &str, enabled: Option<&HashSet<String>>, caps: Option<&std::collections::HashMap<String, Vec<String>>>) -> Vec<Action> {
+    search_routed([&TempfileBare as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
+        .into_iter().map(|(_, action)| action).collect()
+}
+
 struct ClipboardBare;
 impl multi_launcher::plugin::Plugin for ClipboardBare {
     fn name(&self) -> &str { "clipboard" }
@@ -199,6 +220,7 @@ pub(super) struct InstalledLauncherProviders {
     regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
     clipboard: ClipboardBare,
     snippets: SnippetsBare,
+    tempfile: TempfileBare,
     clipboard_modify: ClipboardModifyBare,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
@@ -261,6 +283,7 @@ impl InstalledLauncherProviders {
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             clipboard: ClipboardBare,
             snippets: SnippetsBare::default(),
+            tempfile: TempfileBare,
             clipboard_modify: ClipboardModifyBare {
                 catalog: multi_launcher::clipboard_modify::runtime::shared_default_catalog(),
                 ready: std::sync::atomic::AtomicBool::new(false),
@@ -301,6 +324,7 @@ impl InstalledLauncherProviders {
             Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard as &dyn multi_launcher::plugin::Plugin),
             Some(&self.snippets as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.tempfile as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard_modify as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
@@ -472,6 +496,16 @@ mod tests {
         plugin::{Plugin, search_filtered_plugins_with_origin},
     };
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn tempfile_bare_provider_admits_only_enabled_dialog() {
+        let enabled = HashSet::from(["tempfile".to_owned()]);
+        let rows = super::tempfile_rows("TmP", Some(&enabled), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "tempfile:dialog");
+        assert!(super::tempfile_rows("tmp new secret", Some(&enabled), None).is_empty());
+        assert!(super::tempfile_rows("tmp", Some(&HashSet::new()), None).is_empty());
+    }
 
     #[test]
     fn snippets_bare_provider_admits_only_stock_dialog_with_search_capability() {

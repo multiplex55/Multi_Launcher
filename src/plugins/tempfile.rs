@@ -1,9 +1,13 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn validate_alias(alias: &str) -> anyhow::Result<&str> {
+    if alias.contains('\0') {
+        anyhow::bail!("alias contains invalid characters");
+    }
     if alias.is_empty() {
         anyhow::bail!("alias cannot be empty");
     }
@@ -60,21 +64,103 @@ pub fn create_file() -> anyhow::Result<PathBuf> {
 /// Create a new temp file with a specific `alias` and initial `contents`.
 /// The filename is prefixed with `temp_` and suffixed with a number if needed.
 pub fn create_named_file(alias: &str, contents: &str) -> anyhow::Result<PathBuf> {
+    create_named_file_checked(alias, contents, || true).map(|created| created.path)
+}
+
+/// A published file and the handle that identifies the exact created object.
+pub struct CreatedTempFile {
+    pub path: PathBuf,
+    pub(crate) file: File,
+    #[cfg(windows)]
+    pub(crate) resolved_path: PathBuf,
+}
+
+/// Stage content privately, then publish the first available name atomically.
+pub fn create_named_file_checked(
+    alias: &str,
+    contents: &str,
+    current: impl Fn() -> bool,
+) -> anyhow::Result<CreatedTempFile> {
     validate_alias(alias)?;
+    anyhow::ensure!(current(), "Temp file request was superseded");
     let dir = ensure_dir()?;
-    let mut idx = 0;
+    create_named_file_in(&dir, alias, contents, &current)
+}
+
+fn create_named_file_in(
+    dir: &Path,
+    alias: &str,
+    contents: &str,
+    current: &dyn Fn() -> bool,
+) -> anyhow::Result<CreatedTempFile> {
+    validate_alias(alias)?;
+    anyhow::ensure!(current(), "Temp file request was superseded");
+    let mut staging_builder = tempfile::Builder::new();
+    staging_builder.prefix(".multi-launcher-stage-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        staging_builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    // Resolve once before staging so junction changes cannot redirect publication.
+    #[cfg(windows)]
+    let native_dir = fs::canonicalize(dir)?;
+    #[cfg(windows)]
+    let staging = staging_builder.tempdir_in(&native_dir)?;
+    #[cfg(not(windows))]
+    let staging = staging_builder.tempdir_in(dir)?;
+    #[cfg(windows)]
+    let mut file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new().read(true).write(true).create_new(true)
+            .access_mode(0x80000000 | 0x40000000 | 0x00010000)
+            .share_mode(0x1)
+            .open(staging.path().join("contents"))?
+    };
+    #[cfg(not(windows))]
+    let mut file = {
+        let mut builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o666));
+        }
+        builder.tempfile_in(staging.path())?
+    };
+    file.write_all(contents.as_bytes())?;
+    file.flush()?;
+    #[cfg(windows)]
+    file.sync_all()?;
+    #[cfg(not(windows))]
+    file.as_file().sync_all()?;
+    let mut idx = 0usize;
     loop {
         let name = if idx == 0 {
             format!("temp_{alias}.txt")
         } else {
             format!("temp_{alias}_{idx}.txt")
         };
-        let path = dir.join(name);
-        if !path.exists() {
-            fs::write(&path, contents)?;
-            return Ok(path);
+        let path = dir.join(&name);
+        anyhow::ensure!(current(), "Temp file request was superseded");
+        #[cfg(windows)]
+        {
+            match crate::file_operations::rename_open_file_no_replace_to_path(&file, &native_dir.join(&name)) {
+                Ok(()) => return Ok(CreatedTempFile { resolved_path: native_dir.join(&name), path, file }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists
+                    || fs::symlink_metadata(native_dir.join(&name)).is_ok() => {},
+                Err(error) => return Err(error.into()),
+            }
         }
-        idx += 1;
+        #[cfg(not(windows))]
+        match file.persist_noclobber(&path) {
+            Ok(file) => return Ok(CreatedTempFile { path, file }),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists
+                || fs::symlink_metadata(&path).is_ok() => {
+                file = error.file;
+            }
+            Err(error) => return Err(error.error.into()),
+        }
+        idx = idx.checked_add(1).ok_or_else(|| anyhow::anyhow!("No available temp file name"))?;
     }
 }
 
@@ -329,5 +415,54 @@ impl Plugin for TempfilePlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod checked_creation_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn checked_creation_preserves_collision_and_exact_unicode() {
+        let root = tempfile::tempdir().unwrap();
+        let collision = root.path().join("temp_β.txt");
+        let calls = Cell::new(0);
+        let created = create_named_file_in(root.path(), "β", "first\nλ", &|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 { fs::write(&collision, b"foreign").unwrap(); }
+            true
+        }).unwrap();
+        assert_eq!(created.path, root.path().join("temp_β_1.txt"));
+        assert_eq!(fs::read(&collision).unwrap(), b"foreign");
+        assert_eq!(fs::read(&created.path).unwrap(), "first\nλ".as_bytes());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn published_mode_matches_ordinary_creation_under_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let ordinary = root.path().join("ordinary");
+        File::create(&ordinary).unwrap();
+        let created = create_named_file_in(root.path(), "mode", "", &|| true).unwrap();
+        assert_eq!(fs::metadata(ordinary).unwrap().permissions().mode() & 0o777,
+            fs::metadata(created.path).unwrap().permissions().mode() & 0o777);
+    }
+
+    #[test]
+    fn checked_creation_refuses_revocation_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let calls = Cell::new(0);
+        let result = create_named_file_in(root.path(), "safe", "value", &|| {
+            calls.set(calls.get() + 1);
+            calls.get() == 1
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        assert!(create_named_file_in(root.path(), "bad/alias", "value", &|| true).is_err());
+        assert!(create_named_file_in(root.path(), "bad\0alias", "value", &|| true).is_err());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

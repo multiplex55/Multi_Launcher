@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-Snippets supports authored prompt fields and read-only Test / Preview with exact draft return. Preview, automatic Run and Fill share a protected reader that checks current authority at acquisition. All 19 focused tests passed. Matched native replay remains open. Checked Create Temp File follows. [Editor Preview checkpoint](CHECKPOINTS.md#g13-snippets-field-authoring-and-editor-preview)
+Create Temp File supports retained draft editing, checked no-clobber publication and opening the exact file. All 10 focused tests passed. Matched native association, resize persistence and dashboard invocation remain open. G07 Directory Content Search follows. [Tempfile checkpoint](CHECKPOINTS.md#g13-checked-create-temp-file)
 
 Stock Snippet Run reaches checked literal and automatic Copy and standalone Fill with live result and exact retries. All 16 focused launcher tests and three reused stock cases passed. Native Windows replay remains open. [Standalone Fill checkpoint](CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)
 
@@ -151,7 +151,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 195 Specified, 23 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 194 Specified, 24 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
