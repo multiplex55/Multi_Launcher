@@ -3685,15 +3685,37 @@ enum HashReturnReceipt {
 
 fn hash_popup_visibility_eligible(visible: bool, minimized: bool) -> bool { visible && !minimized }
 
-fn checked_hash_popup_visible(native: NativeWindow) -> bool {
+fn checked_hash_popup_state(native: NativeWindow) -> Option<(bool, bool)> {
     #[cfg(windows)]
     {
         use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsIconic};
-        native_window_is_valid(native) && hash_popup_visibility_eligible(native_window_is_visible(native).unwrap_or(false),
-            unsafe { IsIconic(HWND(native.identity.hwnd as *mut _)) }.as_bool())
+        if !native_window_is_valid(native) { return None; }
+        let visible = native_window_is_visible(native).ok()?;
+        let minimized = unsafe { IsIconic(HWND(native.identity.hwnd as *mut _)) }.as_bool();
+        native_window_is_valid(native).then_some((visible, minimized))
     }
     #[cfg(not(windows))]
-    { let _ = native; false }
+    { let _ = native; None }
+}
+
+fn checked_hash_popup_visible(native: NativeWindow) -> bool {
+    checked_hash_popup_state(native).is_some_and(|(visible, minimized)| hash_popup_visibility_eligible(visible, minimized))
+}
+
+fn prepare_direct_hash_popup(fresh: bool, state: Option<(bool, bool)>, mut current: impl FnMut() -> bool,
+    show: impl FnOnce() -> bool, displayed: impl FnOnce() -> bool) -> bool {
+    if !fresh && state.is_none_or(|(visible, _)| !visible) { return false; }
+    if !current() { return false; }
+    if (fresh || state.is_some_and(|(_, minimized)| minimized)) && !show() { return false; }
+    displayed() && current()
+}
+fn restore_direct_hash_popup(fresh: bool, state: Option<(bool, bool)>, show: impl FnOnce() -> bool) -> bool {
+    if fresh { return show(); }
+    match state {
+        Some((true, false)) => true,
+        Some((true, true)) => show(),
+        _ => false,
+    }
 }
 
 fn direct_inherited_hash_commit_current(accepted: bool, slot: bool, revision: bool, target: bool, native: bool, epoch: bool, origin: bool) -> bool {
@@ -8713,6 +8735,12 @@ impl RootWindow {
         let target_mount = existing.as_ref().map(|(_, _, mount)| *mount).unwrap_or_else(|| self.next_hash_mount_generation());
         let candidate_epoch = if existing.is_some() { epoch } else { epoch.wrapping_add(1) };
         let root = cx.entity().downgrade();
+        let active_mount = self.hash_mount_generation.clone();
+        let initial_mount = active_mount.load(Ordering::Acquire);
+        let transition_pending = self.hash_rehost_pending.clone();
+        let transition_revision = self.hash_rehost_revision.clone();
+        let transition_session = self.hash_session.clone();
+        let admission = self.restart_admission.clone();
         let config = existing.is_none().then(|| HashMountConfig {
             jump_controller: self.search_jump_mode.fresh(), session: Arc::clone(&self.hash_session), wake_signal: Arc::clone(&self.hash_wake_signal),
             file_picker_pending: Arc::clone(&self.hash_file_picker_pending), clipboard_pending: Arc::clone(&self.hash_clipboard_pending),
@@ -8755,18 +8783,30 @@ impl RootWindow {
                 });
                 return;
             };
-            let preflight = root.update(cx, |root, cx| {
-                let target_current = if fresh { matches!(root.hash_window, HashWindowState::Closed) }
-                    else { matches!(&root.hash_window, HashWindowState::Popout { window: current, view: mounted, mount_generation }
-                        if current.window_id() == window.window_id() && mounted.entity_id() == view.entity_id() && *mount_generation == target_mount) };
-                target_current && root.hash_rehost_pending.load(Ordering::Acquire) && root.hash_rehost_revision.load(Ordering::Acquire) == revision
-                    && root.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch() == epoch
-                    && root.hash_inherited_origin_current(&origin, origin.native.identity, cx)
-            }).unwrap_or(false);
-            let target_unavailable = !fresh && !checked_hash_popup_visible(native);
-            let accepted = preflight && !target_unavailable && native_window_is_valid(native) && current_foreground_identity() == Some(origin.native.identity)
-                && (!fresh || set_native_window_visible(native, true).is_ok()) && checked_hash_popup_visible(native)
-                && current_foreground_identity() == Some(origin.native.identity) && activate_native_window(native).is_ok()
+            let state = checked_hash_popup_state(native);
+            let target_unavailable = !fresh && state.is_none_or(|(visible, _)| !visible);
+            let prepared = prepare_direct_hash_popup(fresh, state, || {
+                root.update(cx, |root, cx| {
+                    let target_current = if fresh { matches!(root.hash_window, HashWindowState::Closed) }
+                        else { matches!(&root.hash_window, HashWindowState::Popout { window: current, view: mounted, mount_generation }
+                            if current.window_id() == window.window_id() && mounted.entity_id() == view.entity_id() && *mount_generation == target_mount)
+                            && root.hash_mount_generation.load(Ordering::Acquire) == target_mount };
+                    target_current && root.hash_rehost_pending.load(Ordering::Acquire)
+                        && root.hash_rehost_revision.load(Ordering::Acquire) == revision
+                        && root.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch() == epoch
+                        && view.read(cx).native_window == Some(native) && native_window_is_valid(native)
+                        && root.hash_inherited_origin_current(&origin, origin.native.identity, cx)
+                }).unwrap_or(false)
+            }, || restore_direct_hash_popup(fresh, checked_hash_popup_state(native), || set_native_window_visible(native, true).is_ok()),
+                || checked_hash_popup_visible(native));
+            let accepted = prepared && activate_for_secondary_window_if(&transition_revision, revision, native, Some(origin.native.identity), &|| {
+                transition_pending.load(Ordering::Acquire) && !admission.is_fenced()
+                    && origin.mount.is_current() && native_window_is_valid(origin.native)
+                    && active_mount.load(Ordering::Acquire) == (if fresh { initial_mount } else { target_mount })
+                    && transition_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch() == epoch
+                    && checked_hash_popup_visible(native)
+                    && current_foreground_identity() == Some(origin.native.identity)
+            })
                 && current_foreground_identity() == Some(native.identity) && checked_hash_popup_visible(native);
             let committed = if accepted { root.update(cx, |root, cx| {
                 let target_current = if fresh { matches!(root.hash_window, HashWindowState::Closed) }
@@ -8807,7 +8847,7 @@ impl RootWindow {
                 if !remove_and_wait_for_hash_window(cx, candidate).await { let _ = root.update(cx, |root, _| root.hash_retiring_windows.push(candidate)); }
             }
             let _ = root.update(cx, |root, cx| {
-                let error = if target_unavailable { "Restore the Hash Generator window and retry." }
+                let error = if target_unavailable { "The Hash Generator window is not available." }
                     else { "File Search or Hash Generator changed before activation completed." };
                 if root.hash_rehost_revision.load(Ordering::Acquire) != revision { return; }
                 root.release_direct_inherited_hash_transition(target_mount, epoch, revision, cx);
@@ -16050,6 +16090,38 @@ mod tests {
         assert!(!current(true, true, true, true, false, true, true));
         assert!(!current(true, true, true, true, true, false, true));
         assert!(!current(true, true, true, true, true, true, false));
+    }
+
+    #[test]
+    fn inherited_hash_restore_checks_origin_before_and_after_show() {
+        use super::prepare_direct_hash_popup as prepare;
+        use super::restore_direct_hash_popup as restore;
+        use std::cell::{Cell, RefCell};
+        let calls = RefCell::new(Vec::new());
+        let authorized = Cell::new(true);
+        assert!(prepare(false, Some((true, true)),
+            || { calls.borrow_mut().push("current"); authorized.get() },
+            || { calls.borrow_mut().push("restore"); true },
+            || { calls.borrow_mut().push("visible"); true }));
+        assert_eq!(&*calls.borrow(), &["current", "restore", "visible", "current"]);
+        calls.borrow_mut().clear();
+        assert!(!prepare(false, Some((false, true)),
+            || { calls.borrow_mut().push("current"); true },
+            || { calls.borrow_mut().push("restore"); true }, || true));
+        assert!(calls.borrow().is_empty());
+        assert!(!prepare(false, Some((true, true)), || true, || false, || true));
+        let count = Cell::new(0);
+        assert!(!prepare(false, Some((true, true)),
+            || { count.set(count.get() + 1); count.get() == 1 },
+            || true, || true));
+        assert_eq!(count.get(), 2);
+        let called = Cell::new(false);
+        assert!(prepare(false, Some((true, false)), || true, || { called.set(true); true }, || true));
+        assert!(!called.get(), "a visible, unminimized window does not need restoration");
+        assert!(restore(false, Some((true, false)), || { called.set(true); true }));
+        assert!(!called.get(), "a window restored since sampling is not shown again");
+        assert!(!restore(false, Some((false, true)), || { called.set(true); true }));
+        assert!(!called.get(), "a hidden window is never restored");
     }
 
     #[test]
