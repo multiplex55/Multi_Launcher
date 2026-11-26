@@ -120,6 +120,7 @@ pub mod window_manager;
 pub mod windows_layout;
 pub mod workspace;
 pub mod xml_source;
+pub mod xml_schema_view;
 pub mod xml_tree_model;
 pub mod xml_xpath_model;
 pub mod xml_toolkit_engine;

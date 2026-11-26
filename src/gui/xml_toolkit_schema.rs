@@ -6,13 +6,12 @@
 
 use crate::gui::xml_toolkit_dialog::XmlJumpTargets;
 use crate::xml_toolkit_engine::{XmlDiagnostic, XmlEngineError};
+use crate::xml_schema_view::{request_is_current, schema_diagnostic_message, schema_error_message, bounded_path, MAX_SCHEMA_DIAGNOSTIC_CHARS};
 use crate::xml_toolkit_session::{
     XmlParseStatus, XmlSchemaSessionState, XmlSchemaStatus, XmlSessionSnapshot, XmlTreeStatus,
 };
 use eframe::egui;
 
-const MAX_SCHEMA_PATH_CHARS: usize = 512;
-const MAX_SCHEMA_DIAGNOSTIC_CHARS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum XmlToolkitSchemaIntent {
@@ -125,58 +124,12 @@ impl XmlToolkitSchemaViewState {
         schema: &XmlSchemaSessionState,
         snapshot: &XmlSessionSnapshot,
     ) {
-        match &schema.status {
-            XmlSchemaStatus::NotSelected => {}
-            XmlSchemaStatus::NotRun => {
-                ui.weak("Validation has not been run for the current XML and XSD.");
-            }
-            XmlSchemaStatus::Pending(request) if request_is_current(schema, snapshot, request) => {
-                ui.weak("Validating the current XML against the selected local XSD…");
-            }
-            XmlSchemaStatus::Valid(request) if request_is_current(schema, snapshot, request) => {
-                ui.label("XML is valid against the selected XSD.");
-            }
-            XmlSchemaStatus::SchemaViolation {
-                request,
-                diagnostic,
-            } if request_is_current(schema, snapshot, request) => {
-                let message = schema_diagnostic_message(diagnostic);
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    format!("XML instance violates the selected XSD: {message}"),
-                );
-            }
-            XmlSchemaStatus::SchemaLoadParseResolveCompileError { request, error }
-                if request_is_current(schema, snapshot, request) =>
-            {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    format!(
-                        "The selected XSD schema graph could not be loaded, resolved, or compiled: {}",
-                        schema_error_message(error)
-                    ),
-                );
-            }
-            XmlSchemaStatus::Unavailable { request, error }
-                if request_is_current(schema, snapshot, request) =>
-            {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    format!(
-                        "XSD validation is unavailable: {}",
-                        schema_error_message(error)
-                    ),
-                );
-            }
-            XmlSchemaStatus::Pending(_)
-            | XmlSchemaStatus::Valid(_)
-            | XmlSchemaStatus::SchemaViolation { .. }
-            | XmlSchemaStatus::SchemaLoadParseResolveCompileError { .. }
-            | XmlSchemaStatus::Unavailable { .. } => {
-                // A stale status is never presented as applying to the current
-                // source/schema pair, even if a caller constructed a snapshot
-                // that bypassed the session's normal invalidation path.
-                ui.weak("Validation has not been run for the current XML and XSD.");
+        let _ = schema;
+        if let Some((message, tone)) = crate::xml_schema_view::status_message(snapshot) {
+            match tone {
+                crate::xml_schema_view::SchemaStatusTone::Weak => { ui.weak(message); }
+                crate::xml_schema_view::SchemaStatusTone::Normal => { ui.label(message); }
+                crate::xml_schema_view::SchemaStatusTone::Error => { ui.colored_label(ui.visuals().error_fg_color, message); }
             }
         }
     }
@@ -189,85 +142,6 @@ impl XmlToolkitSchemaViewState {
     #[cfg(test)]
     fn intent_commits(&self) -> usize {
         self.intent_commits
-    }
-}
-
-fn request_is_current(
-    schema: &XmlSchemaSessionState,
-    snapshot: &XmlSessionSnapshot,
-    request: &crate::xml_toolkit_session::XmlSchemaValidationRequest,
-) -> bool {
-    snapshot.revision == Some(request.source_revision)
-        && snapshot.parse == XmlParseStatus::Ready
-        && matches!(&snapshot.tree, XmlTreeStatus::Ready(tree) if tree.document == request.document)
-        && schema.selected_path.as_ref() == Some(&request.schema_path)
-        && schema.revision == request.schema_revision
-}
-
-fn schema_diagnostic_message(diagnostic: &XmlDiagnostic) -> String {
-    let location = match (diagnostic.line, diagnostic.column) {
-        (Some(line), Some(column)) => format!(" at XML line {line}, column {column}"),
-        (Some(line), None) => format!(" at XML line {line}"),
-        (None, Some(column)) => format!(" at XML column {column}"),
-        (None, None) => String::new(),
-    };
-    let message = bounded_message(&diagnostic.message);
-    if location.is_empty() {
-        message
-    } else {
-        format!("{location}: {message}")
-    }
-}
-
-fn schema_error_message(error: &XmlEngineError) -> String {
-    match error {
-        XmlEngineError::SchemaLoad(diagnostic) => {
-            let location = match (diagnostic.line, diagnostic.column) {
-                (Some(line), Some(column)) => {
-                    format!(" (schema graph line {line}, column {column})")
-                }
-                (Some(line), None) => format!(" (schema graph line {line})"),
-                (None, Some(column)) => format!(" (schema graph column {column})"),
-                (None, None) => String::new(),
-            };
-            let message = bounded_message(&diagnostic.message);
-            if location.is_empty() {
-                message
-            } else {
-                format!("{location}: {message}")
-            }
-        }
-        XmlEngineError::SchemaPolicy(message) => {
-            format!("XSD resolution policy: {}", bounded_message(message))
-        }
-        XmlEngineError::Io(message) => {
-            format!("local XSD file access: {}", bounded_message(message))
-        }
-        XmlEngineError::SchemaBackend(message) => {
-            format!("MSXML backend: {}", bounded_message(message))
-        }
-        XmlEngineError::UnsupportedPlatform => "this platform is unsupported".into(),
-        XmlEngineError::WorkerUnavailable => "XML worker is unavailable".into(),
-        other => bounded_message(&format!("{other:?}")),
-    }
-}
-
-fn bounded_path(path: &std::path::Path) -> String {
-    let text = path.to_string_lossy();
-    bounded_message_with_limit(&text, MAX_SCHEMA_PATH_CHARS)
-}
-
-fn bounded_message(message: &str) -> String {
-    bounded_message_with_limit(message, MAX_SCHEMA_DIAGNOSTIC_CHARS)
-}
-
-fn bounded_message_with_limit(message: &str, limit: usize) -> String {
-    let mut chars = message.chars();
-    let prefix: String = chars.by_ref().take(limit).collect();
-    if chars.next().is_some() {
-        format!("{prefix}… (display clipped)")
-    } else {
-        prefix
     }
 }
 
@@ -320,10 +194,18 @@ mod tests {
             panic!("fixture contains a valid status");
         };
         assert!(request_is_current(&current.schema, &current, request));
+        assert_eq!(
+            crate::xml_schema_view::status_message(&current).unwrap().1,
+            crate::xml_schema_view::SchemaStatusTone::Normal
+        );
 
         let mut stale = current.clone();
         stale.revision = Some(XmlSourceRevision::for_test(2));
         assert!(!request_is_current(&stale.schema, &stale, request));
+        assert_eq!(
+            crate::xml_schema_view::status_message(&stale).unwrap().1,
+            crate::xml_schema_view::SchemaStatusTone::Weak
+        );
         assert!(
             schema_diagnostic_message(&XmlDiagnostic {
                 line: None,

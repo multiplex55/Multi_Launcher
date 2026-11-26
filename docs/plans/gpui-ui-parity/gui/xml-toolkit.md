@@ -28,4 +28,8 @@ The Tree tab uses the stock projection and one-shot inspection model. Virtual ro
 
 The XPath tab uses the stock expression and namespace request model. It distinguishes empty matches, scalar output and errors. Virtual nodes support wrap navigation and exact Tree reveal. Copy uses full scalars or the exact current node through the shared clipboard lane. Focused namespace, request, navigation and Windows engine tests passed. Paired desktop replay still needs prefixed nodes and attributes, scalar and empty results, invalid expressions, and exact copies after navigation.
 
-Local schema, owned file effects, and remembered native presentation and pin retain their assigned criteria.
+## GPUI Validation
+
+The Validation tab chooses a local XSD through the checked native owner, retains the selected path, and validates only on demand through the existing engine. Both frontends share bounded status and diagnostic rules. Four focused launcher tests cover owner, source, mount and session receipt checks. The grouped replay still needs actual picker ownership, Cancel, Clear and validation against the relative and missing include fixtures.
+
+Owned file effects and remembered native presentation and pin retain their assigned criteria.

@@ -1,5 +1,18 @@
 //! Source admission shared by the XML editor and file loader.
 use crate::xml_toolkit_engine::MAX_XML_INPUT_BYTES;
+
+pub fn validate_local_path(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("Choose an absolute local file path.".into());
+    }
+    #[cfg(windows)]
+    crate::xml_toolkit_engine::validate_xml_path_spelling(path)?;
+    #[cfg(not(windows))]
+    if path.as_os_str().to_string_lossy().starts_with("//") {
+        return Err("Network paths are not supported for XML files.".into());
+    }
+    Ok(())
+}
 use crate::xml_toolkit_session::{XmlFormatOutput, XmlOutputStatus, XmlSessionSnapshot};
 
 /// Validate a protected Unicode clipboard read before replacing XML source.

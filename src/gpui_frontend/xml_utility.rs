@@ -4,8 +4,8 @@ use multi_launcher::commands::{XmlToolkitCommand, XmlToolkitCommandHost};
 use multi_launcher::xml_toolkit_engine::{XmlFormatMode, XmlNodeDetailKind, XmlNodeId};
 use multi_launcher::xml_toolkit_session::{
     XmlDetailIntent, XmlDetailStatus, XmlEngineSession, XmlNodeDetailOutput, XmlNodeDetailRequest,
-    XmlNodeSelection, XmlOutputStatus, XmlParseStatus, XmlSessionSnapshot, XmlSourceRevision,
-    XmlTreeStatus, XmlXPathQueryRequest,
+    XmlNodeSelection, XmlOutputStatus, XmlParseStatus, XmlSchemaRevision, XmlSessionSnapshot,
+    XmlSourceRevision, XmlTreeStatus, XmlXPathQueryRequest,
 };
 use multi_launcher::xml_tree_model::{default_detail_kind, XmlToolkitTreeViewState};
 use multi_launcher::xml_xpath_model::{VisibleXPathStatus, XmlToolkitXPathViewState};
@@ -93,6 +93,10 @@ fn pump_needed(snapshot_pending: bool, tree_service_due: bool) -> bool {
 fn snapshot_pending(snapshot: &XmlSessionSnapshot) -> bool {
     matches!(snapshot.parse, XmlParseStatus::Pending)
         || matches!(snapshot.output, XmlOutputStatus::Pending(_))
+        || matches!(
+            snapshot.schema.status,
+            multi_launcher::xml_toolkit_session::XmlSchemaStatus::Pending(_)
+        )
         || matches!(snapshot.tree, XmlTreeStatus::Pending)
         || matches!(snapshot.detail, XmlDetailStatus::Pending(_))
         || matches!(
@@ -121,6 +125,7 @@ pub(super) struct XmlWorkspace {
     output_focus: FocusHandle,
     tree_focus: FocusHandle,
     xpath_focus: FocusHandle,
+    schema_focus: FocusHandle,
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     epoch: Arc<AtomicU64>,
@@ -128,6 +133,9 @@ pub(super) struct XmlWorkspace {
     output_tab: bool,
     pub(super) tree_tab: bool,
     pub(super) xpath_tab: bool,
+    pub(super) schema_tab: bool,
+    schema_picker: bool,
+    schema_path_draft: Option<std::path::PathBuf>,
     pub(super) xpath: XmlToolkitXPathViewState,
     pub(super) xpath_expression: Entity<InputState>,
     pub(super) xpath_bindings: Vec<XPathBinding>,
@@ -180,6 +188,7 @@ impl XmlWorkspace {
              event: &InputEvent,
              cx: &mut Context<Self>| {
                 if !this.open
+                    || this.schema_picker
                     || !this.mount.is_current()
                     || !matches!(event, InputEvent::Change)
                     || this.admission.is_fenced()
@@ -224,6 +233,7 @@ impl XmlWorkspace {
             output_focus: cx.focus_handle(),
             tree_focus: cx.focus_handle(),
             xpath_focus: cx.focus_handle(),
+            schema_focus: cx.focus_handle(),
             owner,
             mount,
             epoch: Arc::new(AtomicU64::new(1)),
@@ -231,6 +241,9 @@ impl XmlWorkspace {
             output_tab: false,
             tree_tab: false,
             xpath_tab: false,
+            schema_tab: false,
+            schema_picker: false,
+            schema_path_draft: None,
             xpath: XmlToolkitXPathViewState::default(),
             xpath_expression,
             xpath_bindings: Vec::new(),
@@ -291,6 +304,14 @@ impl XmlWorkspace {
                         view.shutdown_error = None;
                         view.engine = Engine::Active(session);
                         view.submit(cx);
+                        if let (Some(path), Engine::Active(session)) =
+                            (view.schema_path_draft.clone(), &view.engine)
+                        {
+                            if let Err(error) = session.select_schema_path(path) {
+                                view.feedback =
+                                    Some(format!("Could not restore selected XSD: {error:?}"));
+                            }
+                        }
                     }
                     Ok(session) => {
                         session.request_shutdown();
@@ -428,6 +449,12 @@ impl XmlWorkspace {
     pub(super) fn shutdown_failure(&self) -> Option<String> {
         self.shutdown_error.clone()
     }
+    pub(super) fn schema_picker_pending(&self) -> bool {
+        self.schema_picker
+    }
+    pub(super) fn schema_path_draft(&self) -> Option<&std::path::Path> {
+        self.schema_path_draft.as_deref()
+    }
     pub(super) fn draft(&self) -> Option<String> {
         (!self.source.is_empty()).then(|| self.source.clone())
     }
@@ -441,7 +468,9 @@ impl XmlWorkspace {
         if self.open && matches!(self.engine, Engine::Idle) {
             self.start(cx);
         }
-        if self.xpath_tab {
+        if self.schema_tab {
+            self.schema_focus.focus(window, cx);
+        } else if self.xpath_tab {
             self.xpath_focus.focus(window, cx);
         } else if self.tree_tab {
             self.tree_focus.focus(window, cx);
@@ -453,6 +482,9 @@ impl XmlWorkspace {
         cx.notify();
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.schema_picker {
+            return;
+        }
         let restore = window.is_window_active() && self.focus.contains_focused(window, cx);
         self.shutdown(cx);
         let _ = self.root.update(cx, |root, cx| {
@@ -477,7 +509,11 @@ impl XmlWorkspace {
         self.mount.clone()
     }
     pub(super) fn tree_live(&self) -> bool {
-        self.open && self.tree_tab && self.mount.is_current() && !self.admission.is_fenced()
+        self.open
+            && !self.schema_picker
+            && self.tree_tab
+            && self.mount.is_current()
+            && !self.admission.is_fenced()
     }
     pub(super) fn tree_toggle(
         &mut self,
@@ -598,7 +634,11 @@ impl XmlWorkspace {
         !self.clipboard_pending
     }
     pub(super) fn xpath_live(&self) -> bool {
-        self.open && self.xpath_tab && self.mount.is_current() && !self.admission.is_fenced()
+        self.open
+            && !self.schema_picker
+            && self.xpath_tab
+            && self.mount.is_current()
+            && !self.admission.is_fenced()
     }
     fn invalidate_xpath(&mut self, cx: &mut Context<Self>) {
         self.tree_copy_visibility = None;
@@ -951,8 +991,207 @@ impl XmlWorkspace {
         self.pump(cx);
         cx.notify();
     }
+    pub(super) fn schema_live(&self) -> bool {
+        self.open
+            && self.schema_tab
+            && !self.schema_picker
+            && self.mount.is_current()
+            && !self.admission.is_fenced()
+    }
+    pub(super) fn schema_choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.schema_live()
+            || self.clipboard_pending
+            || window.window_handle().window_id() != self.root_window.window_id()
+        {
+            return;
+        }
+        let contexts = window.context_stack();
+        if window.has_active_dialog(cx)
+            || context_stack_has_primary(&contexts, "PopupMenu")
+            || context_stack_has_primary(&contexts, "Dialog")
+            || context_stack_has_primary(&contexts, "AlertDialog")
+        {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        let owner = match checked_active_dialog_owner(window) {
+            Ok(Some(owner)) if Some(owner) == self.native => owner,
+            _ => {
+                self.feedback =
+                    Some("Activate the XML Utility window before choosing an XSD.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let visibility_revision = self.visibility.request_revision.load(Ordering::Acquire);
+        if !json_utility::native_host_current(
+            &self.visibility,
+            visibility_revision,
+            Some(owner),
+            false,
+        ) {
+            return;
+        }
+        let Some(permit) = self.admission.admit() else {
+            return;
+        };
+        let mount = self.mount.clone();
+        let source_epoch = self.epoch.load(Ordering::Acquire);
+        let source_revision = snapshot.revision;
+        let schema_revision = snapshot.schema.revision;
+        let root_window = self.root_window;
+        self.schema_picker = true;
+        let picker = rfd::FileDialog::new()
+            .set_parent(&*window)
+            .add_filter("XML Schema", &["xsd"]);
+        let worker_mount = mount.clone();
+        let worker_epoch = self.epoch.clone();
+        let worker_visibility = self.visibility.clone();
+        let worker_admission = self.admission.clone();
+        let task = cx.background_executor().spawn(async move {
+            if !super::xml_schema::picker_launch_current(
+                &worker_mount,
+                worker_epoch.load(Ordering::Acquire),
+                source_epoch,
+                !worker_admission.is_fenced(),
+                current_foreground_identity() == Some(owner.identity)
+                    && native_window_is_valid(owner)
+                    && json_utility::native_host_current(
+                        &worker_visibility,
+                        visibility_revision,
+                        Some(owner),
+                        false,
+                    ),
+            ) {
+                return None;
+            }
+            Some(picker.pick_file())
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let result = task.await.flatten();
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            let update = update_kit_window_content(root_window, &view, cx, |view, window, cx| {
+                view.schema_picker = false;
+                let snapshot = view.current_snapshot();
+                let current = super::xml_schema::picker_receipt_current(
+                    &mount,
+                    view.open && view.schema_tab && !view.admission.is_fenced(),
+                    view.epoch.load(Ordering::Acquire),
+                    source_epoch,
+                    snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot.revision == source_revision
+                            && snapshot.schema.revision == schema_revision
+                    }),
+                    view.native == Some(owner)
+                        && window.window_handle().window_id() == root_window.window_id()
+                        && json_utility::native_host_current(
+                            &view.visibility,
+                            visibility_revision,
+                            Some(owner),
+                            false,
+                        ),
+                );
+                if !current {
+                    cx.notify();
+                    return;
+                }
+                if let Some(path) = result {
+                    if let Err(error) = multi_launcher::xml_source::validate_local_path(&path) {
+                        view.feedback = Some(error);
+                    } else if let Engine::Active(session) = &view.engine {
+                        match session.select_schema_path(path.clone()) {
+                            Ok(_) => {
+                                view.schema_path_draft = Some(path);
+                                view.feedback = None;
+                            }
+                            Err(error) => {
+                                view.feedback = Some(format!("Could not select XSD: {error:?}"))
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            });
+            if update.is_err() {
+                let _ = view.update(cx, |view, cx| {
+                    view.schema_picker = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    pub(super) fn schema_clear(
+        &mut self,
+        source: XmlSourceRevision,
+        schema: XmlSchemaRevision,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.schema_live() {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        if snapshot.revision != Some(source)
+            || snapshot.schema.revision != schema
+            || snapshot.schema.selected_path.is_none()
+        {
+            return;
+        }
+        if let Engine::Active(session) = &self.engine {
+            match session.clear_schema_path() {
+                Ok(_) => {
+                    self.schema_path_draft = None;
+                    self.feedback = None;
+                }
+                Err(error) => self.feedback = Some(format!("Could not clear XSD: {error:?}")),
+            }
+        }
+        cx.notify();
+    }
+    pub(super) fn schema_validate(
+        &mut self,
+        source: XmlSourceRevision,
+        schema: XmlSchemaRevision,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.schema_live() {
+            return;
+        }
+        let Some(snapshot) = self.current_snapshot() else {
+            return;
+        };
+        if snapshot.revision != Some(source)
+            || snapshot.schema.revision != schema
+            || snapshot.schema.selected_path.is_none()
+            || snapshot.parse != XmlParseStatus::Ready
+            || !matches!(snapshot.tree, XmlTreeStatus::Ready(_))
+        {
+            return;
+        }
+        if let Engine::Active(session) = &self.engine {
+            match session.validate_selected_schema() {
+                Ok(_) => self.feedback = None,
+                Err(error) => self.feedback = Some(format!("Could not validate XML: {error:?}")),
+            }
+        }
+        self.pump(cx);
+        cx.notify();
+    }
     fn format(&mut self, mode: XmlFormatMode, cx: &mut Context<Self>) {
-        if !self.open || !self.mount.is_current() || self.admission.is_fenced() {
+        if !self.open
+            || self.schema_picker
+            || !self.mount.is_current()
+            || self.admission.is_fenced()
+        {
             return;
         }
         let Some(snapshot) = self.current_snapshot() else {
@@ -976,7 +1215,11 @@ impl XmlWorkspace {
         cx.notify();
     }
     fn apply_output(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || !self.mount.is_current() || self.admission.is_fenced() {
+        if !self.open
+            || self.schema_picker
+            || !self.mount.is_current()
+            || self.admission.is_fenced()
+        {
             return;
         }
         let Some(snapshot) = self.current_snapshot() else {
@@ -1004,7 +1247,7 @@ impl XmlWorkspace {
         scalar: Option<Arc<str>>,
         cx: &mut Context<Self>,
     ) {
-        if !self.open || self.clipboard_pending {
+        if !self.open || self.schema_picker || self.clipboard_pending {
             return;
         }
         let output = if matches!(intent, ClipboardIntent::Output) {
@@ -1186,6 +1429,7 @@ impl Render for XmlWorkspace {
         let output_tab_mount = self.mount.clone();
         let tree_tab_mount = self.mount.clone();
         let xpath_tab_mount = self.mount.clone();
+        let schema_tab_mount = self.mount.clone();
         let source_epoch = self.epoch.load(Ordering::Acquire);
         let output_epoch = self.output_epoch.load(Ordering::Acquire);
         let snapshot = self.current_snapshot();
@@ -1287,8 +1531,10 @@ impl Render for XmlWorkspace {
                                 if source_tab_mount.is_current()
                                     && view.open
                                     && !view.admission.is_fenced()
+                                    && !view.schema_picker
                                 {
                                     view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                                    view.schema_tab = false;
                                     view.xpath_tab = false;
                                     view.tree_epoch.fetch_add(1, Ordering::AcqRel);
                                     view.tree.revoke_copy_authority();
@@ -1309,8 +1555,10 @@ impl Render for XmlWorkspace {
                                 if output_tab_mount.is_current()
                                     && view.open
                                     && !view.admission.is_fenced()
+                                    && !view.schema_picker
                                 {
                                     view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                                    view.schema_tab = false;
                                     view.xpath_tab = false;
                                     view.tree_epoch.fetch_add(1, Ordering::AcqRel);
                                     view.tree.revoke_copy_authority();
@@ -1329,12 +1577,17 @@ impl Render for XmlWorkspace {
                     .label("Tree")
                     .track_focus(&self.tree_focus)
                     .on_click(cx.listener(move |view, _, window, cx| {
-                        if tree_tab_mount.is_current() && view.open && !view.admission.is_fenced() {
+                        if tree_tab_mount.is_current()
+                            && view.open
+                            && !view.schema_picker
+                            && !view.admission.is_fenced()
+                        {
                             view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
                             view.tree_epoch.fetch_add(1, Ordering::AcqRel);
                             view.tree.revoke_copy_authority();
                             view.tree_copy_visibility = None;
                             view.tree_copy_request = None;
+                            view.schema_tab = false;
                             view.xpath_tab = false;
                             view.tree_tab = true;
                             view.output_tab = false;
@@ -1349,12 +1602,16 @@ impl Render for XmlWorkspace {
                     .label("XPath")
                     .track_focus(&self.xpath_focus)
                     .on_click(cx.listener(move |view, _, window, cx| {
-                        if xpath_tab_mount.is_current() && view.open && !view.admission.is_fenced()
+                        if xpath_tab_mount.is_current()
+                            && view.open
+                            && !view.schema_picker
+                            && !view.admission.is_fenced()
                         {
                             view.tree_epoch.fetch_add(1, Ordering::AcqRel);
                             view.tree.revoke_copy_authority();
                             view.tree_copy_visibility = None;
                             view.tree_copy_request = None;
+                            view.schema_tab = false;
                             view.xpath_tab = true;
                             view.tree_tab = false;
                             view.output_tab = false;
@@ -1364,10 +1621,35 @@ impl Render for XmlWorkspace {
                         }
                     })),
             )
+            .child(
+                Button::new("xml-tab-validation")
+                    .label("Validation")
+                    .track_focus(&self.schema_focus)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if schema_tab_mount.is_current()
+                            && view.open
+                            && !view.schema_picker
+                            && !view.admission.is_fenced()
+                        {
+                            view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                            view.tree_epoch.fetch_add(1, Ordering::AcqRel);
+                            view.tree.revoke_copy_authority();
+                            view.tree_copy_visibility = None;
+                            view.tree_copy_request = None;
+                            view.schema_tab = true;
+                            view.xpath_tab = false;
+                            view.tree_tab = false;
+                            view.output_tab = false;
+                            view.schema_focus.focus(window, cx);
+                            cx.notify();
+                        }
+                    })),
+            )
+            .children(self.schema_tab.then(|| super::xml_schema::render(self, cx)))
             .children(self.xpath_tab.then(|| super::xml_xpath::render(self, cx)))
             .children(self.tree_tab.then(|| super::xml_tree::render(self, cx)))
             .when(
-                !self.output_tab && !self.tree_tab && !self.xpath_tab,
+                !self.output_tab && !self.tree_tab && !self.xpath_tab && !self.schema_tab,
                 |div| {
                     div.child(
                         Textarea::new(&self.input)
@@ -1469,6 +1751,7 @@ impl Render for XmlWorkspace {
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if !clear_mount.is_current()
                                     || !view.open
+                                    || view.schema_picker
                                     || view.admission.is_fenced()
                                 {
                                     return;
@@ -1479,7 +1762,9 @@ impl Render for XmlWorkspace {
                                 view.input
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                                 view.submit(cx);
-                                if view.xpath_tab {
+                                if view.schema_tab {
+                                    view.schema_focus.focus(window, cx);
+                                } else if view.xpath_tab {
                                     view.xpath_expression.focus_handle(cx).focus(window, cx);
                                 } else if view.tree_tab {
                                     view.tree_focus.focus(window, cx);

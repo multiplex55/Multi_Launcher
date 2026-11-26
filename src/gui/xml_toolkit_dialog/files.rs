@@ -15,21 +15,7 @@ pub(super) enum SaveOutcome {
     OverwriteRequired,
 }
 
-pub(super) fn validate_local_path(path: &Path) -> Result<(), String> {
-    if !path.is_absolute() {
-        return Err("Choose an absolute local file path.".into());
-    }
-
-    #[cfg(windows)]
-    crate::xml_toolkit_engine::validate_xml_path_spelling(path)?;
-
-    #[cfg(not(windows))]
-    if path.as_os_str().to_string_lossy().starts_with("//") {
-        return Err("Network paths are not supported for XML files.".into());
-    }
-
-    Ok(())
-}
+pub(super) use crate::xml_source::validate_local_path;
 
 pub(super) fn read_xml_file(path: &Path) -> Result<String, String> {
     let file = open_local_xml_file(path)?;
