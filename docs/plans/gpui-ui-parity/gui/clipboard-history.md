@@ -13,4 +13,8 @@ Select `protected_clipboard_history_skips_only_the_marked_item`, `ensure_open_lo
 
 ## GPUI docked Browse and Edit
 
-The exact stock `cb` provider opens the retained docked pane. Browse uses the canonical file, byte-faithful full entries and bounded selectable previews. A captured occurrence owns Edit and keeps the draft after a refresh. Opening and Cancel leave the OS clipboard and history bytes untouched. Locked checks passed. Focused GPUI tests, checked Save, Copy and Remove, remaining hosts and paired Windows evidence stay open. [Checkpoint](../CHECKPOINTS.md#g13-clipboard-history-browse-edit-and-cancel)
+The exact stock `cb` provider opens the retained docked pane. Browse uses the canonical file, byte-faithful full entries and bounded selectable previews. A captured occurrence owns Edit and keeps the draft after a refresh. Opening and Cancel leave the OS clipboard and history bytes untouched. Focused tests passed with the checked effects. Remaining hosts and paired Windows evidence stay open. [Checkpoint](../CHECKPOINTS.md#g13-clipboard-history-browse-edit-and-cancel)
+
+## GPUI checked effects
+
+Save, Copy and Remove bind the active mount and exact ordered snapshot. Save and the confirmed removal use guarded atomic replacement. Copy explicitly writes the complete current entry and checks authority after native clipboard acquisition. Conflicts preserve the draft or decision. Focused tests passed and Windows replay remains pending. [Checkpoint](../CHECKPOINTS.md#g13-checked-clipboard-history-save-copy-and-remove)

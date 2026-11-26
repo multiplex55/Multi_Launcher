@@ -74,6 +74,50 @@ pub fn save_history_if_unchanged(
     Ok(outcome)
 }
 
+/// Result of a guarded effect, distinguishing changed/unreadable disk from revoked authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardedHistoryOutcome { Updated, Conflict, Unreadable, Stale, Failed }
+/// Compare the complete ordered history and guard every atomic replacement attempt.
+pub fn replace_history_guarded(path: impl AsRef<Path>, expected: &[String], replacement: &[String], current: &dyn Fn() -> bool) -> GuardedHistoryOutcome {
+    let _transaction = clipboard_transaction_guard();
+    if !current() { return GuardedHistoryOutcome::Stale; }
+    let rows = match load_history_typed(path.as_ref()) { Ok(LoadState::Missing | LoadState::Empty) => Vec::new(), Ok(LoadState::Loaded(rows)) => rows, Err(_) => return GuardedHistoryOutcome::Unreadable };
+    if rows != expected { return GuardedHistoryOutcome::Conflict; }
+    if !current() { return GuardedHistoryOutcome::Stale; }
+    let Ok(bytes) = serde_json::to_vec_pretty(replacement) else { return GuardedHistoryOutcome::Failed; };
+    match crate::common::atomic_file::save_atomic_replaceable_if(path.as_ref(), &bytes, current) {
+        Ok(()) => { bump_clipboard_version(); GuardedHistoryOutcome::Updated },
+        Err(_) if !current() => GuardedHistoryOutcome::Stale,
+        Err(_) => GuardedHistoryOutcome::Failed,
+    }
+}
+
+/// Copy only the exact reviewed occurrence while serializing with history writers.
+/// Clipboard reads in the stock watcher finish before it acquires this transaction,
+/// so there is no clipboard-to-transaction lock nesting in that path.
+pub fn copy_history_if_unchanged(
+    path: impl AsRef<Path>, expected: &[String], index: usize,
+    backend: &dyn crate::clipboard_modify::clipboard::ClipboardBackend,
+    current: &dyn Fn() -> bool,
+) -> GuardedHistoryOutcome {
+    let _transaction = clipboard_transaction_guard();
+    if !current() { return GuardedHistoryOutcome::Stale; }
+    let rows = match load_history_typed(path) {
+        Ok(LoadState::Missing | LoadState::Empty) => Vec::new(),
+        Ok(LoadState::Loaded(rows)) => rows,
+        Err(_) => return GuardedHistoryOutcome::Unreadable,
+    };
+    if rows != expected || index >= rows.len() { return GuardedHistoryOutcome::Conflict; }
+    if !current() { return GuardedHistoryOutcome::Stale; }
+    #[cfg(windows)]
+    if rows[index].contains('\0') { return GuardedHistoryOutcome::Failed; }
+    match backend.write_text_if(&rows[index], current) {
+        Ok(true) => GuardedHistoryOutcome::Updated,
+        Ok(false) => GuardedHistoryOutcome::Stale,
+        Err(_) => GuardedHistoryOutcome::Failed,
+    }
+}
+
 /// Remove the history entry at `index` from the file at `path`.
 pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
     update_history_file(path, |history| {

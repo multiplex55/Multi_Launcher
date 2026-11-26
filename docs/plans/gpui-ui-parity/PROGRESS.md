@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Bare `cb` opens docked Clipboard History with ordered selectable rows, full multiline Edit and Cancel through the canonical disk loader. Locked checks and source review passed, and two reused stock cases passed. New focused cases are queued with the checked effects. [Clipboard History checkpoint](CHECKPOINTS.md#g13-clipboard-history-browse-edit-and-cancel)
+Docked Clipboard History supports checked Save, full Copy and exact Remove confirmation. All 15 grouped cases passed. Matched Windows replay remains pending. Remembered Dock and Pop Out follow. [Checked effects checkpoint](CHECKPOINTS.md#g13-checked-clipboard-history-save-copy-and-remove)
+
+Bare `cb` opens docked Clipboard History with ordered selectable rows, full multiline Edit and Cancel through the canonical disk loader. Focused cases passed in the checked effects batch. [Clipboard History checkpoint](CHECKPOINTS.md#g13-clipboard-history-browse-edit-and-cancel)
 
 Regex workspace Jump focuses Pattern, Test Text and navigation and selects the exact visible Match row. All seven focused tests passed. Matched Windows and additional scoped targets remain open. The next source slice is disk-backed Clipboard History Browse, Edit and Cancel. [Regex Jump checkpoint](CHECKPOINTS.md#g14-d-regex-workspace-jump)
 

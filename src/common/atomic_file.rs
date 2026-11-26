@@ -25,6 +25,11 @@ pub fn save_atomic_replaceable(path: &Path, bytes: &[u8]) -> Result<()> {
     save_atomic_with_policy(path, bytes, false, replace_existing_replaceable)
 }
 
+/// Replaceable write with an authority check immediately before each rename attempt.
+pub fn save_atomic_replaceable_if(path: &Path, bytes: &[u8], is_current: impl Fn() -> bool) -> Result<()> {
+    save_atomic_with_policy(path, bytes, false, |source, destination| replace_existing_replaceable_if(source, destination, &is_current))
+}
+
 fn save_atomic_with_replace(
     path: &Path,
     bytes: &[u8],
@@ -127,6 +132,16 @@ fn replace_existing_replaceable(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(windows)]
 fn replace_existing_if(src: &Path, dst: &Path, is_current: impl Fn() -> bool) -> Result<()> {
     replace_existing_with_flags(src, dst, true, is_current)
+}
+
+#[cfg(windows)]
+fn replace_existing_replaceable_if(src: &Path, dst: &Path, is_current: impl Fn() -> bool) -> Result<()> {
+    replace_existing_with_flags(src, dst, false, is_current)
+}
+#[cfg(not(windows))]
+fn replace_existing_replaceable_if(src: &Path, dst: &Path, is_current: impl Fn() -> bool) -> Result<()> {
+    if !is_current() { anyhow::bail!("atomic save request was superseded"); }
+    replace_existing_replaceable(src, dst)
 }
 
 #[cfg(windows)]
