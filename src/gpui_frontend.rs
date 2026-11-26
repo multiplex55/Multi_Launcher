@@ -7,6 +7,7 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod file_search;
+mod folder_size;
 mod file_search_preview;
 mod settings_actions;
 mod settings_search;
@@ -518,11 +519,12 @@ impl LauncherSearchCatalog {
                 let window_result = window_search::action_is_operation(&provider, &action);
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
+                let folder_size_result = provider == "folder_size" && folder_size::current_provider(raw_query, &action, None, None);
                 let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_search_start(raw_query, &action).is_some();
                 let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || settings_result || clipboard_modify_result || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || settings_result || clipboard_modify_result || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -531,7 +533,7 @@ impl LauncherSearchCatalog {
                         raw_query,
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
-                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || settings_result
+                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || folder_size_result || settings_result
                             || (clipboard_modify_result && multi_launcher::actions::search::clipboard_modify_resolved_postfilter_bypass(raw_query, &action.action)),
                         &self.matcher,
                         self.fuzzy_weight,
@@ -2415,6 +2417,7 @@ struct RootWindow {
     hash_clipboard_operation: Option<HashClipboardOperation>,
     hash_clipboard_operation_counter: u64,
     file_search: Option<Entity<file_search::FileSearchView>>,
+    folder_size_view: Option<Entity<folder_size::FolderSizeView>>,
     file_search_popup: Option<utility_mount::UtilityPopup>,
     file_search_retiring: Vec<RetiringHashWindow>,
     #[cfg(windows)]
@@ -3308,10 +3311,11 @@ fn intercept_root_pane_escape(
     cx: &mut App,
 ) -> bool {
     let plugin_editor = context_stack_has_primary(&event.context_stack, "PluginEditorPane");
+    let folder_size = context_stack_has_primary(&event.context_stack, "FolderSizePane");
     if event.keystroke.key != "escape"
         || receipt.virtual_key != 0x1b
         || receipt.modifiers.modified()
-        || (!plugin_editor && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
+        || (!plugin_editor && !folder_size && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
     {
         return false;
     }
@@ -3325,6 +3329,12 @@ fn intercept_root_pane_escape(
     if plugin_editor {
         let view = state.plugin_editor.clone();
         return view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, Some(receipt.held))));
+    }
+    if folder_size {
+        let view = state.folder_size_view.clone();
+        let handled = view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, receipt.held)));
+        if handled && !receipt.held { root.update(cx, |root, _| root.pane_escape_latched = true); }
+        return handled;
     }
     let view = state.file_search.clone();
     let detached = view.as_ref().is_some_and(|view| view.read(cx)
@@ -3358,6 +3368,7 @@ fn root_tab_traversed_to_search(
         && !context_stack_has_primary(context_stack, "CommandHelp")
         && !context_stack_has_primary(context_stack, "ToastLogViewer")
         && !context_stack_has_primary(context_stack, "FileSearchPane")
+        && !context_stack_has_primary(context_stack, "FolderSizePane")
         && !context_stack_has_primary(context_stack, "DownloadsTriagePane")
         && !context_stack_has_primary(context_stack, "PluginEditorPane")
         && !context_stack_has_primary(context_stack, "PopupMenu")
@@ -3522,6 +3533,7 @@ enum RootCloseBlocker {
     SnippetsSave,
     TempfileSave,
     FileSearchEffect,
+    FolderSize,
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -5452,6 +5464,7 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(folder_size::WAIT.into()); }
         if self.calculator_search.active {
             return Err(calculator_search::SEARCH_PENDING_STATUS.to_owned());
         }
@@ -5935,6 +5948,7 @@ impl RootWindow {
         self.drain_file_search_geometry(cx, true);
         self.drain_file_preview_geometry(cx, true);
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| view.shutdown(cx)); }
+        if let Some(view) = self.folder_size_view.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.retire_json_workspace(cx);
         self.drain_regex_native_geometry(cx, true);
         self.drain_clipboard_native_geometry(cx, true);
@@ -6304,6 +6318,7 @@ impl RootWindow {
             || self.context_favorite_popup.is_some()
             || self.result_favorites.owns_focus(window, cx)
             || self.file_search.as_ref().is_some_and(|view| view.read(cx).owns_focus(window, cx))
+            || self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).owns_focus(window, cx))
             || self.downloads_triage_owns_focus(window, cx)
             || self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).owns_focus(window, cx))
         {
@@ -6942,6 +6957,8 @@ impl RootWindow {
                     is_downloads_triage_opener(action)
                 } else if provider == "settings" && action.action == "settings:search" {
                     settings_navigation::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()).is_some()
+                } else if provider == "folder_size" {
+                    folder_size::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "file_search" {
                     is_file_search_opener(&query, action) || multi_launcher::plugins::file_search::scoped_search_start(&query, action).is_some()
                 } else {
@@ -7735,6 +7752,12 @@ impl RootWindow {
                 && self.enabled_capabilities.as_ref().is_none_or(|caps| caps.get("downloads_triage").is_none_or(|caps| caps.iter().any(|cap| cap == "search")))
             {
                 self.open_downloads_triage(window, cx);
+            }
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folder_size") {
+            if folder_size::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                self.open_folder_size(window, cx);
             }
             return;
         }
@@ -10032,6 +10055,7 @@ impl RootWindow {
             Some(RootCloseBlocker::ClipboardModifyBlocked) => { self.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
             Some(RootCloseBlocker::SettingsActionsSave) => { self.restart_status = Some(settings_actions::WAIT.to_owned()); }
             Some(RootCloseBlocker::FileSearchEffect) => { self.restart_status = Some(file_search_preview::WAIT.to_owned()); }
+            Some(RootCloseBlocker::FolderSize) => { self.restart_status = Some(folder_size::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
@@ -10129,6 +10153,7 @@ impl RootWindow {
     ) -> Option<RootCloseBlocker> {
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
+        if self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::FolderSize); }
         if self.external_launch.auxiliary_effect_pending() || self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting || view.read(cx).host_effect_pending(cx)) { return Some(RootCloseBlocker::FileSearchEffect); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Some(RootCloseBlocker::TempfileSave); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SnippetsSave); }
@@ -11043,6 +11068,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.tempfile_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.folder_size_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -12704,6 +12732,7 @@ pub(crate) fn run_foundation_window(
                     root.drain_file_search_geometry(cx, true);
                     root.drain_file_preview_geometry(cx, true);
                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| view.shutdown(cx)); }
+                    if let Some(view) = root.folder_size_view.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.retire_json_workspace(cx);
                     root.drain_regex_native_geometry(cx, true);
                     root.drain_clipboard_native_geometry(cx, true);
@@ -12939,6 +12968,7 @@ pub(crate) fn run_foundation_window(
                 hash_clipboard_operation: None,
                 hash_clipboard_operation_counter: 0,
                 file_search: None,
+                folder_size_view: None,
                 file_search_popup: None,
                 file_search_retiring: Vec::new(),
                 #[cfg(windows)]
@@ -13434,6 +13464,7 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::ClipboardModifyBlocked) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SettingsActionsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(settings_actions::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::FileSearchEffect) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(file_search_preview::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::FolderSize) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(folder_size::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
@@ -16427,9 +16458,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()

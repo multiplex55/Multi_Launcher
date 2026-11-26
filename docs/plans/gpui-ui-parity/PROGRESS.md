@@ -163,17 +163,17 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Measure | Current value |
 | --- | --- |
 | Initial work goals specified | 27 |
-| Goals with active or completed work | G00–G07, G11 Downloads Triage, G13 Clipboard History, Clipboard Modify, Snippets and Create Temp File, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G11, G13, G14 and G23 have open criteria. |
+| Goals with active or completed work | G00–G07, G10 Folder Size, G11 Downloads Triage, G13 Clipboard History, Clipboard Modify, Snippets and Create Temp File, G14 structured text, and G23 Toast Log and Activity Center. G00 source discovery and representative baseline are accepted. G01–G07, G10, G11, G13, G14 and G23 have open criteria. |
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 193 Specified, 25 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 192 Specified, 26 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add the first G10 Folder Size scan pane through the installed provider and shared session. Preview retention and explicit promotion have [focused evidence](CHECKPOINTS.md#g07-explicit-retained-preview-pop-out). Automatic restore of minimized inherited Hash, matched Settings, G01, G07, G13 and G14 replay, mixed DPI and known-duration F2 remain open. |
+| Current next action | Extract the shared Folder Size report projection and use it for GPUI table and treemap controls. The installed scan pane has [focused evidence](CHECKPOINTS.md#g10-folder-size-scan-pane). Matched Settings, G01, G07, G10, G13 and G14 replay, automatic restore of minimized inherited Hash, mixed DPI and known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

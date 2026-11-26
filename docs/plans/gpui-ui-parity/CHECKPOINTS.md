@@ -1654,3 +1654,13 @@ An explicit Preview action on the same selected row in popup File Search promote
 An accepted promotion queues the canonical `file-preview` Pop Out preference before the permit is released. A fresh Preview opened from docked File Search honors an explicit saved Pop Out. The current pane reports any save failure. The new child retains checked Explorer, clipboard, close, geometry and Return behavior.
 
 Independent review cleared exact admission, single mounting, rollback, remembered presentation and close ownership. The final scoped locked launcher check passed in 8.00 s. One warm launcher link took 21.30 s with no shared-library rebuild. Nextest run `8885679d-fd21-49bb-97f1-a5a74c6f2375` passed all 34 in 16.525 s, with 403 skipped. Paired Windows 1516 × 937 replay remains open for the same document position, one read, geometry persistence and return to the exact File Search popup. Continue the first G10 Folder Size scan pane.
+
+### G10 Folder Size scan pane
+
+The installed stock `foldersize` provider opens a retained Folder Size pane. The shared provider router preserves the stock kind filter and Search capability. Opening or choosing a folder leaves the scan idle. A checked native picker yields the original directory path. Scan and Refresh freeze the visible root, Include subfolders setting and request generation. Cancel applies to the current generation.
+
+The pane uses the shared `FolderSizeSession` and Activity Center. It shows progress, logical bytes, scan omissions and terminal status. Closing the exact pane cancels and retires its session. Quit and Restart wait for the picker or worker to settle. Owned Escape uses the launcher key latch and returns Search focus only if the closing pane still owns the visible launcher.
+
+Independent review covered installed routing, frozen requests, picker authority, Escape and worker retirement. The final scoped locked launcher check passed in 8.33 s. One warm link took 20.69 s with no shared-library rebuild. Nextest run `930371d9-37f6-4e90-af6d-adf74b32d7f5` passed all four in 1.923 s with 436 skipped. Reused Windows shared engine run `f35f5eed-6d8c-4632-82a1-13d452f59c12` passed both in 0.461 s, including hard-link names and cancel subtotal behavior.
+
+Matched Windows 1516 × 937 picker, scan and close replay remains open. The owned corpus has one 3-byte top-level file and one 5-byte nested file. Continue the shared table and treemap report boundary, then the GPUI report controls and remembered host and File Search prefill.

@@ -11,3 +11,7 @@ G10 owns `folder-size`. The `folder_size` plugin matches `foldersize` and emits 
 | FOLDER-SIZE-05 | Dock and Pop Out retain current results, selection, and in-flight or queued work. Preserve native geometry and independent hidden-root completion. Close requests cancellation and retires the host. Late scan events and stale menu actions cannot publish into a replacement session. |
 
 Use `folder_size_dialog_open_does_not_scan_and_retained_choose_starts_only_on_scan`, `file_search_folder_size_retained_prefill_focuses_without_scanning`, `folder_size_actual_prefill_held_scan_refresh_cancel_survives_host_moves`, `folder_size_treemap_links_selection_drill_and_view_modes`, and the affected cancellation or logical-byte tests. A Windows fixture can search for one directory with a 3-byte file and a nested 5-byte file, open Folder Size through the actual result action and verify an idle prefill followed by an explicit 8-byte scan. Native result-menu delivery depends on pointer or an equivalent verified route. This is a source record with GPUI and native verification pending.
+
+## GPUI scan pane
+
+Enter `foldersize`, choose a directory and select Scan. Include subfolders defaults on and applies to the next request. Refresh uses the displayed directory and scope. Cancel stops the current generation and the pane reports its progress or terminal summary from the shared session. The report table and treemap, remembered host, File Search prefill and matched Windows replay remain open. [Focused evidence](../CHECKPOINTS.md#g10-folder-size-scan-pane)

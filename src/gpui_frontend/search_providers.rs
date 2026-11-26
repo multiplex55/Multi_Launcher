@@ -223,6 +223,7 @@ pub(super) struct InstalledLauncherProviders {
     tempfile: TempfileBare,
     clipboard_modify: ClipboardModifyBare,
     file_search: FileSearchBarePlugin,
+    folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
     calculator: CalculatorMetadata,
     #[cfg(windows)]
     windows: WindowsMetadata,
@@ -292,6 +293,7 @@ impl InstalledLauncherProviders {
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
+            folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
             calculator: CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin::default()),
             #[cfg(windows)]
             windows: WindowsMetadata,
@@ -327,6 +329,7 @@ impl InstalledLauncherProviders {
             Some(&self.tempfile as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard_modify as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.folder_size as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
             Some(&self.windows as &dyn multi_launcher::plugin::Plugin),
@@ -608,6 +611,23 @@ mod tests {
         assert_eq!(effective.trim(), "cm uppercase");
         assert!(Arc::ptr_eq(&used, &catalog));
         assert_eq!(provider.search("cm template custom-owned")[0].action, "clipboard_modify:execute");
+    }
+
+    #[test]
+    fn installed_folder_size_provider_obeys_exact_query_and_capabilities() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        let enabled = HashSet::from(["folder_size".to_owned()]);
+        let rows = super::search_routed(providers.plugins(), "FolderSize", Some(&enabled), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "folder_size");
+        let filtered = super::search_routed(providers.plugins(), "kind:foldersize foldersize", Some(&enabled), None);
+        assert_eq!(filtered.len(), 1);
+        assert!(super::super::folder_size::current_provider("kind:foldersize foldersize", &filtered[0].1, Some(&enabled), None));
+        assert!(super::super::folder_size::current_provider("FolderSize", &rows[0].1, Some(&enabled), None));
+        assert!(super::search_routed(providers.plugins(), "foldersize extra", Some(&enabled), None).is_empty());
+        assert!(super::search_routed(providers.plugins(), "foldersize", Some(&HashSet::new()), None).is_empty());
+        let disabled = HashMap::from([("folder_size".to_owned(), Vec::new())]);
+        assert!(super::search_routed(providers.plugins(), "foldersize", Some(&enabled), Some(&disabled)).is_empty());
     }
 
     #[test]

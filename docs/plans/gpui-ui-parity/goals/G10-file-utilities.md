@@ -1,6 +1,6 @@
 # G10 — Archives, Duplicate Finder, Folder Size, and File Lock
 
-**Status:** Pending. **Owner:** G10 implementer, using the existing archive/scan/native diagnostic services. No test or implementation work has occurred. Stay on the single migration branch.
+**Status:** In implementation for Folder Size. **Owner:** G10 implementer, using the existing archive, scan and native diagnostic services. The stock Folder Size opener and shared scan pane have focused evidence. Report controls, remembered hosting, exact File Search prefill, matched native replay and the other G10 tool families remain open. [Scan pane checkpoint](../CHECKPOINTS.md#g10-folder-size-scan-pane)
 
 ## Objective and dependencies
 
