@@ -6,9 +6,11 @@
 
 ## 1. Acceptance objective and authority
 
+Follow [EXECUTION_STRATEGY.md](EXECUTION_STRATEGY.md) for implementation and verification scheduling, grouped linking, and immediate risk-based checks. This document defines evidence requirements and concrete test selection.
+
 Protect the working launcher engine and egui path while recreating every inventoried GUI, control, state and interaction in GPUI using GPUI Kit. Functional and interaction parity are mandatory. A cleaner visual treatment is allowed without silently dropping controls, changing workflow, or treating a screenshot as proof of behavior.
 
-Current task instructions and [AGENTS.md](https://github.com/multiplex55/Multi_Launcher/blob/f7bc610a86bcad1c14b69dce65b1d804df1b7934/AGENTS.md) govern verification. Old project plans and native campaigns are references, not automatically inherited gates. The size of this migration does not itself mandate a complete Nextest run.
+Current task instructions and the repository's [AGENTS.md](../../../AGENTS.md) govern verification. Old project plans and native campaigns are references, not automatically inherited gates. The size of this migration does not itself mandate a complete Nextest run.
 
 There are three distinct proof questions:
 
@@ -32,7 +34,7 @@ For the next bounded slice, record:
 
 - Actual base commit, branch, relevant dirty state, toolchain/target and build feature/profile.
 - Existing source owner and entry points, affected core contracts and GUI states.
-- Smallest existing tests that exercise those contracts, actual selected count and result.
+- Smallest existing tests that exercise those contracts and any applicable selection or result already recorded. Mark newly needed checks unrun until the Execution Strategy calls for execution.
 - Required native baseline observations that cannot be inferred from code, with fixture and environment.
 - Known failures with a reproducible symptom, their baseline provenance, and whether they obstruct the slice.
 
@@ -46,7 +48,7 @@ Case filters restrict execution but may not sufficiently restrict Cargo compilat
 
 Use `cargo check --locked --profile fast-dev` for coherent implementation increments. Include the affected test code when its target can be checked proportionately. Records can advance to implemented and type-checked before linking. Keep the selectors and Windows obligations for the combined run. Aim for three to five related slices per verification batch, using earlier checks for high-risk persistence, destructive operations, native lifecycle, security or shared-engine contracts when dependent work needs that evidence.
 
-Use a single active Cargo invocation with measured compilation parallelism. Keep serial test execution where Windows resources or fixtures require it, along with the existing Nextest stack wrapper. Record actual compile/link and test time separately. Use Cargo timings for the first build profile measurement and when investigating a concrete slowdown. Build one executable at a meaningful batch boundary and run the related native workflows on that artifact. Record tested, natively verified and formally accepted separately.
+Use a single active Cargo invocation with measured compilation parallelism. Keep serial test execution where Windows resources or fixtures require it, along with the existing Nextest stack wrapper. Record actual compile/link and test time separately. Use Cargo timings for the first build profile measurement and when investigating a concrete slowdown. Where practical, build one executable at a meaningful batch boundary and run related native workflows on that artifact. Record tested, natively verified and formally accepted separately.
 
 Current registered grouped integration targets:
 

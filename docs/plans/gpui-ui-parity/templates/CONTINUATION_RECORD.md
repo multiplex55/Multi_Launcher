@@ -4,6 +4,7 @@
 
 ## Current authority and checkout
 
+- Required methodology: [EXECUTION_STRATEGY.md](../EXECUTION_STRATEGY.md). Read and follow it before resuming or delegating.
 - Current objective and controlling instructions:
 - Existing checkout path, task branch and actual base:
 - Local HEAD / upstream HEAD / last accepted checkpoint:
@@ -35,7 +36,7 @@ Ordinary compiler errors and review fixes are continuation work, not automatic u
 
 ## Resume instructions
 
-1. Read current task status, this record, the active checkpoint packet and applicable AGENTS/configuration.
+1. Read current task status, this record, the active checkpoint packet, [EXECUTION_STRATEGY.md](../EXECUTION_STRATEGY.md), and applicable AGENTS and agent configuration. Include the strategy and relevant requirements in each agent handoff.
 2. Confirm checkout/branch/HEAD and preserve intentional user changes.
 3. Resume: <exact next bounded action>.
 4. Run only: <necessary focused checks and remaining native evidence>.

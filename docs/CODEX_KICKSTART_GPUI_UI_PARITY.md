@@ -1,16 +1,18 @@
 # Codex Kickstart: complete Multi Launcher GPUI UI parity
 
+**Required execution strategy.** Every Planner, Implementer, Reviewer, and orchestrator must read and follow [EXECUTION_STRATEGY.md](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) before planning, implementing, reviewing, verifying, or continuing this migration. The [Master Goal](CODEX_GOAL_GPUI_UI_PARITY.md) defines the objectives, full scope, and final acceptance. This Kickstart defines initialization, resumption, and coordination. The Execution Strategy governs implementation methodology, infrastructure priorities, batching, verification scheduling, and build efficiency. [AGENTS.md](../AGENTS.md) governs repository-wide engineering and agent conventions.
+
 You are executing the complete GPUI UI parity program for `multiplex55/Multi_Launcher`. Read `docs/CODEX_GOAL_GPUI_UI_PARITY.md` and its linked goal package in full before broad implementation. These files define the approved scope: a complete native GPUI Kit frontend, GUI-by-GUI parity, one shared engine, and the complete egui fallback. Continue across all G00–G26 goals and any necessary discovered child work.
 
 ## 1. Establish source, authority, and the dedicated branch
 
 1. Read current `AGENTS.md` and applicable nested instructions, `.codex/config.toml`, and actual planner/implementer/reviewer definitions. Use the configured roles/settings; do not invent old model choices or change agent instructions.
 2. Inspect `git status -sb`, active branch, HEAD, remotes/upstream, index, unstaged and untracked work, and any existing migration continuation record. This is one existing checkout with no worktrees, auxiliary clones, or per-agent branches.
-3. For a genuinely new run, fetch `origin/master` normally and resolve its exact SHA. The package was prepared against `f7bc610a86bcad1c14b69dce65b1d804df1b7934`; this is a planning reference, not permission to reset to it. Inspect subsequent commits affecting scope, startup, commands, core, UI, persistence, tests, or instructions.
-4. Create a fresh unique branch such as `feat/gpui-ui-parity` directly from the fetched master SHA. Preserve all existing work. If the transition would overwrite or wrongly incorporate user work, stop only that unsafe transition and report the precise blocker. Do not hard reset, auto-stash, force-checkout, or substitute a stale base.
+3. At first program initialization, fetch `origin/master` and resolve its exact SHA. Keep `f7bc610a86bcad1c14b69dce65b1d804df1b7934` as the historical planning reference. Inspect subsequent changes that affect the program.
+4. At first program initialization, create the dedicated migration branch from the fetched master SHA. Preserve existing work and report any unsafe checkout transition precisely.
 5. If this is a resumed migration, reconcile the recorded branch/HEAD and unfinished changes, then continue that branch. Do not create a fresh branch from master or lose prior GUI acceptance.
 6. Materialize this package’s `docs/` files on the migration branch if they were attached instead of already present. Preserve existing repository files; do not overwrite unrelated plans. Inspect the package as task input, then update its execution fields from actual observations.
-7. Complete `G00-A`: record parent SHA, task branch, current environment and tool versions, source deltas, and initial status; commit a small coherent baseline documentation checkpoint. Record the baseline commit separately from its parent.
+7. At first program initialization, record the `G00-A` parent, branch, environment, tool versions, source deltas, and status. Commit the baseline record and retain its separate SHA.
 8. Attempt one ordinary non-force upstream push. If it fails, preserve the local commit, record the failure, and continue. Do not enter a push-repair/rewrite loop.
 
 Do not implement on master. All goals and agents stay on this same migration branch. A goal boundary does not authorize a branch change.
@@ -41,21 +43,21 @@ Use bounded parallel read-only investigation when useful. Stop investigating a c
 
 ## 4. Prove the risky foundation early
 
-Execute G01 before bulk GUI ports. Pin official GPUI Kit and matching GPUI dependencies; use current primary documentation. Build the actual application binary with both frontends, establish the correct selected event-loop/thread ownership, and verify both startup alternatives.
+Prioritize the G01 foundation and run the early probes required by downstream work. Pin official GPUI Kit and matching GPUI dependencies using current primary documentation. Build the actual dual-frontend application, establish event-loop and thread ownership, and verify both startup alternatives.
 
 Probe actual Windows hotkey/focus/show-hide, secondary windows with hidden root, foreground restoration, representative overlays, and DPI/monitor behavior. Record a concrete adaptation or blocker for unsupported behavior. A separate hello-world demo cannot accept this goal.
 
-Then execute G02–G04: incremental shared-engine boundaries, selection/restart/data identity, shared presentation components, and one complete real Hash Generator GUI. Preserve the working egui path while extracting behavior. Do not require a wholesale engine rewrite before the pilot, and do not stop when the pilot is done.
+As dependencies become ready, execute G02–G04 for shared-engine boundaries, selection, restart, data identity, shared presentation components, and the complete Hash Generator pilot. Preserve the working egui path while extracting behavior. Keep outstanding independent native gates recorded and continue eligible work under the Execution Strategy.
 
 ## 5. Execute the full product conversion
 
-Use `GOAL_REGISTER.md` and the per-goal packets. Default order is G00–G26; reorder independent feature work only with recorded dependencies and GUI ownership. Investigate native risks early even when the corresponding complete feature port is later.
+Use `GOAL_REGISTER.md` and the per-goal packets for dependencies, ownership, and coverage. Apply the [Execution Strategy](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) to schedule foundational work, related GUI batches, and both verification passes. Document dependencies and owners when scheduling independent work out of register order.
 
 For each checkpoint:
 
 1. Planner confirms the actual owner, source/callers, invariants, concrete changes, narrow tests, native/visual needs, and done criteria.
 2. One implementer performs the coherent changes, extracting shared operations instead of duplicating them.
-3. Verify the meaningful affected behavior and inspect the diff.
+3. Check the diff and verify the affected behavior at the stage required by the Execution Strategy.
 4. Review the completed scope when the architecture/risk or goal requires it; resolve concrete findings.
 5. Update the GUI/goal/evidence records, commit a coherent checkpoint, and attempt one ordinary push.
 6. Continue to the next eligible checkpoint without asking for routine permission.
@@ -74,7 +76,7 @@ A frontend switch is a controlled restart: resolve unsaved edits and active jobs
 
 ## 7. Validate proportionately
 
-Read `VALIDATION_STRATEGY.md` before commands. Select the affected Cargo package/target first, then meaningful Nextest filters. Reuse existing tests and fixtures, confirm nonzero intended selection, and record actual commands/results.
+Read the Execution Strategy and `VALIDATION_STRATEGY.md` before commands. Select affected Cargo targets and meaningful Nextest filters. Reuse existing tests and fixtures, confirm nonzero intended selection, and record actual commands and results.
 
 Keep the current Nextest wrapper/stack policy and disable Paste Sequence Next/Cancel shortcuts in app fixtures before app construction, while preserving production defaults. Use the inspected profiles/helpers only where applicable and revalidate configuration against the execution baseline.
 
@@ -92,7 +94,7 @@ Track the stages Not started → Specified → In implementation → Implemented
 
 A window that opens is not automatically implemented; an implemented GUI is not automatically accepted. No placeholders, Unsupported buttons, TODO routes, suppressed errors or automatic egui handoffs may be counted as complete GPUI parity.
 
-Keep the linked documents authoritative. At each context/session boundary write the exact branch, HEAD, working-tree state, active checkpoint, partial changes, applicable evidence, unrun checks, blockers, and next action. On resume read that record before repeating work.
+Keep the linked documents authoritative. At each context or session boundary write the branch, HEAD, working-tree state, active checkpoint, partial changes, evidence, unrun checks, blockers, and next action. Link the Execution Strategy in the continuation record and every sub-agent handoff. On resume read that record and the strategy before work. Apply the same requirement after a model change, checkpoint transition, or upstream integration.
 
 Use one source writer, one shared heavy build/test process, and one native desktop controller. Planner/reviewer work may be parallel only when it is read-only and snapshot-safe.
 
@@ -106,4 +108,4 @@ At G25–G26 reconcile every GUI and requirement against the delivered candidate
 
 Report full completion only when all mandatory original criteria pass. Explicit user exceptions remain visible as changed scope/coverage. Deliver actual commit/branch/push state, build/run instructions, completed coverage, evidence and limitations. Do not merge to master or publish a release as part of this prompt.
 
-**Begin with G00-A now and continue the approved program until complete or a genuine documented blocker prevents further independent progress.**
+**Resume the recorded active checkpoint on the existing branch. Use G00-A only at first program initialization. Continue until the approved program is complete or a documented blocker prevents all remaining independent work.**

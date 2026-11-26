@@ -1,5 +1,7 @@
 # Checkpoints and continuation
 
+Read and follow [EXECUTION_STRATEGY.md](EXECUTION_STRATEGY.md) before continuing, planning, implementing, reviewing, or verifying migration work. Include its link and relevant requirements in every agent handoff and continuation record.
+
 ## P00 — Planning package prepared
 
 Planning reference: master f7bc610a86bcad1c14b69dce65b1d804df1b7934, November 21, 2026. User requirements translated into a master Goal, orchestration Kickstart, 27 initial goal packets and execution record system.

@@ -1,5 +1,7 @@
 # Codex Goal: complete Multi Launcher GPUI UI parity
 
+**Required execution strategy.** Every Planner, Implementer, Reviewer, and orchestrator must read and follow [EXECUTION_STRATEGY.md](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) before planning, implementing, reviewing, verifying, or continuing this migration. This Goal defines the objectives, functional scope, and final acceptance. The Kickstart defines initialization, resumption, and coordination. The Execution Strategy governs implementation methodology, infrastructure priorities, batching, verification scheduling, and build efficiency. [AGENTS.md](../AGENTS.md) governs repository-wide engineering and agent conventions.
+
 ## Assignment
 
 Create a complete second native frontend for Multi Launcher in Rust using **official GPUI Kit**. Recreate the current application **GUI by GUI**, preserving its controls, information, actions, input behavior, workflows, child interfaces, supported window modes, configuration, and data semantics. Improve the presentation through a coherent visual design while keeping the product recognizable.
@@ -142,23 +144,17 @@ Complete coherent vertical slices: retained state, all controls, domain operatio
 
 Use natural checkpoint commits such as `feat(gpui): [G07-B] preserve file search filters and result actions`. Commit coherent increments before materially different work. A checkpoint may be committed with required native evidence still pending when accurately recorded; that does not make its GUI Accepted or its goal complete. Preserve a buildable, working egui path at accepted checkpoints.
 
-### Two-pass execution by GUI family
-
-**Pass 1 · Functional coverage.** Select related interfaces with real engine, hosting or control reuse. A typical batch covers three to five smaller interfaces or several substantial increments of a larger family. Inspect each existing egui surface, wire the complete GPUI behavior to authoritative engines and persistence, add targeted tests, type-check with the locked `fast-dev` profile and obtain independent review. Keep substantial views and rendering in feature modules. Reuse the Hash and launcher work as implementation references. Extract shared hosting, input, controls, accessibility, dispatch, persistence or worker behavior when concrete consumers need it.
-
-**Pass 2 · Verification and acceptance.** Group focused selectors by target and build one Windows candidate for the batch where practical. Compare both frontends at the established 1516 × 937 baseline, collect related defects and revalidate the affected scope together. Record implementation, compilation, executed tests, native evidence and formal acceptance separately. Assign each deferred criterion an owner and verification stage. Continue safe independent implementation while environment-limited evidence remains pending, and resolve shared blocking defects before dependent features rely on them.
-
-Verify high-risk startup, shutdown, shared service ownership, destructive effects, persistence, Windows authority, global input, unsafe code and asynchronous lifetime changes immediately at the narrowest useful boundary. Use ordinary scoped checks between implementation checkpoints and preserve the existing compilation caches. Keep the anchored Search field and independent body scrolling at the native baseline, with compact sizes supplemental.
+Follow the [Execution Strategy](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) for the two functional and verification passes, immediate high-risk checks, and scheduling independent work. Apply the GUI records, requirements and validation contract to every criterion.
 
 ## 8. Branch and agent workflow
 
-Start a fresh branch such as `feat/gpui-ui-parity` from the latest safely fetched `origin/master`. Record the parent SHA, branch, initial baseline commit, and upstream. Preserve staged/unstaged/untracked user work. Do not discard, reset, force-checkout, auto-stash, or incorporate unrelated work merely to create the branch.
+At first program initialization, create the dedicated branch from the latest safely fetched `origin/master`. Record the parent SHA, branch, initial baseline commit, and upstream. Preserve staged, unstaged, and untracked user work.
 
-All G00–G26 work stays on this one branch. Resuming an existing migration uses its latest preserved state; it does not branch again from master. Do not use worktrees, auxiliary clones/checkouts, per-agent branches, or intermediate merges to advance these goals. Integrating upstream later must be deliberate and must not invalidate evidence silently.
+All G00–G26 work stays on this one branch. Resume the existing checkout from its preserved state. Use the single branch throughout ordinary implementation. For an authorized upstream merge, integrate master into the feature branch at a clean checkpoint, record both parent revisions and the result, and reconcile evidence only for the affected scope. Retain the historical behavioral baseline.
 
 Use current configured planner/implementer/reviewer roles. Read their actual configuration; do not carry old model assignments forward. The parent coordinates source ownership, records, commits, and best-effort pushes. Parallelize bounded read-only investigation. Use one active source writer, one shared heavy build/test process, and one live-desktop controller. Do not allow read-only review to race an evolving diff.
 
-After each coherent commit, attempt one ordinary non-force push when possible. A failed push is not an implementation blocker: preserve local commits, record the result, and continue. Do not rewrite history or repeatedly retry to repair a push. Merge/release publication is outside this implementation prompt.
+After each coherent commit, attempt one ordinary non-force push when possible. If it fails, preserve local commits, record the result, and continue. Publishing the migration into master or publishing a release requires separate authorization.
 
 ## 9. Persistent planning and evidence
 
@@ -183,7 +179,7 @@ Statuses are Not started, Specified, In implementation, Implemented, Validation 
 
 ## 10. Focused validation contract
 
-Follow VALIDATION_STRATEGY.md. Do not run full `cargo nextest` after every GUI, checkpoint, or documentation update. Select the relevant Cargo target before Nextest filters to avoid needless target compilation. Reuse current regression tests and fixtures.
+Follow the [Execution Strategy](plans/gpui-ui-parity/EXECUTION_STRATEGY.md) for verification cadence and the [Validation Strategy](plans/gpui-ui-parity/VALIDATION_STRATEGY.md) for evidence requirements. Select the relevant Cargo target before Nextest filters and reuse meaningful existing tests and fixtures.
 
 For the inspected baseline, preserve the Windows Nextest wrapper and stack floor; apply the AGENTS fixture rule disabling Paste Sequence Next/Cancel shortcuts before app construction without changing production defaults. Confirm actual commands and runner configuration at kickoff.
 
@@ -201,7 +197,7 @@ Later changes must selectively invalidate affected earlier acceptance. Record wh
 
 After completing a checkpoint or goal, update records, commit/push as appropriate, and continue to the next eligible task. Do not request routine permission at each screen or stop at the pilot.
 
-At a session boundary, checkpoint branch/HEAD, working-tree state, active goal, GUI IDs, partial edits, tests, pending native checks, blockers, and the exact next action. Resume from this state.
+At a session boundary, checkpoint branch/HEAD, working-tree state, active goal, GUI IDs, partial edits, tests, pending native checks, blockers, and the exact next action. Include the active Execution Strategy in the handoff and agent assignments. Resume from this state.
 
 Normal compiler failures, local UI defects, and failing migration tests are work to resolve. For a persistent blocker with no new evidence, stop identical retries, record what was attempted and the smallest needed capability, and continue independent work. If all independent work is exhausted, create the current AGENTS-required stall report and report truthful partial status.
 

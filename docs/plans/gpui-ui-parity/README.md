@@ -2,13 +2,16 @@
 
 ## Current state
 
+Read and follow the required [Execution Strategy](EXECUTION_STRATEGY.md) before planning, implementing, reviewing, verifying, or resuming migration work.
+
 Execution is on `feat/gpui-ui-parity`. The G00-A baseline checkpoint is `3e67f7396f127d6dcb7bec432e9bb1684e9e6ae3`, pushed to `origin/feat/gpui-ui-parity`. The planning reference and execution parent are recorded separately in [Source baseline](SOURCE_BASELINE.md).
 
-The ordinary Windows release at `e73bb09c1` opened both startup choices and supported native text editing in the GPUI proof. G02-B at `d942d9b65` extracted the shared Hash Generator session and passed the scoped egui regressions. The G02-C/D Windows dev build exercised the typed GPUI Text/SHA-256 route and retained-session lifecycle. See [Checkpoints](CHECKPOINTS.md) and [Progress](PROGRESS.md) for current coverage.
+The current checkout integrates the Windows virtual-desktop fix from master at `00620851f`. G14 JSON and XML have retained hosts and saved pins with focused test evidence. Matched Windows replay remains open. The next implementation is the G14-C Regex Tester workspace. See [Checkpoints](CHECKPOINTS.md) and [Progress](PROGRESS.md) for evidence and continuation.
 
 ## Contracts and work
 
 - [Master Goal](../../CODEX_GOAL_GPUI_UI_PARITY.md) and [complete user requirements](REQUIREMENTS.md).
+- [Required Execution Strategy](EXECUTION_STRATEGY.md) and [Kickstart](../../CODEX_KICKSTART_GPUI_UI_PARITY.md).
 - [Goal register](GOAL_REGISTER.md): all 27 initial goal packets and dependency order.
 - [Source baseline](SOURCE_BASELINE.md) and [provisional discovery inventory](GUI_INVENTORY.md).
 - [Frontend selection](FRONTEND_SELECTION.md), [core contracts](CORE_CONTRACTS.md), [design system](DESIGN_SYSTEM.md), and [component mapping](COMPONENT_MAPPING.md).

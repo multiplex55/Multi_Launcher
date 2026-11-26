@@ -1,6 +1,6 @@
 # Goal register
 
-G00–G07 have active or completed checkpoints. G11 Downloads Triage has its first checked Inspect route. G23 includes the Toast Log launcher route and the first Activity Center view for the Hash pilot. The matrix and individual GUI records track source specifications, scoped implementation and native evidence. Read the master Goal for shared contracts and the packets for concrete checkpoints.
+G00–G07 have active or completed checkpoints. G11 has the checked Downloads Triage Inspect route. G14 has functional JSON and XML workspaces with Windows replay pending. G23 includes Toast Log routing and the first Activity Center view for the Hash pilot. Read the Master Goal for shared contracts, the packets for scoped criteria, and the required [Execution Strategy](EXECUTION_STRATEGY.md) for implementation and verification scheduling.
 
 The initial program has 27 goals. All remain on **one migration branch**, with one active source writer. Ordering below is a default, not a requirement to block independent work behind an unavailable unrelated native check. Record any resequencing and preserve dependency/evidence ownership.
 

@@ -16,6 +16,7 @@ Use the supplied documents as an execution ledger. Avoid copying full checklists
 | DESIGN_SYSTEM | Recorded visual decisions, density, text/theme scales and visual acceptance |
 | COMPONENT_MAPPING | Kit mappings, custom components, accessibility/input ownership |
 | GOAL_REGISTER | Goal dependencies, ownership, checkpoint IDs and actual stage |
+| EXECUTION_STRATEGY | Required implementation methodology, infrastructure priorities, batching, and verification cadence |
 | PROGRESS | Correct counts, denominators, current work, pending native checks and revalidation |
 | VALIDATION_STRATEGY | Relevant targets/filters, native requirements, broader-run triggers |
 | VALIDATION_LOG | Exact commands, selected tests/counts, timings, binary/commit and real result |
