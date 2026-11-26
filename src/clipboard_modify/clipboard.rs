@@ -1,5 +1,7 @@
 use crate::platform::protected_clipboard::{
-    ClipboardError as ProtectedClipboardError, ClipboardRead, read_clipboard_for_modify,
+    ClipboardError as ProtectedClipboardError, ClipboardRead, ClipboardStamp, OpenClipboardFormat,
+    StampedClipboardRead, checked_open_clipboard_is_ordinary, current_clipboard_stamp,
+    read_clipboard_for_modify, read_stamped_clipboard_for_modify,
 };
 use std::sync::{Mutex, TryLockError};
 use std::thread::sleep;
@@ -80,7 +82,27 @@ impl From<ExecuteError> for ClipboardError {
 pub trait ClipboardBackend: Send + Sync {
     fn read_text(&self) -> Result<String, ClipboardError>;
     fn write_text(&self, text: &str) -> Result<(), ClipboardError>;
-    fn write_text_if(&self, text: &str, current: &dyn Fn() -> bool) -> Result<bool, ClipboardError> {
+    /// Checked commits require a backend that can bind its read to its writer.
+    fn read_stamped(&self) -> Result<(String, ClipboardStamp), ClipboardError> {
+        Err(ClipboardError::Permanent(
+            "Checked clipboard access unavailable".into(),
+        ))
+    }
+    fn write_stamped_if(
+        &self,
+        _text: &str,
+        _stamp: ClipboardStamp,
+        _current: &dyn Fn() -> bool,
+    ) -> Result<bool, ClipboardError> {
+        Err(ClipboardError::Permanent(
+            "Checked clipboard access unavailable".into(),
+        ))
+    }
+    fn write_text_if(
+        &self,
+        text: &str,
+        current: &dyn Fn() -> bool,
+    ) -> Result<bool, ClipboardError> {
         if !current() {
             return Ok(false);
         }
@@ -92,6 +114,43 @@ pub trait ClipboardBackend: Send + Sync {
 #[derive(Debug, Default)]
 pub struct ArboardClipboardBackend;
 impl ClipboardBackend for ArboardClipboardBackend {
+    fn read_stamped(&self) -> Result<(String, ClipboardStamp), ClipboardError> {
+        match read_stamped_clipboard_for_modify() {
+            Ok(StampedClipboardRead::Ordinary {
+                text,
+                stamp: Some(stamp),
+            }) => Ok((text, stamp)),
+            Ok(StampedClipboardRead::Ordinary { stamp: None, .. }) => Err(
+                ClipboardError::Permanent("Clipboard sequence unavailable".into()),
+            ),
+            Ok(StampedClipboardRead::Private) => Err(ClipboardError::ProtectedItem),
+            Ok(StampedClipboardRead::NonText) => Err(ClipboardError::NonText),
+            Err(ProtectedClipboardError::TimedOut) => Err(ClipboardError::TimedOut),
+            Err(error) if error.is_busy() => Err(ClipboardError::Busy(error.to_string())),
+            Err(error) => Err(ClipboardError::Permanent(error.to_string())),
+        }
+    }
+    fn write_stamped_if(
+        &self,
+        text: &str,
+        stamp: ClipboardStamp,
+        current: &dyn Fn() -> bool,
+    ) -> Result<bool, ClipboardError> {
+        let mut clipboard = arboard::Clipboard::new().map_err(classify_arboard)?;
+        let writer = clipboard.set();
+        match checked_open_clipboard_is_ordinary() {
+            Ok(OpenClipboardFormat::Ordinary) => {}
+            Ok(OpenClipboardFormat::Private) => return Err(ClipboardError::ProtectedItem),
+            Ok(OpenClipboardFormat::NonText) => return Err(ClipboardError::NonText),
+            Err(error) if error.is_busy() => return Err(ClipboardError::Busy(error.to_string())),
+            Err(error) => return Err(ClipboardError::Permanent(error.to_string())),
+        }
+        if current_clipboard_stamp() != Some(stamp) || !current() {
+            return Ok(false);
+        }
+        writer.text(text).map_err(classify_arboard)?;
+        Ok(true)
+    }
     fn read_text(&self) -> Result<String, ClipboardError> {
         map_protected_read(read_clipboard_for_modify())
     }
@@ -99,7 +158,11 @@ impl ClipboardBackend for ArboardClipboardBackend {
         let mut cb = arboard::Clipboard::new().map_err(classify_arboard)?;
         cb.set_text(text.to_string()).map_err(classify_arboard)
     }
-    fn write_text_if(&self, text: &str, current: &dyn Fn() -> bool) -> Result<bool, ClipboardError> {
+    fn write_text_if(
+        &self,
+        text: &str,
+        current: &dyn Fn() -> bool,
+    ) -> Result<bool, ClipboardError> {
         let mut clipboard = arboard::Clipboard::new().map_err(classify_arboard)?;
         let writer = clipboard.set();
         if !current() {
@@ -141,6 +204,34 @@ pub struct UndoRecord {
     pub operation_label: String,
 }
 
+/// Exact reviewed clipboard content remains private and is never formatted.
+#[derive(Clone)]
+pub struct ClipboardReview {
+    expected: String,
+    stamp: ClipboardStamp,
+    pub baseline: ClipboardSummary,
+    pub current: ClipboardSummary,
+}
+impl std::fmt::Debug for ClipboardReview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClipboardReview")
+            .field("baseline", &self.baseline)
+            .field("current", &self.current)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Clone, Copy)]
+pub enum CheckedClipboardEffect<'a> {
+    Apply { baseline: &'a str },
+    CopyResult,
+    ReviewedOverwrite { review: &'a ClipboardReview },
+}
+pub enum CheckedClipboardOutcome {
+    Written,
+    ReviewRequired(ClipboardReview),
+    Superseded,
+}
+
 #[derive(Clone, Copy)]
 enum RetryPolicy {
     SingleAttempt,
@@ -162,6 +253,72 @@ impl<B: ClipboardBackend> ClipboardService<B> {
     }
     pub fn undo_record(&self) -> Option<UndoRecord> {
         self.undo.lock().unwrap().clone()
+    }
+
+    /// Commit a dialog action only while its protected snapshot and caller's
+    /// authority still hold at the backend's acquired-writer boundary.
+    pub fn commit_dialog_checked(
+        &self,
+        effect: CheckedClipboardEffect<'_>,
+        output: &str,
+        label: &str,
+        current: &dyn Fn() -> bool,
+    ) -> Result<CheckedClipboardOutcome, ClipboardError> {
+        if output.contains('\0') {
+            return Err(ClipboardError::InvalidContent(
+                "Clipboard text contains NUL".into(),
+            ));
+        }
+        let _guard = self.try_commit_lock()?;
+        if !current() {
+            return Ok(CheckedClipboardOutcome::Superseded);
+        }
+        let first = self.backend.read_stamped();
+        if !current() {
+            return Ok(CheckedClipboardOutcome::Superseded);
+        }
+        let (mut text, mut stamp) = first?;
+        if matches!(
+            effect,
+            CheckedClipboardEffect::CopyResult | CheckedClipboardEffect::ReviewedOverwrite { .. }
+        ) {
+            let second = self.backend.read_stamped();
+            if !current() {
+                return Ok(CheckedClipboardOutcome::Superseded);
+            }
+            (text, stamp) = second?;
+        }
+        let expected = match effect {
+            CheckedClipboardEffect::Apply { baseline } => {
+                Some((baseline, ClipboardSummary::new(baseline), None))
+            }
+            CheckedClipboardEffect::ReviewedOverwrite { review } => Some((
+                review.expected.as_str(),
+                review.baseline.clone(),
+                Some(review.stamp),
+            )),
+            CheckedClipboardEffect::CopyResult => None,
+        };
+        if let Some((expected, baseline, expected_stamp)) = expected {
+            if text != expected || expected_stamp.is_some_and(|expected| expected != stamp) {
+                return Ok(CheckedClipboardOutcome::ReviewRequired(ClipboardReview {
+                    baseline,
+                    current: ClipboardSummary::new(&text),
+                    expected: text,
+                    stamp,
+                }));
+            }
+        }
+        if !self.backend.write_stamped_if(output, stamp, current)? {
+            return Ok(CheckedClipboardOutcome::Superseded);
+        }
+        let record = UndoRecord {
+            original_text: text,
+            modified_text: output.to_owned(),
+            operation_label: label.to_owned(),
+        };
+        *self.undo.lock().unwrap() = Some(record);
+        Ok(CheckedClipboardOutcome::Written)
     }
 
     pub fn read_text_for_modify(&self) -> Result<String, ClipboardError> {
@@ -439,6 +596,220 @@ pub mod fake {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_dialog_effects_revalidate_at_writer_and_preserve_undo() {
+        use super::{
+            CheckedClipboardEffect, CheckedClipboardOutcome, ClipboardBackend, ClipboardError,
+            ClipboardService,
+        };
+        use crate::platform::protected_clipboard::ClipboardStamp;
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        struct State {
+            text: String,
+            seq: u32,
+            private: bool,
+            change_at_open: bool,
+            writes: usize,
+            reads: usize,
+            guard_error: Option<ClipboardError>,
+        }
+        struct Backend(Mutex<State>);
+        impl ClipboardBackend for Backend {
+            fn read_text(&self) -> Result<String, ClipboardError> {
+                Ok(self.0.lock().unwrap().text.clone())
+            }
+            fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
+                let mut s = self.0.lock().unwrap();
+                s.text = text.into();
+                s.writes += 1;
+                Ok(())
+            }
+            fn read_stamped(&self) -> Result<(String, ClipboardStamp), ClipboardError> {
+                let mut s = self.0.lock().unwrap();
+                s.reads += 1;
+                if s.private {
+                    return Err(ClipboardError::ProtectedItem);
+                }
+                Ok((
+                    s.text.clone(),
+                    ClipboardStamp::from_sequence(s.seq).unwrap(),
+                ))
+            }
+            fn write_stamped_if(
+                &self,
+                text: &str,
+                stamp: ClipboardStamp,
+                current: &dyn Fn() -> bool,
+            ) -> Result<bool, ClipboardError> {
+                let mut s = self.0.lock().unwrap();
+                if let Some(error) = s.guard_error.take() {
+                    return Err(error);
+                }
+                if s.change_at_open {
+                    s.private = true;
+                    s.seq += 1;
+                    s.change_at_open = false;
+                }
+                if s.private {
+                    return Err(ClipboardError::ProtectedItem);
+                }
+                if ClipboardStamp::from_sequence(s.seq) != Some(stamp) || !current() {
+                    return Ok(false);
+                }
+                s.text = text.into();
+                s.seq += 1;
+                s.writes += 1;
+                Ok(true)
+            }
+        }
+        let service = ClipboardService::new(Backend(Mutex::new(State {
+            text: "baseline".into(),
+            seq: 1,
+            private: false,
+            change_at_open: false,
+            writes: 0,
+            reads: 0,
+            guard_error: None,
+        })));
+        let live = AtomicBool::new(true);
+        let current = || live.load(Ordering::Acquire);
+        let outcome = service
+            .commit_dialog_checked(
+                CheckedClipboardEffect::Apply {
+                    baseline: "baseline",
+                },
+                " café\n😀 ",
+                "Apply",
+                &current,
+            )
+            .unwrap();
+        assert!(matches!(outcome, CheckedClipboardOutcome::Written));
+        let undo = service.undo_record().unwrap();
+        assert_eq!(undo.original_text, "baseline");
+        assert_eq!(undo.modified_text, " café\n😀 ");
+        service.backend.0.lock().unwrap().change_at_open = true;
+        assert!(matches!(
+            service.commit_dialog_checked(
+                CheckedClipboardEffect::CopyResult,
+                "new",
+                "Copy",
+                &current
+            ),
+            Err(ClipboardError::ProtectedItem)
+        ));
+        assert_eq!(service.undo_record(), Some(undo.clone()));
+        assert_eq!(service.backend.0.lock().unwrap().writes, 1);
+        {
+            let mut s = service.backend.0.lock().unwrap();
+            s.private = false;
+        }
+        for error in [
+            ClipboardError::NonText,
+            ClipboardError::Busy("busy".into()),
+            ClipboardError::Permanent("unavailable".into()),
+        ] {
+            service.backend.0.lock().unwrap().guard_error = Some(error.clone());
+            assert!(
+                matches!(service.commit_dialog_checked(CheckedClipboardEffect::CopyResult, "new", "Copy", &current), Err(actual) if actual == error)
+            );
+            assert_eq!(service.undo_record(), Some(undo.clone()));
+        }
+        let calls = std::cell::Cell::new(0);
+        let revoke = || {
+            calls.set(calls.get() + 1);
+            calls.get() <= 3
+        };
+        assert!(matches!(
+            service
+                .commit_dialog_checked(CheckedClipboardEffect::CopyResult, "new", "Copy", &revoke)
+                .unwrap(),
+            CheckedClipboardOutcome::Superseded
+        ));
+        assert_eq!(service.undo_record(), Some(undo));
+        assert_eq!(service.backend.0.lock().unwrap().writes, 1);
+        let prior_reads = service.backend.0.lock().unwrap().reads;
+        let revoke_after_read = || service.backend.0.lock().unwrap().reads == prior_reads;
+        assert!(matches!(
+            service
+                .commit_dialog_checked(
+                    CheckedClipboardEffect::CopyResult,
+                    "new",
+                    "Copy",
+                    &revoke_after_read
+                )
+                .unwrap(),
+            CheckedClipboardOutcome::Superseded
+        ));
+        assert_eq!(service.backend.0.lock().unwrap().reads, prior_reads + 1);
+        let prior_reads = service.backend.0.lock().unwrap().reads;
+        let revoke_after_read = || service.backend.0.lock().unwrap().reads == prior_reads;
+        assert!(matches!(
+            service
+                .commit_dialog_checked(
+                    CheckedClipboardEffect::Apply {
+                        baseline: "different"
+                    },
+                    "new",
+                    "Apply",
+                    &revoke_after_read
+                )
+                .unwrap(),
+            CheckedClipboardOutcome::Superseded
+        ));
+        let CheckedClipboardOutcome::ReviewRequired(review) = service
+            .commit_dialog_checked(
+                CheckedClipboardEffect::Apply { baseline: "old" },
+                "new",
+                "Apply",
+                &current,
+            )
+            .unwrap()
+        else {
+            panic!("expected review")
+        };
+        {
+            let mut s = service.backend.0.lock().unwrap();
+            s.seq += 1;
+        }
+        let CheckedClipboardOutcome::ReviewRequired(renewed) = service
+            .commit_dialog_checked(
+                CheckedClipboardEffect::ReviewedOverwrite { review: &review },
+                "new",
+                "Apply",
+                &current,
+            )
+            .unwrap()
+        else {
+            panic!("expected renewed review")
+        };
+        assert_eq!(renewed.baseline, review.baseline);
+        assert_eq!(renewed.current, review.current);
+        assert!(matches!(
+            service
+                .commit_dialog_checked(
+                    CheckedClipboardEffect::ReviewedOverwrite { review: &renewed },
+                    "new",
+                    "Apply",
+                    &current
+                )
+                .unwrap(),
+            CheckedClipboardOutcome::Written
+        ));
+        assert!(
+            service
+                .commit_dialog_checked(
+                    CheckedClipboardEffect::CopyResult,
+                    "bad\0text",
+                    "Copy",
+                    &current
+                )
+                .is_err()
+        );
+        assert_eq!(service.backend.0.lock().unwrap().writes, 2);
+    }
     use super::fake::{FakeClipboardBackend, Op};
     use super::*;
     use std::sync::{Arc, Barrier};

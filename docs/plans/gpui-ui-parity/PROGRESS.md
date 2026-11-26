@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Clipboard Modify opens from `cm` in Dock with protected Load and Reload, a multiline source, typed ordered stages and cancellable preview. All 16 focused tests passed. Matched Windows replay remains open. Checked clipboard effects and overwrite review follow. [Clipboard Modify checkpoint](CHECKPOINTS.md#g13-clipboard-modify-protected-source-and-preview)
+Docked Clipboard Modify supports checked Apply, Apply and Close, Copy Result and exact Overwrite review through the shared clipboard service. All 14 focused tests passed. Matched Windows replay remains open. Typed `cm undo` follows. [Checked effects checkpoint](CHECKPOINTS.md#g13-clipboard-modify-checked-clipboard-effects)
+
+Clipboard Modify opens from `cm` in Dock with protected Load and Reload, a multiline source, typed ordered stages and cancellable preview. All 16 focused tests passed. [Preview checkpoint](CHECKPOINTS.md#g13-clipboard-modify-protected-source-and-preview)
 
 Clipboard History uses the checked shared Dock and Pop Out host, retaining the draft and review across moves. All 15 focused host and effects tests passed. Matched Windows, pins, docked sizing and full Jump remain open. [Clipboard History host checkpoint](CHECKPOINTS.md#g13-retained-clipboard-history-host)
 
@@ -133,7 +135,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Complete checked Clipboard Modify Apply, Apply and Close, Copy Result and overwrite review, then admit typed Undo. Matched Clipboard History and Modify replay, remaining structured text targets, and broader native acceptance stay open. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Admit typed Clipboard Modify Undo through Launcher Search. Matched Clipboard History and Modify replay, remaining structured text targets, and broader native acceptance stay open. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

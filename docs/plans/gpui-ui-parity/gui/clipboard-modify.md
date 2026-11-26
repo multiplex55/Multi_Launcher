@@ -18,4 +18,10 @@ The exact stock `cm` and `cm modify` search actions open the retained docked Mod
 
 Stages use the shared catalog and typed arguments, including the distinction between an unset separator and an explicit empty one. Preview uses the shared coordinator, with wrap control, bounded Unicode-safe display, counts and exact full output. The displayed preview operation owns Cancel. Large input approval belongs to the exact source revision.
 
-The scoped implementation evidence is in the [checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-protected-source-and-preview). Matched Windows Load, Reload, editable stages, focus, Reset, Cancel and compact layout remain pending. Checked Apply, Apply and Close, Copy Result, Undo, Pop Out and other sections remain open under the same G13 criteria.
+The scoped implementation evidence is in the [preview checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-protected-source-and-preview). Matched Windows Load, Reload, editable stages, focus, Reset, Cancel and compact layout remain pending.
+
+## GPUI Apply, Copy Result and overwrite review
+
+An accepted completed preview can Apply, Apply and Close or Copy Result through the shared clipboard service. Apply compares the loaded baseline and uses the same current preview for an explicit Overwrite review. The approved clipboard item is checked by text and Windows stamp. Copy Result refreshes its protected preflight and keeps the pane open. Effects use the full output and preserve the prior Undo slot when a write is refused. Real Kit editor state is held read-only while a worker or review owns the action.
+
+The scoped implementation evidence is in the [checked effects checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-checked-clipboard-effects). Matched Windows guarded writes, held keys, Cancel and focus remain pending. Typed Undo, Pop Out, pins, Jump and the five other sections remain open.

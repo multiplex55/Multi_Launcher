@@ -2,6 +2,7 @@
 use super::*;
 use multi_launcher::clipboard_modify::{
     catalog::{self, ArgumentRequirements},
+    clipboard::{CheckedClipboardEffect, CheckedClipboardOutcome, ClipboardReview},
     coordinator::{PreviewCoordinator, PreviewState},
     model::{ClipboardModifierCatalog, OperationId, StageArguments, StageSpec},
     parser::ClipboardModifyIntent,
@@ -24,8 +25,33 @@ fn redacted_read_error(
     }
     .into()
 }
-pub(super) const INIT_WAIT: &str = "Wait for Clipboard Modify initialization to finish.";
+pub(super) const BLOCK_WAIT: &str = "Wait for Clipboard Modify to finish or cancel its review.";
 const LARGE_SOURCE: usize = 5 * 1024 * 1024;
+const EFFECT_WAIT: &str = "Wait for the Clipboard Modify operation to finish.";
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EffectKind {
+    Apply,
+    ApplyClose,
+    Copy,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct EffectReceipt {
+    source: u64,
+    stages: u64,
+    preview: multi_launcher::clipboard_modify::coordinator::OperationId,
+}
+struct Review {
+    id: u64,
+    effect: EffectKind,
+    receipt: EffectReceipt,
+    review: Arc<ClipboardReview>,
+}
+fn held_activation(held: bool, modifiers: Modifiers, key: &str) -> bool {
+    held && modifiers == Modifiers::default() && matches!(key, "enter" | "space")
+}
+fn current_completion(pending: Option<u64>, serial: u64) -> bool {
+    pending == Some(serial)
+}
 fn pump_is_current(
     epoch: u64,
     live_epoch: u64,
@@ -100,6 +126,16 @@ pub(super) struct ClipboardModifyView {
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     focus: FocusHandle,
+    review_focus: FocusHandle,
+    review_cancel_focus: FocusHandle,
+    apply_focus: FocusHandle,
+    apply_close_focus: FocusHandle,
+    copy_focus: FocusHandle,
+    effect_epoch: Arc<AtomicU64>,
+    effect_pending: Option<u64>,
+    effect_serial: u64,
+    review: Option<Review>,
+    review_serial: u64,
     source: Entity<TextareaState>,
     reset_source: String,
     source_revision: u64,
@@ -144,6 +180,7 @@ impl ClipboardModifyView {
                     && view.open
                     && matches!(event, InputEvent::Change)
                 {
+                    view.retire_effect_for_edit(cx);
                     view.source_revision = view.source_revision.wrapping_add(1);
                     view.read_revision = view.read_revision.wrapping_add(1);
                     view.read_authority.fetch_add(1, Ordering::AcqRel);
@@ -160,6 +197,16 @@ impl ClipboardModifyView {
             owner,
             mount,
             focus: cx.focus_handle(),
+            review_focus: cx.focus_handle(),
+            review_cancel_focus: cx.focus_handle(),
+            apply_focus: cx.focus_handle(),
+            apply_close_focus: cx.focus_handle(),
+            copy_focus: cx.focus_handle(),
+            effect_epoch: Arc::new(AtomicU64::new(0)),
+            effect_pending: None,
+            effect_serial: 0,
+            review: None,
+            review_serial: 0,
             source,
             reset_source: String::new(),
             source_revision: 0,
@@ -189,7 +236,13 @@ impl ClipboardModifyView {
     }
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open {
-            self.source.focus_handle(cx).focus(window, cx);
+            if self.review.is_some() && self.effect_pending.is_none() {
+                self.review_cancel_focus.focus(window, cx);
+            } else if self.effect_pending.is_some() {
+                self.focus.focus(window, cx);
+            } else {
+                self.source.focus_handle(cx).focus(window, cx);
+            }
             return;
         }
         if !self.mount.is_current() {
@@ -208,6 +261,7 @@ impl ClipboardModifyView {
                         && view.open
                         && matches!(event, InputEvent::Change)
                     {
+                        view.retire_effect_for_edit(cx);
                         view.source_revision = view.source_revision.wrapping_add(1);
                         view.read_revision = view.read_revision.wrapping_add(1);
                         view.read_authority.fetch_add(1, Ordering::AcqRel);
@@ -220,6 +274,11 @@ impl ClipboardModifyView {
             );
             self.source = source;
             self.focus = cx.focus_handle();
+            self.review_focus = cx.focus_handle();
+            self.review_cancel_focus = cx.focus_handle();
+            self.apply_focus = cx.focus_handle();
+            self.apply_close_focus = cx.focus_handle();
+            self.copy_focus = cx.focus_handle();
         }
         self.open = true;
         self.source.focus_handle(cx).focus(window, cx);
@@ -297,6 +356,7 @@ impl ClipboardModifyView {
     }
     fn read_source(&mut self, initial: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open
+            || self.blocked()
             || !self.mount.is_current()
             || window.has_active_dialog(cx)
             || !window.is_window_active()
@@ -385,7 +445,7 @@ impl ClipboardModifyView {
             };
             let result_update = update_kit_window_content(host, &view, cx, |view, window, cx| {
                 if view.active_read != Some(request) { return; }
-                view.active_read = None; view.reading = false; view.initializing = false; view.clear_init_wait(cx);
+                view.active_read = None; view.reading = false; view.initializing = false; view.clear_block_wait(cx);
                 let installed = initialized.is_some() && view.runtime.is_none();
                 if view.runtime.is_none() { if let Some((runtime, loaded)) = initialized { view.catalog = Some(runtime.catalog_snapshot()); view.runtime = Some(runtime); if loaded.state.startup_diagnostic().is_some() { view.catalog_feedback = Some("Clipboard Modify settings could not be loaded; defaults are in use.".into()); } } }
                 let current = read_result_current(view.open, &mount, &view.mount, request, view.read_revision, source_revision, view.source_revision)
@@ -404,7 +464,7 @@ impl ClipboardModifyView {
                 if let Some(next_initial) = view.queued_read.take() { if view.open { view.read_source(next_initial, window, cx); } }
                 cx.notify();
             });
-            if result_update.is_err() { let _ = view.update(cx, |view, cx| { if view.active_read == Some(request) { view.active_read = None; view.reading = false; view.initializing = false; view.clear_init_wait(cx); if view.open { view.feedback = Some("Clipboard read could not be delivered.".into()); } cx.notify(); } }); }
+            if result_update.is_err() { let _ = view.update(cx, |view, cx| { if view.active_read == Some(request) { view.active_read = None; view.reading = false; view.initializing = false; view.clear_block_wait(cx); if view.open { view.feedback = Some("Clipboard read could not be delivered.".into()); } cx.notify(); } }); }
 
         })
         .detach();
@@ -457,9 +517,10 @@ impl ClipboardModifyView {
                         return;
                     }
                     let value = input.read(cx).value().to_string();
-                    let Some(stage) = view.stages.iter_mut().find(|stage| stage.id == id) else {
+                    let Some(index) = view.stages.iter().position(|stage| stage.id == id) else {
                         return;
                     };
+                    let stage = &view.stages[index];
                     let current_input = match arg {
                         Arg::Prefix => &stage.prefix,
                         Arg::Suffix => &stage.suffix,
@@ -470,6 +531,8 @@ impl ClipboardModifyView {
                     if current_input.entity_id() != input.entity_id() {
                         return;
                     }
+                    view.retire_effect_for_edit(cx);
+                    let stage = &mut view.stages[index];
                     let field = match arg {
                         Arg::Prefix => &mut stage.spec.arguments.prefix,
                         Arg::Suffix => &mut stage.spec.arguments.suffix,
@@ -496,16 +559,276 @@ impl ClipboardModifyView {
             _subscriptions: subs,
         }
     }
-    fn clear_init_wait(&self, cx: &mut Context<Self>) {
+    fn clear_block_wait(&self, cx: &mut Context<Self>) {
+        self.sync_editor_readonly(cx);
+        if self.blocks_close() {
+            return;
+        }
         let _ = self.root.update(cx, |root, cx| {
-            if root.restart_status.as_deref() == Some(INIT_WAIT) {
+            if root.restart_status.as_deref() == Some(BLOCK_WAIT) {
                 root.restart_status = None;
                 cx.notify();
             }
         });
     }
-    pub(super) fn initializing(&self) -> bool {
-        self.initializing
+    pub(super) fn blocks_close(&self) -> bool {
+        self.initializing || self.effect_pending.is_some() || self.review.is_some()
+    }
+    fn blocked(&self) -> bool {
+        self.effect_pending.is_some() || self.review.is_some()
+    }
+    fn sync_editor_readonly(&self, cx: &mut Context<Self>) {
+        let readonly = self.blocked();
+        self.source
+            .update(cx, |input, cx| input.set_readonly(readonly, cx));
+        for stage in &self.stages {
+            for input in [
+                &stage.prefix,
+                &stage.suffix,
+                &stage.name,
+                &stage.language,
+                &stage.separator,
+            ] {
+                input.update(cx, |input, cx| input.set_readonly(readonly, cx));
+            }
+        }
+    }
+    fn retire_effect_for_edit(&mut self, cx: &mut Context<Self>) {
+        self.effect_epoch.fetch_add(1, Ordering::AcqRel);
+        if self.review.take().is_some() {
+            self.review_serial = self.review_serial.wrapping_add(1);
+            if self.effect_pending.is_none() {
+                cx.spawn(async move |weak, cx| {
+                    let _ = weak.update(cx, |view, cx| view.clear_block_wait(cx));
+                })
+                .detach();
+            }
+        }
+    }
+    fn effect_receipt(&self) -> Option<EffectReceipt> {
+        match self.preview.state() {
+            PreviewState::Completed { id, .. } if self.resolved => Some(EffectReceipt {
+                source: self.source_revision,
+                stages: self.stage_revision,
+                preview: *id,
+            }),
+            _ => None,
+        }
+    }
+    fn effect(
+        &mut self,
+        kind: EffectKind,
+        expected: EffectReceipt,
+        review_id: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.open
+            || self.effect_pending.is_some()
+            || self.picker.is_some()
+            || self.effect_receipt() != Some(expected)
+            || !self.mount.is_current()
+            || window.has_active_dialog(cx)
+            || !window.is_window_active()
+        {
+            return;
+        }
+        let review = match (review_id, &self.review) {
+            (None, None) => None,
+            (Some(id), Some(review))
+                if review.id == id && review.effect == kind && review.receipt == expected =>
+            {
+                Some(review.review.clone())
+            }
+            _ => return,
+        };
+        let Some(root) = self.root.upgrade() else {
+            return;
+        };
+        let root_state = root.read(cx);
+        let Some(native) = root_state.native_window else {
+            return;
+        };
+        let host = window.window_handle();
+        if root_state
+            .root_window
+            .is_none_or(|w| w.window_id() != host.window_id())
+            || current_foreground_identity() != Some(native.identity)
+            || !root_state
+                .clipboard_modify_view
+                .as_ref()
+                .is_some_and(|v| v.entity_id() == cx.entity().entity_id())
+        {
+            return;
+        }
+        let admission = root_state.restart_admission.clone();
+        let Some(permit) = admission.admit() else {
+            return;
+        };
+        let visibility = root_state.root_visibility.clone();
+        let visibility_revision = visibility.request_revision.load(Ordering::Acquire);
+        let ack_visibility = visibility.clone();
+        let Some(output) = self.preview.full_output().map(str::to_owned) else {
+            return;
+        };
+        let baseline = self.reset_source.clone();
+        // A concurrently admitted Reload must not publish over this action.
+        self.read_revision = self.read_revision.wrapping_add(1);
+        self.read_authority.fetch_add(1, Ordering::AcqRel);
+        self.queued_read = None;
+        self.effect_serial = self.effect_serial.wrapping_add(1);
+        let serial = self.effect_serial;
+        self.effect_pending = Some(serial);
+        self.feedback = None;
+        self.sync_editor_readonly(cx);
+        self.focus.focus(window, cx);
+        let receipt = self.mount.clone();
+        let worker_mount = receipt.clone();
+        let epoch = self.effect_epoch.clone();
+        let expected_epoch = epoch.load(Ordering::Acquire);
+        let task = cx.background_executor().spawn(async move {
+            let current = || {
+                worker_mount.is_current()
+                    && epoch.load(Ordering::Acquire) == expected_epoch
+                    && !admission.is_fenced()
+                    && json_utility::native_host_current(
+                        &visibility,
+                        visibility_revision,
+                        Some(native),
+                        false,
+                    )
+                    && current_foreground_identity() == Some(native.identity)
+            };
+            let effect = match &review {
+                Some(review) => CheckedClipboardEffect::ReviewedOverwrite { review },
+                None if kind == EffectKind::Copy => CheckedClipboardEffect::CopyResult,
+                None => CheckedClipboardEffect::Apply {
+                    baseline: &baseline,
+                },
+            };
+            runtime::clipboard_service().commit_dialog_checked(
+                effect,
+                &output,
+                "Clipboard Modify",
+                &current,
+            )
+        });
+        cx.spawn(async move |weak, cx| {
+            let _permit = permit;
+            let result = task.await;
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            let apply = update_kit_window_content(host, &view, cx, |view, window, cx| {
+                if !current_completion(view.effect_pending, serial) {
+                    return;
+                }
+                let owns_focus =
+                    view.focus.is_focused(window) || view.focus.contains_focused(window, cx);
+                view.effect_pending = None;
+                view.clear_block_wait(cx);
+                if !receipt.is_current()
+                    || !receipt.matches(&view.mount)
+                    || view.effect_receipt() != Some(expected)
+                {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(CheckedClipboardOutcome::Written) => {
+                        view.review = None;
+                        view.feedback = Some("Clipboard updated.".into());
+                        if kind == EffectKind::ApplyClose
+                            && window.is_window_active()
+                            && current_foreground_identity() == Some(native.identity)
+                            && json_utility::native_host_current(
+                                &ack_visibility,
+                                visibility_revision,
+                                Some(native),
+                                false,
+                            )
+                            && !window.has_active_dialog(cx)
+                        {
+                            view.close(window, cx);
+                        }
+                    }
+                    Ok(CheckedClipboardOutcome::ReviewRequired(review)) => {
+                        if !window.is_window_active()
+                            || current_foreground_identity() != Some(native.identity)
+                            || !json_utility::native_host_current(
+                                &ack_visibility,
+                                visibility_revision,
+                                Some(native),
+                                false,
+                            )
+                            || window.has_active_dialog(cx)
+                        {
+                            view.review = None;
+                            view.clear_block_wait(cx);
+                            view.feedback = Some("Clipboard review expired. Try again.".into());
+                            cx.notify();
+                            return;
+                        }
+                        view.review_serial = view.review_serial.wrapping_add(1);
+                        view.review = Some(Review {
+                            id: view.review_serial,
+                            effect: kind,
+                            receipt: expected,
+                            review: Arc::new(review),
+                        });
+                        if owns_focus {
+                            let _ = view
+                                .root
+                                .update(cx, |root, _| root.root_scroll.scroll_to_bottom());
+                        }
+                        if owns_focus
+                            && window.is_window_active()
+                            && current_foreground_identity() == Some(native.identity)
+                            && !window.has_active_dialog(cx)
+                        {
+                            view.review_cancel_focus.focus(window, cx);
+                        }
+                    }
+                    Ok(CheckedClipboardOutcome::Superseded) => {
+                        view.feedback =
+                            Some("Clipboard operation was superseded. Try again.".into())
+                    }
+                    Err(error) => view.feedback = Some(redacted_read_error(error)),
+                }
+                view.clear_block_wait(cx);
+                if view.open
+                    && owns_focus
+                    && window.is_window_active()
+                    && current_foreground_identity() == Some(native.identity)
+                    && json_utility::native_host_current(
+                        &ack_visibility,
+                        visibility_revision,
+                        Some(native),
+                        false,
+                    )
+                    && !window.has_active_dialog(cx)
+                {
+                    if view.review.is_some() {
+                        view.review_cancel_focus.focus(window, cx);
+                    } else {
+                        view.source.focus_handle(cx).focus(window, cx);
+                    }
+                }
+                cx.notify();
+            });
+            if apply.is_err() {
+                let _ = view.update(cx, |view, cx| {
+                    if view.effect_pending == Some(serial) {
+                        view.effect_pending = None;
+                        view.clear_block_wait(cx);
+                        view.feedback = Some("Clipboard operation could not be delivered.".into());
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+        cx.notify();
     }
     pub(super) fn restart_draft(&self, cx: &App) -> Option<RestartDraft> {
         if !self.open {
@@ -518,9 +841,11 @@ impl ClipboardModifyView {
         })
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.initializing {
+        if !self.open || self.initializing || self.effect_pending.is_some() || self.review.is_some()
+        {
             return;
         }
+        let owns_focus = self.focus.is_focused(window) || self.focus.contains_focused(window, cx);
         self.open = false;
         self.owner.retire();
         self.read_revision = self.read_revision.wrapping_add(1);
@@ -539,7 +864,15 @@ impl ClipboardModifyView {
         self.pump_epoch = self.pump_epoch.wrapping_add(1);
         self.pumping = false;
         let _ = self.root.update(cx, |root, cx| {
-            root.query.focus_handle(cx).focus(window, cx);
+            if owns_focus
+                && window.is_window_active()
+                && !window.has_active_dialog(cx)
+                && root
+                    .native_window
+                    .is_some_and(|native| current_foreground_identity() == Some(native.identity))
+            {
+                root.query.focus_handle(cx).focus(window, cx);
+            }
             cx.notify();
         });
         cx.notify();
@@ -549,16 +882,179 @@ impl Render for ClipboardModifyView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mount = self.mount.clone();
         let revision = self.stage_revision;
+        let key_mount = mount.clone();
         let mut panel = div()
             .id("clipboard-modify")
             .track_focus(&self.focus)
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if !key_mount.is_current()
+                    || !key_mount.matches(&view.mount)
+                    || !view.open
+                    || window.default_prevented()
+                    || window.has_active_dialog(cx)
+                    || !window.is_window_active()
+                {
+                    return;
+                }
+                let Some(root) = view.root.upgrade() else {
+                    return;
+                };
+                let root = root.read(cx);
+                if root
+                    .root_window
+                    .is_none_or(|host| host.window_id() != window.window_handle().window_id())
+                    || !root.native_window.is_some_and(|native| {
+                        current_foreground_identity() == Some(native.identity)
+                    })
+                {
+                    return;
+                }
+                let key = event.keystroke.key.as_str();
+                let mods = event.keystroke.modifiers;
+                if view.review.is_some()
+                    && (view.review_focus.is_focused(window)
+                        || view.review_focus.contains_focused(window, cx))
+                {
+                    if mods == Modifiers::default() && key == "escape" {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        if !event.is_held && view.effect_pending.is_none() {
+                            view.review = None;
+                            view.review_serial = view.review_serial.wrapping_add(1);
+                            view.clear_block_wait(cx);
+                            view.focus.focus(window, cx);
+                            cx.notify();
+                        }
+                    } else if held_activation(event.is_held, mods, key) {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if held_activation(event.is_held, mods, key)
+                    && (view.apply_focus.is_focused(window)
+                        || view.apply_close_focus.is_focused(window)
+                        || view.copy_focus.is_focused(window))
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    return;
+                }
+                if view.blocked() || view.picker.is_some() {
+                    return;
+                }
+                if key == "r"
+                    && mods
+                        == (Modifiers {
+                            control: true,
+                            shift: mods.shift,
+                            ..Modifiers::default()
+                        })
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    if !event.is_held && view.source.read(cx).value() == view.reset_source {
+                        view.read_source(false, window, cx);
+                    }
+                    return;
+                }
+                if key == "enter"
+                    && mods
+                        == (Modifiers {
+                            control: true,
+                            shift: mods.shift,
+                            ..Modifiers::default()
+                        })
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    if !event.is_held {
+                        if let Some(receipt) = view.effect_receipt() {
+                            view.effect(
+                                if mods.shift {
+                                    EffectKind::ApplyClose
+                                } else {
+                                    EffectKind::Apply
+                                },
+                                receipt,
+                                None,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                }
+            }))
             .w_full()
             .flex()
             .flex_col()
             .gap_2()
             .p_3()
-            .child(Label::new("Clipboard Modify — Modify"))
-            .child(Textarea::new(&self.source).aria_label("Clipboard Modify source"));
+            .child(Label::new("Clipboard Modify — Modify"));
+        if self.blocked() {
+            if let Some(review) = &self.review {
+                let id = review.id;
+                let effect = review.effect;
+                let expected = review.receipt;
+                let confirm = mount.clone();
+                let cancel = mount.clone();
+                panel = panel.child(
+                    div()
+                        .track_focus(&self.review_focus)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(Label::new(
+                            "The clipboard changed. Replace its current contents?",
+                        ))
+                        .child(Label::new(format!(
+                            "Original: {} bytes · Current: {} bytes",
+                            review.review.baseline.bytes, review.review.current.bytes
+                        )))
+                        .child(
+                            Button::new(SharedString::from(format!("cm-review-cancel-{id}")))
+                                .label("Cancel")
+                                .track_focus(&self.review_cancel_focus)
+                                .disabled(self.effect_pending.is_some())
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if cancel.is_current()
+                                        && cancel.matches(&view.mount)
+                                        && view.effect_pending.is_none()
+                                        && view
+                                            .review
+                                            .as_ref()
+                                            .is_some_and(|review| review.id == id)
+                                        && !window.has_active_dialog(cx)
+                                    {
+                                        view.review = None;
+                                        view.review_serial = view.review_serial.wrapping_add(1);
+                                        view.clear_block_wait(cx);
+                                        view.focus.focus(window, cx);
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("cm-review-confirm-{id}")))
+                                .label("Overwrite clipboard")
+                                .disabled(self.effect_pending.is_some())
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if confirm.is_current() && confirm.matches(&view.mount) {
+                                        view.effect(effect, expected, Some(id), window, cx);
+                                    }
+                                })),
+                        ),
+                );
+            }
+            if self.effect_pending.is_some() {
+                panel = panel.child(Label::new(EFFECT_WAIT));
+            }
+            if let Some(feedback) = &self.feedback {
+                panel = panel.child(Label::new(feedback.clone()));
+            }
+            return panel;
+        }
+        panel = panel.child(Textarea::new(&self.source).aria_label("Clipboard Modify source"));
         let reload = mount.clone();
         let reset = mount.clone();
         panel = panel.child(
@@ -570,6 +1066,9 @@ impl Render for ClipboardModifyView {
                         .label("Reload clipboard")
                         .disabled(self.reading)
                         .on_click(cx.listener(move |view, _, window, cx| {
+                            if view.blocked() {
+                                return;
+                            }
                             if reload.is_current() && reload.matches(&view.mount) {
                                 view.read_source(false, window, cx);
                             }
@@ -623,6 +1122,9 @@ impl Render for ClipboardModifyView {
                             Button::new(SharedString::from(format!("cm-change-{id}")))
                                 .label("Change operation")
                                 .on_click(cx.listener(move |view, _, _, cx| {
+                                    if view.blocked() {
+                                        return;
+                                    }
                                     if choose.is_current()
                                         && choose.matches(&view.mount)
                                         && view.stage_revision == revision
@@ -641,6 +1143,9 @@ impl Render for ClipboardModifyView {
                                 .label("Move up")
                                 .disabled(index == 0)
                                 .on_click(cx.listener(move |view, _, _, cx| {
+                                    if view.blocked() {
+                                        return;
+                                    }
                                     if up.is_current()
                                         && up.matches(&view.mount)
                                         && view.stage_revision == revision
@@ -661,6 +1166,9 @@ impl Render for ClipboardModifyView {
                                 .label("Move down")
                                 .disabled(index + 1 == self.stages.len())
                                 .on_click(cx.listener(move |view, _, _, cx| {
+                                    if view.blocked() {
+                                        return;
+                                    }
                                     if down.is_current()
                                         && down.matches(&view.mount)
                                         && view.stage_revision == revision
@@ -680,6 +1188,9 @@ impl Render for ClipboardModifyView {
                             Button::new(SharedString::from(format!("cm-remove-{id}")))
                                 .label("Remove stage")
                                 .on_click(cx.listener(move |view, _, _, cx| {
+                                    if view.blocked() {
+                                        return;
+                                    }
                                     if remove.is_current()
                                         && remove.matches(&view.mount)
                                         && view.stage_revision == revision
@@ -717,6 +1228,9 @@ impl Render for ClipboardModifyView {
                                     "Set separator"
                                 })
                                 .on_click(cx.listener(move |view, _, window, cx| {
+                                    if view.blocked() {
+                                        return;
+                                    }
                                     if !receipt.is_current()
                                         || !receipt.matches(&view.mount)
                                         || view.stage_revision != revision
@@ -766,6 +1280,9 @@ impl Render for ClipboardModifyView {
                         Button::new(SharedString::from(format!("cm-operation-{id}-{op:?}")))
                             .label(operation.label)
                             .on_click(cx.listener(move |view, _, window, cx| {
+                                if view.blocked() {
+                                    return;
+                                }
                                 if !receipt.is_current()
                                     || !receipt.matches(&view.mount)
                                     || view.stage_revision != revision
@@ -809,6 +1326,9 @@ impl Render for ClipboardModifyView {
                     Button::new("cm-add-stage")
                         .label("Add stage")
                         .on_click(cx.listener(move |view, _, window, cx| {
+                            if view.blocked() {
+                                return;
+                            }
                             if add.is_current() && add.matches(&view.mount) && view.open {
                                 view.add_stage(window, cx);
                             }
@@ -822,6 +1342,9 @@ impl Render for ClipboardModifyView {
                             "Wrap preview: Off"
                         })
                         .on_click(cx.listener(move |view, _, _, cx| {
+                            if view.blocked() {
+                                return;
+                            }
                             if wrap.is_current() && wrap.matches(&view.mount) {
                                 view.wrap = !view.wrap;
                                 cx.notify();
@@ -833,6 +1356,9 @@ impl Render for ClipboardModifyView {
                         .label("Cancel Preview")
                         .disabled(!self.preview.is_active())
                         .on_click(cx.listener(move |view, _, _, cx| {
+                            if view.blocked() {
+                                return;
+                            }
                             if cancel_preview.is_current()
                                 && cancel_preview.matches(&view.mount)
                                 && preview_operation
@@ -847,6 +1373,9 @@ impl Render for ClipboardModifyView {
                         .label("Close")
                         .disabled(self.initializing)
                         .on_click(cx.listener(move |view, _, window, cx| {
+                            if view.blocked() {
+                                return;
+                            }
                             if close.is_current() && close.matches(&view.mount) {
                                 view.close(window, cx);
                             }
@@ -860,6 +1389,9 @@ impl Render for ClipboardModifyView {
                     Button::new("cm-allow-large")
                         .label("Preview large source")
                         .on_click(cx.listener(move |view, _, _, cx| {
+                            if view.blocked() {
+                                return;
+                            }
                             if allow.is_current()
                                 && allow.matches(&view.mount)
                                 && consent_is_current(
@@ -913,6 +1445,33 @@ impl Render for ClipboardModifyView {
                 .overflow_x_scroll()
                 .child(output.whitespace_nowrap())
         });
+        let effect_receipt = self.effect_receipt();
+        let available = effect_receipt.is_some() && self.picker.is_none();
+        for (id, label, kind) in [
+            ("cm-apply", "Apply", EffectKind::Apply),
+            ("cm-apply-close", "Apply and Close", EffectKind::ApplyClose),
+            ("cm-copy-result", "Copy Result", EffectKind::Copy),
+        ] {
+            let receipt = mount.clone();
+            let focus = match kind {
+                EffectKind::Apply => &self.apply_focus,
+                EffectKind::ApplyClose => &self.apply_close_focus,
+                EffectKind::Copy => &self.copy_focus,
+            };
+            panel = panel.child(
+                Button::new(id)
+                    .label(label)
+                    .track_focus(focus)
+                    .disabled(!available)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if receipt.is_current() && receipt.matches(&view.mount) {
+                            if let Some(expected) = effect_receipt {
+                                view.effect(kind, expected, None, window, cx);
+                            }
+                        }
+                    })),
+            );
+        }
         panel
     }
 }
@@ -953,9 +1512,48 @@ impl RootWindow {
 mod tests {
     use super::super::utility_mount::MountOwner;
     use super::{
-        LARGE_SOURCE, consent_is_current, current_provider, pump_is_current, read_result_current,
-        redacted_read_error,
+        EffectReceipt, LARGE_SOURCE, consent_is_current, current_completion, current_provider,
+        held_activation, pump_is_current, read_result_current, redacted_read_error,
     };
+    #[test]
+    fn effect_receipts_and_held_confirm_are_exact() {
+        use multi_launcher::clipboard_modify::coordinator::OperationId;
+        let current = EffectReceipt {
+            source: 1,
+            stages: 2,
+            preview: OperationId(3),
+        };
+        assert!(
+            current
+                == EffectReceipt {
+                    source: 1,
+                    stages: 2,
+                    preview: OperationId(3)
+                }
+        );
+        assert!(
+            current
+                != EffectReceipt {
+                    source: 1,
+                    stages: 2,
+                    preview: OperationId(4)
+                }
+        );
+        assert!(
+            current
+                != EffectReceipt {
+                    source: 2,
+                    stages: 2,
+                    preview: OperationId(3)
+                }
+        );
+        assert!(current_completion(Some(7), 7));
+        assert!(!current_completion(None, 7));
+        assert!(!current_completion(Some(8), 7));
+        assert!(held_activation(true, Default::default(), "enter"));
+        assert!(held_activation(true, Default::default(), "space"));
+        assert!(!held_activation(false, Default::default(), "enter"));
+    }
     #[test]
     fn old_mount_pump_and_old_large_consent_are_rejected() {
         let owner = MountOwner::default();

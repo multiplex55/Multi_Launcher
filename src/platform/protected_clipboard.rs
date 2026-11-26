@@ -15,6 +15,53 @@ pub enum ClipboardRead {
     Private,
     NonText,
 }
+/// An opaque identity captured while the clipboard remains open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClipboardStamp(u32);
+
+impl ClipboardStamp {
+    pub fn from_sequence(sequence: u32) -> Option<Self> {
+        (sequence != 0).then_some(Self(sequence))
+    }
+}
+
+pub enum StampedClipboardRead {
+    Ordinary {
+        text: String,
+        stamp: Option<ClipboardStamp>,
+    },
+    Private,
+    NonText,
+}
+
+pub fn read_stamped_clipboard_for_modify() -> Result<StampedClipboardRead, ClipboardError> {
+    platform::read_stamped_for_modify(MODIFY_READ_TIMEOUT)
+}
+
+pub fn current_clipboard_stamp() -> Option<ClipboardStamp> {
+    #[cfg(windows)]
+    {
+        ClipboardStamp::from_sequence(unsafe {
+            windows::Win32::System::DataExchange::GetClipboardSequenceNumber()
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Called only while the caller's native clipboard writer holds OpenClipboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenClipboardFormat {
+    Ordinary,
+    Private,
+    NonText,
+}
+
+pub fn checked_open_clipboard_is_ordinary() -> Result<OpenClipboardFormat, ClipboardError> {
+    platform::checked_open_is_ordinary()
+}
 impl fmt::Debug for ClipboardRead {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -138,6 +185,38 @@ mod platform {
         core::{HSTRING, IInspectable, Interface},
     };
     const PRIVATE_FORMAT: &str = "application/x-multi-launcher-private-text-v1";
+    pub(super) fn checked_open_is_ordinary() -> Result<OpenClipboardFormat, ClipboardError> {
+        use windows::Win32::{
+            Foundation::{ERROR_CLIPBOARD_NOT_OPEN, ERROR_SUCCESS, GetLastError, SetLastError},
+            System::DataExchange::{EnumClipboardFormats, RegisterClipboardFormatW},
+        };
+        let marker: Vec<u16> = PRIVATE_FORMAT.encode_utf16().chain(Some(0)).collect();
+        let private_format =
+            unsafe { RegisterClipboardFormatW(windows::core::PCWSTR(marker.as_ptr())) };
+        if private_format == 0 {
+            return Err(ClipboardError::Unavailable);
+        }
+        let (private, has_text) = inspect_formats(private_format, |current| {
+            unsafe { SetLastError(ERROR_SUCCESS) };
+            let format = unsafe { EnumClipboardFormats(current) };
+            if format != 0 {
+                Ok(Some(format))
+            } else {
+                match unsafe { GetLastError() } {
+                    ERROR_SUCCESS => Ok(None),
+                    ERROR_CLIPBOARD_NOT_OPEN => Err(ClipboardError::Busy),
+                    _ => Err(ClipboardError::Unavailable),
+                }
+            }
+        })?;
+        Ok(if private {
+            OpenClipboardFormat::Private
+        } else if has_text {
+            OpenClipboardFormat::Ordinary
+        } else {
+            OpenClipboardFormat::NonText
+        })
+    }
     const MAX_MODIFY_READ_WORKERS: usize = 2;
     const MODIFY_READ_WORKER_NAME: &str = "clipboard-modify-read";
     // COM asks clients to retry when its server is temporarily unable to handle a call.
@@ -607,7 +686,7 @@ mod platform {
         diagnostics: &ReadDiagnostics,
         cancelled: &AtomicBool,
         deadline: Instant,
-    ) -> Result<ClipboardRead, ClipboardError> {
+    ) -> Result<StampedClipboardRead, ClipboardError> {
         use windows::Win32::{
             Foundation::{ERROR_SUCCESS, GetLastError, HGLOBAL, SetLastError},
             System::{
@@ -687,10 +766,10 @@ mod platform {
             }
         })?;
         if private {
-            return Ok(ClipboardRead::Private);
+            return Ok(StampedClipboardRead::Private);
         }
         if !has_text {
-            return Ok(ClipboardRead::NonText);
+            return Ok(StampedClipboardRead::NonText);
         }
         check(ReadStage::GetText)?;
         let handle = unsafe { GetClipboardData(13) }
@@ -717,10 +796,21 @@ mod platform {
             error
         })?;
         check(ReadStage::WorkerCleanup)?;
-        Ok(ClipboardRead::Ordinary(text))
+        let stamp = current_clipboard_stamp();
+        Ok(StampedClipboardRead::Ordinary { text, stamp })
     }
 
     pub(super) fn read_for_modify(timeout: Duration) -> Result<ClipboardRead, ClipboardError> {
+        read_stamped_for_modify(timeout).map(|read| match read {
+            StampedClipboardRead::Ordinary { text, .. } => ClipboardRead::Ordinary(text),
+            StampedClipboardRead::Private => ClipboardRead::Private,
+            StampedClipboardRead::NonText => ClipboardRead::NonText,
+        })
+    }
+
+    pub(super) fn read_stamped_for_modify(
+        timeout: Duration,
+    ) -> Result<StampedClipboardRead, ClipboardError> {
         run_bounded_worker(
             Arc::clone(&MODIFY_READ_WORKERS),
             timeout,
@@ -1057,6 +1147,9 @@ mod platform {
 #[cfg(not(windows))]
 mod platform {
     use super::*;
+    pub(super) fn checked_open_is_ordinary() -> Result<OpenClipboardFormat, ClipboardError> {
+        Err(ClipboardError::Unsupported)
+    }
     pub(super) fn copy(_: &SecretResult) -> Result<CopyStatus, ClipboardError> {
         Err(ClipboardError::Unsupported)
     }
@@ -1072,5 +1165,10 @@ mod platform {
 
     pub(super) fn read_for_modify(timeout: Duration) -> Result<ClipboardRead, ClipboardError> {
         read(timeout)
+    }
+    pub(super) fn read_stamped_for_modify(
+        _: Duration,
+    ) -> Result<StampedClipboardRead, ClipboardError> {
+        Err(ClipboardError::Unsupported)
     }
 }

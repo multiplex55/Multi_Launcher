@@ -3799,7 +3799,7 @@ enum RootCloseBlocker {
     RegexPresets,
     RegexClipboard,
     ClipboardHistory,
-    ClipboardModifyInit,
+    ClipboardModifyBlocked,
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -5679,7 +5679,7 @@ impl RootWindow {
                     .to_owned(),
             );
         }
-        if self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).initializing()) { return Err(clipboard_modify_view::INIT_WAIT.to_owned()); }
+        if self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Err(clipboard_history::WAIT.to_owned()); }
         self.clipboard_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
         if !self.clipboard_retiring.is_empty() { return Err("A previous Clipboard History window has not retired.".to_owned()); }
@@ -9965,7 +9965,7 @@ impl RootWindow {
                 self.restart_status = Some(FAVORITES_WRITE_PENDING.to_owned());
             }
             Some(RootCloseBlocker::RegexHistory) => { self.restart_status = Some(regex_history::WAIT_QUIT.to_owned()); }
-            Some(RootCloseBlocker::ClipboardModifyInit) => { self.restart_status = Some(clipboard_modify_view::INIT_WAIT.to_owned()); }
+            Some(RootCloseBlocker::ClipboardModifyBlocked) => { self.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
             Some(RootCloseBlocker::RegexPresets) => { self.restart_status = Some(regex_presets::WAIT_QUIT.to_owned()); }
             Some(RootCloseBlocker::RegexClipboard) => { self.restart_status = Some("Wait for the Regex Tester clipboard operation before quitting.".to_owned()); }
@@ -10046,7 +10046,7 @@ impl RootWindow {
         file_picker_pending: bool,
         cx: &App,
     ) -> Option<RootCloseBlocker> {
-        if self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).initializing()) { return Some(RootCloseBlocker::ClipboardModifyInit); }
+        if self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardHistory); }
         if self.structured_pins.busy() { return Some(RootCloseBlocker::StructuredPinWrite); }
         if self.regex_view.as_ref().is_some_and(|view| view.read(cx).clipboard_pending) { return Some(RootCloseBlocker::RegexClipboard); }
@@ -13185,7 +13185,7 @@ pub(crate) fn run_foundation_window(
                         false
                     }
                     Some(RootCloseBlocker::RegexHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_history::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
-                    Some(RootCloseBlocker::ClipboardModifyInit) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_modify_view::INIT_WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::ClipboardModifyBlocked) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::RegexPresets) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_presets::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::RegexClipboard) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for the Regex Tester clipboard operation before closing.".to_owned()); cx.notify(); }); false }
