@@ -144,6 +144,7 @@ pub(super) struct FileSearchView {
     directory: Entity<InputState>,
     focus: FocusHandle,
     calculate_focus: FocusHandle,
+    folder_size_focus: FocusHandle,
     explorer_focus: FocusHandle,
     preview_focus: FocusHandle,
     content_focus: HashMap<FileSearchResultKey, FocusHandle>,
@@ -238,6 +239,7 @@ impl FileSearchView {
             directory,
             focus,
             calculate_focus: cx.focus_handle(),
+            folder_size_focus: cx.focus_handle(),
             explorer_focus,
             preview_focus: cx.focus_handle(),
             content_focus: HashMap::new(),
@@ -294,6 +296,7 @@ impl FileSearchView {
         self.native = native;
         self.focus = cx.focus_handle();
         self.calculate_focus = cx.focus_handle();
+        self.folder_size_focus = cx.focus_handle();
         self.explorer_focus = cx.focus_handle();
         self.preview_focus = cx.focus_handle();
         self.content_focus.clear();
@@ -1056,6 +1059,28 @@ impl FileSearchView {
         cx.notify();
     }
 
+    pub(super) fn folder_action_focus(&self) -> FocusHandle { self.folder_size_focus.clone() }
+    pub(super) fn folder_action_is_focused(&self, window: &Window) -> bool { self.folder_size_focus.is_focused(window) }
+    pub(super) fn report_folder_size_error(&mut self, error: &str, cx: &mut Context<Self>) {
+        self.status = format!("Could not open Folder Size: {error}"); cx.notify();
+    }
+    fn analyze_selected(&mut self, receipt: SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting || !self.is_mounted_in(window.window_handle().window_id(), self.popout)
+            || !window.is_window_active() || window.has_active_dialog(cx) || self.admission.is_fenced()
+            || receipt.kind != FileKind::Directory || receipt.content_key.is_some()
+            || !self.receipt_is_current(&receipt, cx.entity_id())
+            || context_stack_has_primary(&window.context_stack(), "PopupMenu")
+            || !self.native.is_some_and(|native| native_window_is_valid(native) && current_foreground_identity() == Some(native.identity))
+            || self.root.upgrade().is_none_or(|root| {
+                let root = root.read(cx);
+                root.action_sheet.is_some() || root.context_favorite_popup.is_some()
+                    || (!self.popout && !root.external_owner_is_current(window.focused(cx).as_ref(), window, cx))
+            }) { return; }
+        self.folder_size_focus.focus(window, cx);
+        let root = self.root.clone(); let source = cx.entity().downgrade();
+        window.defer(cx, move |window, app| { let _ = root.update(app, |root, cx| root.open_folder_size_from_file_search(source, receipt, window, cx)); });
+    }
+
     fn calculate_selected(
         &mut self,
         receipt: SelectionReceipt,
@@ -1380,6 +1405,7 @@ impl Render for FileSearchView {
             }
         }
         let preview_receipt = selected_receipt.clone().filter(|receipt| matches!(receipt.kind, FileKind::File | FileKind::Directory));
+        let folder_receipt = selected_receipt.clone().filter(|receipt| receipt.kind == FileKind::Directory && receipt.content_key.is_none());
         let hash_receipt = selected_receipt.clone().filter(|receipt| receipt.kind == FileKind::File && receipt.content_key.is_none());
         let selected_path = selected_receipt
             .as_ref()
@@ -1532,6 +1558,13 @@ impl Render for FileSearchView {
                                 }
                             }) }),
                     )
+                    .child(Button::new("file-search-analyze-folder-size").tab_stop(true).track_focus(&self.folder_size_focus)
+                        .label("Analyze folder size…").disabled(self.rehosting || folder_receipt.is_none())
+                        .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| {
+                            if mount.is_current() && mount.matches(&this.mount_receipt) && !this.rehosting {
+                                if let Some(receipt) = folder_receipt.clone() { this.analyze_selected(receipt, window, cx); }
+                            }
+                        }) }))
                     .child(
                         Button::new("file-search-preview-selected")
                             .tab_stop(true).track_focus(&self.preview_focus)
