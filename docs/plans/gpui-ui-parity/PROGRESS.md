@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+Merged the upstream Windows virtual-desktop restore and egui cloaked repaint changes. The locked check and all 20 focused activation tests passed. The required execution strategy is committed and linked from the Master Goal, Kickstart, and continuation records. Cross-desktop Windows replay remains pending. Current implementation continues with G14-C Regex Tester. [Integration checkpoint](CHECKPOINTS.md#upstream-master-integration) · [Execution Strategy](EXECUTION_STRATEGY.md)
+
 Saved JSON and XML pins now restore their remembered hosts passively. The toolbar focuses an exact live host or unpins the top panel through the canonical checked Settings write. Twelve grouped tests passed. The matched Windows replay and scoped Jump evidence remain pending. [Structured utility pins checkpoint](CHECKPOINTS.md#saved-json-and-xml-pins)
 
 An open XML Overwrite review can move between Dock and Pop Out with the exact frozen path and payload. Six focused launcher tests passed. Native confirmation and transfer evidence and saved JSON and XML pins remain pending. [Overwrite transfer checkpoint](CHECKPOINTS.md#xml-overwrite-review-transfer)

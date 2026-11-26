@@ -1201,3 +1201,20 @@ Startup restores both saved tools in settings order and their remembered present
 The paired `egui-structured-pins` and `gpui-structured-pins` profiles under the owned G14 fixture have the same Settings SHA-256 `4214ED3E85E0E234B3A19472F5598504D62972CE9AA624451806B94F8C99D016`. They save JSON then XML in toolbar order, JSON Pop Out at the previous saved geometry, XML Docked, both Paste Sequence shortcuts unset, and unrelated opaque Settings values for comparison. The profiles are idle. Verify matched 1516 × 937 startup, preserved Search focus, exact toolbar activation, pinned close refusal, scoped review Ctrl+W, and acknowledged unpin preserving the sibling and raw Settings.
 
 Locked `fast-dev` launcher checks passed in 5.99 s and 3.72 s. Independent review cleared passive XPath initialization, native activation authority, scoped Ctrl+W and rollback focus. The grouped library and launcher link passed in 18.17 s, and run `4fc7e6e1-5abb-4998-9c5e-8388c9849499` passed all 12 tests in 2.587 s with 9117 skips. The batch covers canonical Settings success and failure, pin ordering, stale and matching acknowledgements, and existing clipboard, host and Overwrite receipts. Matched desktop and structured-workspace Jump evidence remain pending. The next implementation is G14-C Regex Tester after the requested master integration.
+
+## Upstream master integration
+
+| Revision | SHA |
+| --- | --- |
+| Migration branch before merge | `80c18afb62e16319d8c8c688bd50f475e9a876f5` |
+| Incorporated `origin/master` | `0f3655a9f55d4bae71215ead9a6bec826edc2783` |
+| Resulting merge commit | `00620851f213111e20923cadc563daedffc0b786` |
+| Required strategy documentation commit | `1347b4a64e54ac370a30f669e8e8850c6ee7aba3` |
+
+Merged on a clean `feat/gpui-ui-parity` checkout. Git merged both overlapping activation files automatically without a conflict. Independent review confirmed the merge preserves the GPUI checked Window Search authority and the launcher placement helper. Master adds a process-owned public COM relocation attempt, an internal fallback under a fresh authority check, and membership confirmation before egui launcher focus. Vendored eframe handles DWM-cloaked windows through its existing throttled direct repaint path. Both merge and strategy commits were pushed. The original planning and execution baselines remain recorded in [Source baseline](SOURCE_BASELINE.md).
+
+The locked `fast-dev` library and launcher check passed in 2 min 03 s. The shared-library Nextest target linked in 7 min 30 s. Run `356d0cce-ac74-4999-bfea-a879957f2b49` passed all 20 focused tests in 4.087 s. [Integration evidence](VALIDATION_LOG.md#master-virtual-desktop-integration)
+
+[EXECUTION_STRATEGY.md](EXECUTION_STRATEGY.md) contains the complete revised methodology. Its required references resolve from the Master Goal, Kickstart, continuation template, and this checkpoint ledger. The reference, independent coverage review, and documentation-only diff checks passed without an application build for the documentation.
+
+Defer actual two-desktop validation to the next eligible grouped Windows candidate. At matched 1516 × 937 dimensions, verify egui processes a cloaked but visible root's reveal on the current desktop and preserves the same HWND through foreground restoration. Verify GPUI reveal separately and confirm current-desktop Window Search keeps its existing off-desktop refusal. Earlier unrelated evidence remains applicable. Native G14 hosts, pins, review, and scoped Jump remain open. Next is G14-C, starting with the stock Regex Tester route, real editor and match inspection through the shared engine.
