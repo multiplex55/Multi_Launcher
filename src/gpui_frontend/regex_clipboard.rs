@@ -13,6 +13,7 @@ pub(super) enum Action {
     Information,
     Replacement,
     Cases,
+    Reference(&'static str),
 }
 
 #[derive(Default)]
@@ -24,6 +25,7 @@ pub(super) struct Epochs {
     pub capture: Arc<AtomicU64>,
     pub replacement: Arc<AtomicU64>,
     pub cases: Arc<AtomicU64>,
+    pub reference: Arc<AtomicU64>,
 }
 impl Epochs {
     fn for_action(&self, action: Action) -> Arc<AtomicU64> {
@@ -35,6 +37,7 @@ impl Epochs {
             Action::Capture => self.capture.clone(),
             Action::Replacement => self.replacement.clone(),
             Action::Cases => self.cases.clone(),
+            Action::Reference(_) => self.reference.clone(),
         }
     }
     pub fn main_changed(&self, cases_changed: bool) {
@@ -60,7 +63,7 @@ fn clear_wait(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>) {
 fn available(session: &multi_launcher::regex_tester::RegexSession, capture: usize, action: Action) -> bool {
     let selected = session.selected_index().and_then(|index| session.matches().get(index));
     match action {
-        Action::Import | Action::Pattern | Action::Cases => true,
+        Action::Import | Action::Pattern | Action::Cases | Action::Reference(_) => true,
         Action::Match | Action::Information => selected.is_some(),
         Action::Capture => selected.and_then(|item| item.captures.get(capture))
             .is_some_and(|capture| matches!(&capture.value, CaptureValue::Matched { .. })),
@@ -74,6 +77,7 @@ fn payload(session: &multi_launcher::regex_tester::RegexSession, capture: usize,
     let selected = session.selected_index().and_then(|index| session.matches().get(index));
     match action {
         Action::Import => None,
+        Action::Reference(text) => Some(text.to_owned()),
         Action::Pattern => Some(session.draft.pattern.clone()),
         Action::Match => selected.map(|item| item.text.clone()),
         Action::Capture => match &selected?.captures.get(capture)?.value {
@@ -222,6 +226,18 @@ mod tests {
         assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
         assert_eq!(clipboard.writes.load(Ordering::SeqCst), 1);
     }
+    #[test]
+    fn reference_copy_uses_exact_syntax_and_independent_authority() {
+        use std::sync::atomic::Ordering;
+        let epochs = super::Epochs::default();
+        let reference = epochs.for_action(super::Action::Reference("\\p{Greek}"));
+        let pattern = epochs.for_action(super::Action::Pattern);
+        reference.fetch_add(1, Ordering::AcqRel);
+        assert_eq!(pattern.load(Ordering::Acquire), 0);
+        let session = multi_launcher::regex_tester::RegexSession::default();
+        assert_eq!(super::payload(&session, 0, super::Action::Reference("\\p{Greek}")).as_deref(), Some("\\p{Greek}"));
+    }
+
     #[test]
     fn copy_payload_distinguishes_empty_and_unmatched_captures() {
         let mut session = multi_launcher::regex_tester::RegexSession::default();

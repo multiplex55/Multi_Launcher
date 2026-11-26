@@ -82,6 +82,8 @@ pub(super) struct RegexMount {
     pub(super) text: Entity<TextareaState>,
     pub(super) replacement: Entity<TextareaState>,
     pub(super) preset_name: Entity<InputState>,
+    pub(super) reference_filter: Entity<InputState>,
+    pub(super) examples_filter: Entity<InputState>,
     pub(super) preset_confirmation_focus: FocusHandle,
     pub(super) case_owner: utility_mount::MountOwner,
     pub(super) case_receipt: utility_mount::MountReceipt,
@@ -103,6 +105,7 @@ pub(super) struct RegexWorkspace {
     pub(super) session: RegexSession,
     pub(super) history: super::regex_history::HistoryLane,
     pub(super) presets: super::regex_presets::PresetLane,
+    pub(super) inspectors: super::regex_inspectors::InspectorState,
     pub(super) clipboard_pending: bool,
     pub(super) clipboard_epochs: super::regex_clipboard::Epochs,
     pub(super) clipboard_feedback: Option<String>,
@@ -149,6 +152,24 @@ impl RegexMount {
             TextareaState::new(window, cx)
                 .auto_grow(2, 5)
                 .placeholder("Replacement")
+        });
+        let reference_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search reference"));
+        let examples_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search examples"));
+        let reference_receipt = receipt.clone();
+        let reference_sub = cx.subscribe(&reference_filter, move |view: &mut RegexWorkspace, input: Entity<InputState>, event: &InputEvent, cx| {
+            if reference_receipt.is_current() && view.open && !view.rehosting && !view.admission.is_fenced()
+                && !view.presets.has_confirmation() && view.inspectors.is_reference() && matches!(event, InputEvent::Change) {
+                let next = input.read(cx).value().to_string();
+                if next != view.inspectors.reference_query { view.inspectors.revoke(&view.clipboard_epochs); view.inspectors.reference_query = next; cx.notify(); }
+            }
+        });
+        let examples_receipt = receipt.clone();
+        let examples_sub = cx.subscribe(&examples_filter, move |view: &mut RegexWorkspace, input: Entity<InputState>, event: &InputEvent, cx| {
+            if examples_receipt.is_current() && view.open && !view.rehosting && !view.admission.is_fenced()
+                && !view.presets.has_confirmation() && view.inspectors.is_examples() && matches!(event, InputEvent::Change) {
+                let next = input.read(cx).value().to_string();
+                if next != view.inspectors.examples_query { view.inspectors.examples_query = next; view.inspectors.revision = view.inspectors.revision.wrapping_add(1); cx.notify(); }
+            }
         });
         let preset_name = cx.new(|cx| InputState::new(window, cx).placeholder("Preset name"));
         let preset_receipt = receipt.clone();
@@ -245,13 +266,15 @@ impl RegexMount {
             text,
             replacement,
             preset_name,
+            reference_filter,
+            examples_filter,
             preset_confirmation_focus: cx.focus_handle(),
             case_owner,
             case_receipt,
             cases: HashMap::new(),
             focus: cx.focus_handle(),
             scroll: Default::default(),
-            _subscriptions: vec![pattern_sub, text_sub, replacement_sub, preset_sub],
+            _subscriptions: vec![pattern_sub, text_sub, replacement_sub, preset_sub, reference_sub, examples_sub],
         }
     }
 }
@@ -280,6 +303,7 @@ impl RegexWorkspace {
             session: RegexSession::default(),
             presets: super::regex_presets::PresetLane::new(history_path.as_ref().map(|path| path.with_file_name("regex_presets.json"))),
             history: super::regex_history::HistoryLane::new(history_path),
+            inspectors: super::regex_inspectors::InspectorState::default(),
             clipboard_pending: false,
             clipboard_epochs: super::regex_clipboard::Epochs::default(),
             clipboard_feedback: None,
@@ -315,6 +339,8 @@ impl RegexWorkspace {
             .replacement
             .update(cx, |input, cx| input.set_value(replacement, window, cx));
         mount.preset_name.update(cx, |input, cx| input.set_value(self.presets.name.clone(), window, cx));
+        mount.reference_filter.update(cx, |input, cx| input.set_value(self.inspectors.reference_query.clone(), window, cx));
+        mount.examples_filter.update(cx, |input, cx| input.set_value(self.inspectors.examples_query.clone(), window, cx));
         self.mount = mount;
         super::regex_cases::sync_editors(self, window, cx);
     }
@@ -934,6 +960,7 @@ impl Render for RegexWorkspace {
             .child(super::regex_clipboard::render(self, cx))
             .child(super::regex_history::render(self, cx))
             .child(super::regex_presets::render(self, cx))
+            .child(super::regex_inspectors::render(self, cx))
     }
 }
 impl RootWindow {

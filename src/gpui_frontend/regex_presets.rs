@@ -508,6 +508,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                         else {
                             return;
                         };
+                        view.inspectors.revoke(&view.clipboard_epochs);
                         view.presets.confirmation_revision =
                             view.presets.confirmation_revision.wrapping_add(1);
                         view.presets.confirmation = Some(Confirmation {

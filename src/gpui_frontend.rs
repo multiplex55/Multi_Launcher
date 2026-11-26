@@ -28,6 +28,7 @@ mod xml_utility;
 mod regex_tester;
 mod regex_substitution;
 mod regex_cases;
+mod regex_inspectors;
 mod regex_history;
 mod regex_presets;
 mod regex_clipboard;

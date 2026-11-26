@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+Regex offers Explanation, Reference and Examples through the shared session and catalogs. Locked launcher checks, independent review and five reused stock tests passed. The new GPUI cases are queued with Syntax Structure and constructor verification. [Regex inspectors checkpoint](CHECKPOINTS.md#g14-c-regex-explanation-reference-and-examples)
+
 Regex Presets supports the canonical saved list, explicit Load, Save, Rename, Update, Reload and checked Delete. All 15 grouped History and Presets cases passed. Matched Windows replay remains pending. Explanation, Reference and Examples are next. [Regex Presets checkpoint](CHECKPOINTS.md#g14-c-saved-regex-presets)
 
 Regex History now displays persisted rows and supports checked Load, Reload and Retry through the canonical store. Seven cases passed in the Presets batch. [Regex History checkpoint](CHECKPOINTS.md#g14-c-live-regex-history-controls)
