@@ -59,6 +59,9 @@ fn mounted_search_row_current(
 pub(super) fn eligible_file_row(row: &FilenameResult, expected: &std::path::Path) -> bool {
     row.kind == FileKind::File && row.path == expected
 }
+fn eligible_lock_candidate(kind: FileKind, has_content: bool, current: bool, row: Option<&FilenameResult>, path: &std::path::Path) -> bool {
+    kind == FileKind::File && !has_content && current && row.is_some_and(|row| eligible_file_row(row, path))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SelectionReceipt {
@@ -145,6 +148,7 @@ pub(super) struct FileSearchView {
     focus: FocusHandle,
     calculate_focus: FocusHandle,
     folder_size_focus: FocusHandle,
+    file_lock_focus: FocusHandle,
     explorer_focus: FocusHandle,
     preview_focus: FocusHandle,
     content_focus: HashMap<FileSearchResultKey, FocusHandle>,
@@ -164,6 +168,7 @@ pub(super) struct FileSearchView {
     active: Option<SearchId>,
     validating: bool,
     status: String,
+    file_lock_error: Option<(SelectionReceipt, String)>,
     backend: Option<SearchBackend>,
     results: Vec<FilenameResult>,
     content_rows: Vec<ContentRow>,
@@ -240,6 +245,7 @@ impl FileSearchView {
             focus,
             calculate_focus: cx.focus_handle(),
             folder_size_focus: cx.focus_handle(),
+            file_lock_focus: cx.focus_handle(),
             explorer_focus,
             preview_focus: cx.focus_handle(),
             content_focus: HashMap::new(),
@@ -259,6 +265,7 @@ impl FileSearchView {
             active: None,
             validating: false,
             status: "Enter a directory and filename, then search.".into(),
+            file_lock_error: None,
             backend: None,
             results: Vec::new(),
             content_rows: Vec::new(),
@@ -297,6 +304,7 @@ impl FileSearchView {
         self.focus = cx.focus_handle();
         self.calculate_focus = cx.focus_handle();
         self.folder_size_focus = cx.focus_handle();
+        self.file_lock_focus = cx.focus_handle();
         self.explorer_focus = cx.focus_handle();
         self.preview_focus = cx.focus_handle();
         self.content_focus.clear();
@@ -1081,6 +1089,36 @@ impl FileSearchView {
         window.defer(cx, move |window, app| { let _ = root.update(app, |root, cx| root.open_folder_size_from_file_search(source, receipt, window, cx)); });
     }
 
+    pub(super) fn lock_action_focus(&self) -> FocusHandle { self.file_lock_focus.clone() }
+    pub(super) fn lock_action_is_focused(&self, window: &Window) -> bool { self.file_lock_focus.is_focused(window) }
+    pub(super) fn report_file_lock_error(&mut self, error: &str, cx: &mut Context<Self>) {
+        if let Some(receipt) = self.selected_receipt(cx.entity_id()) {
+            self.file_lock_error = Some((receipt, format!("Could not open File Lock Inspector: {error}"))); cx.notify();
+        }
+    }
+    pub(super) fn clear_file_lock_error(&mut self, receipt: &SelectionReceipt, cx: &mut Context<Self>) {
+        if self.file_lock_error.as_ref().is_some_and(|(issued, _)| issued == receipt) {
+            self.file_lock_error = None; cx.notify();
+        }
+    }
+    pub(super) fn eligible_lock_receipt(&self, receipt: &SelectionReceipt, owner: EntityId) -> bool {
+        eligible_lock_candidate(receipt.kind, receipt.content_key.is_some(), self.receipt_is_current(receipt, owner),
+            self.results.get(receipt.index), &receipt.path)
+    }
+    fn inspect_file_users(&mut self, receipt: SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehosting || !self.is_mounted_in(window.window_handle().window_id(), self.popout)
+            || !window.is_window_active() || window.has_active_dialog(cx) || self.admission.is_fenced()
+            || !self.eligible_lock_receipt(&receipt, cx.entity_id())
+            || context_stack_has_primary(&window.context_stack(), "PopupMenu")
+            || !self.native.is_some_and(|native| native_window_is_valid(native) && current_foreground_identity() == Some(native.identity))
+            || self.root.upgrade().is_none_or(|root| { let root = root.read(cx);
+                root.action_sheet.is_some() || root.context_favorite_popup.is_some()
+                    || (!self.popout && !root.external_owner_is_current(window.focused(cx).as_ref(), window, cx)) }) { return; }
+        self.file_lock_focus.focus(window, cx);
+        let root = self.root.clone(); let source = cx.entity().downgrade();
+        window.defer(cx, move |window, app| { let _ = root.update(app, |root, cx| root.open_file_lock_from_file_search(source, receipt, window, cx)); });
+    }
+
     fn calculate_selected(
         &mut self,
         receipt: SelectionReceipt,
@@ -1392,6 +1430,9 @@ impl Drop for FileSearchView {
 
 impl Render for FileSearchView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.file_lock_error.as_ref().is_some_and(|(receipt, _)| !self.receipt_is_current(receipt, cx.entity_id())) {
+            self.file_lock_error = None;
+        }
         let running = self.running();
         let visible = self.visible_rows();
         let start = visible.start;
@@ -1407,6 +1448,7 @@ impl Render for FileSearchView {
         let preview_receipt = selected_receipt.clone().filter(|receipt| matches!(receipt.kind, FileKind::File | FileKind::Directory));
         let folder_receipt = selected_receipt.clone().filter(|receipt| receipt.kind == FileKind::Directory && receipt.content_key.is_none());
         let hash_receipt = selected_receipt.clone().filter(|receipt| receipt.kind == FileKind::File && receipt.content_key.is_none());
+        let lock_receipt = hash_receipt.clone();
         let selected_path = selected_receipt
             .as_ref()
             .map(|receipt| receipt.path.display().to_string());
@@ -1558,6 +1600,13 @@ impl Render for FileSearchView {
                                 }
                             }) }),
                     )
+                    .when(cfg!(windows), |panel| panel.child(Button::new("file-search-inspect-file-users").tab_stop(true).track_focus(&self.file_lock_focus)
+                        .label("Inspect file users…").disabled(self.rehosting || lock_receipt.is_none())
+                        .on_click({ let mount = self.mount_receipt.clone(); let receipt = lock_receipt.clone(); cx.listener(move |this, _, window, cx| {
+                            if mount.is_current() && mount.matches(&this.mount_receipt) && !this.rehosting {
+                                if let Some(receipt) = receipt.clone() { this.inspect_file_users(receipt, window, cx); }
+                            }
+                        }) })))
                     .child(Button::new("file-search-analyze-folder-size").tab_stop(true).track_focus(&self.folder_size_focus)
                         .label("Analyze folder size…").disabled(self.rehosting || folder_receipt.is_none())
                         .on_click({ let mount = self.mount_receipt.clone(); cx.listener(move |this, _, window, cx| {
@@ -1600,6 +1649,7 @@ impl Render for FileSearchView {
             .when_some(self.presentation_error.clone(), |pane, error| pane.child(Label::new(error)))
             .when_some(self.geometry_error.clone(), |pane, error| pane.child(Label::new(error)))
             .child(Label::new(if self.explorer_pending { "Opening in Explorer…".to_owned() } else { self.status.clone() }).id("file-search-status"))
+            .children(self.file_lock_error.as_ref().map(|(_, message)| Label::new(message.clone())))
             .when_some(selected_path, |pane, path| {
                 pane.child(Label::new("Selected result"))
                     .child(Label::new(path).id("file-search-selected-path"))
@@ -1947,6 +1997,23 @@ mod typed_tests {
     use super::{ProbeOwner, ProbeRequest, ScopedReceipt, validated_root_matches};
     use std::{collections::HashSet, path::PathBuf};
     use multi_launcher::file_search::{model::{SearchKind, SearchScope}, query::SearchRequestDraft};
+
+    #[test]
+    fn file_lock_handoff_rejects_stale_directory_content_and_wrong_file() {
+        use super::eligible_lock_candidate;
+        use multi_launcher::file_search::model::{FileKind, FilenameRank, FilenameResult};
+        let path = PathBuf::from("owned-file");
+        let mut row = FilenameResult { path: path.clone(), file_name: "owned-file".into(), parent_directory: None,
+            kind: FileKind::File, size: None, modified: None, rank: FilenameRank::ExactFilename,
+            match_quality: FilenameRank::ExactFilename, filename_match_ranges: Vec::new(), path_match_ranges: Vec::new(), arrival_index: 0 };
+        assert!(eligible_lock_candidate(FileKind::File, false, true, Some(&row), &path));
+        assert!(!eligible_lock_candidate(FileKind::File, true, true, Some(&row), &path));
+        assert!(!eligible_lock_candidate(FileKind::File, false, false, Some(&row), &path));
+        assert!(!eligible_lock_candidate(FileKind::Directory, false, true, Some(&row), &path));
+        assert!(!eligible_lock_candidate(FileKind::File, false, true, Some(&row), &PathBuf::from("other")));
+        row.kind = FileKind::Directory;
+        assert!(!eligible_lock_candidate(FileKind::File, false, true, Some(&row), &path));
+    }
 
     #[test]
     fn remount_and_rollback_preserve_search_identity_but_retire_old_rows() {

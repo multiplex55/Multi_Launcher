@@ -35,6 +35,17 @@ fn attempt_current(mount: &utility_mount::MountReceipt, issued: u64, current: u6
 fn submission_current(submitted: Option<&(PathBuf, u64)>, selected: Option<&PathBuf>, generation: u64) -> bool {
     submitted.is_some_and(|(path, issued)| selected == Some(path) && *issued == generation)
 }
+fn prefill_changes_file(current: Option<&PathBuf>, incoming: &PathBuf) -> bool { current != Some(incoming) }
+fn apply_file_prefill(selected: &mut Option<PathBuf>, submitted: &mut Option<(PathBuf, u64)>,
+    process: &mut Option<ProcessKey>, incoming: PathBuf, cancel: impl FnOnce()) -> bool {
+    if !prefill_changes_file(selected.as_ref(), &incoming) { return false; }
+    cancel();
+    *selected = Some(incoming); *submitted = None; *process = None;
+    true
+}
+fn inherited_prefers_popout(source_popout: bool, fresh: bool, remembered: bool) -> bool {
+    source_popout || (fresh && remembered)
+}
 fn rehost_allowed(open: bool, rehosting: bool, picker: bool, fenced: bool, popout: bool, target: bool,
     mount: &utility_mount::MountReceipt) -> bool {
     open && !rehosting && !picker && !fenced && popout != target && mount.is_current()
@@ -58,6 +69,7 @@ pub(super) struct FileLockView {
     owner: utility_mount::MountOwner,
     pub(super) popout: bool,
     pub(super) rehosting: bool,
+    pub(super) staging: bool,
     pub(super) presentation_error: Option<String>,
     pub(super) geometry_error: Option<String>,
     pub(super) mount: utility_mount::MountReceipt,
@@ -100,17 +112,22 @@ impl FileLockView {
             }
         }).detach();
         Self { open: true, root, host: window.window_handle(), native, visibility, admission,
-            owner, mount, popout: false, rehosting: false, presentation_error: None, geometry_error: None, session, wake, selected_file: None, submitted: None, selected: None, picker: false,
+            owner, mount, popout: false, rehosting: false, staging: false, presentation_error: None, geometry_error: None, session, wake, selected_file: None, submitted: None, selected: None, picker: false,
             picker_attempt: 0, permit: None, focus: cx.focus_handle(), choose_focus: cx.focus_handle(), rows_scroll: ScrollHandle::new(), message: None }
     }
     pub(super) fn host_close_blocked(&self) -> bool { self.picker || self.rehosting }
-    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool { self.open && self.popout == popout && self.mount.is_current() && self.host.window_id() == id }
+    pub(super) fn is_mounted_in(&self, id: WindowId, popout: bool) -> bool { self.open && (!self.staging || popout) && self.popout == popout && self.mount.is_current() && self.host.window_id() == id }
     pub(super) fn replace_mount(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, cx: &mut Context<Self>) {
         self.mount = self.owner.attach(); self.host = host; self.native = native;
         self.focus = cx.focus_handle(); self.choose_focus = cx.focus_handle();
     }
     pub(super) fn focus_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_mounted_in(window.window_handle().window_id(), self.popout) { self.choose_focus.focus(window, cx); }
+    }
+    pub(super) fn prefill(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let session = &self.session;
+        apply_file_prefill(&mut self.selected_file, &mut self.submitted, &mut self.selected, path, || { let _ = session.cancel(); });
+        self.message = None; cx.notify();
     }
     fn request_rehost(&mut self, target: bool, cx: &mut Context<Self>) {
         if !rehost_allowed(self.open, self.rehosting, self.picker, self.admission.is_fenced(), self.popout, target, &self.mount) { return; }
@@ -130,7 +147,7 @@ impl FileLockView {
     pub(super) fn owns_focus(&self, window: &Window, cx: &App) -> bool { self.open && self.focus.contains_focused(window, cx) }
     pub(super) fn shutdown(&mut self) {
         self.owner.retire(); self.picker_attempt = self.picker_attempt.wrapping_add(1);
-        self.open = false; self.rehosting = false; self.selected = None; self.session.close();
+        self.open = false; self.rehosting = false; self.staging = false; self.selected = None; self.session.close();
     }
     fn current(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.open && !self.rehosting && self.mount.is_current() && !self.admission.is_fenced()
@@ -333,6 +350,64 @@ impl Render for FileLockView {
 }
 
 impl RootWindow {
+    pub(super) fn open_file_lock_from_file_search(&mut self, source: WeakEntity<super::file_search::FileSearchView>,
+        receipt: super::file_search::SelectionReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        use super::file_search_handoff::{FileSearchOrigin, HandoffTarget};
+        let Some(source) = source.upgrade() else { return; };
+        let dialog = window.has_active_dialog(cx);
+        let contexts = window.context_stack();
+        let state = source.read(cx); let popout = state.is_mounted_in(window.window_handle().window_id(), true);
+        if self.restart_admission.is_fenced() || self.action_sheet.is_some() || self.context_favorite_popup.is_some()
+            || dialog || context_stack_has_primary(&contexts, "PopupMenu") || context_stack_has_primary(&contexts, "Dialog")
+            || context_stack_has_primary(&contexts, "AlertDialog") || !window.is_window_active() || state.rehosting
+            || (!popout && !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx))
+            || !self.file_search.as_ref().is_some_and(|view| view.entity_id() == receipt.owner)
+            || source.entity_id() != receipt.owner || !state.is_mounted_in(window.window_handle().window_id(), popout)
+            || !state.lock_action_is_focused(window) || !state.eligible_lock_receipt(&receipt, source.entity_id()) { return; }
+        let Some(native) = state.host_native() else { return; };
+        if !native_window_is_valid(native) || current_foreground_identity() != Some(native.identity) { return; }
+        if !popout && !json_utility::native_host_current(&self.root_visibility,
+            self.root_visibility.request_revision.load(Ordering::Acquire), Some(native), false) { return; }
+        if let Err(error) = multi_launcher::file_lock::validate_file_path(&receipt.path) {
+            source.update(cx, |view, cx| view.report_file_lock_error(&error.to_string(), cx)); return;
+        }
+        let fresh = self.file_lock_view.as_ref().is_none_or(|view| !view.read(cx).open);
+        if fresh && self.file_lock_retiring.iter().any(|window| window.native_window.is_none_or(native_window_is_valid)) {
+            source.update(cx, |view, cx| view.report_file_lock_error("The previous inspector window is closing.", cx)); return;
+        }
+        if self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).host_close_blocked() || (fresh && view.read(cx).busy())) {
+            source.update(cx, |view, cx| view.report_file_lock_error("The inspector is busy.", cx)); return;
+        }
+        let origin = FileSearchOrigin { target: HandoffTarget::FileLock(receipt.path.clone()), receipt, mount: state.mount_receipt(),
+            host: window.window_handle(), native, focus: state.lock_action_focus(), popout,
+            root_revision: self.root_visibility.request_revision.load(Ordering::Acquire), fresh };
+        let Some(permit) = self.restart_admission.admit() else { return; };
+        if fresh && self.file_lock_popup.is_some() {
+            source.update(cx, |view, cx| view.report_file_lock_error("The previous inspector window is closing.", cx)); return;
+        }
+        if self.file_lock_popup.as_ref().is_some_and(|popup| popup.native.is_none_or(|target| !checked_hash_popup_visible(target))) {
+            source.update(cx, |view, cx| view.report_file_lock_error("Restore the inspector window and retry.", cx)); return;
+        }
+        let view = if fresh {
+            let retained = self.file_lock_view.as_ref().and_then(|view| view.read(cx).selected_file.clone());
+            let root = cx.entity().downgrade(); let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone();
+            let view = cx.new(|cx| FileLockView::new(window, cx, root, Some(native), visibility, admission));
+            view.update(cx, |view, _| view.selected_file = retained);
+            self.file_lock_view = Some(view.clone()); view
+        } else { self.file_lock_view.as_ref().unwrap().clone() };
+        if self.file_lock_popup.is_some() { self.activate_inherited_file_lock_popup(origin, permit, cx); return; }
+        let remembered = multi_launcher::settings::UtilityToolKey::parse("file-lock").ok().is_some_and(|key|
+            self.utility_presentations.preference(key).unwrap_or(multi_launcher::settings::RememberedPresentation::Docked)
+                == multi_launcher::settings::RememberedPresentation::Popout);
+        if inherited_prefers_popout(popout, fresh, remembered) {
+            let mount = view.update(cx, |view, _| { view.rehosting = true; view.staging = fresh; view.mount.clone() });
+            self.start_inherited_file_lock_rehost(mount, origin, permit, cx);
+        } else if let HandoffTarget::FileLock(path) = &origin.target {
+            view.update(cx, |view, cx| { view.prefill(path.clone(), cx); view.focus_host(window, cx); });
+            source.update(cx, |view, cx| view.clear_file_lock_error(&origin.receipt, cx));
+            self.reveal_file_lock(window, cx); cx.notify();
+        }
+    }
     pub(super) fn open_file_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.restart_admission.is_fenced() || window.has_active_dialog(cx) || !window.is_window_active()
             || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
@@ -424,7 +499,7 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{attempt_current, current_provider, rehost_allowed, submission_current, ProcessKey};
+    use super::{apply_file_prefill, attempt_current, current_provider, inherited_prefers_popout, prefill_changes_file, rehost_allowed, submission_current, ProcessKey};
     use multi_launcher::plugin::Plugin;
     #[test]
     fn exact_provider_and_stale_picker_receipts() {
@@ -464,5 +539,34 @@ mod tests {
         let replacement = owner.attach();
         assert!(!rehost_allowed(true, false, false, false, false, true, &old));
         assert!(rehost_allowed(true, false, false, false, true, false, &replacement));
+    }
+    #[test]
+    fn file_prefill_preserves_same_path_and_host_policy() {
+        let first = std::env::temp_dir().join("first");
+        let next = std::env::temp_dir().join("next");
+        assert!(!prefill_changes_file(Some(&first), &first));
+        assert!(prefill_changes_file(Some(&first), &next));
+        assert!(prefill_changes_file(None, &first));
+        assert!(inherited_prefers_popout(true, false, false));
+        assert!(inherited_prefers_popout(false, true, true));
+        assert!(!inherited_prefers_popout(false, false, true));
+    }
+    #[test]
+    fn accepted_prefill_changes_only_different_file_and_keeps_worker_permit() {
+        use std::{cell::Cell, sync::Arc};
+        let admission = Arc::new(super::super::RestartAdmission::default());
+        let permit = admission.admit().unwrap();
+        let first = std::env::temp_dir().join("first");
+        let next = std::env::temp_dir().join("next");
+        let key = ProcessKey { generation: 4, pid: 5, created: 6 };
+        let mut selected = Some(first.clone()); let mut submitted = Some((first.clone(), 4)); let mut process = Some(key);
+        let cancels = Cell::new(0);
+        assert!(!apply_file_prefill(&mut selected, &mut submitted, &mut process, first.clone(), || cancels.set(cancels.get() + 1)));
+        assert_eq!(submitted, Some((first, 4))); assert_eq!(process, Some(key)); assert_eq!(cancels.get(), 0);
+        assert!(apply_file_prefill(&mut selected, &mut submitted, &mut process, next.clone(), || cancels.set(cancels.get() + 1)));
+        assert_eq!(selected, Some(next)); assert!(submitted.is_none()); assert!(process.is_none()); assert_eq!(cancels.get(), 1);
+        assert_eq!(admission.pending_effects(), 1);
+        drop(permit);
+        assert_eq!(admission.pending_effects(), 0);
     }
 }

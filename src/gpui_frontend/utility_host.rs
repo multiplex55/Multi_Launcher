@@ -11,6 +11,10 @@ pub(super) fn shell_geometry_mount_is_current(
     mounted_in_popup && receipt.is_current()
 }
 
+fn inherited_popup_target_allowed(mount: bool, installed: bool, presented: bool, modal_clear: bool) -> bool {
+    mount && installed && presented && modal_clear
+}
+
 /// A checked geometry observer owned by one utility shell mount.
 pub(super) struct ShellGeometry {
     key: UtilityToolKey,
@@ -908,8 +912,74 @@ impl RootWindow {
     }
     pub(super) fn drain_folder_size_geometry(&mut self, cx: &mut Context<Self>, detach: bool) { self.drain_host_geometry::<super::folder_size::FolderSizeView>(cx, detach); }
     pub(super) fn start_folder_size_rehost(&mut self, popout: bool, gesture: Option<hash_dock::Gesture>, source: utility_mount::MountReceipt, cx: &mut Context<Self>) { self.start_hosted_rehost::<super::folder_size::FolderSizeView>(popout, gesture, source, None, None, cx); }
-    pub(super) fn start_inherited_folder_size_rehost(&mut self, source: utility_mount::MountReceipt, origin: super::folder_size::FileSearchOrigin, permit: EffectPermit, cx: &mut Context<Self>) {
+    pub(super) fn start_inherited_folder_size_rehost(&mut self, source: utility_mount::MountReceipt, origin: super::file_search_handoff::FileSearchOrigin, permit: EffectPermit, cx: &mut Context<Self>) {
         self.start_hosted_rehost::<super::folder_size::FolderSizeView>(true, None, source, Some((origin, permit)), None, cx);
+    }
+    pub(super) fn start_inherited_file_lock_rehost(&mut self, source: utility_mount::MountReceipt, origin: super::file_search_handoff::FileSearchOrigin, permit: EffectPermit, cx: &mut Context<Self>) {
+        self.start_hosted_rehost::<super::file_lock::FileLockView>(true, None, source, Some((origin, permit)), None, cx);
+    }
+    pub(super) fn activate_inherited_folder_size_popup(&mut self, origin: super::file_search_handoff::FileSearchOrigin, permit: EffectPermit, cx: &mut Context<Self>) {
+        self.activate_file_search_popup::<super::folder_size::FolderSizeView>(origin, permit, cx);
+    }
+    pub(super) fn activate_inherited_file_lock_popup(&mut self, origin: super::file_search_handoff::FileSearchOrigin, permit: EffectPermit, cx: &mut Context<Self>) {
+        self.activate_file_search_popup::<super::file_lock::FileLockView>(origin, permit, cx);
+    }
+    fn file_search_popup_target_current<T: HostedUtility>(&self, workspace: &Entity<T>, mount: &utility_mount::MountReceipt,
+        host: AnyWindowHandle, native: NativeWindow, cx: &mut Context<Self>) -> bool {
+        let installed = !self.restart_admission.is_fenced()
+            && T::workspace(self).as_ref().is_some_and(|view| view.entity_id() == workspace.entity_id())
+            && T::popup(self).is_some_and(|popup| popup.window.window_id() == host.window_id() && popup.native == Some(native))
+            && workspace.read(cx).rehosting() && workspace.read(cx).mounted(host.window_id(), true)
+            && workspace.read(cx).receipt().matches(mount);
+        if !inherited_popup_target_allowed(mount.is_current(), installed, checked_hash_popup_visible(native), true) { return false; }
+        let modal_clear = host.update(cx, |_, window, app| {
+            let contexts = window.context_stack();
+            !window.has_active_dialog(app)
+                && !context_stack_has_primary(&contexts, "PopupMenu")
+                && !context_stack_has_primary(&contexts, "Dialog")
+                && !context_stack_has_primary(&contexts, "AlertDialog")
+                && checked_native_window(window).ok().flatten() == Some(native)
+        }).unwrap_or(false);
+        inherited_popup_target_allowed(mount.is_current(), installed, checked_hash_popup_visible(native), modal_clear)
+    }
+    fn activate_file_search_popup<T: HostedUtility>(&mut self, origin: super::file_search_handoff::FileSearchOrigin,
+        permit: EffectPermit, cx: &mut Context<Self>) {
+        let (Some(workspace), Some(popup)) = (T::workspace(self), T::popup(self)) else { return; };
+        let Some(native) = popup.native else { return; };
+        let host = popup.window; let mount = workspace.read(cx).receipt();
+        workspace.update(cx, |view, cx| { view.set_rehosting(true, cx); cx.notify(); });
+        let root = cx.entity().downgrade(); let worker_mount = mount.clone();
+        let source_mount = origin.mount.clone(); let source_native = origin.native;
+        let source_popup = origin.popout; let source_revision = origin.root_revision;
+        let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone();
+        let guard = Arc::new(AtomicU64::new(1));
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let current = root.update(cx, |root, cx| root.file_search_origin_current(&origin, source_native.identity, cx)
+                && root.file_search_popup_target_current::<T>(&workspace, &mount, host, native, cx)).unwrap_or(false);
+            let accepted = current && activate_for_secondary_window_if(&guard, 1, native, Some(source_native.identity), &||
+                worker_mount.is_current() && source_mount.is_current() && !admission.is_fenced()
+                    && checked_hash_popup_visible(native) && native_window_is_valid(source_native)
+                    && (source_popup || json_utility::native_host_current(&visibility, source_revision, Some(source_native), false)));
+            let committed = root.update(cx, |root, cx| {
+                if !accepted || current_foreground_identity() != Some(native.identity)
+                    || !root.file_search_origin_current(&origin, native.identity, cx)
+                    || !root.file_search_popup_target_current::<T>(&workspace, &mount, host, native, cx) { return false; }
+                if !root.commit_file_search_handoff(&origin, workspace.entity_id(), host.window_id(), cx) { return false; }
+                workspace.update(cx, |view, cx| { view.set_rehosting(false, cx); cx.notify(); });
+                if origin.popout { T::remember(root, RememberedPresentation::Popout, cx); }
+                true
+            }).unwrap_or(false);
+            if committed {
+                let _ = update_kit_window_content(host, &workspace, cx, |view, window, cx| {
+                    if mount.is_current() && view.mounted(window.window_handle().window_id(), true)
+                        && !window.has_active_dialog(cx) && current_foreground_identity() == Some(native.identity) { view.focus(window, cx); }
+                });
+            } else { let _ = root.update(cx, |root, cx| {
+                workspace.update(cx, |view, cx| { if mount.is_current() && view.receipt().matches(&mount) { view.set_rehosting(false, cx); cx.notify(); } });
+                root.file_search_origin_error(&origin, "The window could not be activated.", cx);
+            }); }
+        }).detach();
     }
     pub(super) fn drain_file_search_geometry(&mut self, cx: &mut Context<Self>, detach: bool) { self.drain_host_geometry::<super::file_search::FileSearchView>(cx, detach); }
     pub(super) fn start_file_search_rehost(&mut self, popout: bool, gesture: Option<hash_dock::Gesture>, source: utility_mount::MountReceipt, cx: &mut Context<Self>) {
@@ -949,7 +1019,7 @@ impl RootWindow {
         popout: bool,
         gesture: Option<hash_dock::Gesture>,
         source: utility_mount::MountReceipt,
-        inherited: Option<(super::folder_size::FileSearchOrigin, EffectPermit)>,
+        inherited: Option<(super::file_search_handoff::FileSearchOrigin, EffectPermit)>,
         cold_lock: Option<super::file_lock::ColdOrigin>,
         cx: &mut Context<Self>,
     ) {
@@ -968,13 +1038,13 @@ impl RootWindow {
         }
         let Some(permit) = self.restart_admission.admit() else {
             if let Some((origin, _)) = inherited.as_ref() {
-                self.abort_folder_size_inherited(origin, workspace.entity_id(), &source, "Folder Size is busy.", cx);
+                self.abort_file_search_handoff(origin, workspace.entity_id(), &source, &format!("{} is busy.", T::TITLE), cx);
             } else { workspace.update(cx, |view, cx| view.set_rehosting(false, cx)); }
             return;
         };
         let Some(root_window) = self.root_window else {
             if let Some((origin, _)) = inherited.as_ref() {
-                self.abort_folder_size_inherited(origin, workspace.entity_id(), &source, "The launcher window is unavailable.", cx);
+                self.abort_file_search_handoff(origin, workspace.entity_id(), &source, "The launcher window is unavailable.", cx);
             } else { workspace.update(cx, |view, cx| view.set_rehosting(false, cx)); }
             return;
         };
@@ -1090,7 +1160,7 @@ impl RootWindow {
                     Ok(opened) => opened,
                     Err(error) => {
                         if let Some((origin, _)) = inherited.as_ref() {
-                            let _ = root.update(cx, |root, cx| root.abort_folder_size_inherited(origin, workspace.entity_id(), &source, "Could not open the destination window.", cx));
+                            let _ = root.update(cx, |root, cx| root.abort_file_search_handoff(origin, workspace.entity_id(), &source, "Could not open the destination window.", cx));
                         } else { let _ = workspace.update(cx, |view, cx| {
                             view.set_rehosting(false, cx);
                             view.set_error(Some(format!(
@@ -1123,7 +1193,7 @@ impl RootWindow {
                     Ok(Ok(native)) => native,
                     _ => {
                         if let Some((origin, _)) = inherited.as_ref() {
-                            let _ = root.update(cx, |root, cx| root.abort_folder_size_inherited(origin, workspace.entity_id(), &source, "Could not attach the destination window.", cx));
+                            let _ = root.update(cx, |root, cx| root.abort_file_search_handoff(origin, workspace.entity_id(), &source, "Could not attach the destination window.", cx));
                         }
                         let candidate_native = cx
                             .update(|app| {
@@ -1225,7 +1295,7 @@ impl RootWindow {
                     .unwrap_or(false);
                 let mut displayed = false;
                 let inherited_ready = inherited.as_ref().is_none_or(|(origin, _)| root.update(cx, |root, cx|
-                    root.folder_size_origin_current(origin, origin.native.identity, cx)).unwrap_or(false));
+                    root.file_search_origin_current(origin, origin.native.identity, cx)).unwrap_or(false));
                 let cold_ready = cold_lock.as_ref().is_none_or(|origin| root.update(cx, |root, cx|
                     root.file_lock_cold_origin_current(origin, cx)).unwrap_or(false));
                 if installed && inherited_ready && cold_ready {
@@ -1239,7 +1309,7 @@ impl RootWindow {
                                 }
                             };
                             let authorized = if let Some((origin, _)) = inherited.as_ref() {
-                                root.update(cx, |root, cx| root.folder_size_origin_current(origin, origin.native.identity, cx)).unwrap_or(false)
+                                root.update(cx, |root, cx| root.file_search_origin_current(origin, origin.native.identity, cx)).unwrap_or(false)
                             } else if let Some(origin) = cold_lock.as_ref() {
                                 root.update(cx, |root, cx| root.file_lock_cold_origin_current(origin, cx)).unwrap_or(false)
                             } else { gesture.is_some_and(|gesture| {
@@ -1278,12 +1348,10 @@ impl RootWindow {
                 }
                 if displayed && let Some((origin, _)) = inherited.as_ref() {
                     displayed = native.is_some_and(|native| root.update(cx, |root, cx| {
-                        if !root.folder_size_origin_current(origin, native.identity, cx)
+                        if !root.file_search_origin_current(origin, native.identity, cx)
                             || !T::popup(root).is_some_and(|popup| popup.window.window_id() == window.window_id() && popup.native == Some(native))
                             || !mounted_receipt.is_current() { return false; }
-                        let Some(view) = root.folder_size_view.clone().filter(|view| view.entity_id() == workspace.entity_id()) else { return false; };
-                        view.update(cx, |view, cx| { if !view.is_mounted_in(window.window_id(), true) || !view.rehosting { return false; }
-                            view.prefill(origin.root.clone(), cx); view.staging = false; true })
+                        root.commit_file_search_handoff(origin, workspace.entity_id(), window.window_id(), cx)
                     }).unwrap_or(false));
                 }
                 if displayed && let Some(origin) = cold_lock.as_ref() {
@@ -1377,7 +1445,7 @@ impl RootWindow {
                     );
                     if let Some((origin, _)) = inherited.as_ref() {
                         let restored = cx.update(|app| workspace.read(app).receipt());
-                        let _ = root.update(cx, |root, cx| root.abort_folder_size_inherited(origin, workspace.entity_id(), &restored, "The destination could not be activated.", cx));
+                        let _ = root.update(cx, |root, cx| root.abort_file_search_handoff(origin, workspace.entity_id(), &restored, "The destination could not be activated.", cx));
                     }
                     retire_failed_utility_candidate(&root, window, native, T::KIND, cx).await;
                 }
@@ -1556,11 +1624,19 @@ mod tests {
         ForegroundIdentity, HashWakeSignal, NativeWindow, RootVisibilityRequest, hash_dock,
         utility_mount,
     };
-    use super::shell_geometry_mount_is_current;
+    use super::{inherited_popup_target_allowed, shell_geometry_mount_is_current};
     use std::sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     };
+    #[test]
+    fn inherited_popup_requires_live_presented_modal_free_target() {
+        assert!(inherited_popup_target_allowed(true, true, true, true));
+        assert!(!inherited_popup_target_allowed(false, true, true, true));
+        assert!(!inherited_popup_target_allowed(true, false, true, true));
+        assert!(!inherited_popup_target_allowed(true, true, false, true));
+        assert!(!inherited_popup_target_allowed(true, true, true, false));
+    }
     #[test]
     fn geometry_reattachment_requires_current_popup_mount() {
         let owner = utility_mount::MountOwner::default();

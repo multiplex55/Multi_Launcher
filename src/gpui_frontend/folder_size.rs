@@ -8,18 +8,7 @@ use multi_launcher::plugin::Plugin;
 
 pub(super) const WAIT: &str = "Wait for the Folder Size operation to finish.";
 
-#[derive(Clone)]
-pub(super) struct FileSearchOrigin {
-    pub(super) receipt: super::file_search::SelectionReceipt,
-    pub(super) mount: utility_mount::MountReceipt,
-    pub(super) host: AnyWindowHandle,
-    pub(super) native: NativeWindow,
-    pub(super) focus: FocusHandle,
-    pub(super) popout: bool,
-    pub(super) root_revision: u64,
-    pub(super) root: ExplicitDirectoryRoot,
-    pub(super) fresh: bool,
-}
+use super::file_search_handoff::{FileSearchOrigin, HandoffTarget};
 
 pub(super) fn current_provider(query: &str, action: &Action, enabled: Option<&HashSet<String>>,
     capabilities: Option<&HashMap<String, Vec<String>>>) -> bool {
@@ -387,39 +376,17 @@ impl Render for FolderSizeView {
     }
 }
 impl RootWindow {
-    pub(super) fn folder_size_origin_current(&self, origin: &FileSearchOrigin, foreground: ForegroundIdentity, cx: &mut Context<Self>) -> bool {
-        if self.restart_admission.is_fenced() || !origin.mount.is_current() || !native_window_is_valid(origin.native)
-            || (!origin.popout && !json_utility::native_host_current(&self.root_visibility, origin.root_revision, Some(origin.native), false))
-            || current_foreground_identity() != Some(foreground) || self.action_sheet.is_some() || self.context_favorite_popup.is_some() { return false; }
-        let current = self.file_search.as_ref().is_some_and(|view| view.entity_id() == origin.receipt.owner
-            && view.read(cx).is_mounted_in(origin.host.window_id(), origin.popout)
-            && !view.read(cx).rehosting && view.read(cx).receipt_is_current(&origin.receipt, view.entity_id()));
-        current && origin.host.update(cx, |_, window, app| !window.has_active_dialog(app) && origin.focus.is_focused(window)).unwrap_or(false)
-    }
-    pub(super) fn folder_size_origin_error(&self, origin: &FileSearchOrigin, message: &str, cx: &mut Context<Self>) {
-        if !self.folder_size_origin_current(origin, origin.native.identity, cx) { return; }
-        if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| view.report_folder_size_error(message, cx)); }
-    }
-    pub(super) fn abort_folder_size_inherited(&mut self, origin: &FileSearchOrigin, owner: EntityId,
-        expected: &utility_mount::MountReceipt, message: &str, cx: &mut Context<Self>) {
-        if let Some(view) = self.folder_size_view.clone().filter(|view| view.entity_id() == owner) {
-            view.update(cx, |view, cx| {
-                if !expected.is_current() || !expected.matches(&view.mount) { return; }
-                if origin.fresh { view.staging = false; view.shutdown(); }
-                else { view.rehosting = false; }
-                cx.notify();
-            });
-        }
-        self.folder_size_origin_error(origin, message, cx);
-    }
     pub(super) fn open_folder_size_from_file_search(&mut self, source: WeakEntity<super::file_search::FileSearchView>, receipt: super::file_search::SelectionReceipt,
         window: &mut Window, cx: &mut Context<Self>) {
         use multi_launcher::file_search::model::FileKind;
         let Some(source) = source.upgrade() else { return; };
         let dialog = window.has_active_dialog(cx);
+        let contexts = window.context_stack();
         let state = source.read(cx); let popout = state.is_mounted_in(window.window_handle().window_id(), true);
         if self.restart_admission.is_fenced() || self.action_sheet.is_some() || self.context_favorite_popup.is_some()
-            || dialog || !window.is_window_active() || state.rehosting
+            || dialog || context_stack_has_primary(&contexts, "PopupMenu") || context_stack_has_primary(&contexts, "Dialog")
+            || context_stack_has_primary(&contexts, "AlertDialog") || !window.is_window_active() || state.rehosting
+            || (!popout && !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx))
             || !self.file_search.as_ref().is_some_and(|view| view.entity_id() == receipt.owner)
             || source.entity_id() != receipt.owner || !state.is_mounted_in(window.window_handle().window_id(), popout)
             || receipt.kind != FileKind::Directory || receipt.content_key.is_some()
@@ -438,7 +405,7 @@ impl RootWindow {
             source.update(cx, |view, cx| view.report_folder_size_error("Folder Size is busy.", cx)); return;
         }
         let origin = FileSearchOrigin { receipt, mount: state.mount_receipt(), host: window.window_handle(), native,
-            focus: state.folder_action_focus(), popout, root_revision: self.root_visibility.request_revision.load(Ordering::Acquire), root: root_path, fresh };
+            focus: state.folder_action_focus(), popout, root_revision: self.root_visibility.request_revision.load(Ordering::Acquire), target: HandoffTarget::FolderSize(root_path), fresh };
         let Some(permit) = self.restart_admission.admit() else { return; };
         if fresh && self.folder_size_popup.is_some() {
             source.update(cx, |view, cx| view.report_folder_size_error("The previous Folder Size window is closing.", cx));
@@ -455,7 +422,7 @@ impl RootWindow {
             self.folder_size_view = Some(view.clone()); view
         } else { self.folder_size_view.as_ref().unwrap().clone() };
         if self.folder_size_popup.is_some() {
-            self.activate_folder_size_prefill(view, origin, permit, cx); return;
+            self.activate_inherited_folder_size_popup(origin, permit, cx); return;
         }
         let remembered = multi_launcher::settings::UtilityToolKey::parse("folder-size").ok().is_some_and(|key|
             self.utility_presentations.preference(key).unwrap_or(multi_launcher::settings::RememberedPresentation::Docked)
@@ -465,37 +432,10 @@ impl RootWindow {
             let mount = view.update(cx, |view, _| { view.rehosting = true; view.staging = fresh; view.mount.clone() });
             self.start_inherited_folder_size_rehost(mount, origin, permit, cx);
         } else {
-            view.update(cx, |view, cx| { view.prefill(origin.root.clone(), cx); view.focus_host(window, cx); });
+            let Some(root_path) = origin.folder_root() else { return; };
+            view.update(cx, |view, cx| { view.prefill(root_path.clone(), cx); view.focus_host(window, cx); });
             self.reveal_folder_size(window, cx); cx.notify();
         }
-    }
-    fn activate_folder_size_prefill(&mut self, view: Entity<FolderSizeView>, origin: FileSearchOrigin, permit: EffectPermit, cx: &mut Context<Self>) {
-        let Some(popup) = self.folder_size_popup.as_ref() else { return; };
-        let Some(target) = popup.native else { return; };
-        let host = popup.window; let mount = view.read(cx).mount.clone();
-        view.update(cx, |view, cx| { view.rehosting = true; cx.notify(); });
-        let root = cx.entity().downgrade(); let worker_mount = mount.clone();
-        let admission = self.restart_admission.clone(); let guard = Arc::new(AtomicU64::new(1));
-        cx.spawn(async move |_, cx| {
-            let _permit = permit;
-            let current = root.update(cx, |root, cx| root.folder_size_origin_current(&origin, origin.native.identity, cx)).unwrap_or(false);
-            let accepted = current && activate_for_secondary_window_if(&guard, 1, target, Some(origin.native.identity), &||
-                worker_mount.is_current() && !admission.is_fenced());
-            let committed = root.update(cx, |root, cx| {
-                if !accepted || !checked_hash_popup_visible(target) || !mount.is_current() || !root.folder_size_popup.as_ref().is_some_and(|popup| popup.window.window_id() == host.window_id() && popup.native == Some(target))
-                    || !root.folder_size_origin_current(&origin, target.identity, cx) { return false; }
-                let applied = view.update(cx, |view, cx| { if !view.is_mounted_in(host.window_id(), true) || !view.rehosting { return false; }
-                    view.prefill(origin.root.clone(), cx); view.rehosting = false; true });
-                if applied && origin.popout { root.remember_host_presentation("folder-size", multi_launcher::settings::RememberedPresentation::Popout, cx); }
-                applied
-            }).unwrap_or(false);
-            if committed {
-                let _ = update_kit_window_content(host, &view, cx, |view, window, cx| {
-                    if mount.is_current() && view.is_mounted_in(window.window_handle().window_id(), true)
-                        && !window.has_active_dialog(cx) && current_foreground_identity() == Some(target.identity) { view.focus_host(window, cx); }
-                });
-            } else { let _ = root.update(cx, |root, cx| { view.update(cx, |view, cx| { if mount.is_current() { view.rehosting = false; cx.notify(); } }); root.folder_size_origin_error(&origin, "The window could not be activated.", cx); }); }
-        }).detach();
     }
     pub(super) fn open_folder_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.restart_admission.is_fenced() || window.has_active_dialog(cx) || !window.is_window_active()

@@ -9,6 +9,7 @@ mod external_launch;
 mod file_search;
 mod folder_size;
 mod file_lock;
+mod file_search_handoff;
 mod file_search_preview;
 mod settings_actions;
 mod settings_search;
