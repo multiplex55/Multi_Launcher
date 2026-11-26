@@ -224,6 +224,8 @@ pub(super) struct InstalledLauncherProviders {
     clipboard_modify: ClipboardModifyBare,
     file_search: FileSearchBarePlugin,
     folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
+    #[cfg(windows)]
+    file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
     calculator: CalculatorMetadata,
     #[cfg(windows)]
     windows: WindowsMetadata,
@@ -294,6 +296,8 @@ impl InstalledLauncherProviders {
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
             folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
+            #[cfg(windows)]
+            file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
             calculator: CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin::default()),
             #[cfg(windows)]
             windows: WindowsMetadata,
@@ -330,6 +334,8 @@ impl InstalledLauncherProviders {
             Some(&self.clipboard_modify as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.folder_size as &dyn multi_launcher::plugin::Plugin),
+            #[cfg(windows)]
+            Some(&self.file_lock as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
             Some(&self.windows as &dyn multi_launcher::plugin::Plugin),
@@ -628,6 +634,24 @@ mod tests {
         assert!(super::search_routed(providers.plugins(), "foldersize", Some(&HashSet::new()), None).is_empty());
         let disabled = HashMap::from([("folder_size".to_owned(), Vec::new())]);
         assert!(super::search_routed(providers.plugins(), "foldersize", Some(&enabled), Some(&disabled)).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_file_lock_provider_obeys_exact_query_and_capabilities() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        let enabled = HashSet::from(["file_lock".to_owned()]);
+        let rows = super::search_routed(providers.plugins(), "FileLock", Some(&enabled), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "file_lock");
+        assert!(super::super::file_lock::current_provider("FileLock", &rows[0].1, Some(&enabled), None));
+        let filtered = super::search_routed(providers.plugins(), "kind:filelock filelock", Some(&enabled), None);
+        assert_eq!(filtered.len(), 1);
+        assert!(super::super::file_lock::current_provider("kind:filelock filelock", &filtered[0].1, Some(&enabled), None));
+        assert!(super::search_routed(providers.plugins(), "filelock extra", Some(&enabled), None).is_empty());
+        assert!(super::search_routed(providers.plugins(), "filelock", Some(&HashSet::new()), None).is_empty());
+        let disabled = HashMap::from([("file_lock".to_owned(), Vec::new())]);
+        assert!(super::search_routed(providers.plugins(), "filelock", Some(&enabled), Some(&disabled)).is_empty());
     }
 
     #[test]

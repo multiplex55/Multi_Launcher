@@ -1710,3 +1710,11 @@ The acquired clipboard writer and checked Shell selector verify their retained p
 Independent review cleared exact paths, final effect guards, menu dismissal and keyboard receipt. The final scoped locked launcher check passed in 6.93 s. One grouped library and launcher link took 25 min with zero corrective links. Nextest run `d50201d7-f8f3-48ab-aed2-dd71f0510c1e` passed all 14 in 6.768 s with 9310 skipped. The batch uses an owned Windows filesystem fixture and fake clipboard and Shell effects. It covers directory type, volume-root refusal, frozen cancelled progress, exact acquired copy and stale action retirement.
 
 Paired 1516 × 937 clipboard and Explorer replay remains open. Use the owned Unicode file and directory to witness exact path text, directory open and containing-folder selection. Pointer-anchored context menu placement remains open. Continue the launcher-only File Lock Inspector pane.
+
+### G10 File Lock Inspector pane
+
+The installed Windows `filelock` provider opens the GPUI File Lock Inspector. Open and Choose leave inspection idle. A checked owner-bound picker selects the exact file, then Inspect or Refresh submits it to the existing read-only `FileLockSession`. The pane shows status and bounded reported user rows with PID, creation FILETIME and available metadata. A changed file clears the previous displayed submission. Cancel invalidates that submission immediately and Close retires it. Quit and Restart wait for the underlying native call to settle.
+
+Independent review cleared installed admission, exact submitted path and generation, picker authority and worker retirement. The final locked scoped launcher check passed in 12.12 s. One warm link took 22.74 s with no shared-library rebuild. Nextest run `24df16fc-fc1f-409a-ad1e-b28f3be38627` passed all five in 1.648 s, with 446 skipped. Reused stock provider, cancel, close and owned Windows holder tests passed all four in `9ec9ca30-806b-442b-8c73-cb5eefb00737` in 1.007 s. The Windows fixture observed the disposable holder before release. Matched GUI picker, keyboard and inspection replay remains open.
+
+Continue remembered File Lock hosting and exact File Search prefill. Copy snapshot, checked executable reveal and remaining G10 tool families retain their own criteria.
