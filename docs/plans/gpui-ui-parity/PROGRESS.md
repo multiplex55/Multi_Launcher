@@ -2,13 +2,15 @@
 
 ## Current checkpoint
 
+The stock `regex` Search route opens a retained GPUI matcher with exact Pattern, flags, Test Text, match and capture byte ranges, and scoped F3 navigation. Shared Regex baseline tests passed from the existing linked library. GPUI tests are written for the next grouped run. Native hosting, history and advanced controls remain open. [Regex Tester](gui/regex-tester.md#gpui-retained-matcher)
+
 Merged the upstream Windows virtual-desktop restore and egui cloaked repaint changes. The locked check and all 20 focused activation tests passed. The required execution strategy is committed and linked from the Master Goal, Kickstart, and continuation records. Cross-desktop Windows replay remains pending. Current implementation continues with G14-C Regex Tester. [Integration checkpoint](CHECKPOINTS.md#upstream-master-integration) · [Execution Strategy](EXECUTION_STRATEGY.md)
 
 Saved JSON and XML pins now restore their remembered hosts passively. The toolbar focuses an exact live host or unpins the top panel through the canonical checked Settings write. Twelve grouped tests passed. The matched Windows replay and scoped Jump evidence remain pending. [Structured utility pins checkpoint](CHECKPOINTS.md#saved-json-and-xml-pins)
 
 An open XML Overwrite review can move between Dock and Pop Out with the exact frozen path and payload. Six focused launcher tests passed. Native confirmation and transfer evidence and saved JSON and XML pins remain pending. [Overwrite transfer checkpoint](CHECKPOINTS.md#xml-overwrite-review-transfer)
 
-G14 XML now reuses the shared checked utility host for remembered Dock and Pop Out. The same engine and draft survive moves, and Dock preserves a newer focus choice while the old popup retires. Ten focused host tests passed. Overwrite review transfer and saved JSON and XML pins follow. Matched desktop replay remains pending. [XML host checkpoint](CHECKPOINTS.md#xml-remembered-dock-and-pop-out)
+G14 XML reuses the shared checked utility host for remembered Dock and Pop Out. The same engine and draft survive moves, and Dock preserves a newer focus choice while the old popup retires. Ten focused host tests passed. Matched desktop replay remains pending. [XML host checkpoint](CHECKPOINTS.md#xml-remembered-dock-and-pop-out)
 
 G14 now has XML Open, Save Source, Save Output and an explicit Overwrite review. Initial creation cannot clobber a file that appears late, and Windows rename retries check authority again. Twenty-three grouped tests passed, closing the queued automated Open and XSD checks. Paired desktop replay and review rehosting remain open. [XML file-effects checkpoint](CHECKPOINTS.md#xml-save-and-overwrite)
 
@@ -24,7 +26,7 @@ G14 XML Format and Minify produce a separate bounded Output preview. Copy keeps 
 
 G14 docked XML Source now edits multiline XML under the stock `xml` route. It uses the existing XML engine and Activity, current-revision diagnostics, and explicit protected clipboard. Ten focused tests passed, including the real Windows MSXML gate. Matched desktop verification remains pending. [XML Source checkpoint](CHECKPOINTS.md#xml-source-session-and-activity)
 
-G14 added JSON Pop Out and Dock through the retained workspace. Dock requires an accepted foreground receipt before the source popup retires. Mode persistence, native geometry capture and saved geometry restore use the shared settings owners. Independent review and the focused host and geometry tests passed. Native replay and saved pin remain pending. [Checked host checkpoint](CHECKPOINTS.md#json-checked-pop-out-and-dock) · [Geometry checkpoint](CHECKPOINTS.md#json-native-geometry-writeback)
+G14 added JSON Pop Out and Dock through the retained workspace. Dock requires an accepted foreground receipt before the source popup retires. Mode persistence, native geometry capture and saved geometry restore use the shared settings owners. Independent review and the focused host and geometry tests passed. Native replay remains pending. [Checked host checkpoint](CHECKPOINTS.md#json-checked-pop-out-and-dock) · [Geometry checkpoint](CHECKPOINTS.md#json-native-geometry-writeback)
 
 G14 JSON Tree provides virtualized rows, literal search and match reveal, bounded Details, and checked Value, Subtree and Pointer copies. Independent review and ten focused library and launcher tests passed. Saved pin and paired desktop replay remain pending. [Docked Tree checkpoint](CHECKPOINTS.md#docked-json-tree)
 
@@ -93,7 +95,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 200 Specified, 18 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 199 Specified, 19 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |

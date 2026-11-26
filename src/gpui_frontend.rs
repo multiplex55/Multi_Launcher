@@ -25,6 +25,7 @@ mod hash_dock;
 mod wake;
 mod json_utility;
 mod xml_utility;
+mod regex_tester;
 mod xml_host;
 mod xml_tree;
 mod xml_xpath;
@@ -2036,6 +2037,7 @@ enum InstalledSearchRoute {
     Activity,
     JsonUtility(multi_launcher::commands::JsonUtilityIntent),
     XmlUtility,
+    RegexTester,
     FavoritesBrowse,
     FavoritesNamed(String),
 }
@@ -2085,6 +2087,7 @@ fn classify_installed_search_command(
         Command::Dialog(DialogCommand::Settings) => Ok(InstalledSearchRoute::Settings),
         Command::Dialog(DialogCommand::Help) => Ok(InstalledSearchRoute::Help),
         Command::Dialog(DialogCommand::Activity) => Ok(InstalledSearchRoute::Activity),
+        Command::Dialog(DialogCommand::RegexTester) => Ok(InstalledSearchRoute::RegexTester),
         Command::JsonUtility(multi_launcher::commands::JsonUtilityCommand::Open { intent }) => Ok(InstalledSearchRoute::JsonUtility(*intent)),
         Command::XmlToolkit(multi_launcher::commands::XmlToolkitCommand::Open) => Ok(InstalledSearchRoute::XmlUtility),
         Command::Storage(StorageCommand::FavoriteDialog(label)) => {
@@ -2661,6 +2664,7 @@ struct RootWindow {
     activity_view: Option<Entity<activity::ActivityView>>,
     json_view: Option<Entity<json_utility::JsonWorkspace>>,
     xml_view: Option<Entity<xml_utility::XmlWorkspace>>,
+    regex_view: Option<Entity<regex_tester::RegexWorkspace>>,
     xml_popup: Option<utility_mount::UtilityPopup>,
     xml_retiring: Vec<RetiringHashWindow>,
     xml_terminal_quit: bool,
@@ -4625,6 +4629,7 @@ struct RestartDrafts {
     utility: Option<String>,
     json: Option<String>,
     xml: Option<String>,
+    regex: Option<multi_launcher::regex_tester::RegexDraft>,
     hash: HashDraft,
     hash_window_open: bool,
     settings: SettingsRestartDraft,
@@ -4810,6 +4815,7 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
         names.push("JSON text");
     }
     if drafts.xml.as_ref().is_some_and(|text| !text.is_empty()) { names.push("XML source"); }
+    if drafts.regex.is_some() { names.push("Regex Tester draft"); }
     if !drafts.hash.text.is_empty() {
         names.push("Hash Generator text");
     }
@@ -5821,6 +5827,7 @@ impl RootWindow {
                 utility,
                 json: self.json_view.as_ref().and_then(|view| view.read(cx).draft()),
                 xml: self.xml_view.as_ref().and_then(|view| view.read(cx).draft()),
+                regex: self.regex_view.as_ref().and_then(|view| view.read(cx).draft()),
                 hash: hash_draft,
                 hash_window_open,
                 settings: self.settings_editor.restart_draft(),
@@ -6000,6 +6007,7 @@ impl RootWindow {
         self.retire_search_jump_mode();
         if let Some(view) = self.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
         self.retire_json_workspace(cx);
+        if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         if let Some(view) = &self.xml_view { view.update(cx, |view, cx| view.shutdown(cx)); }
         #[cfg(windows)]
         if let Some(view) = self.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
@@ -7871,6 +7879,10 @@ impl RootWindow {
             }
             return;
         }
+        if result.action.action == "regex:open" {
+            if !matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "regex_tester")
+                || !regex_tester::provider_is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) { return; }
+        }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "activity")
             && !activity::provider_is_current(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             return;
@@ -8129,6 +8141,7 @@ impl RootWindow {
                 self.open_json_utility(intent, Some(self.query.focus_handle(cx)), window, cx);
             }
             InstalledSearchRoute::XmlUtility => { drop(operation); self.open_xml_toolkit(window, cx); }
+            InstalledSearchRoute::RegexTester => { drop(operation); self.open_regex_tester(window, cx); }
             InstalledSearchRoute::FavoritesBrowse => {
                 drop(operation);
                 let focus = Some(self.query.focus_handle(cx));
@@ -9902,6 +9915,7 @@ impl RootWindow {
         self.root_visibility.deactivate();
         if let Some(view) = &self.file_search { view.read(cx).retire_explorer(); }
         self.retire_json_workspace(cx);
+        if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         self.window_search.retire();
         self.file_search_probe.retire();
         self.indexed_applications.retire();
@@ -10798,6 +10812,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.xml_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.regex_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -12354,6 +12371,7 @@ pub(crate) fn run_foundation_window(
                     root.retire_search_jump_mode();
                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.retire_json_workspace(cx);
+                    if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
                     #[cfg(windows)]
                     if let Some(view) = root.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
                     root.drain_hash_native_geometry(cx, true);
@@ -12553,6 +12571,7 @@ pub(crate) fn run_foundation_window(
                 activity_view: None,
                 json_view: None,
                 xml_view: None,
+                regex_view: None,
                 xml_popup: None,
                 xml_retiring: Vec::new(),
                 xml_terminal_quit: false,
@@ -12905,6 +12924,7 @@ pub(crate) fn run_foundation_window(
                         let _ = root_for_window_close.update(app, |root, cx| {
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.retire_json_workspace(cx);
+                            if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
                             root.window_search.retire(); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });
@@ -12938,6 +12958,7 @@ pub(crate) fn run_foundation_window(
                             let _ = root_for_window_close.update(app, |root, cx| {
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.retire_json_workspace(cx);
+                            if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
                             root.window_search.retire(); root.file_search_probe.retire();
                             root.indexed_applications.retire();
                         });
@@ -15728,9 +15749,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "favorites", "file_search", "hash_generator", "help", "json_utility", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()

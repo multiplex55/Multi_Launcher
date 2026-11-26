@@ -67,6 +67,7 @@ pub(super) struct InstalledLauncherProviders {
     activity: multi_launcher::plugins::activity::ActivityPlugin,
     json_utility: multi_launcher::plugins::json_utility::JsonUtilityPlugin,
     xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
+    regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
     #[cfg(windows)]
@@ -107,6 +108,7 @@ impl InstalledLauncherProviders {
             activity: multi_launcher::plugins::activity::ActivityPlugin,
             json_utility: multi_launcher::plugins::json_utility::JsonUtilityPlugin,
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
+            regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
@@ -139,6 +141,7 @@ impl InstalledLauncherProviders {
             Some(&self.activity as &dyn multi_launcher::plugin::Plugin),
             Some(&self.json_utility as &dyn multi_launcher::plugin::Plugin),
             Some(&self.xml_toolkit as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
