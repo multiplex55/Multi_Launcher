@@ -3523,6 +3523,7 @@ enum RootCloseBlocker {
     ToastLogOpen,
     FavoritesWrite,
     HashPinWrite,
+    HashRehost,
     StructuredPinWrite,
     RegexRehost,
     RegexHistory,
@@ -3642,6 +3643,23 @@ enum HashReturnReceipt {
     FileSearchPopup { receipt: file_search::SelectionReceipt, mount: utility_mount::MountReceipt, host: AnyWindowHandle, native: NativeWindow },
     #[cfg(windows)]
     Downloads(downloads_triage::InspectReceipt),
+}
+
+fn inherited_hash_parent_return_allowed(remount: bool, unpin: bool) -> bool { !remount && !unpin }
+
+fn commit_inherited_hash_file(session: &mut HashSession, path: &std::path::Path, current: bool) -> bool {
+    if !current { return false; }
+    session.set_file_path(Some(path.to_path_buf()));
+    true
+}
+
+#[derive(Clone)]
+struct HashInheritedOrigin {
+    receipt: file_search::SelectionReceipt,
+    mount: utility_mount::MountReceipt,
+    host: AnyWindowHandle,
+    native: NativeWindow,
+    focus: FocusHandle,
 }
 
 struct HashMountConfig {
@@ -4001,18 +4019,21 @@ fn create_hash_generator_view(
         let pending = Arc::clone(&clipboard_pending);
         let pinned_for_close = Arc::clone(&pinned);
         let root_for_close = root.clone();
-        window.on_window_should_close(cx, move |_, app| {
-            if !hash_pin::allows_close(pinned_for_close.load(Ordering::Acquire), hash_pin::CloseOrigin::Native) {
+        window.on_window_should_close(cx, move |window, app| {
+            if !hash_pin::allows_close(pinned_for_close.load(Ordering::Acquire), hash_pin::CloseOrigin::Native) { return false; }
+            if let Some(message) = hash_clipboard_close_message(pending.kind()) {
+                let _ = root_for_close.update(app, |root, cx| { root.restart_status = Some(message.to_owned()); cx.notify(); });
                 return false;
             }
-            let Some(message) = hash_clipboard_close_message(pending.kind()) else {
-                return true;
-            };
-            let _ = root_for_close.update(app, |root, cx| {
-                root.restart_status = Some(message.to_owned());
-                cx.notify();
-            });
-            false
+            let view = root_for_close.update(app, |root, _| match (&root.hash_window, &root.hash_return) {
+                (HashWindowState::Popout { window: host, view, mount_generation: active }, Some(HashReturnReceipt::FileSearchPopup { .. }))
+                    if host.window_id() == window.window_handle().window_id() && *active == mount_generation => Some(view.clone()),
+                _ => None,
+            }).ok().flatten();
+            if let Some(view) = view {
+                window.defer(app, move |_, app| { view.update(app, |tool, cx| tool.request_close(hash_pin::CloseOrigin::Native, cx)); });
+                false
+            } else { true }
         });
     }
     let text = cx.new(|cx| {
@@ -4474,6 +4495,34 @@ async fn remove_and_wait_for_hash_window(cx: &mut AsyncApp, retiring: RetiringHa
         tracing::debug!(%error, "GPUI Hash window was already unavailable during retirement");
     }
     wait_for_hash_window_retirement(cx, retiring.native_window).await
+}
+
+async fn retire_unchecked_hash_candidate(root: &WeakEntity<RootWindow>, window: AnyWindowHandle, cx: &mut AsyncApp) {
+    let signal = Arc::new(HashWakeSignal::default());
+    let wait = signal.clone();
+    let id = window.window_id();
+    let installed = root.update(cx, |root, cx| {
+        root.hash_retiring_windows.push(RetiringHashWindow { window, native_window: None });
+        let owner = cx.entity().downgrade();
+        let closed = signal.clone();
+        let subscription = cx.on_window_closed(move |app, closed_id| {
+            if closed_id == id {
+                let _ = owner.update(app, |root, cx| {
+                    root.hash_retiring_windows.retain(|item| item.window.window_id() != id);
+                    cx.notify();
+                });
+                closed.notify();
+            }
+        });
+        cx.spawn(async move |_, _| { let _subscription = subscription; wait.wait().await; }).detach();
+    }).is_ok();
+    if cx.update(|app| window.update(app, |_, window, _| window.remove_window())).is_err() && installed {
+        let _ = root.update(cx, |root, cx| {
+            root.hash_retiring_windows.retain(|item| item.window.window_id() != id);
+            cx.notify();
+        });
+        signal.notify();
+    }
 }
 
 async fn restore_root_search_focus_after_hash_close(
@@ -7495,6 +7544,18 @@ impl RootWindow {
         let source_host = window.window_handle();
         if source_popup {
             let Some(operation) = self.restart_admission.admit() else { return; };
+            if let HashWindowState::Docked { view: hash_view, mount_generation } = &self.hash_window {
+                if self.hash_file_picker_pending.load(Ordering::Acquire) || self.hash_clipboard_pending.is_pending()
+                    || self.hash_rehost_pending.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() { return; }
+                let hash_view = hash_view.clone(); let generation = *mount_generation;
+                let epoch = self.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).epoch();
+                let revision = self.hash_rehost_revision.fetch_add(1, Ordering::AcqRel).wrapping_add(1).max(1);
+                let origin = HashInheritedOrigin { receipt, mount: source_mount, host: source_host,
+                    native: source_native, focus: source.hash_action_focus(cx) };
+                hash_view.update(cx, |tool, cx| { tool.set_editors_readonly(true, cx); cx.notify(); });
+                self.start_hash_rehost(HashPresentationMode::Popout, generation, epoch, revision, None, Some(origin), operation, cx);
+                return;
+            }
             match self.open_hash_generator_window(HashOpenIntent::InheritedFile(receipt.path.clone()), operation, window, cx) {
                 Ok(()) => {
                     self.hash_return = Some(HashReturnReceipt::FileSearchPopup { receipt, mount: source_mount,
@@ -8505,6 +8566,18 @@ impl RootWindow {
         cx.notify();
     }
 
+    fn hash_inherited_origin_current(&self, origin: &HashInheritedOrigin, foreground: ForegroundIdentity, cx: &mut Context<Self>) -> bool {
+        if self.restart_admission.is_fenced() || !origin.mount.is_current() || !native_window_is_valid(origin.native)
+            || current_foreground_identity() != Some(foreground) || self.action_sheet.is_some() || self.context_favorite_popup.is_some() { return false; }
+        let current = self.file_search.as_ref().is_some_and(|view| {
+            view.entity_id() == origin.receipt.owner && view.read(cx).is_mounted_in(origin.host.window_id(), true)
+                && view.read(cx).receipt_is_current(&origin.receipt, view.entity_id())
+        });
+        current && origin.host.update(cx, |_, window, app| {
+            !window.has_active_dialog(app) && origin.focus.is_focused(window)
+        }).unwrap_or(false)
+    }
+
     fn start_hash_rehost(
         &mut self,
         target: HashPresentationMode,
@@ -8512,6 +8585,7 @@ impl RootWindow {
         session_epoch: u64,
         revision: u64,
         dock_gesture: Option<hash_dock::Gesture>,
+        inherited: Option<HashInheritedOrigin>,
         operation: EffectPermit,
         cx: &mut Context<Self>,
     ) {
@@ -8573,13 +8647,14 @@ impl RootWindow {
             );
             return;
         };
-        let initial_draft = {
+        let mut initial_draft = {
             let session = self
                 .hash_session
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             HashDraft::from_session(&session)
         };
+        if let Some(origin) = &inherited { initial_draft.mode = HashInputMode::File; initial_draft.file_path = Some(origin.receipt.path.clone()); }
         let destination_mount_generation = self.next_hash_mount_generation();
         let destination_session_epoch = session_epoch;
         let root = cx.entity().downgrade();
@@ -8648,7 +8723,8 @@ impl RootWindow {
                     }
                 }
                 HashPresentationMode::Popout => {
-                    let options = cx.update(|app| hash_popout_window_options(app));
+                    let mut options = cx.update(|app| hash_popout_window_options(app));
+                    if inherited.is_some() { options.show = false; options.focus = false; }
                     let config = mount_config;
                     match cx.update(|app| {
                         gpui_kit::open_window(options, app, move |window, app| {
@@ -8673,7 +8749,9 @@ impl RootWindow {
                                     window,
                                     native_window,
                                 };
-                                if !remove_and_wait_for_hash_window(cx, candidate).await {
+                                if inherited.is_some() {
+                                    retire_unchecked_hash_candidate(&root, window, cx).await;
+                                } else if !remove_and_wait_for_hash_window(cx, candidate).await {
                                     let _ = root.update(cx, |root, cx| {
                                         root.hash_retiring_windows.push(candidate);
                                         cx.notify();
@@ -8780,6 +8858,23 @@ impl RootWindow {
                     Some((window, close_subscription)),
                 ),
             };
+            let inherited_ready = if let Some(origin) = inherited.as_ref() {
+                let current = root.update(cx, |root, cx| {
+                    root.hash_rehost_pending.load(Ordering::Acquire)
+                        && root.hash_rehost_revision.load(Ordering::Acquire) == revision
+                        && root.hash_mount_generation.load(Ordering::Acquire) == source_mount_generation
+                        && root.hash_window.mount_generation() == Some(source_mount_generation)
+                        && root.hash_inherited_origin_current(origin, origin.native.identity, cx)
+                }).unwrap_or(false);
+                if let Some(native) = candidate_native_window {
+                    current && native_window_is_valid(native)
+                        && current_foreground_identity() == Some(origin.native.identity)
+                        && set_native_window_visible(native, true).is_ok()
+                        && current_foreground_identity() == Some(origin.native.identity)
+                        && activate_native_window(native).is_ok()
+                        && current_foreground_identity() == Some(native.identity)
+                } else { false }
+            } else { true };
             let commit = root.update(cx, |root, cx| {
                 let still_current = root.hash_rehost_pending.load(Ordering::Acquire)
                     && root.hash_rehost_revision.load(Ordering::Acquire) == revision
@@ -8792,8 +8887,17 @@ impl RootWindow {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .epoch()
                         == session_epoch;
-                if !still_current {
-                    return Err("The active Hash Generator mount changed before rehosting completed.".to_owned());
+                if !still_current { return Err("The active Hash Generator mount changed before rehosting completed.".to_owned()); }
+                if !inherited_ready { return Err("The initiating File Search changed before rehosting completed.".to_owned()); }
+                if let Some(origin) = inherited.as_ref() {
+                    let Some(candidate) = candidate_native_window else { return Err("Hash Generator has no checked native window.".into()); };
+                    if !native_window_is_valid(candidate) || !root.hash_inherited_origin_current(origin, candidate.identity, cx) {
+                        return Err("File Search or Hash Generator changed before the handoff completed.".into());
+                    }
+                    commit_inherited_hash_file(&mut root.hash_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                        &origin.receipt.path, true);
+                    root.hash_return = Some(HashReturnReceipt::FileSearchPopup { receipt: origin.receipt.clone(),
+                        mount: origin.mount.clone(), host: origin.host, native: origin.native });
                 }
 
                 root.drain_hash_native_geometry(cx, true);
@@ -8978,7 +9082,7 @@ impl RootWindow {
                 receiver.wait().await;
             }
 
-            if source_mode == Some(HashPresentationMode::Docked)
+            if inherited.is_none() && source_mode == Some(HashPresentationMode::Docked)
                 && target == HashPresentationMode::Popout
                 && let Some(root_view) = root.upgrade()
             {
@@ -9061,6 +9165,16 @@ impl RootWindow {
         .detach();
     }
 
+    fn hash_return_activation_origin(&self, child: NativeWindow, cx: &App) -> Option<HashInheritedOrigin> {
+        let HashReturnReceipt::FileSearchPopup { receipt, mount, host, native } = self.hash_return.as_ref()? else { return None; };
+        if !mount.is_current() || self.restart_admission.is_fenced() || !native_window_is_valid(*native)
+            || !native_window_is_valid(child) || current_foreground_identity() != Some(child.identity) { return None; }
+        let view = self.file_search.as_ref().filter(|view| view.entity_id() == receipt.owner)?;
+        if !view.read(cx).is_mounted_in(host.window_id(), true) || !view.read(cx).receipt_is_current(receipt, view.entity_id()) { return None; }
+        Some(HashInheritedOrigin { receipt: receipt.clone(), mount: mount.clone(), host: *host, native: *native,
+            focus: view.read(cx).hash_action_focus(cx) })
+    }
+
     fn start_hash_close(
         &mut self,
         mount_generation: u64,
@@ -9104,6 +9218,12 @@ impl RootWindow {
             );
             return;
         }
+        let remount = self.hash_pin.is_saved() && origin == hash_pin::CloseOrigin::Button;
+        let return_activation = match &self.hash_window {
+            HashWindowState::Popout { view, .. } if inherited_hash_parent_return_allowed(remount, origin == hash_pin::CloseOrigin::Unpin) => view.read(cx).native_window.and_then(|child|
+                self.hash_return_activation_origin(child, cx).map(|origin| (origin, child))),
+            _ => None,
+        };
         self.cancel_docked_hash_resize_for_mount(mount_generation, session_epoch);
         self.drain_hash_native_geometry(cx, true);
         let retired_docked_focus = match &self.hash_window {
@@ -9131,7 +9251,6 @@ impl RootWindow {
         let close_revision = self.hash_window_revision
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
-        let remount = self.hash_pin.is_saved() && origin == hash_pin::CloseOrigin::Button;
         self.hash_pin.remount_revision = remount.then_some(close_revision);
         let return_receipt = self.hash_return.take();
         self.hash_open_error = None;
@@ -9140,6 +9259,12 @@ impl RootWindow {
         let root = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             let _operation = operation;
+            if let Some((origin, child)) = return_activation {
+                let allowed = root.update(cx, |root, cx| root.hash_window_revision.load(Ordering::Acquire) == close_revision
+                    && root.hash_window.mode().is_none() && root.hash_inherited_origin_current(&origin, child.identity, cx)).unwrap_or(false);
+                if allowed && origin.mount.is_current() && native_window_is_valid(child)
+                    && current_foreground_identity() == Some(child.identity) { let _ = activate_native_window(origin.native); }
+            }
             let retired = if let Some(retiring) = retiring {
                 let retired = remove_and_wait_for_hash_window(cx, retiring).await;
                 let _ = root.update(cx, |root, cx| {
@@ -9781,6 +9906,7 @@ impl RootWindow {
             Some(RootCloseBlocker::StructuredPinWrite) => {
                 self.restart_status = Some("Wait for the utility pin update to finish before quitting Multi Launcher.".to_owned());
             }
+            Some(RootCloseBlocker::HashRehost) => { self.restart_status = Some("Wait for the Hash Generator candidate window to close.".into()); }
             Some(RootCloseBlocker::HashPinWrite) => {
                 self.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
             }
@@ -9882,6 +10008,7 @@ impl RootWindow {
             return Some(RootCloseBlocker::CalculatorSearch);
         }
         if self.hash_pin.pending.is_some() { return Some(RootCloseBlocker::HashPinWrite); }
+        if self.hash_retiring_windows.iter().any(|window| window.native_window.is_none()) { return Some(RootCloseBlocker::HashRehost); }
         if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
             return Some(RootCloseBlocker::PluginPreferenceSave);
         }
@@ -11353,6 +11480,7 @@ impl HashGeneratorWindow {
                     session_epoch,
                     revision,
                     dock_gesture,
+                    None,
                     operation,
                     cx,
                 );
@@ -13168,6 +13296,7 @@ pub(crate) fn run_foundation_window(
                         let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for the utility pin update to finish before closing Multi Launcher.".to_owned()); cx.notify(); });
                         false
                     }
+                    Some(RootCloseBlocker::HashRehost) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for the Hash Generator candidate window to close.".into()); cx.notify(); }); false }
                     Some(RootCloseBlocker::HashPinWrite) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
                             root.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
@@ -15593,6 +15722,27 @@ mod tests {
         assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs", Some(&HashSet::new()), Some(&search)).is_empty());
         let disabled_caps = HashMap::from([("file_search".to_owned(), Vec::new())]);
         assert!(multi_launcher::plugin::search_filtered_plugins_with_origin(providers.plugins(), "fs", Some(&enabled), Some(&disabled_caps)).is_empty());
+    }
+
+    #[test]
+    fn inherited_hash_commit_keeps_source_on_refusal_and_same_path() {
+        assert!(super::inherited_hash_parent_return_allowed(false, false));
+        assert!(!super::inherited_hash_parent_return_allowed(true, false));
+        assert!(!super::inherited_hash_parent_return_allowed(false, true));
+        let first = PathBuf::from(r"C:\owned\first.txt");
+        let second = PathBuf::from(r"C:\owned\second.txt");
+        let mut session = super::HashSession::new();
+        session.begin(Some(first.clone()));
+        let generation = session.generation();
+        assert!(!super::commit_inherited_hash_file(&mut session, &second, false));
+        assert_eq!(session.file_path(), Some(first.as_path()));
+        assert_eq!(session.generation(), generation);
+        assert!(super::commit_inherited_hash_file(&mut session, &first, true));
+        assert_eq!(session.generation(), generation);
+        assert!(super::commit_inherited_hash_file(&mut session, &second, true));
+        assert_eq!(session.file_path(), Some(second.as_path()));
+        assert_ne!(session.generation(), generation);
+        assert!(!session.has_job());
     }
 
     #[test]
