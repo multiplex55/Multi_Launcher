@@ -1,6 +1,7 @@
 //! Local, Rust-compatible regular-expression tester domain.
 
 pub mod engine;
+pub mod clipboard_format;
 mod history_policy;
 pub mod examples;
 pub mod explanation;

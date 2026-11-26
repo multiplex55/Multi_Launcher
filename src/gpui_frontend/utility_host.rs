@@ -107,6 +107,7 @@ trait HostedUtility: Render + Sized + 'static {
     fn root(&self) -> WeakEntity<RootWindow>;
     fn open(&self) -> bool;
     fn rehosting(&self) -> bool;
+    fn clipboard_pending(&self) -> bool { false }
     fn popout(&self) -> bool;
     fn fenced(&self) -> bool;
     fn receipt(&self) -> utility_mount::MountReceipt;
@@ -268,6 +269,9 @@ impl HostedUtility for super::regex_tester::RegexWorkspace {
     }
     fn rehosting(&self) -> bool {
         self.rehosting
+    }
+    fn clipboard_pending(&self) -> bool {
+        self.clipboard_pending
     }
     fn popout(&self) -> bool {
         self.popout
@@ -702,7 +706,7 @@ impl RootWindow {
                                 if !view.mounted(local_id, true) {
                                     return true;
                                 }
-                                if view.rehosting() {
+                                if view.rehosting() || view.clipboard_pending() {
                                     return false;
                                 }
                                 let _ = view.root().update(cx, |root, cx| T::drain(root, cx, true));

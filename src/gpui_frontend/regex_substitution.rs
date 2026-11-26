@@ -39,6 +39,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                 }
                 view.session
                     .set_substitution_enabled(state == CheckboxState::Checked, Instant::now());
+                view.clipboard_epochs.replacement.fetch_add(1, Ordering::AcqRel);
                 view.pump(cx);
                 cx.notify();
             });
@@ -134,6 +135,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                     }
                     if !view.session.draft.replacement.is_empty() {
                         view.session.draft.replacement.clear();
+                        view.clipboard_epochs.replacement.fetch_add(1, Ordering::AcqRel);
                         view.mount
                             .replacement
                             .update(cx, |input, cx| input.set_value("", window, cx));

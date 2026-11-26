@@ -23,15 +23,7 @@ struct PresentedStatus {
 }
 
 fn summary_text(summary: RegexTestCaseSummary) -> String {
-    let noun = if summary.total == 1 { "case" } else { "cases" };
-    format!(
-        "{} {noun} · {} passed · {} failed · {} errors · {} pending",
-        summary.total,
-        summary.passed,
-        summary.failed,
-        summary.pattern_errors + summary.unevaluated,
-        summary.pending
-    )
+    crate::regex_tester::clipboard_format::case_summary(summary)
 }
 
 fn status_for(case: &RegexTestCase, status: Option<&RegexTestCaseStatus>) -> PresentedStatus {

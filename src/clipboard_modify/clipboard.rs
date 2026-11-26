@@ -80,6 +80,13 @@ impl From<ExecuteError> for ClipboardError {
 pub trait ClipboardBackend: Send + Sync {
     fn read_text(&self) -> Result<String, ClipboardError>;
     fn write_text(&self, text: &str) -> Result<(), ClipboardError>;
+    fn write_text_if(&self, text: &str, current: &dyn Fn() -> bool) -> Result<bool, ClipboardError> {
+        if !current() {
+            return Ok(false);
+        }
+        self.write_text(text)?;
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -91,6 +98,15 @@ impl ClipboardBackend for ArboardClipboardBackend {
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
         let mut cb = arboard::Clipboard::new().map_err(classify_arboard)?;
         cb.set_text(text.to_string()).map_err(classify_arboard)
+    }
+    fn write_text_if(&self, text: &str, current: &dyn Fn() -> bool) -> Result<bool, ClipboardError> {
+        let mut clipboard = arboard::Clipboard::new().map_err(classify_arboard)?;
+        let writer = clipboard.set();
+        if !current() {
+            return Ok(false);
+        }
+        writer.text(text.to_owned()).map_err(classify_arboard)?;
+        Ok(true)
     }
 }
 fn classify_arboard(e: arboard::Error) -> ClipboardError {

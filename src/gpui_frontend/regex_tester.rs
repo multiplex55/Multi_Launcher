@@ -54,13 +54,13 @@ fn pending_timer(
     }
     delay
 }
-fn advance_due(session: &mut RegexSession, now: Instant) -> bool {
+pub(super) fn advance_due(session: &mut RegexSession, now: Instant) -> (bool, bool, bool) {
     let previous = session.evaluated_revision();
-    session.tick(now);
+    let replacement = session.tick(now);
     let main_completed =
         session.evaluated_revision().is_some() && session.evaluated_revision() != previous;
-    session.tick_test_cases(now);
-    main_completed
+    let cases = session.tick_test_cases(now);
+    (main_completed, replacement, cases)
 }
 fn preview(text: &str) -> String {
     let mut chars = text.chars();
@@ -76,10 +76,10 @@ fn preview(text: &str) -> String {
 }
 pub(super) struct RegexMount {
     pub(super) receipt: utility_mount::MountReceipt,
-    window: AnyWindowHandle,
-    native: Option<NativeWindow>,
+    pub(super) window: AnyWindowHandle,
+    pub(super) native: Option<NativeWindow>,
     pattern: Entity<InputState>,
-    text: Entity<TextareaState>,
+    pub(super) text: Entity<TextareaState>,
     pub(super) replacement: Entity<TextareaState>,
     pub(super) cases:
         HashMap<multi_launcher::regex_tester::RegexTestCaseId, super::regex_cases::CaseEditor>,
@@ -95,9 +95,13 @@ pub(super) struct RegexWorkspace {
     pub(super) geometry_error: Option<String>,
     pub(super) root: WeakEntity<RootWindow>,
     pub(super) admission: Arc<RestartAdmission>,
-    visibility: RootVisibility,
+    pub(super) visibility: RootVisibility,
     pub(super) session: RegexSession,
     pub(super) history: super::regex_history::HistoryLane,
+    pub(super) clipboard_pending: bool,
+    pub(super) clipboard_epochs: super::regex_clipboard::Epochs,
+    pub(super) clipboard_feedback: Option<String>,
+    pub(super) selected_capture: usize,
     mount_owner: utility_mount::MountOwner,
     pub(super) mount: RegexMount,
     pub(super) cases_expanded: bool,
@@ -162,6 +166,7 @@ impl RegexMount {
                             view.focus.focus(window, cx);
                         }
                         view.session.draft.replacement = next;
+                        view.clipboard_epochs.replacement.fetch_add(1, Ordering::AcqRel);
                         view.session.mark_replacement_changed(Instant::now());
                         view.pump(cx);
                         cx.notify();
@@ -181,19 +186,22 @@ impl RegexMount {
                 {
                     let next = input.read(cx).value().to_string();
                     if next != view.session.draft.pattern {
+                        view.clipboard_epochs.pattern.fetch_add(1, Ordering::AcqRel);
                         view.session.draft.pattern = next;
-                        view.changed(cx);
+                        view.changed(true, cx);
                     }
                 }
             },
         );
         let text_receipt = receipt.clone();
-        let text_sub = cx.subscribe(
+        let text_sub = cx.subscribe_in(
             &text,
+            window,
             move |view: &mut RegexWorkspace,
-                  input: Entity<TextareaState>,
+                  input: &Entity<TextareaState>,
                   event: &InputEvent,
-                  cx| {
+                  window: &mut Window,
+                  cx: &mut Context<RegexWorkspace>| {
                 if text_receipt.is_current()
                     && view.open
                     && !view.rehosting
@@ -202,8 +210,13 @@ impl RegexMount {
                 {
                     let next = input.read(cx).value().to_string();
                     if next != view.session.draft.test_text {
+                        if next.len() > view.session.policy().text_bytes
+                            && input.focus_handle(cx).is_focused(window) {
+                            view.focus_anchor(window, cx);
+                        }
+                        view.clipboard_epochs.source.fetch_add(1, Ordering::AcqRel);
                         view.session.draft.test_text = next;
-                        view.changed(cx);
+                        view.changed(false, cx);
                     }
                 }
             },
@@ -246,6 +259,10 @@ impl RegexWorkspace {
             visibility,
             session: RegexSession::default(),
             history: super::regex_history::HistoryLane::new(history_path),
+            clipboard_pending: false,
+            clipboard_epochs: super::regex_clipboard::Epochs::default(),
+            clipboard_feedback: None,
+            selected_capture: 0,
             mount_owner,
             mount,
             cases_expanded: true,
@@ -317,7 +334,7 @@ impl RegexWorkspace {
         }
     }
     fn request_rehost(&mut self, popout: bool, cx: &mut Context<Self>) {
-        if !self.open || self.rehosting || self.admission.is_fenced() || self.popout == popout {
+        if !self.open || self.rehosting || self.clipboard_pending || self.admission.is_fenced() || self.popout == popout {
             return;
         }
         let source = self.mount.receipt.clone();
@@ -338,7 +355,8 @@ impl RegexWorkspace {
         .detach();
         cx.notify();
     }
-    fn changed(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn changed(&mut self, cases_changed: bool, cx: &mut Context<Self>) {
+        self.clipboard_epochs.main_changed(cases_changed);
         self.session.mark_changed(Instant::now());
         self.pump(cx);
         cx.notify();
@@ -368,9 +386,15 @@ impl RegexWorkspace {
                         if !timer_current(view.open, view.generation, generation) {
                             return false;
                         }
-                        if advance_due(&mut view.session, Instant::now()) {
+                        let (main, replacement, cases) = advance_due(&mut view.session, Instant::now());
+                        if main {
+                            view.clipboard_epochs.matches.fetch_add(1, Ordering::AcqRel);
+                            view.clipboard_epochs.selection.fetch_add(1, Ordering::AcqRel);
+                            view.clipboard_epochs.capture.fetch_add(1, Ordering::AcqRel);
                             view.record_accepted_history(cx);
                         }
+                        if replacement { view.clipboard_epochs.replacement.fetch_add(1, Ordering::AcqRel); }
+                        if cases { view.clipboard_epochs.cases.fetch_add(1, Ordering::AcqRel); }
                         let more = view.session.pending_delay(Instant::now()).is_some();
                         if !more {
                             view.pumping = false;
@@ -408,7 +432,7 @@ impl RegexWorkspace {
         self.pumping = false;
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.rehosting {
+        if !self.open || self.rehosting || self.clipboard_pending {
             return;
         }
         let popout = self.popout;
@@ -462,6 +486,9 @@ impl RegexWorkspace {
         } else {
             self.session.next_match()
         } {
+            self.clipboard_epochs.selection.fetch_add(1, Ordering::AcqRel);
+            self.clipboard_epochs.capture.fetch_add(1, Ordering::AcqRel);
+            self.selected_capture = 0;
             if let Some(index) = self.session.selected_index() {
                 self.scroll
                     .scroll_to_item(index, gpui_kit::ScrollStrategy::Nearest);
@@ -479,6 +506,7 @@ impl Render for RegexWorkspace {
         let next_receipt = render_receipt.clone();
         let close_receipt = render_receipt.clone();
         let rehost_receipt = render_receipt.clone();
+        let clear_source_receipt = render_receipt.clone();
         let flags = self.session.draft.flags;
         let mut flag_row = div().flex().flex_wrap().gap_2();
         for (index, label, selected) in [
@@ -512,7 +540,7 @@ impl Render for RegexWorkspace {
                                 3 => view.session.draft.flags.unicode = value,
                                 _ => view.session.draft.flags.ignore_whitespace = value,
                             }
-                            view.changed(cx);
+                            view.changed(true, cx);
                         });
                     })
                     .child(
@@ -599,6 +627,9 @@ impl Render for RegexWorkspace {
                                             && index < view.session.matches().len()
                                         {
                                             view.session.select_match(index);
+                                            view.clipboard_epochs.selection.fetch_add(1, Ordering::AcqRel);
+                                            view.clipboard_epochs.capture.fetch_add(1, Ordering::AcqRel);
+                                            view.selected_capture = 0;
                                             cx.notify();
                                         }
                                     });
@@ -728,10 +759,31 @@ impl Render for RegexWorkspace {
                     .aria_label("Pattern"),
             )
             .child(flag_row)
-            .child(
-                Textarea::new(&self.text)
-                    .readonly(self.rehosting || self.admission.is_fenced())
-                    .aria_label("Test Text"),
+            .when(
+                self.session.draft.test_text.len() <= self.session.policy().text_bytes,
+                |element| element.child(
+                    Textarea::new(&self.text)
+                        .readonly(self.rehosting || self.admission.is_fenced())
+                        .aria_label("Test Text"),
+                ),
+            )
+            .when(
+                self.session.draft.test_text.len() > self.session.policy().text_bytes,
+                |element| element.child(
+                    div().flex().flex_col().gap_1()
+                        .child(Label::new(format!("Test Text retained ({} bytes), above the evaluation limit.", self.session.draft.test_text.len())))
+                        .child(Label::new(preview(&self.session.draft.test_text)).id("regex-test-text-oversize-preview"))
+                        .child(Button::new("regex-test-text-clear").label("Clear Test Text")
+                            .disabled(self.rehosting || self.admission.is_fenced())
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if clear_source_receipt.is_current() && view.open && !view.rehosting && !view.admission.is_fenced() {
+                                    view.session.draft.test_text.clear();
+                                    view.focus_anchor(window, cx);
+                                    view.clipboard_epochs.source.fetch_add(1, Ordering::AcqRel);
+                                    view.mount.text.update(cx, |input, cx| input.set_value("", window, cx));
+                                    view.changed(false, cx);
+                                }
+                            })))),
             )
             .child(div().id("regex-status").role(Role::Status).child(status))
             .child(
@@ -761,7 +813,7 @@ impl Render for RegexWorkspace {
                     .child(
                         Button::new("regex-rehost")
                             .label(if self.popout { "Dock" } else { "Pop Out" })
-                            .disabled(self.rehosting)
+                            .disabled(self.rehosting || self.clipboard_pending)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if rehost_receipt.is_current() {
                                     view.request_rehost(!view.popout, cx);
@@ -771,6 +823,7 @@ impl Render for RegexWorkspace {
                     .child(
                         Button::new("regex-close")
                             .label("Close")
+                            .disabled(self.clipboard_pending)
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if close_receipt.is_current() {
                                     view.close(window, cx);
@@ -796,6 +849,10 @@ impl Render for RegexWorkspace {
             )
             .child(rows)
             .children(details.map(|(index, rows)| {
+                let match_id = self.session.matches()[index].id;
+                let receipt = render_receipt.clone();
+                let owner = cx.entity().downgrade();
+                let selected = self.selected_capture;
                 div()
                     .id("regex-capture-details")
                     .max_h(px(220.0))
@@ -803,13 +860,33 @@ impl Render for RegexWorkspace {
                     .flex()
                     .flex_col()
                     .children(rows.into_iter().map(move |(group, text)| {
-                        Label::new(text).id(SharedString::from(format!(
-                            "regex-capture-{revision}-{index}-{group}"
-                        )))
+                        if group == 0 {
+                            return Label::new(text).id(SharedString::from(format!(
+                                "regex-match-detail-{revision}-{index}"
+                            ))).into_any_element();
+                        }
+                        let owner = owner.clone();
+                        let receipt = receipt.clone();
+                        Button::new(SharedString::from(format!("regex-capture-{revision}-{index}-{group}")))
+                            .label(text)
+                            .selected(selected == group - 1)
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |view, cx| {
+                                    if receipt.is_current() && view.open && !view.rehosting
+                                        && !view.admission.is_fenced() && view.session.revision() == revision
+                                        && view.session.selected_index().and_then(|selected| view.session.matches().get(selected))
+                                            .is_some_and(|item| item.id == match_id && item.captures.get(group - 1).is_some_and(|capture| capture.group_index == group)) {
+                                        view.selected_capture = group - 1;
+                                        view.clipboard_epochs.capture.fetch_add(1, Ordering::AcqRel);
+                                        cx.notify();
+                                    }
+                                });
+                            }).into_any_element()
                     }))
             }))
             .child(super::regex_substitution::render(self, cx))
             .child(super::regex_cases::render(self, cx))
+            .child(super::regex_clipboard::render(self, cx))
     }
 }
 impl RootWindow {
@@ -1069,13 +1146,13 @@ mod tests {
         session.draft.pattern = "a".into();
         session.draft.test_text = "aa".into();
         session.mark_changed(now);
-        assert!(advance_due(&mut session, now + Duration::from_millis(200)));
+        assert!(advance_due(&mut session, now + Duration::from_millis(200)).0);
         session.select_match(1);
         let revision = session.revision();
         session.set_substitution_enabled(true, now);
         session.draft.replacement = "b".into();
         session.mark_replacement_changed(now);
-        assert!(!advance_due(&mut session, now + Duration::from_millis(200)));
+        assert!(!advance_due(&mut session, now + Duration::from_millis(200)).0);
         assert!(
             matches!(session.substitution_result(), Some(SubstitutionEvaluationResult::Success(result)) if result.output == "bb")
         );
@@ -1087,7 +1164,7 @@ mod tests {
             .add(None, "a".into(), RegexTestCaseExpectation::Match)
             .unwrap();
         session.mark_test_cases_changed(now);
-        assert!(!advance_due(&mut session, now + Duration::from_millis(200)));
+        assert!(!advance_due(&mut session, now + Duration::from_millis(200)).0);
         assert!(
             session
                 .test_case_evaluation()

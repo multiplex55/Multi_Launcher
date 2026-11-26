@@ -24,6 +24,10 @@ Automatic history records only the exact current accepted pattern and flags. A s
 
 Substitution evaluates edited Replacement independently of the current match selection. The UI shows distinct disabled, pending, invalid, paused and successful output states. The UTF-8 preview is bounded at 16 KiB and the session retains the complete output. Oversized Replacement remains authored and Clear remains reachable.
 
-Test Cases edits the same retained collection through stable case IDs. Add, Duplicate, Remove, Move Up and Down, expectation, optional labels, multiline inputs and Run or Rerun use the shared case policy and separate revisions. Stable editor and action identities preserve keyboard focus through changes. Case evaluation leaves primary results and accepted history intact. Rehost rebuilds the local editors from the retained draft. New GPUI tests await the grouped clipboard run and matched native replay.
+Test Cases edits the same retained collection through stable case IDs. Add, Duplicate, Remove, Move Up and Down, expectation, optional labels, multiline inputs and Run or Rerun use the shared case policy and separate revisions. Stable editor and action identities preserve keyboard focus through changes. Case evaluation leaves primary results and accepted history intact. Rehost rebuilds the local editors from the retained draft. The grouped launcher tests passed. Matched native replay remains pending.
 
-Explicit protected clipboard effects are next. History controls and Presets, explanation, syntax, reference, examples and scoped Jump remain open.
+## GPUI explicit clipboard actions
+
+Use Clipboard Text reads through the shared protected backend and replaces only Test Text. The entire draft survives an oversized import. Explicit Copy uses the full selected and accepted payload. Capture choice is scoped to the exact current match, and Test Cases Copy summary includes counts only. One checked lane validates current host and action authority after Windows clipboard acquisition and before a write. It coordinates Close, rehost and restart.
+
+The matched Windows replay still needs actual protected refusal, clipboard contents, focus and host behavior. Ordinary editor keyboard and context-menu clipboard behavior remains a separate scope. Continue History controls and Presets, explanation, syntax, reference, examples and scoped Jump.

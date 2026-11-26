@@ -3,11 +3,11 @@
 use super::JumpTargets;
 use crate::clipboard_modify::clipboard::ClipboardError;
 use crate::regex_tester::{
-    CaptureValue, EvaluationResult, MatchCompleteness, RegexMatch, RegexSession,
+    EvaluationResult, MatchCompleteness, RegexSession,
     SubstitutionEvaluationResult,
 };
 use eframe::egui;
-use std::fmt::Write;
+pub(super) use crate::regex_tester::clipboard_format::{all_matches, match_information};
 
 pub(super) enum ClipboardAction {
     ImportText,
@@ -34,17 +34,6 @@ pub(super) fn error_message(error: &ClipboardError) -> String {
     }
 }
 
-pub(super) fn all_matches(matches: &[RegexMatch]) -> String {
-    let mut text = String::new();
-    for (index, matched) in matches.iter().enumerate() {
-        if index > 0 {
-            text.push('\n');
-        }
-        text.push_str(&matched.text);
-    }
-    text
-}
-
 pub(super) fn all_matches_label(session: &RegexSession) -> &'static str {
     if matches!(
         session.result(),
@@ -57,39 +46,6 @@ pub(super) fn all_matches_label(session: &RegexSession) -> &'static str {
     } else {
         "Copy All Matches"
     }
-}
-
-pub(super) fn match_information(matched: &RegexMatch) -> String {
-    let mut text = format!(
-        "Match #{}\nLine {}, column {} (Unicode scalars)\n{}\nText{}:\n{}\n",
-        matched.id.index() + 1,
-        matched.location.line,
-        matched.location.column,
-        super::inspection::byte_label(matched.span),
-        if matched.text.is_empty() {
-            " (zero-width match, empty)"
-        } else {
-            ""
-        },
-        matched.text,
-    );
-    for capture in &matched.captures {
-        let _ = writeln!(text, "{}", super::inspection::capture_label(capture));
-        match &capture.value {
-            CaptureValue::Unmatched => {
-                text.push_str("Unmatched optional capture\n");
-            }
-            CaptureValue::Matched { span, text: value } => {
-                let _ = writeln!(text, "{}", super::inspection::byte_label(*span));
-                if value.is_empty() {
-                    text.push_str("Matched empty capture\n");
-                } else {
-                    let _ = writeln!(text, "Matched text:\n{value}");
-                }
-            }
-        }
-    }
-    text
 }
 
 pub(super) fn show(

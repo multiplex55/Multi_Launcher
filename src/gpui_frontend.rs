@@ -29,6 +29,7 @@ mod regex_tester;
 mod regex_substitution;
 mod regex_cases;
 mod regex_history;
+mod regex_clipboard;
 mod xml_host;
 mod xml_tree;
 mod xml_xpath;
@@ -3780,6 +3781,7 @@ enum RootCloseBlocker {
     StructuredPinWrite,
     RegexRehost,
     RegexHistory,
+    RegexClipboard,
     AppWrite,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -5649,6 +5651,7 @@ impl RootWindow {
             );
         }
         if self.structured_pins.busy() { return Err("Wait for the utility pin update to finish before restarting.".to_owned()); }
+        if self.regex_view.as_ref().is_some_and(|view| view.read(cx).clipboard_pending) { return Err("Wait for the Regex Tester clipboard operation before restarting.".to_owned()); }
         if self.regex_view.as_ref().is_some_and(|view| view.read(cx).history.busy()) { return Err(regex_history::WAIT_RESTART.to_owned()); }
         if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending()) { return Err("Wait for the XML file operation to finish before restarting.".to_owned()); }
         if let Some(error) = self.xml_view.as_ref().and_then(|view| view.read(cx).shutdown_failure()) {
@@ -9907,6 +9910,7 @@ impl RootWindow {
                 self.restart_status = Some(FAVORITES_WRITE_PENDING.to_owned());
             }
             Some(RootCloseBlocker::RegexHistory) => { self.restart_status = Some(regex_history::WAIT_QUIT.to_owned()); }
+            Some(RootCloseBlocker::RegexClipboard) => { self.restart_status = Some("Wait for the Regex Tester clipboard operation before quitting.".to_owned()); }
             Some(RootCloseBlocker::RegexRehost) => { self.restart_status = Some("Wait for Regex Tester to finish changing windows before quitting.".to_owned()); }
             Some(RootCloseBlocker::StructuredPinWrite) => {
                 self.restart_status = Some("Wait for the utility pin update to finish before quitting Multi Launcher.".to_owned());
@@ -9980,6 +9984,7 @@ impl RootWindow {
         cx: &App,
     ) -> Option<RootCloseBlocker> {
         if self.structured_pins.busy() { return Some(RootCloseBlocker::StructuredPinWrite); }
+        if self.regex_view.as_ref().is_some_and(|view| view.read(cx).clipboard_pending) { return Some(RootCloseBlocker::RegexClipboard); }
         if self.regex_view.as_ref().is_some_and(|view| view.read(cx).history.busy()) { return Some(RootCloseBlocker::RegexHistory); }
         if self.regex_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Some(RootCloseBlocker::RegexRehost); }
         if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending() || view.read(cx).rehosting || view.read(cx).save_review_pending()) { return Some(RootCloseBlocker::XmlFilePicker); }
@@ -13083,6 +13088,7 @@ pub(crate) fn run_foundation_window(
                         false
                     }
                     Some(RootCloseBlocker::RegexHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_history::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::RegexClipboard) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for the Regex Tester clipboard operation before closing.".to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::RegexRehost) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for Regex Tester to finish changing windows before closing.".to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::StructuredPinWrite) => {
                         let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Wait for the utility pin update to finish before closing Multi Launcher.".to_owned()); cx.notify(); });

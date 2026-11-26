@@ -89,6 +89,7 @@ fn case_live(
         && view.session.draft.test_cases.get(id).is_some()
 }
 fn case_changed(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>) {
+    view.clipboard_epochs.cases.fetch_add(1, Ordering::AcqRel);
     view.session.mark_test_cases_changed(Instant::now());
     view.cases_error = None;
     view.pump(cx);
@@ -249,6 +250,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
     let toggle_receipt = receipt.clone();
     let add_receipt = receipt.clone();
     let run_receipt = receipt.clone();
+    let copy_receipt = receipt.clone();
     let mut panel = div()
         .id("regex-test-cases")
         .flex()
@@ -324,6 +326,16 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                                 && !view.session.draft.test_cases.is_empty()
                             {
                                 case_changed(view, cx);
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("regex-cases-copy-summary")
+                        .label("Copy summary")
+                        .disabled(!enabled || view.clipboard_pending)
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            if copy_receipt.is_current() {
+                                view.clipboard_action(super::regex_clipboard::Action::Cases, window, cx);
                             }
                         })),
                 ),
