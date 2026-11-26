@@ -2,6 +2,7 @@
 
 pub mod engine;
 pub mod clipboard_format;
+pub mod constructor;
 mod history_policy;
 pub mod examples;
 pub mod explanation;

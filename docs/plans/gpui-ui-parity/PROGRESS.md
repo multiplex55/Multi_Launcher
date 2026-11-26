@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Regex offers Explanation, Reference and Examples through the shared session and catalogs. Locked launcher checks, independent review and five reused stock tests passed. The new GPUI cases are queued with Syntax Structure and constructor verification. [Regex inspectors checkpoint](CHECKPOINTS.md#g14-c-regex-explanation-reference-and-examples)
+Regex Syntax Structure presents the accepted tree, checked editor selection and source reveal, related explanations and shared constructors. All 11 grouped inspector and syntax cases passed. Matched Windows replay remains open. G14-D scoped JSON Jump follows. [Syntax checkpoint](CHECKPOINTS.md#g14-c-regex-syntax-structure-and-constructors)
+
+Regex offers Explanation, Reference and Examples through the shared session and catalogs. The new inspector and clipboard authority tests passed in the Syntax Structure batch. [Regex inspectors checkpoint](CHECKPOINTS.md#g14-c-regex-explanation-reference-and-examples)
 
 Regex Presets supports the canonical saved list, explicit Load, Save, Rename, Update, Reload and checked Delete. All 15 grouped History and Presets cases passed. Matched Windows replay remains pending. Explanation, Reference and Examples are next. [Regex Presets checkpoint](CHECKPOINTS.md#g14-c-saved-regex-presets)
 

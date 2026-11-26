@@ -12,6 +12,7 @@ enum Section {
     Explanation,
     Reference,
     Examples,
+    Syntax,
 }
 #[derive(Default)]
 pub(super) struct InspectorState {
@@ -27,6 +28,13 @@ impl InspectorState {
     }
     pub fn is_examples(&self) -> bool {
         self.section == Some(Section::Examples)
+    }
+    pub fn open_explanation(&mut self, epochs: &super::regex_clipboard::Epochs) {
+        self.revoke(epochs);
+        self.section = Some(Section::Explanation);
+    }
+    pub fn is_syntax(&self) -> bool {
+        self.section == Some(Section::Syntax)
     }
     pub fn revoke(&mut self, epochs: &super::regex_clipboard::Epochs) {
         self.revision = self.revision.wrapping_add(1);
@@ -74,6 +82,7 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
         (Section::Explanation, "Explanation", "explanation"),
         (Section::Reference, "Reference", "reference"),
         (Section::Examples, "Examples", "examples"),
+        (Section::Syntax, "Syntax Structure", "syntax"),
     ] {
         let receipt = mount.clone();
         let prefix = if view.inspectors.section == Some(section) {
@@ -112,6 +121,9 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
                         } else {
                             Some(section)
                         };
+                        if view.inspectors.is_syntax() {
+                            super::regex_syntax::reconcile(view, cx);
+                        }
                         cx.notify();
                     }
                 })),
@@ -120,6 +132,9 @@ pub(super) fn render(view: &mut RegexWorkspace, cx: &mut Context<RegexWorkspace>
     panel = panel.child(tabs);
     match view.inspectors.section {
         None => {}
+        Some(Section::Syntax) => {
+            panel = panel.child(super::regex_syntax::render(view, cx));
+        }
         Some(Section::Explanation) => {
             let mut content = div()
                 .id("regex-explanation")

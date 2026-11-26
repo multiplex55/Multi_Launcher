@@ -85,6 +85,8 @@ pub(super) struct RegexMount {
     pub(super) reference_filter: Entity<InputState>,
     pub(super) examples_filter: Entity<InputState>,
     pub(super) preset_confirmation_focus: FocusHandle,
+    pub(super) outer_scroll: ScrollHandle,
+    pub(super) pattern_geometry: std::rc::Rc<std::cell::Cell<Option<(Bounds<Pixels>, Point<Pixels>)>>>,
     pub(super) case_owner: utility_mount::MountOwner,
     pub(super) case_receipt: utility_mount::MountReceipt,
     pub(super) cases:
@@ -106,6 +108,7 @@ pub(super) struct RegexWorkspace {
     pub(super) history: super::regex_history::HistoryLane,
     pub(super) presets: super::regex_presets::PresetLane,
     pub(super) inspectors: super::regex_inspectors::InspectorState,
+    pub(super) syntax: super::regex_syntax::SyntaxState,
     pub(super) clipboard_pending: bool,
     pub(super) clipboard_epochs: super::regex_clipboard::Epochs,
     pub(super) clipboard_feedback: Option<String>,
@@ -211,6 +214,16 @@ impl RegexMount {
                 }
             },
         );
+        let observer_receipt = receipt.clone();
+        let selection_observer = cx.observe(&pattern, move |view: &mut RegexWorkspace, input: Entity<InputState>, cx| {
+            if observer_receipt.is_current() && view.open && !view.rehosting && view.inspectors.is_syntax() && !view.presets.has_confirmation() {
+                let editor = input.read(cx);
+                if editor.value().as_ref() == view.session.draft.pattern.as_str() {
+                    let selected = view.session.visualization().and_then(|result| result.tree()).and_then(|tree| tree.best_node_for_selection(editor.selected_range()));
+                    if view.syntax.selected != selected { view.syntax.selected = selected; cx.notify(); }
+                }
+            }
+        });
         let pattern_receipt = receipt.clone();
         let pattern_sub = cx.subscribe(
             &pattern,
@@ -269,12 +282,14 @@ impl RegexMount {
             reference_filter,
             examples_filter,
             preset_confirmation_focus: cx.focus_handle(),
+            outer_scroll: ScrollHandle::default(),
+            pattern_geometry: Default::default(),
             case_owner,
             case_receipt,
             cases: HashMap::new(),
             focus: cx.focus_handle(),
             scroll: Default::default(),
-            _subscriptions: vec![pattern_sub, text_sub, replacement_sub, preset_sub, reference_sub, examples_sub],
+            _subscriptions: vec![pattern_sub, text_sub, replacement_sub, preset_sub, reference_sub, examples_sub, selection_observer],
         }
     }
 }
@@ -304,6 +319,7 @@ impl RegexWorkspace {
             presets: super::regex_presets::PresetLane::new(history_path.as_ref().map(|path| path.with_file_name("regex_presets.json"))),
             history: super::regex_history::HistoryLane::new(history_path),
             inspectors: super::regex_inspectors::InspectorState::default(),
+            syntax: super::regex_syntax::SyntaxState::default(),
             clipboard_pending: false,
             clipboard_epochs: super::regex_clipboard::Epochs::default(),
             clipboard_feedback: None,
@@ -352,6 +368,21 @@ impl RegexWorkspace {
             && self.popout == popout
             && self.mount.receipt.is_current()
             && self.mount.window.window_id() == id
+    }
+    pub(super) fn reveal_pattern(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open || self.rehosting || self.admission.is_fenced() || !self.mount.receipt.is_current()
+            || self.mount.window.window_id() != window.window_handle().window_id() { return; }
+        let Some((measured, measured_offset)) = self.mount.pattern_geometry.get() else { return; };
+        let scroll = if self.popout { Some(self.mount.outer_scroll.clone()) } else {
+            self.root.upgrade().map(|root| root.read(cx).root_scroll.clone())
+        };
+        let Some(scroll) = scroll else { return; };
+        let viewport = scroll.bounds(); let offset = scroll.offset();
+        if viewport.size.height <= px(0.) || measured.size.height <= px(0.) { return; }
+        let top = measured.top() + offset.y - measured_offset.y;
+        let bottom = measured.bottom() + offset.y - measured_offset.y;
+        let delta = super::regex_syntax::reveal_delta(f32::from(top), f32::from(bottom), f32::from(viewport.top()), f32::from(viewport.bottom()));
+        if delta != 0. { scroll.set_offset(point(offset.x, (offset.y + px(delta)).clamp(-scroll.max_offset().y, px(0.)))); cx.notify(); }
     }
     pub(super) fn focus_anchor(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
@@ -444,6 +475,7 @@ impl RegexWorkspace {
                             view.clipboard_epochs.matches.fetch_add(1, Ordering::AcqRel);
                             view.clipboard_epochs.selection.fetch_add(1, Ordering::AcqRel);
                             view.clipboard_epochs.capture.fetch_add(1, Ordering::AcqRel);
+                            super::regex_syntax::reconcile(view, cx);
                             view.record_accepted_history(cx);
                         }
                         if replacement { view.clipboard_epochs.replacement.fetch_add(1, Ordering::AcqRel); }
@@ -737,6 +769,10 @@ impl Render for RegexWorkspace {
             }));
             (index, rows)
         });
+        let pattern_geometry = self.mount.pattern_geometry.clone();
+        let geometry_receipt = self.mount.receipt.clone();
+        let geometry_host = self.mount.window;
+        let geometry_scroll = if self.popout { Some(self.mount.outer_scroll.clone()) } else { self.root.upgrade().map(|root| root.read(cx).root_scroll.clone()) };
         div()
             .id("regex-workspace")
             .track_focus(&self.focus)
@@ -825,9 +861,15 @@ impl Render for RegexWorkspace {
             }))
             .child(Label::new("Regex Tester"))
             .child(
-                Input::new(&self.pattern)
-                    .disabled(self.rehosting || self.admission.is_fenced())
-                    .aria_label("Pattern"),
+                div().relative().w_full()
+                    .child(Input::new(&self.pattern)
+                        .disabled(self.rehosting || self.admission.is_fenced())
+                        .aria_label("Pattern"))
+                    .child(canvas(move |bounds, window, _| {
+                        if geometry_receipt.is_current() && window.window_handle().window_id() == geometry_host.window_id() {
+                            if let Some(scroll) = geometry_scroll { pattern_geometry.set(Some((bounds, scroll.offset()))); }
+                        }
+                    }, |_, _, _, _| {}).absolute().size_full()),
             )
             .child(flag_row)
             .when(

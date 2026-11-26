@@ -38,20 +38,7 @@ pub(super) struct SourceSelection {
     pub bytes: Range<usize>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Constructor {
-    EscapeSelection,
-    DigitClass,
-    WordClass,
-    WhitespaceClass,
-    Dot,
-    StartAnchor,
-    EndAnchor,
-    Group,
-    Alternation,
-    OneOrMore,
-    ZeroOrMore,
-}
+use crate::regex_tester::constructor::Constructor;
 
 #[derive(Clone, Debug)]
 pub(super) struct ConstructorRequest {
@@ -784,45 +771,7 @@ fn show_constructors(
 pub(super) fn constructor_replacement(
     request: &ConstructorRequest,
 ) -> Option<(String, Range<usize>)> {
-    let source = &request.selection.pattern;
-    let range = request.selection.bytes.clone();
-    let selected = source.get(range.clone())?;
-    let (inserted, caret_offset) = match request.constructor {
-        Constructor::EscapeSelection => (regex::escape(selected), None),
-        Constructor::DigitClass => (r"\d".to_owned(), None),
-        Constructor::WordClass => (r"\w".to_owned(), None),
-        Constructor::WhitespaceClass => (r"\s".to_owned(), None),
-        Constructor::Dot => (".".to_owned(), None),
-        Constructor::StartAnchor => ("^".to_owned(), None),
-        Constructor::EndAnchor => ("$".to_owned(), None),
-        Constructor::Alternation => ("|".to_owned(), None),
-        Constructor::Group => {
-            if selected.is_empty() {
-                ("(?:)".to_owned(), Some(3))
-            } else {
-                (format!("(?:{selected})"), None)
-            }
-        }
-        Constructor::OneOrMore | Constructor::ZeroOrMore => {
-            let quantifier = if request.constructor == Constructor::OneOrMore {
-                "+"
-            } else {
-                "*"
-            };
-            if selected.is_empty() {
-                (format!("(?:){quantifier}"), Some(3))
-            } else {
-                (format!("(?:{selected}){quantifier}"), None)
-            }
-        }
-    };
-    let mut replacement = String::with_capacity(source.len() + inserted.len());
-    replacement.push_str(&source[..range.start]);
-    replacement.push_str(&inserted);
-    let inserted_start = range.start;
-    replacement.push_str(&source[range.end..]);
-    let cursor_byte = inserted_start + caret_offset.unwrap_or(inserted.len());
-    Some((replacement, cursor_byte..cursor_byte))
+    crate::regex_tester::constructor::replacement(&request.selection.pattern, request.selection.bytes.clone(), request.constructor)
 }
 
 pub(super) fn pattern_char_range(source: &str, bytes: Range<usize>) -> Option<Range<usize>> {

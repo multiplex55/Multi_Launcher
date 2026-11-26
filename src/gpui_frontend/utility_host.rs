@@ -108,6 +108,7 @@ trait HostedUtility: Render + Sized + 'static {
     fn open(&self) -> bool;
     fn rehosting(&self) -> bool;
     fn close_blocked(&self) -> bool { false }
+    fn outer_scroll(&self) -> Option<ScrollHandle> { None }
     fn popout(&self) -> bool;
     fn fenced(&self) -> bool;
     fn receipt(&self) -> utility_mount::MountReceipt;
@@ -270,6 +271,7 @@ impl HostedUtility for super::regex_tester::RegexWorkspace {
     fn rehosting(&self) -> bool {
         self.rehosting
     }
+    fn outer_scroll(&self) -> Option<ScrollHandle> { Some(self.mount.outer_scroll.clone()) }
     fn close_blocked(&self) -> bool {
         self.clipboard_pending || self.presets.blocks_host()
     }
@@ -332,6 +334,7 @@ impl<T: HostedUtility> Render for UtilityShell<T> {
             .id(SharedString::from(format!("{}-popout-scroll", T::KEY)))
             .size_full()
             .overflow_y_scroll()
+            .when_some(self.workspace.read(cx).outer_scroll(), |div, scroll| div.track_scroll(&scroll))
             .when(
                 self.workspace
                     .read(cx)

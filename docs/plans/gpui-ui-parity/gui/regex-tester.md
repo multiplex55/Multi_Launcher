@@ -42,4 +42,8 @@ Presets lists canonical saved entries and changes the draft only through explici
 
 ## GPUI Explanation, Reference and Examples
 
-Explanation uses accepted session results. Reference offers search, category selection, precise syntax append and protected Copy. Examples provide filtered previews and explicit Load that preserves authored cases. Locked checks and review passed. GPUI tests await the Syntax Structure batch and Windows replay remains pending. [Checkpoint](../CHECKPOINTS.md#g14-c-regex-explanation-reference-and-examples)
+Explanation uses accepted session results. Reference offers search, category selection, precise syntax append and protected Copy. Examples provide filtered previews and explicit Load that preserves authored cases. Focused tests passed in the Syntax Structure batch. Windows replay remains pending. [Checkpoint](../CHECKPOINTS.md#g14-c-regex-explanation-reference-and-examples)
+
+## GPUI Syntax Structure
+
+The expandable virtualized tree uses accepted syntax nodes and maps Pattern selection to the relevant node. Choosing a current node reveals its exact Pattern span and associated explanations. Constructors share the stock transform and apply one checked editor edit. Matched Windows replay remains pending for selection, undo and source reveal. [Checkpoint](../CHECKPOINTS.md#g14-c-regex-syntax-structure-and-constructors)
