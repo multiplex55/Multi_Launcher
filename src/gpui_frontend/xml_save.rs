@@ -11,6 +11,7 @@ impl ReviewPresentation {
         self.current = Some((review, next));
         Some(next)
     }
+    pub fn owns_review(&self, review: u64) -> bool { self.current.is_some_and(|(id, _)| id == review) }
     pub fn revoke(&mut self) {
         self.current = None;
     }
