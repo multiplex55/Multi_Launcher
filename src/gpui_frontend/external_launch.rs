@@ -538,6 +538,7 @@ pub(super) enum RunCommand {
     WindowClose(multi_launcher::window_close::CheckedWindowClose),
     Calculator(super::calculator_search::ScalarResult),
     CalculatorHistory(super::calculator_search::HistoryResult),
+    ClipboardUndo(Arc<dyn Fn() -> bool + Send + Sync>, Arc<std::sync::atomic::AtomicBool>),
     Diagnostic { kind: DiagnosticKind, message: String },
 }
 
@@ -570,6 +571,8 @@ struct Pending {
     stamp: Stamp,
     permit: EffectPermit,
     window_catalog: bool,
+    clipboard_undo: bool,
+    undo_lease: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Default)]
@@ -585,6 +588,12 @@ impl ExternalLaunch {
 
     pub fn window_catalog_pending(&self) -> bool {
         self.pending.as_ref().is_some_and(|pending| pending.window_catalog)
+    }
+    pub fn clipboard_undo_pending(&self) -> bool {
+        self.pending.as_ref().is_some_and(|pending| pending.clipboard_undo)
+    }
+    pub fn retire_clipboard_undo(&self) {
+        if let Some(lease) = self.pending.as_ref().and_then(|pending| pending.undo_lease.as_ref()) { lease.store(false, Ordering::Release); }
     }
 
     pub fn begin(
@@ -604,6 +613,8 @@ impl ExternalLaunch {
             stamp,
             permit,
             window_catalog: matches!(&request.command, RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_)),
+            clipboard_undo: matches!(&request.command, RunCommand::ClipboardUndo(..)),
+            undo_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) => Some(lease.clone()), _ => None },
         });
         Some(ticket)
     }
@@ -695,6 +706,25 @@ impl ExternalCommandHost for IndexedHost<'_> {
     fn external_launcher_should_refocus(&self) -> bool { self.host.external_launcher_should_refocus() }
 }
 
+fn clipboard_undo_outcome(result: Result<bool, multi_launcher::clipboard_modify::clipboard::ClipboardError>) -> Result<CommandOutcome, CommandError> {
+    use multi_launcher::clipboard_modify::clipboard::ClipboardError;
+    match result {
+        Ok(true) => Ok(CommandOutcome { visibility: multi_launcher::commands::VisibilityPolicy::Hide, toasts: vec![multi_launcher::commands::ToastPolicy::Success("Undid Clipboard Modify".into())], ..CommandOutcome::default() }),
+        Ok(false) => Err(CommandError::new("clipboard_modify", "Clipboard Undo was superseded. Try again.").with_gui_failure_policy()),
+        Err(error) => {
+            let message = match error {
+                ClipboardError::NoUndo => "Nothing to undo.",
+                ClipboardError::ProtectedItem => "This clipboard item was copied privately.",
+                ClipboardError::NonText => "Clipboard does not contain text.",
+                ClipboardError::TimedOut => "The clipboard did not respond in time.",
+                ClipboardError::Busy(_) | ClipboardError::Transient(_) => "The clipboard is busy. Try again.",
+                _ => "Clipboard Undo failed. Try again.",
+            };
+            Err(CommandError::new("clipboard_modify", message).with_gui_failure_policy())
+        }
+    }
+}
+
 fn execute_request(
     request: &Request,
     host: &mut Host,
@@ -782,6 +812,9 @@ fn execute_request(
             };
             Err(CommandError::new(domain, message.clone()).with_gui_failure_policy())
         }
+        RunCommand::ClipboardUndo(current, _) => {
+            clipboard_undo_outcome(multi_launcher::clipboard_modify::runtime::clipboard_service().undo_checked(current.as_ref()))
+        }
     }
 }
 
@@ -790,7 +823,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } => None,
+            RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) => None,
         },
         query: request.query.clone(),
     };
@@ -838,7 +871,21 @@ fn switch_receipt_foreground_current(
 struct ExternalNotification;
 
 impl RootWindow {
-    fn external_owner_is_current(
+    pub(super) fn start_clipboard_undo(&mut self, action: Action, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        if self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) || window.has_active_dialog(cx) || !window.is_window_active() || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+        let Some(native) = self.native_window else { return; };
+        if self.root_window.is_none_or(|host| host.window_id() != window.window_handle().window_id()) || current_foreground_identity() != Some(native.identity) { return; }
+        let visibility = self.root_visibility.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire);
+        let admission = self.restart_admission.clone();
+        let lease = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_lease = lease.clone();
+        let current = Arc::new(move || worker_lease.load(Ordering::Acquire) && !admission.is_fenced()
+            && super::json_utility::native_host_current(&visibility, revision, Some(native), false)
+            && current_foreground_identity() == Some(native.identity));
+        self.start_run(action, RunCommand::ClipboardUndo(current, lease), query, source, None, window, cx);
+    }
+    pub(super) fn external_owner_is_current(
         &self,
         origin: Option<&FocusHandle>,
         window: &Window,
@@ -1009,7 +1056,11 @@ impl RootWindow {
         else {
             return;
         };
-        self.query_history.reset();
+        if matches!(&request.command, RunCommand::ClipboardUndo(..)) {
+            if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, cx| { view.retire_read_for_undo(); cx.notify(); }); }
+        } else {
+            self.query_history.reset();
+        }
         let task = cx.background_executor().spawn(async move {
             let result = run(&request);
             (request, result)
@@ -1040,10 +1091,16 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(&receipt.request.command, RunCommand::ClipboardUndo(..)) && self.launcher_search_error.as_deref() == Some(super::clipboard_modify_view::UNDO_WAIT) {
+            self.launcher_search_error = None;
+        }
+        if matches!(&receipt.request.command, RunCommand::ClipboardUndo(..)) {
+            if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, cx| view.undo_settled(cx)); }
+        }
         if self.restart_status.as_deref() == Some(CLOSE_STATUS) {
             self.restart_status = None;
         }
-        if receipt.result.outcome.is_ok() {
+        if receipt.result.outcome.is_ok() && !matches!(&receipt.request.command, RunCommand::ClipboardUndo(..)) {
             let count = self
                 .search_catalog
                 .usage
@@ -1113,6 +1170,7 @@ impl RootWindow {
                 (checked.is_current)() && window.is_window_active()
                     && current_foreground_identity() == Some(initiating)
             }
+            RunCommand::ClipboardUndo(current, _) => current() && window.is_window_active(),
             _ => true,
         };
         let local_focus_owned = self.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx);
@@ -1160,6 +1218,10 @@ impl RootWindow {
                                 revision, root, target, changed_query.as_deref().unwrap_or(&receipt.request.query),
                             );
                         }
+                    } else if let RunCommand::ClipboardUndo(_, lease) = &receipt.request.command {
+                        if let Some(native) = self.native_window {
+                            self.root_visibility.request_clipboard_undo_hide(revision, native.identity, receipt.stamp.generation, &receipt.request.query, lease.clone(), receipt.stamp.focus.clone());
+                        }
                     } else {
                         self.root_visibility.request_external_hide(revision);
                     }
@@ -1195,7 +1257,7 @@ impl RootWindow {
                 }
             }
             Err(error) => {
-                if settings.show_inline_errors {
+                if settings.show_inline_errors || matches!(&receipt.request.command, RunCommand::ClipboardUndo(..)) {
                     self.launcher_search_error = Some(error.message.clone());
                 }
                 if error.toast && settings.enable_toasts && settings.show_error_toasts {
@@ -1365,6 +1427,39 @@ fn bookkeep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_undo_outcome_preserves_search_and_skips_bookkeeping() {
+        use multi_launcher::commands::{QueryPolicy, ResultsPolicy, ToastPolicy, VisibilityPolicy};
+        let request = Request {
+            action: multi_launcher::plugins::clipboard_modify::bare_undo_action("cm undo").unwrap(),
+            history_label: None,
+            command: RunCommand::ClipboardUndo(Arc::new(|| true), Arc::new(std::sync::atomic::AtomicBool::new(true))),
+            query: "cm undo".into(), source: ActivationSource::Enter,
+            settings: Settings { clear_query_after_run: true, hide_after_run: false, history_limit: 10, enable_toasts: true, show_error_toasts: true, show_inline_errors: true, toast_duration: 1.0 },
+        };
+        let outcome = clipboard_undo_outcome(Ok(true)).unwrap();
+        assert_eq!(outcome.query, QueryPolicy::Keep);
+        assert_eq!(outcome.results, ResultsPolicy::Keep);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+        assert_eq!(outcome.toasts, vec![ToastPolicy::Success("Undid Clipboard Modify".into())]);
+        assert!(!outcome.move_cursor_end);
+        let receipt = bookkeep(Ok(outcome), &request, |_, _| panic!("history"), |_| panic!("usage"));
+        assert!(receipt.usage_result.is_none());
+        assert!(clipboard_undo_outcome(Ok(false)).is_err());
+        let admission = Arc::new(RestartAdmission::default());
+        let mut owner = ExternalLaunch::default();
+        let stamp = Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "cm undo".into(), focus: None };
+        let ticket = owner.begin(&admission, stamp, &request).unwrap();
+        assert!(owner.clipboard_undo_pending());
+        owner.retire_clipboard_undo();
+        let RunCommand::ClipboardUndo(_, lease) = &request.command else { unreachable!() };
+        assert!(!lease.load(Ordering::Acquire));
+        assert!(owner.finish(ticket + 1, request.clone(), WorkerResult { outcome: clipboard_undo_outcome(Ok(false)), history_error: None, usage_result: None }).is_none());
+        assert!(owner.clipboard_undo_pending());
+        assert!(owner.finish(ticket, request, WorkerResult { outcome: clipboard_undo_outcome(Ok(false)), history_error: None, usage_result: None }).is_some());
+        assert!(!owner.clipboard_undo_pending());
+    }
 
     #[test]
     fn window_switch_receipt_separates_success_and_failure_foreground_ownership() {

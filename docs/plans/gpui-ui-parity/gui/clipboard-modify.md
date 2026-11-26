@@ -24,4 +24,10 @@ The scoped implementation evidence is in the [preview checkpoint](../CHECKPOINTS
 
 An accepted completed preview can Apply, Apply and Close or Copy Result through the shared clipboard service. Apply compares the loaded baseline and uses the same current preview for an explicit Overwrite review. The approved clipboard item is checked by text and Windows stamp. Copy Result refreshes its protected preflight and keeps the pane open. Effects use the full output and preserve the prior Undo slot when a write is refused. Real Kit editor state is held read-only while a worker or review owns the action.
 
-The scoped implementation evidence is in the [checked effects checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-checked-clipboard-effects). Matched Windows guarded writes, held keys, Cancel and focus remain pending. Typed Undo, Pop Out, pins, Jump and the five other sections remain open.
+The scoped implementation evidence is in the [checked effects checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-checked-clipboard-effects). Matched Windows guarded writes, held keys, Cancel and focus remain pending.
+
+## GPUI Launcher Search Undo
+
+`cm undo` runs through the guarded launcher effect owner even when Clipboard Modify is closed. It restores the exact previous text after a stamped protected preflight and consumes Undo only after the accepted writer succeeds. Success keeps Search state and requests Hide for the exact initiating scope. Refused or stale work preserves Undo and stays visible when the Search receipt is current.
+
+The scoped evidence is in the [Undo checkpoint](../CHECKPOINTS.md#g13-clipboard-modify-typed-undo). Matched Windows replay, Pop Out, pins, Jump and the five other sections remain open.

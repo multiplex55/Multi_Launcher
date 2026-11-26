@@ -203,6 +203,19 @@ pub fn bare_modify_opener(query: &str) -> Option<Action> {
     } else { None }
 }
 
+/// Admit the stock Undo action without constructing the catalog or runtime.
+pub fn bare_undo_action(query: &str) -> Option<Action> {
+    let mut words = query.split_whitespace();
+    if words.next().is_some_and(|word| word.eq_ignore_ascii_case("cm"))
+        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("undo"))
+        && words.next().is_none()
+    { Some(undo_action()) } else { None }
+}
+
+pub fn admitted_modify_commands() -> Vec<Action> {
+    cm_static_commands().into_iter().filter(|action| matches!(action.action.as_str(), "query:cm" | "query:cm undo")).collect()
+}
+
 fn is_exact_cm_root_query(query: &str) -> bool {
     query.trim().eq_ignore_ascii_case("cm")
 }
@@ -435,18 +448,12 @@ fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCa
                 args: encode_action_payload(&payload).ok(),
             }
         }
-        ClipboardModifyIntent::Undo => {
-            let payload = undo_payload();
-            let encoded = encode_action_payload(&payload).ok();
-            Action {
-                label: "Undo Clipboard Modify".into(),
-                desc: "Executes undo now; writes clipboard text captured before the last Clipboard Modify write"
-                    .into(),
-                action: "clipboard_modify:undo".into(),
-                args: encoded,
-            }
-        }
+        ClipboardModifyIntent::Undo => undo_action(),
     }
+}
+fn undo_action() -> Action {
+    let encoded = encode_action_payload(&undo_payload()).ok();
+    Action { label: "Undo Clipboard Modify".into(), desc: "Executes undo now; writes clipboard text captured before the last Clipboard Modify write".into(), action: "clipboard_modify:undo".into(), args: encoded }
 }
 
 fn resolve_template_id(catalog: &ClipboardModifierCatalog, name: &str) -> Option<String> {

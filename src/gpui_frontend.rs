@@ -7148,6 +7148,7 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
+        self.external_launch.retire_clipboard_undo();
         self.retire_context_favorite();
         self.retire_search_jump_mode();
         self.calculator_search.pending = None;
@@ -7216,6 +7217,7 @@ impl RootWindow {
                     unit_convert_search::classify(provider, action).is_some()
                 } else if provider == "clipboard_modify" {
                     clipboard_modify_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                        || clipboard_modify_view::current_undo_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "clipboard" {
                     clipboard_history::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "favorites" {
@@ -8061,6 +8063,13 @@ impl RootWindow {
                     result.action, command, authority, query, source,
                     result.display_label, window, cx,
                 );
+            }
+            return;
+        }
+        if result.action.action == "clipboard_modify:undo" {
+            if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard_modify")
+                && clipboard_modify_view::current_undo_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                self.start_clipboard_undo(result.action, query, source, window, cx);
             }
             return;
         }
@@ -11957,6 +11966,7 @@ enum RootVisibilityRequest {
     HideAfterExternalLaunch(u64),
     HideAfterWindowSwitch(u64, ForegroundIdentity, Arc<str>),
     HideAfterWindowClose(u64, ForegroundIdentity, ForegroundIdentity, Arc<str>),
+    HideAfterClipboardUndo(u64, ForegroundIdentity, u64, Arc<str>, Arc<AtomicBool>, Option<FocusHandle>),
 }
 
 fn exclude_closed_return_target(return_target: Option<ForegroundIdentity>, closed: ForegroundIdentity) -> Option<ForegroundIdentity> {
@@ -11974,6 +11984,9 @@ fn window_switch_hide_is_current(
 
 fn window_close_hide_is_current(expected_root: ForegroundIdentity, foreground: Option<ForegroundIdentity>, expected_query: &str, live_query: Option<&str>) -> bool {
     foreground == Some(expected_root) && live_query == Some(expected_query)
+}
+fn clipboard_undo_hide_is_current(expected_root: ForegroundIdentity, foreground: Option<ForegroundIdentity>, expected_generation: u64, generation: u64, expected_query: &str, query: &str, lease: bool) -> bool {
+    lease && foreground == Some(expected_root) && generation == expected_generation && query == expected_query
 }
 
 fn utility_dock_focus_allowed(action_sheet: bool, dialog: bool, popup: bool) -> bool {
@@ -12017,14 +12030,15 @@ impl RootVisibilityRequest {
             Self::DockHash(reveal) => reveal.gesture.visibility_revision == revision && !newer_pending,
             Self::DockUtility(_, reveal) => reveal.gesture.visibility_revision == revision && reveal.mount.is_current() && !newer_pending,
             Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _)
-                | Self::HideAfterWindowClose(expected, _, _, _) => {
+                | Self::HideAfterWindowClose(expected, _, _, _)
+                | Self::HideAfterClipboardUndo(expected, _, _, _, _, _) => {
                 *expected == revision && visible && !newer_pending
             }
         }
     }
 
     fn superseded_by_hotkey(&self, take_hotkey: impl FnOnce() -> bool) -> bool {
-        matches!(self, Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _) | Self::HideAfterWindowClose(_, _, _, _)) && take_hotkey()
+        matches!(self, Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _) | Self::HideAfterWindowClose(_, _, _, _) | Self::HideAfterClipboardUndo(_, _, _, _, _, _)) && take_hotkey()
     }
 }
 
@@ -12113,6 +12127,10 @@ impl RootVisibility {
         self.queue_visible(RootVisibilityRequest::HideAfterExternalLaunch(revision))
     }
 
+    fn request_clipboard_undo_hide(&self, revision: u64, root: ForegroundIdentity, generation: u64, query: &str, lease: Arc<AtomicBool>, focus: Option<FocusHandle>) -> bool {
+        self.queue_visible(RootVisibilityRequest::HideAfterClipboardUndo(revision, root, generation, Arc::from(query), lease, focus))
+    }
+
     fn request_window_close_hide(&self, revision: u64, root: ForegroundIdentity, target: ForegroundIdentity, query: &str) -> bool {
         self.queue_visible(RootVisibilityRequest::HideAfterWindowClose(revision, root, target, Arc::from(query)))
     }
@@ -12137,10 +12155,12 @@ impl RootVisibility {
                 && matches!(&request, RootVisibilityRequest::HideAfterExternalLaunch(_)
                     | RootVisibilityRequest::HideAfterWindowSwitch(_, _, _)
                     | RootVisibilityRequest::HideAfterWindowClose(_, _, _, _));
+            let dock_supersedes_undo = matches!(pending.as_ref(), Some(RootVisibilityRequest::HideAfterClipboardUndo(_, _, _, _, _, _)))
+                && matches!(&request, RootVisibilityRequest::DockHash(_) | RootVisibilityRequest::DockUtility(_, _));
             if !request.is_current(
                 self.request_revision.load(Ordering::Acquire),
                 self.visible.load(Ordering::Acquire),
-                pending.is_some() && !supersedes_dock,
+                pending.is_some() && !supersedes_dock && !dock_supersedes_undo,
             ) {
                 return false;
             }
@@ -12200,6 +12220,10 @@ impl RootVisibility {
             RootVisibilityRequest::DockUtility(_, _) => true,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
             RootVisibilityRequest::HideAfterWindowClose(_, _, _, _) => false,
+            RootVisibilityRequest::HideAfterClipboardUndo(_, root, _, _, lease, _) => {
+                if !lease.load(Ordering::Acquire) || current_foreground_identity() != Some(*root) { return None; }
+                false
+            }
             RootVisibilityRequest::HideAfterWindowSwitch(_, target, _) => {
                 if current_foreground_identity() != Some(*target) { return None; }
                 false
@@ -13494,6 +13518,16 @@ pub(crate) fn run_foundation_window(
                         native_window.identity == *root
                             && window_close_hide_is_current(*root, current_foreground_identity(), expected, current_query.as_deref())
                     });
+                    let undo_current = requested_visible.as_ref().is_none_or(|request| {
+                        let RootVisibilityRequest::HideAfterClipboardUndo(_, expected_root, generation, expected_query, lease, focus) = request else { return true; };
+                        native_window.identity == *expected_root && update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| {
+                            root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
+                                && root.native_window == Some(native_window)
+                                && !window.has_active_dialog(cx)
+                                && root.external_owner_is_current(focus.as_ref(), window, cx)
+                                && clipboard_undo_hide_is_current(*expected_root, current_foreground_identity(), *generation, root.launcher_results.generation, expected_query, root.query.read(cx).value().as_str(), lease.load(Ordering::Acquire))
+                        }).unwrap_or(false)
+                    });
                     let dock_reveal = requested_visible.as_ref().and_then(|request| match request {
                         RootVisibilityRequest::DockHash(reveal) => Some((reveal.gesture, Some(reveal.mount_generation), None)),
                         RootVisibilityRequest::DockUtility(kind, reveal) => Some((reveal.gesture, None, Some((reveal.mount.clone(), *kind)))),
@@ -13513,7 +13547,7 @@ pub(crate) fn run_foundation_window(
                             && native_window_is_valid(gesture.source)
                             && !restart_admission_for_hotkey.is_fenced()
                     });
-                    let accepted_visible = if hotkey_for_conditional || !switch_query_current || !close_current || !dock_current || !utility_destination_current {
+                    let accepted_visible = if hotkey_for_conditional || !switch_query_current || !close_current || !undo_current || !dock_current || !utility_destination_current {
                         None
                     } else {
                         requested_visible.as_ref().and_then(|request| visibility.accept_requested_visible(request))
@@ -13523,6 +13557,12 @@ pub(crate) fn run_foundation_window(
                     let close_hide = if accepted_visible.is_some() {
                         requested_visible.as_ref().and_then(|request| match request {
                             RootVisibilityRequest::HideAfterWindowClose(_, root, target, query) => Some((*root, *target, Arc::clone(query))),
+                            _ => None,
+                        })
+                    } else { None };
+                    let undo_hide = if accepted_visible.is_some() {
+                        requested_visible.as_ref().and_then(|request| match request {
+                            RootVisibilityRequest::HideAfterClipboardUndo(_, root, generation, query, lease, focus) => Some((*root, *generation, Arc::clone(query), Arc::clone(lease), focus.clone())),
                             _ => None,
                         })
                     } else { None };
@@ -13559,7 +13599,7 @@ pub(crate) fn run_foundation_window(
                         }
                     }
                     let switch_hide_accepted = switch_hide.is_some();
-                    let guarded_hide = switch_hide_accepted || close_hide.is_some();
+                    let guarded_hide = switch_hide_accepted || close_hide.is_some() || undo_hide.is_some();
                     let query_window = update_kit_window_content(
                         root_window,
                         &root_view,
@@ -13682,6 +13722,19 @@ pub(crate) fn run_foundation_window(
                         if !visibility.is_current(revision, false) || native_window.identity != *root
                             || !window_close_hide_is_current(*root, current_foreground_identity(), expected_query, current_query.as_deref())
                         {
+                            visibility.revert_if_current(revision, false);
+                            continue;
+                        }
+                    }
+                    if let Some((expected_root, generation, expected_query, lease, focus)) = &undo_hide {
+                        let current = update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| {
+                            root.native_window == Some(native_window)
+                                && root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
+                                && !window.has_active_dialog(cx)
+                                && root.external_owner_is_current(focus.as_ref(), window, cx)
+                                && clipboard_undo_hide_is_current(*expected_root, current_foreground_identity(), *generation, root.launcher_results.generation, expected_query, root.query.read(cx).value().as_str(), lease.load(Ordering::Acquire))
+                        }).unwrap_or(false);
+                        if !visibility.is_current(revision, false) || native_window.identity != *expected_root || !current {
                             visibility.revert_if_current(revision, false);
                             continue;
                         }
@@ -18173,6 +18226,47 @@ mod tests {
         assert!(request.is_current(5, true, false));
         assert!(!request.is_current(6, true, false));
         assert!(request.superseded_by_hotkey(|| true));
+    }
+
+    #[test]
+    fn clipboard_undo_hide_requires_exact_live_receipt_and_yields_to_hotkey() {
+        let root = super::ForegroundIdentity { hwnd: 52, process_id: 2, thread_id: 3 };
+        let other = super::ForegroundIdentity { hwnd: 53, ..root };
+        let check = super::clipboard_undo_hide_is_current;
+        assert!(check(root, Some(root), 7, 7, "cm undo", "cm undo", true));
+        assert!(!check(root, Some(other), 7, 7, "cm undo", "cm undo", true));
+        assert!(!check(root, Some(root), 7, 8, "cm undo", "cm undo", true));
+        assert!(!check(root, Some(root), 7, 7, "cm undo", "cm", true));
+        assert!(!check(root, Some(root), 7, 7, "cm undo", "cm undo", false));
+        let request = super::RootVisibilityRequest::HideAfterClipboardUndo(5, root, 7, Arc::from("cm undo"), Arc::new(std::sync::atomic::AtomicBool::new(true)), None);
+        assert!(request.is_current(5, true, false));
+        assert!(request.superseded_by_hotkey(|| true));
+        assert!(!request.is_current(6, true, false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn clipboard_undo_hide_yields_to_explicit_dock_in_both_orders() {
+        let visibility = super::RootVisibility::new();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        visibility.bind_request_sender(tx);
+        assert!(visibility.activate());
+        let root = super::ForegroundIdentity { hwnd: 1, process_id: 2, thread_id: 3 };
+        let gesture = super::hash_dock::Gesture { source: super::NativeWindow { identity: root }, foreground_authorized: true, visibility_revision: 0 };
+        let lease = || Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let first = visibility.request_hash_visible(gesture, 1).unwrap();
+        assert!(!visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None));
+        assert!(!first.state.lock().unwrap().closed);
+        assert!(matches!(visibility.take_requested_visible(), Some(super::RootVisibilityRequest::DockHash(_))));
+        assert!(visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None));
+        let second = visibility.request_hash_visible(gesture, 1).unwrap();
+        assert!(matches!(visibility.take_requested_visible(), Some(super::RootVisibilityRequest::DockHash(_))));
+        assert!(second.state.lock().unwrap().closed);
+        assert!(visibility.request_clipboard_undo_hide(0, root, 1, "cm undo", lease(), None));
+        let owner = super::utility_mount::MountOwner::default();
+        let (utility, _) = visibility.request_xml_visible(gesture, owner.attach()).unwrap();
+        assert!(matches!(visibility.take_requested_visible(), Some(super::RootVisibilityRequest::DockUtility(_, _))));
+        assert!(utility.state.lock().unwrap().closed);
     }
 
     #[test]

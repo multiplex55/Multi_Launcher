@@ -442,6 +442,45 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         self.undo_with_policy(RetryPolicy::Bounded)
     }
 
+    /// Restore the last committed text only while the protected clipboard and
+    /// the launcher's authority remain current at the acquired writer.
+    pub fn undo_checked(&self, current: &dyn Fn() -> bool) -> Result<bool, ClipboardError> {
+        if !current() {
+            return Ok(false);
+        }
+        let _guard = self.try_commit_lock()?;
+        if !current() {
+            return Ok(false);
+        }
+        let record = self
+            .undo
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(ClipboardError::NoUndo)?;
+        if !current() {
+            return Ok(false);
+        }
+        if record.original_text.contains('\0') {
+            return Err(ClipboardError::InvalidContent(
+                "Clipboard text contains NUL".into(),
+            ));
+        }
+        let snapshot = self.backend.read_stamped();
+        if !current() {
+            return Ok(false);
+        }
+        let (_, stamp) = snapshot?;
+        if !self
+            .backend
+            .write_stamped_if(&record.original_text, stamp, current)?
+        {
+            return Ok(false);
+        }
+        *self.undo.lock().unwrap() = None;
+        Ok(true)
+    }
+
     /// GUI Undo is one attempt; a Busy result leaves the record intact for an
     /// explicit user retry instead of sleeping on the UI thread.
     pub(crate) fn undo_without_retry(&self) -> Result<UndoRecord, ClipboardError> {
@@ -615,6 +654,7 @@ mod tests {
             writes: usize,
             reads: usize,
             guard_error: Option<ClipboardError>,
+            change_seq_at_open: bool,
         }
         struct Backend(Mutex<State>);
         impl ClipboardBackend for Backend {
@@ -653,6 +693,10 @@ mod tests {
                     s.seq += 1;
                     s.change_at_open = false;
                 }
+                if s.change_seq_at_open {
+                    s.seq += 1;
+                    s.change_seq_at_open = false;
+                }
                 if s.private {
                     return Err(ClipboardError::ProtectedItem);
                 }
@@ -673,6 +717,7 @@ mod tests {
             writes: 0,
             reads: 0,
             guard_error: None,
+            change_seq_at_open: false,
         })));
         let live = AtomicBool::new(true);
         let current = || live.load(Ordering::Acquire);
@@ -809,6 +854,38 @@ mod tests {
                 .is_err()
         );
         assert_eq!(service.backend.0.lock().unwrap().writes, 2);
+        let before = service.undo_record().unwrap();
+        service.backend.0.lock().unwrap().change_at_open = true;
+        assert!(matches!(
+            service.undo_checked(&current),
+            Err(ClipboardError::ProtectedItem)
+        ));
+        assert_eq!(service.undo_record(), Some(before.clone()));
+        {
+            let mut state = service.backend.0.lock().unwrap();
+            state.private = false;
+            state.text = "different ordinary text".into();
+            state.seq += 1;
+        }
+        service.backend.0.lock().unwrap().change_seq_at_open = true;
+        assert!(!service.undo_checked(&current).unwrap());
+        assert_eq!(service.undo_record(), Some(before.clone()));
+        let checks = std::cell::Cell::new(0);
+        let revoke = || {
+            checks.set(checks.get() + 1);
+            checks.get() < 5
+        };
+        assert!(!service.undo_checked(&revoke).unwrap());
+        assert_eq!(service.undo_record(), Some(before.clone()));
+        assert!(service.undo_checked(&current).unwrap());
+        assert_eq!(service.backend.0.lock().unwrap().text, before.original_text);
+        assert!(service.undo_record().is_none());
+        let reads = service.backend.0.lock().unwrap().reads;
+        assert!(matches!(
+            service.undo_checked(&current),
+            Err(ClipboardError::NoUndo)
+        ));
+        assert_eq!(service.backend.0.lock().unwrap().reads, reads);
     }
     use super::fake::{FakeClipboardBackend, Op};
     use super::*;

@@ -26,6 +26,7 @@ fn redacted_read_error(
     .into()
 }
 pub(super) const BLOCK_WAIT: &str = "Wait for Clipboard Modify to finish or cancel its review.";
+pub(super) const UNDO_WAIT: &str = "Wait for Clipboard Modify Undo to finish.";
 const LARGE_SOURCE: usize = 5 * 1024 * 1024;
 const EFFECT_WAIT: &str = "Wait for the Clipboard Modify operation to finish.";
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +98,23 @@ pub(super) fn current_provider(
             ))
         )
 }
+pub(super) fn current_undo_provider(
+    query: &str,
+    action: &Action,
+    enabled: Option<&HashSet<String>>,
+    caps: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
+    enabled.is_none_or(|enabled| enabled.contains("clipboard_modify"))
+        && multi_launcher::settings::provider_search_capability_enabled(caps, "clipboard_modify")
+        && multi_launcher::plugins::clipboard_modify::bare_undo_action(query).as_ref()
+            == Some(action)
+        && matches!(
+            parse_action(action),
+            Ok(Command::ClipboardModify(
+                multi_launcher::commands::ClipboardModifyCommand::Undo { .. }
+            ))
+        )
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RestartDraft {
     source: String,
@@ -163,6 +181,17 @@ pub(super) struct ClipboardModifyView {
     _source_sub: Subscription,
 }
 impl ClipboardModifyView {
+    pub(super) fn retire_read_for_undo(&mut self) {
+        self.read_revision = self.read_revision.wrapping_add(1);
+        self.read_authority.fetch_add(1, Ordering::AcqRel);
+        self.queued_read = None;
+    }
+    pub(super) fn undo_settled(&mut self, cx: &mut Context<Self>) {
+        if self.feedback.as_deref() == Some(UNDO_WAIT) {
+            self.feedback = None;
+        }
+        cx.notify();
+    }
     fn new(window: &mut Window, cx: &mut Context<Self>, root: WeakEntity<RootWindow>) -> Self {
         let owner = utility_mount::MountOwner::default();
         let mount = owner.attach();
@@ -367,6 +396,11 @@ impl ClipboardModifyView {
             return;
         };
         let root_state = root.read(cx);
+        if root_state.external_launch.clipboard_undo_pending() {
+            self.feedback = Some(UNDO_WAIT.into());
+            cx.notify();
+            return;
+        }
         if !root_state
             .clipboard_modify_view
             .as_ref()
@@ -646,6 +680,9 @@ impl ClipboardModifyView {
             return;
         };
         let root_state = root.read(cx);
+        if root_state.external_launch.clipboard_undo_pending() {
+            return;
+        }
         let Some(native) = root_state.native_window else {
             return;
         };
@@ -881,6 +918,10 @@ impl ClipboardModifyView {
 impl Render for ClipboardModifyView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mount = self.mount.clone();
+        let undo_pending = self
+            .root
+            .upgrade()
+            .is_some_and(|root| root.read(cx).external_launch.clipboard_undo_pending());
         let revision = self.stage_revision;
         let key_mount = mount.clone();
         let mut panel = div()
@@ -1055,6 +1096,9 @@ impl Render for ClipboardModifyView {
             return panel;
         }
         panel = panel.child(Textarea::new(&self.source).aria_label("Clipboard Modify source"));
+        if undo_pending {
+            panel = panel.child(Label::new(UNDO_WAIT));
+        }
         let reload = mount.clone();
         let reset = mount.clone();
         panel = panel.child(
@@ -1064,7 +1108,7 @@ impl Render for ClipboardModifyView {
                 .child(
                     Button::new("cm-reload")
                         .label("Reload clipboard")
-                        .disabled(self.reading)
+                        .disabled(self.reading || undo_pending)
                         .on_click(cx.listener(move |view, _, window, cx| {
                             if view.blocked() {
                                 return;
@@ -1446,7 +1490,7 @@ impl Render for ClipboardModifyView {
                 .child(output.whitespace_nowrap())
         });
         let effect_receipt = self.effect_receipt();
-        let available = effect_receipt.is_some() && self.picker.is_none();
+        let available = effect_receipt.is_some() && self.picker.is_none() && !undo_pending;
         for (id, label, kind) in [
             ("cm-apply", "Apply", EffectKind::Apply),
             ("cm-apply-close", "Apply and Close", EffectKind::ApplyClose),
@@ -1478,6 +1522,16 @@ impl Render for ClipboardModifyView {
 impl RootWindow {
     pub(super) fn open_clipboard_modify(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.restart_admission.is_fenced() {
+            return;
+        }
+        if self.external_launch.clipboard_undo_pending()
+            && !self
+                .clipboard_modify_view
+                .as_ref()
+                .is_some_and(|view| view.read(cx).open)
+        {
+            self.launcher_search_error = Some(UNDO_WAIT.into());
+            cx.notify();
             return;
         }
         let root = cx.entity().downgrade();
@@ -1513,7 +1567,8 @@ mod tests {
     use super::super::utility_mount::MountOwner;
     use super::{
         EffectReceipt, LARGE_SOURCE, consent_is_current, current_completion, current_provider,
-        held_activation, pump_is_current, read_result_current, redacted_read_error,
+        current_undo_provider, held_activation, pump_is_current, read_result_current,
+        redacted_read_error,
     };
     #[test]
     fn effect_receipts_and_held_confirm_are_exact() {
@@ -1629,5 +1684,30 @@ mod tests {
         assert!(current_provider("cm modify", &modify, None, None));
         assert!(!current_provider("cm help", &root, None, None));
         assert!(!current_provider("cm modify", &root, None, None));
+    }
+    #[test]
+    fn undo_route_requires_exact_stock_action_query_and_enablement() {
+        use std::collections::HashSet;
+        let action =
+            multi_launcher::plugins::clipboard_modify::bare_undo_action("cm undo").unwrap();
+        assert!(current_undo_provider("cm undo", &action, None, None));
+        assert!(!current_undo_provider("cm undo extra", &action, None, None));
+        let mut forged = action.clone();
+        forged.label.push('!');
+        assert!(!current_undo_provider("cm undo", &forged, None, None));
+        assert!(!current_undo_provider(
+            "cm undo",
+            &action,
+            Some(&HashSet::new()),
+            None
+        ));
+        let commands = multi_launcher::plugins::clipboard_modify::admitted_modify_commands();
+        assert_eq!(
+            commands
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["query:cm", "query:cm undo"]
+        );
     }
 }

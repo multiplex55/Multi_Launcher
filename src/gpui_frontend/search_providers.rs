@@ -64,8 +64,8 @@ impl multi_launcher::plugin::Plugin for ClipboardModifyBare {
     fn description(&self) -> &str { "Builds clipboard modification pipelines with prefix `cm`" }
     fn capabilities(&self) -> &[&str] { &["search"] }
     fn query_prefixes(&self) -> &[&str] { &["cm"] }
-    fn search(&self, query: &str) -> Vec<Action> { multi_launcher::plugins::clipboard_modify::bare_modify_opener(query).into_iter().collect() }
-    fn commands(&self) -> Vec<Action> { vec![Action { label: "cm".into(), desc: "Clipboard Modify".into(), action: "query:cm".into(), args: None }] }
+    fn search(&self, query: &str) -> Vec<Action> { multi_launcher::plugins::clipboard_modify::bare_modify_opener(query).or_else(|| multi_launcher::plugins::clipboard_modify::bare_undo_action(query)).into_iter().collect() }
+    fn commands(&self) -> Vec<Action> { multi_launcher::plugins::clipboard_modify::admitted_modify_commands() }
 }
 
 struct ClipboardBare;
