@@ -31,6 +31,7 @@ mod regex_cases;
 mod regex_inspectors;
 mod regex_syntax;
 mod regex_jump;
+mod clipboard_history;
 mod regex_history;
 mod regex_presets;
 mod regex_clipboard;
@@ -2049,6 +2050,7 @@ enum InstalledSearchRoute {
     JsonUtility(multi_launcher::commands::JsonUtilityIntent),
     XmlUtility,
     RegexTester,
+    ClipboardHistory,
     FavoritesBrowse,
     FavoritesNamed(String),
 }
@@ -2676,6 +2678,7 @@ struct RootWindow {
     json_view: Option<Entity<json_utility::JsonWorkspace>>,
     xml_view: Option<Entity<xml_utility::XmlWorkspace>>,
     regex_view: Option<Entity<regex_tester::RegexWorkspace>>,
+    clipboard_history: Option<Entity<clipboard_history::ClipboardHistory>>,
     xml_popup: Option<utility_mount::UtilityPopup>,
     regex_popup: Option<utility_mount::UtilityPopup>,
     regex_retiring: Vec<RetiringHashWindow>,
@@ -7182,6 +7185,8 @@ impl RootWindow {
                     base_convert_search::classify(provider, action).is_some()
                 } else if provider == "unit_convert" {
                     unit_convert_search::classify(provider, action).is_some()
+                } else if provider == "clipboard" {
+                    clipboard_history::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "favorites" {
                     favorite_search::is_executable(action) || is_supported_launcher_search_action(action)
                 } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
@@ -8096,7 +8101,11 @@ impl RootWindow {
             );
             return;
         }
-        let installed_invocation = match parse_installed_search_invocation(result.action, source) {
+        let clipboard_open = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "clipboard")
+            && clipboard_history::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref());
+        let installed_invocation = match if clipboard_open {
+            parse_command(result.action, None, source).map(|invocation| InstalledSearchInvocation { invocation, route: InstalledSearchRoute::ClipboardHistory }).map_err(|error| InstalledSearchActionError::Unsupported(error.to_string()))
+        } else { parse_installed_search_invocation(result.action, source) } {
             Ok(installed_invocation) => installed_invocation,
             Err(InstalledSearchActionError::QuerySet(error)) => {
                 self.launcher_search_error = Some(format!("Could not apply saved query: {error}"));
@@ -8184,6 +8193,7 @@ impl RootWindow {
             }
             InstalledSearchRoute::XmlUtility => { drop(operation); self.open_xml_toolkit(window, cx); }
             InstalledSearchRoute::RegexTester => { drop(operation); self.open_regex_tester(window, cx); }
+            InstalledSearchRoute::ClipboardHistory => { drop(operation); self.open_clipboard_history(window, cx); }
             InstalledSearchRoute::FavoritesBrowse => {
                 drop(operation);
                 let focus = Some(self.query.focus_handle(cx));
@@ -10872,6 +10882,9 @@ impl Render for RootWindow {
         if let Some(view) = self.regex_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
+        if let Some(view) = self.clipboard_history.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
         // ScrollHandle bounds update during prepaint. Re-render either tool
         // when that measured body viewport changes, including native resizes.
         if docked_hash.is_some() || self.app_editor.open {
@@ -12652,6 +12665,7 @@ pub(crate) fn run_foundation_window(
                 json_view: None,
                 xml_view: None,
                 regex_view: None,
+                clipboard_history: None,
                 xml_popup: None,
                 regex_popup: None,
                 regex_retiring: Vec::new(),

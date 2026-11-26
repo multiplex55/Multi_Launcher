@@ -58,6 +58,16 @@ impl multi_launcher::plugin::Plugin for FileSearchBarePlugin {
     }
 }
 
+struct ClipboardBare;
+impl multi_launcher::plugin::Plugin for ClipboardBare {
+    fn name(&self) -> &str { "clipboard" }
+    fn description(&self) -> &str { "Provides clipboard history search (prefix: `cb`)" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["cb"] }
+    fn search(&self, query: &str) -> Vec<Action> { multi_launcher::plugins::clipboard::bare_history_opener(query).into_iter().collect() }
+    fn commands(&self) -> Vec<Action> { vec![Action { label: "cb".into(), desc: "Clipboard".into(), action: "query:cb".into(), args: None }] }
+}
+
 /// Providers admitted by GPUI Search, including the owners of watched stores.
 pub(super) struct InstalledLauncherProviders {
     pub(super) hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
@@ -68,6 +78,7 @@ pub(super) struct InstalledLauncherProviders {
     json_utility: multi_launcher::plugins::json_utility::JsonUtilityPlugin,
     xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
     regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
+    clipboard: ClipboardBare,
     file_search: FileSearchBarePlugin,
     calculator: CalculatorMetadata,
     #[cfg(windows)]
@@ -109,6 +120,7 @@ impl InstalledLauncherProviders {
             json_utility: multi_launcher::plugins::json_utility::JsonUtilityPlugin,
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
+            clipboard: ClipboardBare,
             file_search: FileSearchBarePlugin(
                 multi_launcher::plugins::file_search::FileSearchPlugin::default(),
             ),
@@ -142,6 +154,7 @@ impl InstalledLauncherProviders {
             Some(&self.json_utility as &dyn multi_launcher::plugin::Plugin),
             Some(&self.xml_toolkit as &dyn multi_launcher::plugin::Plugin),
             Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.clipboard as &dyn multi_launcher::plugin::Plugin),
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]

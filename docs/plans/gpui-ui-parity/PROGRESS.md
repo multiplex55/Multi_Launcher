@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+Bare `cb` opens docked Clipboard History with ordered selectable rows, full multiline Edit and Cancel through the canonical disk loader. Locked checks and source review passed, and two reused stock cases passed. New focused cases are queued with the checked effects. [Clipboard History checkpoint](CHECKPOINTS.md#g13-clipboard-history-browse-edit-and-cancel)
+
 Regex workspace Jump focuses Pattern, Test Text and navigation and selects the exact visible Match row. All seven focused tests passed. Matched Windows and additional scoped targets remain open. The next source slice is disk-backed Clipboard History Browse, Edit and Cancel. [Regex Jump checkpoint](CHECKPOINTS.md#g14-d-regex-workspace-jump)
 
 XML Overwrite Jump focuses Cancel, Replace and Dock or Pop Out in the exact current review. All five focused tests passed. Matched Windows key, focus and file checks remain open. [Overwrite Jump checkpoint](CHECKPOINTS.md#g14-d-xml-overwrite-child-jump)
@@ -119,7 +121,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 199 Specified, 19 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 198 Specified, 20 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |

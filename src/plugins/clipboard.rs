@@ -241,6 +241,13 @@ impl Default for ClipboardPlugin {
     }
 }
 
+/// Stock bare opener without constructing the clipboard watcher.
+pub fn bare_history_opener(query: &str) -> Option<Action> {
+    crate::common::strip_prefix_ci(query, "cb")?;
+    let rest = crate::common::strip_prefix_ci(query.trim(), "cb")?;
+    rest.is_empty().then(|| Action { label: "cb: edit clipboard".into(), desc: "Clipboard".into(), action: "clipboard:dialog".into(), args: None })
+}
+
 impl Plugin for ClipboardPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "cb";
@@ -249,16 +256,7 @@ impl Plugin for ClipboardPlugin {
         }
 
         let trimmed = query.trim();
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb")
-            && rest.is_empty()
-        {
-            return vec![Action {
-                label: "cb: edit clipboard".into(),
-                desc: "Clipboard".into(),
-                action: "clipboard:dialog".into(),
-                args: None,
-            }];
-        }
+        if let Some(action) = bare_history_opener(query) { return vec![action]; }
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb clear")
             && rest.is_empty()
