@@ -108,6 +108,7 @@ trait HostedUtility: Render + Sized + 'static {
     fn open(&self) -> bool;
     fn rehosting(&self) -> bool;
     fn close_blocked(&self) -> bool { false }
+    fn activation_lost(&mut self, _: &mut Context<Self>) {}
     fn outer_scroll(&self) -> Option<ScrollHandle> { None }
     fn popout(&self) -> bool;
     fn fenced(&self) -> bool;
@@ -167,6 +168,7 @@ impl HostedUtility for JsonWorkspace {
     fn observe(root: &mut RootWindow, id: WindowId, cx: &mut Context<RootWindow>) {
         root.observe_structured_pin_activation(Self::PANEL, id, cx);
     }
+    fn activation_lost(&mut self, cx: &mut Context<Self>) { self.retire_jump(cx); }
     fn root(&self) -> WeakEntity<RootWindow> {
         self.root.clone()
     }
@@ -722,7 +724,11 @@ impl RootWindow {
                             let activation = cx.observe_window_activation(
                                 window,
                                 |shell: &mut UtilityShell<T>, window, cx| {
-                                    if window.is_window_active() {
+                                    if !window.is_window_active() {
+                                        if shell.workspace.read(cx).mounted(window.window_handle().window_id(), true) {
+                                            shell.workspace.update(cx, |view, cx| view.activation_lost(cx));
+                                        }
+                                    } else {
                                         let root = shell.workspace.read(cx).root();
                                         let id = window.window_handle().window_id();
                                         let _ =

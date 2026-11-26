@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+JSON Jump targets Source, Format, Tree Search and visible Tree rows through the existing native interceptor in Dock and Pop Out. All seven focused launcher tests passed, including Search and Hash regressions. Matched Windows replay remains open. [Scoped JSON Jump checkpoint](CHECKPOINTS.md#g14-d-first-scoped-json-jump-targets)
+
 Regex Syntax Structure presents the accepted tree, checked editor selection and source reveal, related explanations and shared constructors. All 11 grouped inspector and syntax cases passed. Matched Windows replay remains open. G14-D scoped JSON Jump follows. [Syntax checkpoint](CHECKPOINTS.md#g14-c-regex-syntax-structure-and-constructors)
 
 Regex offers Explanation, Reference and Examples through the shared session and catalogs. The new inspector and clipboard authority tests passed in the Syntax Structure batch. [Regex inspectors checkpoint](CHECKPOINTS.md#g14-c-regex-explanation-reference-and-examples)

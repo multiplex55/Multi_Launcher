@@ -22,3 +22,7 @@ Verify typing and Unicode, exact Format and Minify, valid versus invalid or prot
 The docked Tree uses bounded virtual rows with source-generation and node identity, typed branch and selection actions, literal Keys, Values or Both search, match navigation and reveal, and bounded Details. Copy Value, Copy Subtree and Copy JSON Pointer bind the exact current selection, with a separate Tree revision so Text clipboard actions keep their source authority. The wide paired fixture exercises a long result range and an escaped pointer.
 
 The JSON editor session and clipboard lane live in one retained owner. Window-bound mounts own their local editors, focus and subscriptions. GPUI has native Pop Out, a checked Dock foreground receipt, scoped presentation persistence and event-driven geometry capture and restore. Saved pins mount passively without clipboard initialization. Pinned workspace close is refused. A checked top toolbar unpin preserves unrelated Settings and closes the exact current workspace after acknowledgement. Compare both frontends at 1516 × 937 with the paired pin fixtures.
+
+## GPUI scoped Jump
+
+Source, Format and Tree Search hints focus their controls. A fresh activation invokes Format. A visible Tree row hint selects and focuses its exact current node without expanding or copying. Targets belong to the active mount and current viewport in Dock or Pop Out. Matched Windows replay and additional control targets remain pending. [Checkpoint](../CHECKPOINTS.md#g14-d-first-scoped-json-jump-targets)

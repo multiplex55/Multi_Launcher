@@ -7,7 +7,7 @@ use multi_launcher::json_utility_session::TreeMatch;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::Sizable as _;
 
-fn apply_row(
+pub(super) fn apply_row(
     view: &mut JsonWorkspace,
     stamp: TreeStamp,
     id: multi_launcher::json_transform::JsonTreeNodeId,
@@ -29,12 +29,13 @@ fn apply_row(
     }
 }
 
-pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) -> AnyElement {
+pub(super) fn render(view: &mut JsonWorkspace, jump_draft: Option<Rc<RefCell<JumpGeometryDraft>>>, cx: &mut Context<JsonWorkspace>) -> AnyElement {
     let stamp = view.session.tree_stamp();
     let count = view.session.tree_row_count();
     let owner = cx.entity().downgrade();
     let mount = view.mount_receipt();
     let row_mount = mount.clone();
+    let row_draft = jump_draft.clone();
     let rows = gpui_kit::uniform_list("json-tree-rows", count, move |range, _, app| {
         let Some(entity) = owner.upgrade() else {
             return Vec::<AnyElement>::new();
@@ -46,6 +47,7 @@ pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) 
             .filter_map(|index| {
                 let row = entity.read(app).session.tree_row(index)?;
                 let id = row.id;
+                let row_focus = row_draft.as_ref().map(|_| entity.read(app).mount.jump.row_focus(stamp, id, app));
                 let select_owner = owner.clone();
                 let toggle_owner = owner.clone();
                 let select_mount = row_mount.clone();
@@ -80,19 +82,16 @@ pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) 
                 let hit = match row.matched { Some(TreeMatch::Key) => " · key match", Some(TreeMatch::Value) => " · value match", Some(TreeMatch::Both) => " · key and value match", None => "" };
                 let active = if row.active_match { " · active match" } else { "" };
                 let label = format!("{}{hit}{active}", row.label);
-                Some(
-                    line.child(
-                        Button::new(SharedString::from(format!("json-tree-node-{}-{}", stamp.source_generation(), id.index())))
-                            .label(label).small().selected(row.selected)
-                            .tab_stop(true)
-                            .on_click(move |_, _, app| {
-                                if !select_mount.is_current() { return; }
-                                let _ = select_owner
-                                    .update(app, |view, cx| apply_row(view, stamp, id, false, cx));
-                            }),
-                    )
-                    .into_any_element(),
-                )
+                let button = Button::new(SharedString::from(format!("json-tree-node-{}-{}", stamp.source_generation(), id.index())))
+                    .label(label).small().selected(row.selected).tab_stop(true)
+                    .on_click(move |_, _, app| {
+                        if !select_mount.is_current() { return; }
+                        let _ = select_owner.update(app, |view, cx| apply_row(view, stamp, id, false, cx));
+                    });
+                let button = if let Some(focus) = row_focus {
+                    entity.read(app).mount.jump.wrap(button.track_focus(&focus), super::json_jump::Role::Row(id, stamp), row_draft.clone(), app)
+                } else { button.into_any_element() };
+                Some(line.child(button).into_any_element())
             })
             .collect()
     })
@@ -216,7 +215,7 @@ pub(super) fn render(view: &mut JsonWorkspace, cx: &mut Context<JsonWorkspace>) 
         .flex_col()
         .gap_2()
         .w_full()
-        .child(Input::new(&view.tree_search).disabled(view.rehosting).aria_label("Tree search query"))
+        .child(view.mount.jump.wrap(Input::new(&view.tree_search).disabled(view.rehosting).aria_label("Tree search query"), super::json_jump::Role::Search, jump_draft.clone(), cx))
         .child(fields)
         .child(controls)
         .child(

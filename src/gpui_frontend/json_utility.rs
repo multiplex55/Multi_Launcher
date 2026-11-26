@@ -135,10 +135,11 @@ pub(super) struct JsonMount {
     receipt: super::utility_mount::MountReceipt,
     root_window: AnyWindowHandle,
     pub(super) native: Option<NativeWindow>,
-    input: Entity<TextareaState>,
+    pub(super) input: Entity<TextareaState>,
+    pub(super) jump: super::json_jump::JsonJump,
     pub(super) tree_search: Entity<InputState>,
     pub(super) tree_scroll: gpui_kit::UniformListScrollHandle,
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
     return_focus: Option<FocusHandle>,
     return_scroll: Option<Point<Pixels>>,
     escape_waiting: bool,
@@ -157,7 +158,7 @@ pub(super) struct JsonWorkspace {
     pub(super) admission: Arc<RestartAdmission>,
     pub(super) visibility: RootVisibility,
     mount_owner: super::utility_mount::MountOwner,
-    mount: JsonMount,
+    pub(super) mount: JsonMount,
     pub(super) tree_mode: bool,
     pub(super) session: JsonEditorState,
     intent: JsonUtilityIntent,
@@ -166,7 +167,7 @@ pub(super) struct JsonWorkspace {
     wake: Arc<HashWakeSignal>,
     pub(super) lane: ClipboardLane,
     initial_projection: Option<(u64, u64)>,
-    checking: Option<u64>,
+    pub(super) checking: Option<u64>,
 }
 impl std::ops::Deref for JsonWorkspace {
     type Target = JsonMount;
@@ -177,7 +178,7 @@ impl std::ops::DerefMut for JsonWorkspace {
 }
 impl JsonMount {
     fn new(window: &mut Window, cx: &mut Context<JsonWorkspace>, owner: &super::utility_mount::MountOwner,
-        root_window: AnyWindowHandle, native: Option<NativeWindow>, return_focus: Option<FocusHandle>, return_scroll: Point<Pixels>) -> Self {
+        root_window: AnyWindowHandle, native: Option<NativeWindow>, return_focus: Option<FocusHandle>, return_scroll: Point<Pixels>, jump_controller: JumpModeController) -> Self {
         let receipt = owner.attach();
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -218,8 +219,9 @@ impl JsonMount {
             },
         );
         let focus_receipt = receipt.clone();
-        let focus_subscription = cx.on_focus_out(&focus, window, move |this: &mut JsonWorkspace, _, _, _| { if focus_receipt.is_current() { this.escape_waiting = false; } });
-        Self { receipt, root_window, native, input, tree_search, tree_scroll: gpui_kit::UniformListScrollHandle::default(),
+        let focus_subscription = cx.on_focus_out(&focus, window, move |this: &mut JsonWorkspace, _, _, cx| { if focus_receipt.is_current() { this.escape_waiting = false; if this.mount.jump.controller.retire() { cx.notify(); } } });
+        let jump = super::json_jump::JsonJump::new(jump_controller, cx);
+        Self { receipt, root_window, native, input, jump, tree_search, tree_scroll: gpui_kit::UniformListScrollHandle::default(),
             focus, return_focus, return_scroll: Some(return_scroll), escape_waiting: false,
             _subscriptions: vec![subscription, focus_subscription, search_subscription] }
     }
@@ -233,7 +235,8 @@ impl JsonWorkspace {
         self.open && self.popout == popout && self.mount.receipt.is_current() && self.root_window.window_id() == id
     }
     pub(super) fn replace_mount(&mut self, root_window: AnyWindowHandle, native: Option<NativeWindow>, origin: Option<FocusHandle>, offset: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let mount = JsonMount::new(window, cx, &self.mount_owner, root_window, native, origin, offset);
+        let jump_controller = self.mount.jump.controller.fresh();
+        let mount = JsonMount::new(window, cx, &self.mount_owner, root_window, native, origin, offset, jump_controller);
         let text = self.session.source().to_owned();
         let query = self.session.tree_search_query().to_owned();
         mount.input.update(cx, |input, cx| input.set_value(text, window, cx));
@@ -266,6 +269,7 @@ impl JsonWorkspace {
                 foreground_authorized: native_window_is_valid(source) && current_foreground_identity() == Some(source.identity),
                 visibility_revision: self.visibility.request_revision.load(Ordering::Acquire),
             });
+        self.retire_jump(cx);
         self.rehosting = true;
         self.activation_revision.fetch_add(1, Ordering::AcqRel);
         let root = self.root.clone();
@@ -283,9 +287,10 @@ impl JsonWorkspace {
         intent: JsonUtilityIntent,
         return_focus: Option<FocusHandle>,
         return_scroll: Point<Pixels>,
+        jump_controller: JumpModeController,
     ) -> Self {
         let mount_owner = super::utility_mount::MountOwner::default();
-        let mount = JsonMount::new(window, cx, &mount_owner, root_window, native, return_focus, return_scroll);
+        let mount = JsonMount::new(window, cx, &mount_owner, root_window, native, return_focus, return_scroll, jump_controller);
         let mut session = JsonEditorState::default();
         session.begin_initialize();
         Self { open: false, popout: false, rehosting: false, presentation_error: None, geometry_error: None, open_popout_after_load: false, activation_revision: Arc::new(AtomicU64::new(0)), root, admission, visibility, mount_owner, mount, tree_mode: false, session, intent,
@@ -667,6 +672,7 @@ impl JsonWorkspace {
         cx.notify();
     }
     pub(super) fn shutdown(&mut self) {
+        self.mount.jump.controller.retire();
         self.open = false;
         self.activation_revision.fetch_add(1, Ordering::AcqRel);
         self.mount_owner.retire();
@@ -710,7 +716,12 @@ impl Drop for JsonWorkspace {
     }
 }
 impl Render for JsonWorkspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scope = super::json_jump::Scope::new(self);
+        let jump_draft = self.mount.jump.begin(scope, window);
+        let jump_receipt = self.mount_receipt();
+        let jump_host = self.mount.root_window.window_id();
+        let jump_publisher = jump_draft.clone().map(|draft| self.mount.jump.publish_draft(draft, cx, jump_receipt, jump_host, scope));
         let mount = self.mount_receipt();
         let escape_action = mount.clone();
         let escape_key = mount.clone();
@@ -733,13 +744,14 @@ impl Render for JsonWorkspace {
             .into_iter()
             .map(|(name, action)| {
                 let mount = mount.clone();
-                Button::new(SharedString::from(format!("json-{name}")))
+                let button = Button::new(SharedString::from(format!("json-{name}")))
                     .label(name)
                     .tab_stop(!checking)
                     .disabled(checking)
                     .on_click(
                         cx.listener(move |view, _, window, cx| { if mount.is_current() { view.transform(action, window, cx); } }),
-                    )
+                    );
+                if name == "Format" { self.mount.jump.wrap(button.track_focus(&self.mount.jump.format), super::json_jump::Role::Format, if checking { None } else { jump_draft.clone() }, cx) } else { button.into_any_element() }
             })
             .collect::<Vec<_>>();
         let error = self
@@ -750,9 +762,10 @@ impl Render for JsonWorkspace {
         let feedback = self.session.feedback().map(|result| match result {
             Ok(message) | Err(message) => message.clone(),
         });
-        let tree_panel = self.tree_mode.then(|| super::json_tree::render(self, cx));
+        let tree_panel = self.tree_mode.then(|| super::json_tree::render(self, jump_draft.clone(), cx));
         div()
             .id("json-utility-pane")
+            .key_context("JsonUtilityWindow")
             .w_full()
             .flex()
             .flex_col()
@@ -825,8 +838,9 @@ impl Render for JsonWorkspace {
             .child(div().flex().gap_2()
                 .child(Button::new("json-view-text").label("Text").tab_stop(true).on_click(cx.listener(move |view, _, _, cx| { if !text_mount.is_current() { return; } if view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = false; } cx.notify(); })))
                 .child(Button::new("json-view-tree").label("Tree").tab_stop(true).on_click(cx.listener(move |view, _, _, cx| { if !tree_mount.is_current() { return; } if !view.tree_mode { view.tree_epoch.fetch_add(1, Ordering::AcqRel); view.tree_mode = true; } cx.notify(); }))))
-            .when(!self.tree_mode, |this| this.child(Textarea::new(&self.input).aria_label("JSON text").tab_index(0).readonly(self.rehosting)))
+            .when(!self.tree_mode, |this| this.child(self.mount.jump.wrap(Textarea::new(&self.input).aria_label("JSON text").tab_index(0).readonly(self.rehosting), super::json_jump::Role::Source, jump_draft.clone(), cx)))
             .children(tree_panel)
+            .children(jump_publisher)
             .children(self.checking.is_some().then(|| {
                 div()
                     .id("json-checking-clipboard")
@@ -857,7 +871,7 @@ impl RootWindow {
         if self.json_view.is_some() { return; }
         let Some(root_window) = self.root_window else { return; };
         let root = cx.entity().downgrade();
-        let view = cx.new(|cx| JsonWorkspace::new(window, cx, root, root_window, self.restart_admission.clone(), self.root_visibility.clone(), self.native_window, JsonUtilityIntent::General, None, point(px(0.0), px(0.0))));
+        let view = cx.new(|cx| JsonWorkspace::new(window, cx, root, root_window, self.restart_admission.clone(), self.root_visibility.clone(), self.native_window, JsonUtilityIntent::General, None, point(px(0.0), px(0.0)), self.search_jump_mode.fresh()));
         view.update(cx, |view, cx| view.mount_passive(cx));
         self.json_view = Some(view.clone());
         panel_stack::ensure(&mut self.panel_stack, Panel::JsonUtilityDialog);
@@ -944,6 +958,7 @@ impl RootWindow {
                     intent,
                     origin.clone(),
                     offset,
+                    self.search_jump_mode.fresh(),
                 )
             })
         };
