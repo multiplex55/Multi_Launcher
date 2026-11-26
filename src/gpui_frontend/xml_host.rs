@@ -170,14 +170,15 @@ impl RootWindow {
             || !workspace.read(cx).rehosting
             || workspace.read(cx).popout == popout
         {
+            workspace.update(cx, |view, cx| view.finish_rehost(cx));
             return;
         }
         let Some(permit) = self.restart_admission.admit() else {
-            workspace.update(cx, |view, _| view.rehosting = false);
+            workspace.update(cx, |view, cx| view.finish_rehost(cx));
             return;
         };
         let Some(root_window) = self.root_window else {
-            workspace.update(cx, |view, _| view.rehosting = false);
+            workspace.update(cx, |view, cx| view.finish_rehost(cx));
             return;
         };
         let root = cx.entity().downgrade();
@@ -253,7 +254,7 @@ impl RootWindow {
                     Ok(opened) => opened,
                     Err(error) => {
                         let _ = workspace.update(cx, |view, cx| {
-                            view.rehosting = false;
+                            view.finish_rehost(cx);
                             view.feedback = Some(format!("Could not open XML window: {error}"));
                             cx.notify();
                         });
@@ -297,7 +298,7 @@ impl RootWindow {
                         )
                         .await;
                         let _ = workspace.update(cx, |view, cx| {
-                            view.rehosting = false;
+                            view.finish_rehost(cx);
                             view.feedback = Some("Could not attach XML window.".into());
                             cx.notify();
                         });
@@ -455,7 +456,7 @@ impl RootWindow {
                         }
                         root.remember_xml_presentation(RememberedPresentation::Popout, cx);
                         workspace.update(cx, |view, cx| {
-                            view.rehosting = false;
+                            view.finish_rehost(cx);
                             cx.notify();
                         });
                     });
@@ -486,7 +487,7 @@ impl RootWindow {
                             if mounted_receipt.is_current() {
                                 view.replace_mount(root_window, root_native, window, cx);
                                 view.popout = false;
-                                view.rehosting = false;
+                                view.finish_rehost(cx);
                                 view.feedback = Some("Could not show XML Toolkit window.".into());
                                 if root_native.is_some_and(|native| {
                                     current_foreground_identity() == Some(native.identity)
@@ -516,7 +517,7 @@ impl RootWindow {
                     .ok()
                     .flatten();
                 let Some((popup, popup_native)) = source_popup else {
-                    let _ = workspace.update(cx, |view, _| view.rehosting = false);
+                    let _ = workspace.update(cx, |view, cx| view.finish_rehost(cx));
                     return;
                 };
                 let _ = root.update(cx, |root, cx| root.drain_xml_native_geometry(cx, true));
@@ -536,7 +537,7 @@ impl RootWindow {
                     .ok()
                     .flatten();
                 let Some(mount) = mounted else {
-                    let _ = workspace.update(cx, |view, _| view.rehosting = false);
+                    let _ = workspace.update(cx, |view, cx| view.finish_rehost(cx));
                     let _ = root.update(cx, |root, cx| {
                         if root
                             .xml_popup
@@ -568,7 +569,7 @@ impl RootWindow {
                         if mount.is_current() {
                             view.replace_mount(popup, popup_native, window, cx);
                             view.popout = true;
-                            view.rehosting = false;
+                            view.finish_rehost(cx);
                         }
                     });
                     let _ = root.update(cx, |root, cx| {
@@ -591,7 +592,7 @@ impl RootWindow {
                                 if mount.is_current() {
                                     view.replace_mount(popup, popup_native, window, cx);
                                     view.popout = true;
-                                    view.rehosting = false;
+                                    view.finish_rehost(cx);
                                     view.feedback = Some(
                                         "Could not show the launcher to dock XML Toolkit.".into(),
                                     );
@@ -624,7 +625,7 @@ impl RootWindow {
                                 if mount.is_current() {
                                     view.replace_mount(popup, popup_native, window, cx);
                                     view.popout = true;
-                                    view.rehosting = false;
+                                    view.finish_rehost(cx);
                                     view.feedback = Some(
                                         "Could not focus the launcher to dock XML Toolkit.".into(),
                                     );
@@ -671,7 +672,7 @@ impl RootWindow {
                 }
                 let _ =
                     update_kit_window_content(root_window, &workspace, cx, |view, window, cx| {
-                        view.rehosting = false;
+                        view.finish_rehost(cx);
                         if mount.is_current()
                             && view.is_mounted_in(window.window_handle().window_id(), false)
                             && view.transfer_anchor_is_focused(window)

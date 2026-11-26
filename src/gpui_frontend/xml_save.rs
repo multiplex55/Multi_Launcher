@@ -1,4 +1,23 @@
 //! One-shot ownership for an explicit XML overwrite review.
+#[derive(Default)]
+pub(super) struct ReviewPresentation {
+    next: u64,
+    current: Option<(u64, u64)>,
+}
+impl ReviewPresentation {
+    pub fn issue(&mut self, review: u64) -> Option<u64> {
+        let next = self.next.checked_add(1)?;
+        self.next = next;
+        self.current = Some((review, next));
+        Some(next)
+    }
+    pub fn revoke(&mut self) {
+        self.current = None;
+    }
+    pub fn is_current(&self, review: u64, presentation: u64) -> bool {
+        self.current == Some((review, presentation))
+    }
+}
 pub(super) fn take_review<T>(review: &mut Option<(u64, T)>, id: u64) -> Option<T> {
     if review.as_ref().is_some_and(|(current, _)| *current == id) {
         review.take().map(|(_, value)| value)
@@ -12,7 +31,20 @@ pub(super) fn review_description(path: &std::path::Path) -> Option<String> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{review_description, take_review};
+    use super::{ReviewPresentation, review_description, take_review};
+    #[test]
+    fn review_presentation_revokes_old_modal_even_for_same_review() {
+        let mut authority = ReviewPresentation::default();
+        let old = authority.issue(17).unwrap();
+        authority.revoke();
+        assert!(!authority.is_current(17, old));
+        let current = authority.issue(17).unwrap();
+        assert!(!authority.is_current(17, old));
+        assert!(authority.is_current(17, current));
+        assert!(!authority.is_current(18, current));
+        authority.revoke();
+        assert!(!authority.is_current(17, current));
+    }
     #[test]
     fn review_contains_complete_unclipped_target() {
         let target = format!("C:/{}end.xml", "long-segment/".repeat(60));

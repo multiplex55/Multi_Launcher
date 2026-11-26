@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+An open XML Overwrite review can move between Dock and Pop Out with the exact frozen path and payload. Six focused launcher tests passed. Native confirmation and transfer evidence and saved JSON and XML pins remain pending. [Overwrite transfer checkpoint](CHECKPOINTS.md#xml-overwrite-review-transfer)
+
 G14 XML now reuses the shared checked utility host for remembered Dock and Pop Out. The same engine and draft survive moves, and Dock preserves a newer focus choice while the old popup retires. Ten focused host tests passed. Overwrite review transfer and saved JSON and XML pins follow. Matched desktop replay remains pending. [XML host checkpoint](CHECKPOINTS.md#xml-remembered-dock-and-pop-out)
 
 G14 now has XML Open, Save Source, Save Output and an explicit Overwrite review. Initial creation cannot clobber a file that appears late, and Windows rename retries check authority again. Twenty-three grouped tests passed, closing the queued automated Open and XSD checks. Paired desktop replay and review rehosting remain open. [XML file-effects checkpoint](CHECKPOINTS.md#xml-save-and-overwrite)

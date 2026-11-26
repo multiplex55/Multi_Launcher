@@ -14,7 +14,7 @@ Select `xml_toolkit_plugin_command_routes_once_through_the_typed_bus`, `m7f_xml_
 
 ## GPUI Source and session
 
-Stock typed Search opens the docked XML Source editor and focuses the retained draft. Source revisions publish only current diagnostics from the real Activity-backed engine. Paste explicitly reads protected Unicode text and uses the stock size and UTF-8 declaration policy. Copy Source preserves exact authored text, including invalid XML. Closing retires the current worker and effects, while reopening preserves the draft. Accepted launcher Quit and restart wait for worker retirement. The focused batch passed the real Windows engine gate. Matched desktop checks remain pending.
+Stock typed Search opens XML Toolkit and focuses the retained draft. Source revisions publish only current diagnostics from the real Activity-backed engine. Paste explicitly reads protected Unicode text and uses the stock size and UTF-8 declaration policy. Copy Source preserves exact authored text, including invalid XML. Closing retires the current worker and effects, while reopening preserves the draft. Accepted launcher Quit and restart wait for worker retirement. The focused batch passed the real Windows engine gate. Matched desktop checks remain pending.
 
 ## GPUI Format and Output
 
@@ -38,4 +38,4 @@ Open uses the checked native picker and shared bounded UTF-8 loader. Source and 
 
 ## GPUI retained host
 
-Fresh typed Open uses the saved presentation, with Pop Out as the stock default. Dock and Pop Out retain the same engine, draft and tab state. The popup starts hidden, restores saved geometry before show and uses the shared native geometry observer. Dock requires exact launcher visibility and foreground acknowledgement before retiring its source. A rejected transfer restores the original mount. New edits and effects wait for transfer to finish, and picker and accepted write authority stay with the original mount. Paired native geometry, foreground, close and picker verification remain pending, along with overwrite review transfer and saved pin.
+Fresh typed Open uses the saved presentation, with Pop Out as the stock default. Dock and Pop Out retain the same engine, draft and tab state. The popup starts hidden, restores saved geometry before show and uses the shared native geometry observer. Dock requires exact launcher visibility and foreground acknowledgement before retiring its source. A rejected transfer restores the original mount. New edits and effects wait for transfer to finish, and picker and accepted write authority stay with the original mount. An open [Overwrite review](xml-toolkit-overwrite.md) moves with its frozen target and payload. Paired native geometry, foreground, close, picker and review verification remain pending, along with saved pin.
