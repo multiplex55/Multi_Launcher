@@ -9,9 +9,7 @@ use crate::gui::theme::widgets::{
 };
 use crate::gui::theme::{TextRole, text_style_for_role};
 use crate::plugins::snippet_template::{
-    RenderErrorKind, RenderIssue, RenderIssueKind, RenderedPreview, SnippetInvocationContext,
-    TemplateRenderError, render_for_copy, render_for_copy_with_context, render_preview,
-    render_preview_with_context,
+    RenderErrorKind, RenderIssueKind, RenderedPreview, SnippetInvocationContext, TemplateRenderError,
 };
 use crate::plugins::snippets::{
     PreparedSnippetTemplate, SnippetEntry, SnippetInputKind, SnippetRunMode,
@@ -1276,17 +1274,7 @@ impl SnippetPromptSession {
         context: Option<SnippetInvocationContext>,
         mode: SnippetPromptMode,
     ) -> Self {
-        let values = prepared
-            .fields
-            .iter()
-            .map(|field| (field.name.clone(), field.default_value.clone()))
-            .collect();
-        let initial_focus = prepared
-            .fields
-            .iter()
-            .find(|field| field.required)
-            .or_else(|| prepared.fields.first())
-            .map(|field| field.name.clone());
+        let (values, initial_focus) = crate::snippet_prompt::initial_values(&prepared);
         Self {
             generation: 0,
             alias,
@@ -1304,51 +1292,11 @@ impl SnippetPromptSession {
 fn render_session_preview(
     session: &SnippetPromptSession,
 ) -> Result<RenderedPreview, TemplateRenderError> {
-    match session.context.as_ref() {
-        Some(context) => render_preview_with_context(
-            &session.prepared.parsed,
-            &session.prepared.fields,
-            &session.values,
-            context,
-        ),
-        None if session.prepared.parsed.has_system_variables() => {
-            Err(missing_system_context_error())
-        }
-        None => render_preview(
-            &session.prepared.parsed,
-            &session.prepared.fields,
-            &session.values,
-        ),
-    }
+    crate::snippet_prompt::preview_prepared(&session.prepared, &session.values, session.context.as_ref())
 }
 
 fn render_session_for_copy(session: &SnippetPromptSession) -> Result<String, TemplateRenderError> {
-    match session.context.as_ref() {
-        Some(context) => render_for_copy_with_context(
-            &session.prepared.parsed,
-            &session.prepared.fields,
-            &session.values,
-            context,
-        ),
-        None if session.prepared.parsed.has_system_variables() => {
-            Err(missing_system_context_error())
-        }
-        None => render_for_copy(
-            &session.prepared.parsed,
-            &session.prepared.fields,
-            &session.values,
-        ),
-    }
-}
-
-fn missing_system_context_error() -> TemplateRenderError {
-    TemplateRenderError {
-        kind: RenderErrorKind::SystemVariableResolution,
-        issues: vec![RenderIssue {
-            key: "system variable".into(),
-            kind: RenderIssueKind::SystemVariableFormatting,
-        }],
-    }
+    crate::snippet_prompt::render_prepared(&session.prepared, &session.values, session.context.as_ref())
 }
 
 fn map_render_error(error: TemplateRenderError) -> SnippetPromptError {

@@ -2,7 +2,9 @@
 
 ## Current checkpoint
 
-Cold named Snippets Edit opens the exact saved row through a canonical watched Search snapshot. All 15 focused tests passed. The same build supplied the bounded performance measurements. Matched Windows replay remains open. The next G13 batch shares the prompt contract across Fill, Run and editor Preview. [Named Edit and build receipt](CHECKPOINTS.md#g13-canonical-snippets-search-and-named-edit)
+Snippet Prompt has a shared preparation, context, Preview and checked Copy contract for the next GPUI consumers. All 22 focused library tests passed, including existing egui and Paste Sequence behavior. The next G13 increment wires standalone Fill and Run into the launcher. [Shared prompt checkpoint](CHECKPOINTS.md#g13-shared-snippet-prompt-contract)
+
+Cold named Snippets Edit opens the exact saved row through a canonical watched Search snapshot. All 15 focused tests passed. The same build supplied the bounded performance measurements. Matched Windows replay remains open. [Named Edit and build receipt](CHECKPOINTS.md#g13-canonical-snippets-search-and-named-edit)
 
 Snippets supports Add and exact Remove review through the existing checked store. All five launcher tests and three reused stock tests passed. Matched Windows replay remains open. [Snippets mutation checkpoint](CHECKPOINTS.md#g13-snippets-add-and-exact-remove-review)
 

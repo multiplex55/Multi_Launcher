@@ -110,6 +110,14 @@ pub trait ClipboardBackend: Send + Sync {
         self.write_text(text)?;
         Ok(true)
     }
+    /// Fail closed unless the backend checks authority after acquiring its writer.
+    fn write_text_acquired_if(
+        &self,
+        _text: &str,
+        _current: &dyn Fn() -> bool,
+    ) -> Result<bool, ClipboardError> {
+        Err(ClipboardError::Permanent("Acquired clipboard writer unavailable".into()))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -169,7 +177,15 @@ impl ClipboardBackend for ArboardClipboardBackend {
         if !current() {
             return Ok(false);
         }
-        writer.text(text.to_owned()).map_err(classify_arboard)?;
+        writer.text(text).map_err(classify_arboard)?;
+        Ok(true)
+    }
+    #[cfg(windows)]
+    fn write_text_acquired_if(&self, text: &str, current: &dyn Fn() -> bool) -> Result<bool, ClipboardError> {
+        let mut clipboard = arboard::Clipboard::new().map_err(classify_arboard)?;
+        let writer = clipboard.set();
+        if !current() { return Ok(false); }
+        writer.text(text).map_err(classify_arboard)?;
         Ok(true)
     }
 }

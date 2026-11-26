@@ -10,7 +10,7 @@ mod parser;
 
 pub mod handlers;
 
-pub use bus::{CommandBus, LauncherRunPreferences};
+pub use bus::{CommandBus, LauncherRunPreferences, normalize_outcome_for_root_policy};
 pub use error::CommandError;
 pub use host::{
     BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost,

@@ -7,7 +7,7 @@ pub struct ExternalForegroundWindow {
     pub(crate) title: Option<String>,
 }
 
-pub(crate) enum ForegroundWindowObservation {
+pub enum ForegroundWindowObservation {
     External(ExternalForegroundWindow),
     Launcher,
     Unavailable,
@@ -22,7 +22,7 @@ pub fn capture_external_foreground_window() -> Option<ExternalForegroundWindow> 
     }
 }
 
-pub(crate) fn observe_foreground_window() -> ForegroundWindowObservation {
+pub fn observe_foreground_window() -> ForegroundWindowObservation {
     #[cfg(windows)]
     {
         use windows::Win32::UI::WindowsAndMessaging::{

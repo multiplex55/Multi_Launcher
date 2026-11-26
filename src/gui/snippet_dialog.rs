@@ -715,14 +715,10 @@ impl SnippetDialog {
             return;
         }
 
-        match parse_template(&self.text) {
-            Ok(parsed) => {
-                self.discovered_field_keys = parsed.field_keys;
-                for key in &self.discovered_field_keys {
-                    if !self.fields.iter().any(|field| field.name == *key) {
-                        self.fields.push(SnippetFieldDefinition::new(key.clone()));
-                    }
-                }
+        match crate::snippet_prompt::discover_editor_fields_typed(&self.text, &self.fields) {
+            Ok(discovery) => {
+                self.discovered_field_keys = discovery.keys;
+                self.fields = discovery.fields;
             }
             Err(error) => self.template_error = Some(error),
         }

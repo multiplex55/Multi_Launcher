@@ -20,6 +20,9 @@ use std::sync::{
 };
 
 pub const SNIPPETS_FILE: &str = "snippets.json";
+pub(crate) fn normalized_snippet_path(path: &Path) -> PathBuf {
+    super::live_snapshot::normalized_path(path)
+}
 pub(crate) const MAX_SNIPPET_TAGS: usize = 16;
 pub(crate) const MAX_SNIPPET_TAG_CHARS: usize = 64;
 
@@ -822,6 +825,11 @@ fn snippets_transaction_guard() -> MutexGuard<'static, ()> {
     SNIPPETS_TRANSACTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub(crate) fn with_snippets_transaction<T>(action: impl FnOnce() -> T) -> T {
+    let _transaction = snippets_transaction_guard();
+    action()
 }
 
 /// Append or update a snippet entry identified by `alias`.

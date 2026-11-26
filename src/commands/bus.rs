@@ -25,7 +25,30 @@ pub struct LauncherRunPreferences {
 #[derive(Debug, Default)]
 pub struct CommandBus;
 
+pub fn normalize_outcome_for_root_policy(
+    outcome: CommandOutcome,
+    root_policy: crate::universal_actions::RootLauncherPolicy,
+) -> CommandOutcome {
+    if root_policy == crate::universal_actions::RootLauncherPolicy::Legacy { return outcome; }
+    CommandOutcome { history: outcome.history, toasts: outcome.toasts, favorite_log: outcome.favorite_log, ..CommandOutcome::default() }
+}
+
 impl CommandBus {
+    /// Apply the normal alias-only launcher policy to a completed checked snippet write.
+    pub fn complete_checked_snippet_run(
+        &self,
+        completion: crate::snippet_prompt::PromptCompletion,
+        preferences: LauncherRunPreferences,
+    ) -> Result<CommandOutcome, CommandError> {
+        let invocation = CommandInvocation {
+            command: Command::Storage(super::StorageCommand::SnippetRun(completion.alias.clone())),
+            original_action: completion.safe_action.clone(),
+            query_override: None,
+            source: completion.source,
+        };
+        handle_checked_headless_effect(preferences, &invocation, Ok(()))
+            .map(|outcome| normalize_outcome_for_root_policy(outcome, completion.root_policy))
+    }
     /// Apply the normal launcher outcome to an already checked clipboard text effect.
     pub fn complete_checked_clipboard_text(
         &self,

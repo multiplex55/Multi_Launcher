@@ -130,19 +130,7 @@ fn normalize_outcome_for_root_policy(
     outcome: CommandOutcome,
     root_policy: crate::universal_actions::RootLauncherPolicy,
 ) -> CommandOutcome {
-    if root_policy == crate::universal_actions::RootLauncherPolicy::Legacy {
-        return outcome;
-    }
-
-    // These policies all mutate the ordinary launcher surface. Preserve the
-    // non-ROOT completion effects while leaving query, results, focus, and
-    // visibility decisions to their existing owners.
-    CommandOutcome {
-        history: outcome.history,
-        toasts: outcome.toasts,
-        favorite_log: outcome.favorite_log,
-        ..CommandOutcome::default()
-    }
+    crate::commands::normalize_outcome_for_root_policy(outcome, root_policy)
 }
 
 impl RadialCommandHost for LauncherApp {
@@ -1804,26 +1792,7 @@ fn select_snippet_origin_window(
     observed: crate::active_window::ForegroundWindowObservation,
     cached: Option<crate::active_window::ExternalForegroundWindow>,
 ) -> Option<crate::active_window::ExternalForegroundWindow> {
-    let radial_source = matches!(
-        source,
-        crate::commands::ActivationSource::RadialRelease
-            | crate::commands::ActivationSource::RadialShortcut
-            | crate::commands::ActivationSource::RadialHotstring
-    );
-    if radial_source {
-        return match observed {
-            crate::active_window::ForegroundWindowObservation::External(window) => Some(window),
-            crate::active_window::ForegroundWindowObservation::Launcher
-            | crate::active_window::ForegroundWindowObservation::Unavailable => None,
-        };
-    }
-
-    match observed {
-        crate::active_window::ForegroundWindowObservation::External(window) => Some(window),
-        crate::active_window::ForegroundWindowObservation::Launcher if root_visible => cached,
-        crate::active_window::ForegroundWindowObservation::Launcher
-        | crate::active_window::ForegroundWindowObservation::Unavailable => None,
-    }
+    crate::snippet_prompt::select_origin_window(source, root_visible, observed, cached)
 }
 
 fn select_sequence_origin_window(
@@ -2313,31 +2282,16 @@ impl LauncherApp {
         needs_window_title: bool,
         launcher_origin_available: bool,
     ) -> crate::plugins::SnippetInvocationContext {
-        let timestamp = chrono::Local::now().fixed_offset();
-        let origin = if needs_window_title {
-            select_snippet_origin_window(
+        crate::snippet_prompt::capture_protected_context(
+            chrono::Local::now().fixed_offset(),
+            needs_clipboard,
+            needs_window_title,
+            || select_snippet_origin_window(
                 source,
                 launcher_origin_available,
                 crate::active_window::observe_foreground_window(),
                 self.snippet_origin_window.clone(),
-            )
-        } else {
-            None
-        };
-        let clipboard_text = needs_clipboard
-            .then(|| crate::actions::clipboard::get_text().ok())
-            .flatten();
-        let (foreground_hwnd, foreground_title) = if needs_window_title {
-            origin.map_or((None, None), |origin| (Some(origin.hwnd), origin.title))
-        } else {
-            (None, None)
-        };
-
-        crate::plugins::SnippetInvocationContext::new(
-            timestamp,
-            clipboard_text,
-            foreground_hwnd,
-            foreground_title,
+            ),
         )
     }
 
@@ -4770,7 +4724,8 @@ pub(in crate::gui) mod tests {
 
     #[test]
     fn prompt_completion_uses_captured_history_and_root_policy_once() {
-        let mut app = test_app();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = inert_test_app_with_paste_shortcuts_disabled(directory.path());
         app.test_skip_history_persistence = true;
         app.query = "later ambient query".into();
         app.hide_after_run = true;

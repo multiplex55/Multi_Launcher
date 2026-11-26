@@ -33,6 +33,7 @@ pub mod color_pick;
 pub mod commands;
 pub mod common;
 pub mod completion;
+pub mod snippet_prompt;
 pub mod coordinate_tool;
 pub mod dashboard;
 pub mod date_arithmetic;
