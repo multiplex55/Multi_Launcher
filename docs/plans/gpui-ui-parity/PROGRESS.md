@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+G14 XML Open now uses the checked native picker and stock secure UTF-8 loader. A current read replaces Source, and newer edits or a closed pane reject old results. Scoped checks and source review are complete. Linked tests are queued with Save and Overwrite. [XML Open checkpoint](CHECKPOINTS.md#owned-xml-open)
+
 G14 XML Validation now has an owned local XSD chooser, Clear and explicit Validate. The source retains the path across engine reopen and checks the exact host and draft before using a picker result. Four focused launcher tests passed. The shared model tests and matched desktop replay remain queued. [XML Validation checkpoint](CHECKPOINTS.md#xml-validation-and-local-xsd)
 
 G14 XPath adds stock namespace editing, exact scalar and node results, virtual navigation, Tree reveal and explicit copies. Eleven focused tests passed, including real Windows XPath and namespace validation in the engine. Matched desktop evidence remains pending. [XPath checkpoint](CHECKPOINTS.md#xml-xpath-and-namespace-mappings)
@@ -87,7 +89,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Add owned XML Open with the shared file worker, then Save Source, Save Output and Overwrite. Continue saved JSON pin in the shared JSON/XML host follow-up. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
+| Current next action | Add owned Save Source, Save Output and the checked XML Overwrite decision, then run the grouped file and schema checks. Continue saved JSON pin in the shared JSON/XML host follow-up. When native replay is available, verify Favorites Search and saved Action Sheet associations on one candidate where practical, and replay staged Follow Mouse. Mixed DPI and G01 known-duration F2 remain open. |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

@@ -3,6 +3,17 @@ use super::xml_utility::XmlWorkspace;
 use super::*;
 use multi_launcher::xml_toolkit_session::{XmlParseStatus, XmlTreeStatus};
 
+pub(super) fn pane_close_blocked(native_picker: bool) -> bool {
+    native_picker
+}
+pub(super) fn loaded_source_may_focus(owned_focus_current: bool, root_foreground: bool) -> bool {
+    owned_focus_current && root_foreground
+}
+
+pub(super) fn file_effect_pending(picker: bool, read: bool) -> bool {
+    picker || read
+}
+
 pub(super) fn picker_launch_current(
     mount: &utility_mount::MountReceipt,
     source: u64,
@@ -135,7 +146,7 @@ pub(super) fn render(view: &mut XmlWorkspace, cx: &mut Context<XmlWorkspace>) ->
         );
     }
     if view.schema_picker_pending() {
-        panel = panel.child("Choosing local XSD…");
+        panel = panel.child("Choosing file…");
     }
     panel.into_any_element()
 }
@@ -143,7 +154,25 @@ pub(super) fn render(view: &mut XmlWorkspace, cx: &mut Context<XmlWorkspace>) ->
 #[cfg(test)]
 mod tests {
     use super::super::utility_mount::MountOwner;
-    use super::{picker_launch_current, picker_receipt_current};
+    use super::{
+        file_effect_pending, loaded_source_may_focus, pane_close_blocked, picker_launch_current,
+        picker_receipt_current,
+    };
+    #[test]
+    fn detached_read_allows_pane_close_and_focus_requires_same_owner_and_foreground() {
+        assert!(pane_close_blocked(true));
+        assert!(!pane_close_blocked(false));
+        assert!(file_effect_pending(false, true));
+        assert!(loaded_source_may_focus(true, true));
+        assert!(!loaded_source_may_focus(false, true));
+        assert!(!loaded_source_may_focus(true, false));
+    }
+    #[test]
+    fn picker_or_read_holds_the_file_lifecycle_open() {
+        assert!(!file_effect_pending(false, false));
+        assert!(file_effect_pending(true, false));
+        assert!(file_effect_pending(false, true));
+    }
     #[test]
     fn delayed_picker_launch_requires_live_owner_mount_and_source() {
         let owner = MountOwner::default();

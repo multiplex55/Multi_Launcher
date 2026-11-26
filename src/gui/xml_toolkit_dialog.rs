@@ -24,7 +24,7 @@ use crate::xml_toolkit_session::{
 };
 use eframe::egui;
 use files::{
-    SaveOutcome, read_xml_file, save_xml_file, validate_local_path,
+    SaveOutcome, save_xml_file, validate_local_path,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -208,23 +208,7 @@ impl XmlFileWorker {
                             path,
                             activity,
                         } => {
-                            if let Some(activity) = activity.as_ref() {
-                                activity.mark_running();
-                            }
-                            let result = read_xml_file(&path);
-                            if let Some(activity) = activity.as_ref() {
-                                let outcome = if result.is_ok() {
-                                    ActivityOutcome::Completed
-                                } else {
-                                    ActivityOutcome::Failed
-                                };
-                                activity.finish(
-                                    outcome,
-                                    (outcome == ActivityOutcome::Failed)
-                                        .then_some(ActivityDiagnostic::WorkerFailed),
-                                    ActivityRetirement::Unavailable,
-                                );
-                            }
+                            let result = crate::xml_file_load::run_xml_load(&path, activity.as_ref());
                             FileCompletion {
                                 id,
                                 source_generation: Some(source_generation),

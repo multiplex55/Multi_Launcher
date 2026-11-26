@@ -5595,7 +5595,7 @@ impl RootWindow {
                     .to_owned(),
             );
         }
-        if self.xml_view.as_ref().is_some_and(|view| view.read(cx).schema_picker_pending()) { return Err("Finish or cancel the XML schema picker before restarting.".to_owned()); }
+        if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending()) { return Err("Wait for the XML file operation to finish before restarting.".to_owned()); }
         if let Some(error) = self.xml_view.as_ref().and_then(|view| view.read(cx).shutdown_failure()) {
             return Err(format!("Cannot restart because {error}. Close and rerun Multi Launcher."));
         }
@@ -9807,7 +9807,7 @@ impl RootWindow {
                 );
             }
             Some(RootCloseBlocker::XmlFilePicker) => {
-                self.restart_status = Some("Finish or cancel the XML schema picker before quitting Multi Launcher.".to_owned());
+                self.restart_status = Some("Wait for the XML file operation to finish before quitting Multi Launcher.".to_owned());
             }
             Some(RootCloseBlocker::ToastLogOpen) => {
                 self.restart_status = Some(TOAST_LOG_OPEN_PENDING_STATUS.to_owned());
@@ -9872,7 +9872,7 @@ impl RootWindow {
         file_picker_pending: bool,
         cx: &App,
     ) -> Option<RootCloseBlocker> {
-        if self.xml_view.as_ref().is_some_and(|view| view.read(cx).schema_picker_pending()) { return Some(RootCloseBlocker::XmlFilePicker); }
+        if self.xml_view.as_ref().is_some_and(|view| view.read(cx).file_effect_pending()) { return Some(RootCloseBlocker::XmlFilePicker); }
         if self.calculator_search.active {
             return Some(RootCloseBlocker::CalculatorSearch);
         }
@@ -12880,7 +12880,7 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::XmlFilePicker) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
-                            root.restart_status = Some("Finish or cancel the XML schema picker before closing Multi Launcher.".to_owned()); cx.notify();
+                            root.restart_status = Some("Wait for the XML file operation to finish before closing Multi Launcher.".to_owned()); cx.notify();
                         });
                         false
                     }

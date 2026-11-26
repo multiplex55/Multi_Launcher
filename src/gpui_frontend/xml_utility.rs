@@ -104,6 +104,20 @@ fn snapshot_pending(snapshot: &XmlSessionSnapshot) -> bool {
             multi_launcher::xml_toolkit_session::XmlXPathStatus::Pending(_)
         )
 }
+#[derive(Clone, Copy)]
+enum XmlPickerKind {
+    Schema,
+    Open,
+}
+struct XmlReadReceipt {
+    mount: utility_mount::MountReceipt,
+    source_epoch: u64,
+    source_revision: Option<XmlSourceRevision>,
+    owner: NativeWindow,
+    visibility_revision: u64,
+    root_window: AnyWindowHandle,
+    open_focus: Option<FocusHandle>,
+}
 enum Engine {
     Idle,
     Starting { cancel: bool },
@@ -135,6 +149,8 @@ pub(super) struct XmlWorkspace {
     pub(super) xpath_tab: bool,
     pub(super) schema_tab: bool,
     schema_picker: bool,
+    file_read_pending: bool,
+    next_file_request: u64,
     schema_path_draft: Option<std::path::PathBuf>,
     pub(super) xpath: XmlToolkitXPathViewState,
     pub(super) xpath_expression: Entity<InputState>,
@@ -243,6 +259,8 @@ impl XmlWorkspace {
             xpath_tab: false,
             schema_tab: false,
             schema_picker: false,
+            file_read_pending: false,
+            next_file_request: 0,
             schema_path_draft: None,
             xpath: XmlToolkitXPathViewState::default(),
             xpath_expression,
@@ -452,6 +470,9 @@ impl XmlWorkspace {
     pub(super) fn schema_picker_pending(&self) -> bool {
         self.schema_picker
     }
+    pub(super) fn file_effect_pending(&self) -> bool {
+        super::xml_schema::file_effect_pending(self.schema_picker, self.file_read_pending)
+    }
     pub(super) fn schema_path_draft(&self) -> Option<&std::path::Path> {
         self.schema_path_draft.as_deref()
     }
@@ -482,7 +503,7 @@ impl XmlWorkspace {
         cx.notify();
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.schema_picker {
+        if super::xml_schema::pane_close_blocked(self.schema_picker) {
             return;
         }
         let restore = window.is_window_active() && self.focus.contains_focused(window, cx);
@@ -994,12 +1015,29 @@ impl XmlWorkspace {
     pub(super) fn schema_live(&self) -> bool {
         self.open
             && self.schema_tab
-            && !self.schema_picker
+            && !self.file_effect_pending()
             && self.mount.is_current()
             && !self.admission.is_fenced()
     }
     pub(super) fn schema_choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.schema_live()
+        if !self.schema_live() {
+            return;
+        }
+        self.begin_xml_picker(XmlPickerKind::Schema, window, cx);
+    }
+    fn open_xml_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_xml_picker(XmlPickerKind::Open, window, cx);
+    }
+    fn begin_xml_picker(
+        &mut self,
+        kind: XmlPickerKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.open
+            || !self.mount.is_current()
+            || self.admission.is_fenced()
+            || self.file_effect_pending()
             || self.clipboard_pending
             || window.window_handle().window_id() != self.root_window.window_id()
         {
@@ -1020,7 +1058,7 @@ impl XmlWorkspace {
             Ok(Some(owner)) if Some(owner) == self.native => owner,
             _ => {
                 self.feedback =
-                    Some("Activate the XML Utility window before choosing an XSD.".into());
+                    Some("Activate the XML Utility window before choosing a file.".into());
                 cx.notify();
                 return;
             }
@@ -1042,10 +1080,15 @@ impl XmlWorkspace {
         let source_revision = snapshot.revision;
         let schema_revision = snapshot.schema.revision;
         let root_window = self.root_window;
+        if matches!(kind, XmlPickerKind::Open) && !self.focus.contains_focused(window, cx) {
+            self.focus.focus(window, cx);
+        }
         self.schema_picker = true;
-        let picker = rfd::FileDialog::new()
-            .set_parent(&*window)
-            .add_filter("XML Schema", &["xsd"]);
+        let picker = rfd::FileDialog::new().set_parent(&*window);
+        let picker = match kind {
+            XmlPickerKind::Schema => picker.add_filter("XML Schema", &["xsd"]),
+            XmlPickerKind::Open => picker.add_filter("XML document", &["xml", "xsl", "xslt"]),
+        };
         let worker_mount = mount.clone();
         let worker_epoch = self.epoch.clone();
         let worker_visibility = self.visibility.clone();
@@ -1071,7 +1114,7 @@ impl XmlWorkspace {
         });
         let weak = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
-            let _permit = permit;
+            let mut permit = Some(permit);
             let result = task.await.flatten();
             let Some(view) = weak.upgrade() else {
                 return;
@@ -1081,12 +1124,15 @@ impl XmlWorkspace {
                 let snapshot = view.current_snapshot();
                 let current = super::xml_schema::picker_receipt_current(
                     &mount,
-                    view.open && view.schema_tab && !view.admission.is_fenced(),
+                    view.open
+                        && (!matches!(kind, XmlPickerKind::Schema) || view.schema_tab)
+                        && !view.admission.is_fenced(),
                     view.epoch.load(Ordering::Acquire),
                     source_epoch,
                     snapshot.as_ref().is_some_and(|snapshot| {
                         snapshot.revision == source_revision
-                            && snapshot.schema.revision == schema_revision
+                            && (!matches!(kind, XmlPickerKind::Schema)
+                                || snapshot.schema.revision == schema_revision)
                     }),
                     view.native == Some(owner)
                         && window.window_handle().window_id() == root_window.window_id()
@@ -1104,14 +1150,37 @@ impl XmlWorkspace {
                 if let Some(path) = result {
                     if let Err(error) = multi_launcher::xml_source::validate_local_path(&path) {
                         view.feedback = Some(error);
-                    } else if let Engine::Active(session) = &view.engine {
-                        match session.select_schema_path(path.clone()) {
-                            Ok(_) => {
-                                view.schema_path_draft = Some(path);
-                                view.feedback = None;
+                    } else {
+                        match kind {
+                            XmlPickerKind::Schema => {
+                                if let Engine::Active(session) = &view.engine {
+                                    match session.select_schema_path(path.clone()) {
+                                        Ok(_) => {
+                                            view.schema_path_draft = Some(path);
+                                            view.feedback = None;
+                                        }
+                                        Err(error) => {
+                                            view.feedback =
+                                                Some(format!("Could not select XSD: {error:?}"))
+                                        }
+                                    }
+                                }
                             }
-                            Err(error) => {
-                                view.feedback = Some(format!("Could not select XSD: {error:?}"))
+                            XmlPickerKind::Open => {
+                                if let Some(permit) = permit.take() {
+                                    let receipt = XmlReadReceipt {
+                                        mount: mount.clone(),
+                                        source_epoch,
+                                        source_revision,
+                                        owner,
+                                        visibility_revision,
+                                        root_window,
+                                        open_focus: window
+                                            .focused(cx)
+                                            .filter(|focus| view.focus.contains(focus, window)),
+                                    };
+                                    view.start_xml_load(path, receipt, permit, cx);
+                                }
                             }
                         }
                     }
@@ -1121,6 +1190,108 @@ impl XmlWorkspace {
             if update.is_err() {
                 let _ = view.update(cx, |view, cx| {
                     view.schema_picker = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    fn start_xml_load(
+        &mut self,
+        path: std::path::PathBuf,
+        receipt: XmlReadReceipt,
+        permit: EffectPermit,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_read_pending {
+            return;
+        }
+        let Some(next) = self.next_file_request.checked_add(1) else {
+            self.feedback = Some("XML file request identifiers are exhausted.".into());
+            return;
+        };
+        self.next_file_request = next;
+        let activity = self.activity.start(
+            multi_launcher::activity::ActivityOwner::Xml,
+            multi_launcher::activity::ActivitySlot::Primary,
+            multi_launcher::activity::ActivityIncarnation::new(next),
+            multi_launcher::activity::ActivityOperation::LoadXmlFile,
+        );
+        self.file_read_pending = true;
+        self.feedback = Some("Loading selected XML file…".into());
+        let task = cx.background_executor().spawn(async move {
+            multi_launcher::xml_file_load::run_xml_load(&path, activity.as_ref())
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let result = task.await;
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            let update =
+                update_kit_window_content(receipt.root_window, &view, cx, |view, window, cx| {
+                    view.file_read_pending = false;
+                    if view.feedback.as_deref() == Some("Loading selected XML file…") {
+                        view.feedback = None;
+                    }
+                    let snapshot = view.current_snapshot();
+                    let current = super::xml_schema::picker_receipt_current(
+                        &receipt.mount,
+                        view.open && !view.admission.is_fenced(),
+                        view.epoch.load(Ordering::Acquire),
+                        receipt.source_epoch,
+                        snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.revision == receipt.source_revision),
+                        view.native == Some(receipt.owner)
+                            && window.window_handle().window_id()
+                                == receipt.root_window.window_id()
+                            && json_utility::native_host_current(
+                                &view.visibility,
+                                receipt.visibility_revision,
+                                Some(receipt.owner),
+                                false,
+                            ),
+                    );
+                    if !current {
+                        cx.notify();
+                        return;
+                    }
+                    match result {
+                        Ok(source) => {
+                            let focus_current = receipt.open_focus.as_ref().is_some_and(|focus| {
+                                focus.is_focused(window) && view.focus.contains(focus, window)
+                            });
+                            let root_foreground = window.is_window_active()
+                                && current_foreground_identity() == Some(receipt.owner.identity);
+                            let may_focus = super::xml_schema::loaded_source_may_focus(
+                                focus_current,
+                                root_foreground,
+                            );
+                            view.epoch.fetch_add(1, Ordering::AcqRel);
+                            view.xpath_epoch.fetch_add(1, Ordering::AcqRel);
+                            view.source = source.clone();
+                            view.feedback = Some("Loaded XML file.".into());
+                            view.schema_tab = false;
+                            view.xpath_tab = false;
+                            view.tree_tab = false;
+                            view.output_tab = false;
+                            view.input
+                                .update(cx, |input, cx| input.set_value(&source, window, cx));
+                            view.submit(cx);
+                            if may_focus {
+                                view.input.focus_handle(cx).focus(window, cx);
+                            }
+                        }
+                        Err(error) => view.feedback = Some(error),
+                    }
+                    cx.notify();
+                });
+            if update.is_err() {
+                let _ = view.update(cx, |view, cx| {
+                    view.file_read_pending = false;
                     cx.notify();
                 });
             }
@@ -1268,6 +1439,9 @@ impl XmlWorkspace {
             return;
         };
         self.clipboard_pending = true;
+        if matches!(intent, ClipboardIntent::Paste) && self.file_read_pending {
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+        }
         let expected = self.epoch.load(Ordering::Acquire);
         let epoch = self.epoch.clone();
         let mount = self.mount.clone();
@@ -1417,6 +1591,7 @@ impl XmlWorkspace {
 impl Render for XmlWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let escape_mount = self.mount.clone();
+        let open_mount = self.mount.clone();
         let paste_mount = self.mount.clone();
         let copy_mount = self.mount.clone();
         let clear_mount = self.mount.clone();
@@ -1433,6 +1608,11 @@ impl Render for XmlWorkspace {
         let source_epoch = self.epoch.load(Ordering::Acquire);
         let output_epoch = self.output_epoch.load(Ordering::Acquire);
         let snapshot = self.current_snapshot();
+        let can_open_file = self.open
+            && !self.file_effect_pending()
+            && !self.clipboard_pending
+            && !self.admission.is_fenced()
+            && snapshot.is_some();
         let can_format = snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.parse == XmlParseStatus::Ready);
@@ -1674,6 +1854,17 @@ impl Render for XmlWorkspace {
                     .flex_wrap()
                     .gap_2()
                     .child(
+                        Button::new("xml-open-file")
+                            .label("Open XML…")
+                            .disabled(!can_open_file)
+                            .tab_stop(can_open_file)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                if open_mount.is_current() {
+                                    view.open_xml_file(window, cx);
+                                }
+                            })),
+                    )
+                    .child(
                         Button::new("xml-paste")
                             .label("Paste")
                             .disabled(self.clipboard_pending)
@@ -1778,6 +1969,8 @@ impl Render for XmlWorkspace {
                     .child(
                         Button::new("xml-close")
                             .label("Close")
+                            .disabled(self.schema_picker)
+                            .tab_stop(!self.schema_picker)
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if close_mount.is_current()
                                     && view.open
