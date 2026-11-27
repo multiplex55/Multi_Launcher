@@ -166,6 +166,9 @@ mod tests {
         use crate::settings::Settings;
         use std::sync::{Arc, atomic::AtomicBool};
 
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         crate::gui::LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -173,7 +176,7 @@ mod tests {
             PluginManager::new_inert_for_test(),
             root.join("actions.json").to_string_lossy().into_owned(),
             root.join("settings.json").to_string_lossy().into_owned(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,

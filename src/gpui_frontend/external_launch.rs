@@ -621,8 +621,11 @@ const EFFECT_PENDING: u8 = 0;
 const EFFECT_ENTERED: u8 = 1;
 const EFFECT_REVOKED: u8 = 2;
 impl EffectGate {
-    fn revoke_pending(&self) -> bool {
+    pub(super) fn revoke_pending(&self) -> bool {
         self.0.compare_exchange(EFFECT_PENDING, EFFECT_REVOKED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+    pub(super) fn claim(&self, current: impl FnOnce() -> bool) -> bool {
+        claim_omni_effect(self, current)
     }
 }
 fn claim_omni_effect(gate: &EffectGate, current: impl FnOnce() -> bool) -> bool {

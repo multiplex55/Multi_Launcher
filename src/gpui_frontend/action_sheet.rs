@@ -201,6 +201,9 @@ impl RootWindow {
         {
             return;
         }
+        if matches!(&action.origin, LauncherResultOrigin::Provider(name) if name == "tempfile")
+            && (!super::tempfile_alias::admitted(&action, &query, &action.action.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                || self.tempfile_search.receipt(generation, &query, &action.action).is_none()) { return; }
         let indexed = matches!(&action.origin, LauncherResultOrigin::Indexed { .. });
         let indexed_current = indexed_applications::admitted_result(
             &action,
@@ -245,6 +248,9 @@ impl RootWindow {
             UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
                 action: candidate,
             }) => candidate == action && context.can_add_favorite,
+            UniversalActionOperation::UiIntent(UniversalUiIntent::OpenTempfileAlias { path }) =>
+                super::tempfile_alias::admitted(&result, &query, path, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                    && self.tempfile_search.receipt(generation, &query, action).is_some(),
             UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url }) =>
                 matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks") && *url == action.action,
             UniversalActionOperation::Command { command: Command::Storage(StorageCommand::BookmarkRemove(url)), .. } =>
@@ -523,6 +529,9 @@ impl RootWindow {
                         action,
                     }) if action == sheet.result.action => {
                         root.open_result_favorites(action, Some(sheet.return_focus), window, cx)
+                    }
+                    UniversalActionOperation::UiIntent(UniversalUiIntent::OpenTempfileAlias { path }) => {
+                        root.open_tempfile_alias(sheet.generation, sheet.row, sheet.query.clone(), sheet.result.action.clone(), path, window, cx);
                     }
                     UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url })
                         if url == sheet.result.action.action => {

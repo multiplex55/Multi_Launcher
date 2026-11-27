@@ -172,6 +172,16 @@ pub fn open_listed_with_effect(row: &ListedTempFile, current: impl Fn() -> bool,
     open_listed_with(row, &current, |path, guard| crate::actions::exec::launch_association_if_current(path.as_os_str(), || guard() && before_effect()))
 }
 
+/// Rename the exact file behind a checked list row using the stock alias rules.
+/// The list receipt remains the authority; no path is reconstructed from UI text.
+pub fn alias_listed_with_effect(row: &ListedTempFile, alias: &str, current: impl Fn() -> bool, before_effect: impl Fn() -> bool) -> anyhow::Result<()> {
+    anyhow::ensure!(matches!(row.operation, ListedOperation::Open), "Not a temporary file list row");
+    crate::plugins::tempfile::validate_alias(alias)?;
+    let mut mutation = row.clone();
+    mutation.operation = ListedOperation::Alias(alias.to_owned());
+    mutate_listed_with_effect(&mutation, current, before_effect)
+}
+
 /// Rename or remove exactly the observed object using its opened native handle.
 #[cfg(windows)]
 pub fn mutate_listed_with_effect(row: &ListedTempFile, current: impl Fn() -> bool, before_effect: impl Fn() -> bool) -> anyhow::Result<()> {
@@ -524,6 +534,30 @@ mod checked_creation_tests {
         mutate_listed_with_effect(&row, || true, || true).unwrap();
         assert!(!target.exists());
         assert_eq!(std::fs::read(&sibling).unwrap(), b"sibling");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn listed_open_receipt_alias_preserves_unicode_and_rejects_collision_and_revocation() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("Café report.txt");
+        let target = root.path().join("temp_雪 alias.txt");
+        std::fs::write(&original, b"exact bytes").unwrap();
+        let row = list_checked_in(root.path(), "tmp list Café", || true).unwrap().remove(0);
+        let claims = std::cell::Cell::new(0);
+        assert!(alias_listed_with_effect(&row, "雪 alias", || false, || { claims.set(claims.get() + 1); true }).is_err());
+        assert_eq!(claims.get(), 0);
+        std::fs::write(&target, b"other").unwrap();
+        assert!(alias_listed_with_effect(&row, "雪 alias", || true, || { claims.set(claims.get() + 1); true }).is_err());
+        assert_eq!(claims.get(), 0);
+        assert_eq!(std::fs::read(&target).unwrap(), b"other");
+        assert_eq!(std::fs::read(&original).unwrap(), b"exact bytes");
+        std::fs::remove_file(&target).unwrap();
+        alias_listed_with_effect(&row, "雪 alias", || true, || { claims.set(claims.get() + 1); true }).unwrap();
+        assert_eq!(claims.get(), 1);
+        assert_eq!(std::fs::read(&target).unwrap(), b"exact bytes");
+        assert!(!original.exists());
+        assert!(alias_listed_with_effect(&row, "later", || true, || true).is_err());
     }
 
     #[cfg(windows)]

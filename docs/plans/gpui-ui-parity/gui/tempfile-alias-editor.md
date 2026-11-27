@@ -8,4 +8,4 @@ G06 owns `tempfile-alias-editor`. A current `tmp list` result's Set Alias action
 
 Select `long_tempfile_target_keeps_actions_reachable_without_render_mutation` and `each_target_gets_primary_and_current_specialized_capabilities`. Use an explicit scratch `ML_TMP_DIR`.
 
-`G06-EGUI-FOLDER-TEMPFILE-ALIAS-DRAFTS` verifies the native egui current path, initial alias, editing, and Cancel with filename and contents preserved. Validation, rename and GPUI remain pending.
+`G06-EGUI-FOLDER-TEMPFILE-ALIAS-DRAFTS` verifies the native egui current path, initial alias, editing, and Cancel with filename and contents preserved. GPUI implements the exact list-to-form entry, stock prefill, checked Save and Cancel for ordinary local text files. Paired Windows validation and rename replay remain open. [Retained Alias checkpoint](../CHECKPOINTS.md#p016-retained-temporary-file-alias)

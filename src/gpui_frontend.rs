@@ -54,6 +54,7 @@ mod snippets;
 mod snippet_fill;
 mod clipboard_modify_view;
 mod tempfile_view;
+mod tempfile_alias;
 mod timer_view;
 mod todo_view;
 mod calendar_view;
@@ -2508,6 +2509,7 @@ struct RootWindow {
     clipboard_history: Option<Entity<clipboard_history::ClipboardHistory>>,
     snippets_view: Option<Entity<snippets::SnippetsView>>,
     tempfile_view: Option<Entity<tempfile_view::TempfileView>>,
+    tempfile_alias: Option<Entity<tempfile_alias::AliasView>>,
     tempfile_search: tempfile_search::Owner,
     snippet_fill: Option<Entity<snippet_fill::SnippetFill>>,
     pane_escape_latched: bool,
@@ -3737,6 +3739,7 @@ enum RootCloseBlocker {
     ClipboardModifyBlocked,
     SnippetsSave,
     TempfileSave,
+    TempfileAlias,
     TimerOperation,
     GestureEditor,
     FileSearchEffect,
@@ -4677,6 +4680,7 @@ struct RestartDrafts {
     snippets: Option<snippets::RestartDraft>,
     snippet_fill: Option<Vec<String>>,
     tempfile: Option<(String, String)>,
+    tempfile_alias: Option<(String, String)>,
     hash: HashDraft,
     hash_window_open: bool,
     settings_search: Option<settings_search::RestartDraft>,
@@ -4917,6 +4921,7 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.snippets.is_some() { names.push("Snippets draft"); }
     if drafts.snippet_fill.is_some() { names.push("Snippet prompt values"); }
     if drafts.tempfile.is_some() { names.push("Create Temp File draft"); }
+    if drafts.tempfile_alias.as_ref().is_some_and(|(seed, draft)| seed != draft) { names.push("temporary file alias draft"); }
     if !drafts.hash.text.is_empty() {
         names.push("Hash Generator text");
     }
@@ -5023,6 +5028,9 @@ impl RootWindow {
         }
         if let Some(view) = &self.calculation_pad_view {
             view.update(cx, |view, _| view.revoke_document());
+        }
+        if let Some(view) = &self.tempfile_alias {
+            view.update(cx, |view, _| view.revoke_operation());
         }
     }
 
@@ -5810,6 +5818,7 @@ impl RootWindow {
         }
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Err(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
         if self.external_launch.auxiliary_effect_pending() { return Err(file_search_preview::WAIT.to_owned()); }
+        if self.tempfile_alias.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(tempfile_alias::WAIT.to_owned()); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Err(tempfile_view::WAIT.to_owned()); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(snippets::SAVE_WAIT.to_owned()); }
         self.clipboard_modify_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
@@ -6091,6 +6100,7 @@ impl RootWindow {
                 snippets: self.snippets_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 snippet_fill: self.snippet_fill.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 tempfile: self.tempfile_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
+                tempfile_alias: self.tempfile_alias.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 hash: hash_draft,
                 hash_window_open,
                 settings_search: self.settings_search.as_ref().map(|view| view.read(cx).restart_draft(cx)),
@@ -10631,6 +10641,7 @@ impl RootWindow {
             Some(RootCloseBlocker::NoteEditor) => { self.restart_status = Some(note_editor::WAIT.to_owned()); }
             Some(RootCloseBlocker::MultiManager) => { self.restart_status = Some(multi_manager::WAIT.to_owned()); }
             Some(RootCloseBlocker::CalculationPad) => { self.restart_status = Some(calculation_pad::WAIT.to_owned()); }
+            Some(RootCloseBlocker::TempfileAlias) => { self.restart_status = Some(tempfile_alias::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::TimerOperation) => { self.restart_status = Some(timer_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::GestureEditor) => { self.restart_status = Some("Finish the Mouse Gestures operation, or save or discard its draft before closing.".into()); }
@@ -10774,6 +10785,7 @@ impl RootWindow {
         if self.folder_size_retiring.iter().any(|window| window.native_window.is_none())
             || self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FolderSize); }
         if self.external_launch.auxiliary_effect_pending() || self.file_search.as_ref().is_some_and(|view| view.read(cx).rehosting || view.read(cx).host_effect_pending(cx)) { return Some(RootCloseBlocker::FileSearchEffect); }
+        if self.tempfile_alias.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::TempfileAlias); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Some(RootCloseBlocker::TempfileSave); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SnippetsSave); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardHistory); }
@@ -11761,6 +11773,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.gesture_editor.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.tempfile_alias.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -13783,6 +13798,7 @@ pub(crate) fn run_foundation_window(
                 clipboard_history: None,
                 snippets_view: None,
                 tempfile_view: None,
+                tempfile_alias: None,
                 tempfile_search: tempfile_search::Owner::default(),
                 snippet_fill: None,
                 pane_escape_latched: false,
@@ -14372,6 +14388,7 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::NoteEditor) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(note_editor::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::MultiManager) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(multi_manager::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::CalculationPad) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(calculation_pad::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::TempfileAlias) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_alias::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TimerOperation) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(timer_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::GestureEditor) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Finish the Mouse Gestures operation, or save or discard its draft before closing.".into()); cx.notify(); }); false }
