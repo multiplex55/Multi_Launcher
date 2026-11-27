@@ -18,6 +18,7 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const PLUGIN_NAME: &str = "mouse_gestures";
 
@@ -206,11 +207,22 @@ struct MouseGestureRuntime {
     directory_revision: u64,
     #[allow(dead_code)]
     watcher: Option<crate::common::json_watch::JsonWatcher>,
+    gpui: Option<Arc<GpuiGestureOwner>>,
+    watcher_active: Arc<AtomicBool>,
+    watcher_gate: Arc<Mutex<()>>,
+    path: std::path::PathBuf,
 }
 
 impl Default for MouseGestureRuntime {
     fn default() -> Self {
-        let initial_db = match load_gestures(GESTURES_FILE) {
+        let path = std::env::current_dir().unwrap_or_default().join(GESTURES_FILE);
+        Self::new_at(path)
+    }
+}
+
+impl MouseGestureRuntime {
+    fn new_at(path: std::path::PathBuf) -> Self {
+        let initial_db = match load_gestures(&path) {
             Ok(db) => db,
             Err(error) => {
                 tracing::error!(
@@ -222,11 +234,18 @@ impl Default for MouseGestureRuntime {
         };
         let db = Arc::new(Mutex::new(initial_db));
         let db_for_watcher = Arc::clone(&db);
+        let watcher_active = Arc::new(AtomicBool::new(true));
+        let watcher_gate = Arc::new(Mutex::new(()));
+        let callback_active = watcher_active.clone();
+        let callback_gate = watcher_gate.clone();
+        let watcher_path = path.clone();
 
-        let watcher = watch_json(GESTURES_FILE, move || {
+        let watcher = watch_json(&path, move || {
+            let Ok(_guard) = callback_gate.lock() else { return; };
+            if !callback_active.load(Ordering::Acquire) { return; }
             let mut result: anyhow::Result<bool> = Ok(false);
             with_service(|service| {
-                result = reload_gesture_runtime_database(service, GESTURES_FILE, &db_for_watcher);
+                result = reload_gesture_runtime_database(service, &watcher_path, &db_for_watcher);
             });
             match result {
                 Ok(true) => {
@@ -249,6 +268,10 @@ impl Default for MouseGestureRuntime {
             db,
             directory_revision: 0,
             watcher,
+            gpui: None,
+            watcher_active,
+            watcher_gate,
+            path,
         }
     }
 }
@@ -283,11 +306,29 @@ fn reload_gesture_runtime_database(
     if !Arc::ptr_eq(&runtime.db, expected_db) {
         return Ok(false);
     }
-    let changed = reload_shared_gesture_db(path, &runtime.db)?;
+    let result = if let Some(owner) = &runtime.gpui {
+        reload_gpui_database(path, &runtime.db, owner)
+    } else { reload_shared_gesture_db(path, &runtime.db) };
+    let changed = match result {
+        Ok(changed) => changed,
+        Err(error) => {
+            if runtime.gpui.is_some() { runtime.apply(); }
+            return Err(error);
+        }
+    };
     if changed {
         runtime.bump_directory_revision();
     }
+    if runtime.gpui.is_some() { runtime.apply(); }
     Ok(changed)
+}
+
+fn reload_gpui_database(path: impl AsRef<std::path::Path>, shared: &SharedGestureDb, owner: &GpuiGestureOwner) -> anyhow::Result<bool> {
+    owner.close_admission();
+    match reload_shared_gesture_db(path, shared) {
+        Ok(changed) => { owner.open_admission(); Ok(changed) }
+        Err(error) => { owner.set_status(Some(format!("Mouse Gestures database could not be loaded: {error}"))); Err(error) }
+    }
 }
 
 impl MouseGestureRuntime {
@@ -308,6 +349,7 @@ impl MouseGestureRuntime {
     }
 
     fn bump_directory_revision(&mut self) {
+        if let Some(owner) = &self.gpui { owner.invalidate(); owner.editor_revision.fetch_add(1, Ordering::AcqRel); }
         self.directory_revision = self.directory_revision.checked_add(1).unwrap_or(1);
     }
 
@@ -339,11 +381,17 @@ impl MouseGestureRuntime {
     }
 
     fn apply(&self) {
-        let config = settings_to_config(&self.settings, self.plugin_enabled);
+        let mut config = settings_to_config(&self.settings, self.plugin_enabled);
+        if let Some(owner) = &self.gpui {
+            config.enabled &= owner.active.load(Ordering::Acquire) && owner.ready.load(Ordering::Acquire) && self.db.lock().ok().is_some_and(|db| gpui_binding_available(&db, config.dir_mode));
+        }
+        let mut status = Err("Mouse Gestures service unavailable".to_owned());
         with_gesture_service(|svc| {
             svc.update_config(config);
             svc.update_db(Some(self.db.clone()));
+            status = svc.gesture_capture_status();
         });
+        if let Some(owner) = &self.gpui && owner.ready.load(Ordering::Acquire) { owner.set_status(status.err()); }
     }
 }
 
@@ -370,6 +418,10 @@ pub(crate) fn test_install_directory_runtime(db: GestureDb, revision: u64) -> cr
         db: Arc::new(Mutex::new(db)),
         directory_revision: revision,
         watcher: None,
+        gpui: None,
+        watcher_active: Arc::new(AtomicBool::new(true)),
+        watcher_gate: Arc::new(Mutex::new(())),
+        path: std::path::PathBuf::from(GESTURES_FILE),
     };
     let source = hotkey_directory_source_from_runtime(&runtime);
     TEST_DIRECTORY_RUNTIME.with(|slot| *slot.borrow_mut() = Some(runtime));
@@ -439,6 +491,219 @@ fn settings_to_config(settings: &MouseGestureSettings, plugin_enabled: bool) -> 
 
 static SERVICE: OnceCell<Mutex<MouseGestureRuntime>> = OnceCell::new();
 
+mod editor;
+pub use editor::{GestureEdit, GestureEditorSnapshot};
+
+#[derive(Clone)]
+pub struct GestureRelease {
+    generation: u64,
+    sequence: u64,
+    tokens: String,
+    mode: crate::mouse_gestures::engine::DirMode,
+    index: usize,
+    pub action: Action,
+    pub foreground: crate::mouse_gestures::service::GestureForeground,
+    pub visibility_revision: u64,
+}
+
+pub struct GpuiGestureOwner {
+    db: SharedGestureDb,
+    generation: Arc<AtomicU64>,
+    editor_revision: AtomicU64,
+    latest_sequence: Arc<AtomicU64>,
+    active: AtomicBool,
+    ready: AtomicBool,
+    sender: std::sync::mpsc::SyncSender<GestureRelease>,
+    receiver: Mutex<std::sync::mpsc::Receiver<GestureRelease>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    shutdown_gate: Mutex<()>,
+    shutdown_complete: AtomicBool,
+    status: Mutex<(Option<String>, bool)>,
+    shutdown_error: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuiGestureCapture {
+    Active,
+    Idle,
+    Failed(String),
+}
+
+impl std::fmt::Debug for GpuiGestureOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("GpuiGestureOwner").finish_non_exhaustive() }
+}
+
+impl GpuiGestureOwner {
+    /// Apply already-durable preference leaves off the UI thread. Calling this
+    /// again retries capture even if the committed values did not change.
+    pub fn apply_saved_preferences(&self, enabled: Option<bool>, practice_mode: Option<bool>, current: impl Fn() -> bool) -> Result<GpuiGestureCapture, String> {
+        let mut runtime = SERVICE.get().ok_or_else(|| "Mouse Gestures runtime unavailable".to_owned())?.lock().map_err(|_| "Mouse Gestures runtime unavailable".to_owned())?;
+        if !self.active.load(Ordering::Acquire) || !current() || !runtime.gpui.as_ref().is_some_and(|owner| std::ptr::eq(owner.as_ref(), self)) {
+            return Err("Mouse Gestures owner retired".into());
+        }
+        let was_ready = self.ready.load(Ordering::Acquire);
+        self.close_admission();
+        if let Some(enabled) = enabled { runtime.settings.enabled = enabled; }
+        if let Some(practice_mode) = practice_mode { runtime.settings.practice_mode = practice_mode; }
+        runtime.bump_directory_revision();
+        if !runtime.settings.enabled || !runtime.plugin_enabled {
+            let mut stopped = Err("Mouse Gestures service unavailable".to_owned());
+            with_gesture_service(|service| stopped = service.stop_gesture_checked());
+            if let Err(error) = stopped {
+                if was_ready && self.active.load(Ordering::Acquire) { self.open_admission(); }
+                return Ok(GpuiGestureCapture::Failed(error));
+            }
+        }
+        if was_ready && self.active.load(Ordering::Acquire) { self.open_admission(); }
+        runtime.apply();
+        let mut result = GpuiGestureCapture::Idle;
+        with_gesture_service(|service| {
+            service.reconcile_current();
+            result = match service.gesture_capture_status() {
+                Err(error) => GpuiGestureCapture::Failed(error),
+                Ok(()) if service.is_running() => GpuiGestureCapture::Active,
+                Ok(()) => GpuiGestureCapture::Idle,
+            };
+        });
+        Ok(result)
+    }
+    fn invalidate(&self) { self.generation.fetch_add(1, Ordering::AcqRel); }
+    fn close_admission(&self) { self.ready.store(false, Ordering::Release); self.invalidate(); }
+    fn open_admission(&self) { self.invalidate(); self.ready.store(true, Ordering::Release); }
+    fn set_status(&self, value: Option<String>) {
+        let changed = self.status.lock().ok().is_some_and(|mut status| {
+            if status.0 == value { false } else { status.0 = value; status.1 = true; true }
+        });
+        if changed { (self.wake)(); }
+    }
+    pub fn take_status(&self) -> Option<Option<String>> {
+        let mut status = self.status.lock().ok()?;
+        if !status.1 { return None; }
+        status.1 = false;
+        Some(status.0.clone())
+    }
+    pub fn is_current(&self, release: &GestureRelease) -> bool {
+        if !self.active.load(Ordering::Acquire) || !self.ready.load(Ordering::Acquire) || self.generation.load(Ordering::Acquire) != release.generation || self.latest_sequence.load(Ordering::Acquire) != release.sequence { return false; }
+        let Ok(db) = self.db.try_lock() else { return false; };
+        if ambiguous_gesture(&db, &release.tokens, release.mode) { return false; }
+        let Some((label, bindings)) = db.match_bindings_owned(&release.tokens, release.mode) else { return false; };
+        let valid = bindings.get(release.index).is_some_and(|binding| binding.kind == crate::mouse_gestures::db::BindingKind::SetQuery && binding.to_action(&label) == release.action);
+        valid && self.active.load(Ordering::Acquire) && self.ready.load(Ordering::Acquire) && self.generation.load(Ordering::Acquire) == release.generation && self.latest_sequence.load(Ordering::Acquire) == release.sequence
+    }
+    pub fn take(&self) -> Vec<GestureRelease> {
+        let Ok(receiver) = self.receiver.lock() else { return Vec::new(); };
+        receiver.try_iter().collect()
+    }
+    pub fn fence(&self) { self.active.store(false, Ordering::Release); self.invalidate(); }
+    pub fn shutdown_checked(&self) -> Result<(), String> {
+        let _shutdown = self.shutdown_gate.lock().map_err(|_| "Mouse Gestures shutdown unavailable".to_owned())?;
+        if self.shutdown_complete.load(Ordering::Acquire) { return Ok(()); }
+        if let Some(error) = self.shutdown_error.lock().map_err(|_| "Mouse Gestures shutdown status unavailable".to_owned())?.clone() { return Err(error); }
+        self.fence();
+        let Some(runtime) = SERVICE.get() else { return Ok(()); };
+        let mut runtime = runtime.lock().map_err(|_| "Mouse Gestures runtime unavailable".to_owned())?;
+        if runtime.gpui.as_ref().is_some_and(|owner| !std::ptr::eq(owner.as_ref(), self)) {
+            return Err("Mouse Gestures owner changed before shutdown".into());
+        }
+        runtime.plugin_enabled = false;
+        let mut stop_result = Err("Mouse Gestures service unavailable".to_owned());
+        with_gesture_service(|service| { stop_result = service.stop_gesture_checked(); service.update_release_sink(None); });
+        let watcher = if runtime.gpui.is_some() {
+            runtime.gpui = None;
+            runtime.watcher_active.store(false, Ordering::Release);
+            runtime.watcher.take()
+        } else { None };
+        let watcher_gate = runtime.watcher_gate.clone();
+        drop(runtime);
+        drop(watcher);
+        drop(watcher_gate.lock().map_err(|_| "Mouse Gestures watcher drain failed".to_owned())?);
+        if let Err(error) = stop_result {
+            if error.contains("panicked") && let Ok(mut status) = self.shutdown_error.lock() { *status = Some(error.clone()); }
+            return Err(error);
+        }
+        let reservation = crate::mouse_gestures::service::reserve_frontend_restart()?;
+        reservation.shutdown_checked()?;
+        self.shutdown_complete.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl crate::mouse_gestures::service::GestureReleaseSink for GpuiGestureOwner {
+    fn stroke_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+    fn release(&self, generation: u64, sequence: Option<u64>, foreground: Option<crate::mouse_gestures::service::GestureForeground>, visibility_revision: Option<u64>, tokens: &str, mode: crate::mouse_gestures::engine::DirMode, index: usize, action: Action) -> crate::mouse_gestures::service::GestureReleaseDisposition {
+        use crate::mouse_gestures::service::GestureReleaseDisposition::{Accepted, Ignore, PassThrough};
+        let Some(foreground) = foreground else { return Ignore; };
+        let Some(sequence) = sequence else { return Ignore; };
+        let Some(visibility_revision) = visibility_revision else { return Ignore; };
+        if !self.active.load(Ordering::Acquire) || !self.ready.load(Ordering::Acquire) || self.generation.load(Ordering::Acquire) != generation || self.latest_sequence.load(Ordering::Acquire) != sequence { return Ignore; }
+        let Ok(db) = self.db.try_lock() else { return Ignore; };
+        if ambiguous_gesture(&db, tokens, mode) {
+            return if self.active.load(Ordering::Acquire) && self.ready.load(Ordering::Acquire) && self.generation.load(Ordering::Acquire) == generation && self.latest_sequence.load(Ordering::Acquire) == sequence { PassThrough } else { Ignore };
+        }
+        let Some((label, bindings)) = db.match_bindings_owned(tokens, mode) else { return Ignore; };
+        let Some(binding) = bindings.get(index) else { return Ignore; };
+        if binding.to_action(&label) != action || self.generation.load(Ordering::Acquire) != generation || self.latest_sequence.load(Ordering::Acquire) != sequence || !self.active.load(Ordering::Acquire) || !self.ready.load(Ordering::Acquire) { return Ignore; }
+        if binding.kind != crate::mouse_gestures::db::BindingKind::SetQuery { return PassThrough; }
+        drop(db);
+        let release = GestureRelease { generation, sequence, tokens: tokens.to_owned(), mode, index, action, foreground, visibility_revision };
+        if !self.is_current(&release) { return Ignore; }
+        if self.sender.try_send(release).is_err() { return Ignore; }
+        (self.wake)();
+        Accepted
+    }
+}
+
+fn ambiguous_gesture(db: &GestureDb, tokens: &str, mode: crate::mouse_gestures::engine::DirMode) -> bool {
+    db.gestures.iter().filter(|gesture| gesture.enabled && gesture.dir_mode == mode && gesture.tokens == tokens).take(2).count() > 1
+}
+
+fn gpui_binding_available(db: &GestureDb, mode: crate::mouse_gestures::engine::DirMode) -> bool {
+    db.gestures.iter().any(|gesture| gesture.enabled && gesture.dir_mode == mode && !gesture.tokens.is_empty() && gesture.tokens.chars().all(|token| match mode {
+        crate::mouse_gestures::engine::DirMode::Four => matches!(token, 'U' | 'D' | 'L' | 'R'),
+        crate::mouse_gestures::engine::DirMode::Eight => matches!(token, '1' | '2' | '3' | '4' | '6' | '7' | '8' | '9'),
+    }) && !ambiguous_gesture(db, &gesture.tokens, mode) && gesture.bindings.iter().any(|binding| binding.enabled && binding.kind == crate::mouse_gestures::db::BindingKind::SetQuery && !binding.action.trim().is_empty() && !binding.action.contains(['\r', '\n'])))
+}
+
+/// Installs the existing watcher/service for the selected GPUI app session.
+pub fn start_gpui_gestures(settings: MouseGestureSettings, enabled: bool, root: &crate::platform::app_data::AppDataRoot, visibility_revision: Arc<AtomicU64>, visibility_active: Arc<AtomicBool>, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Arc<GpuiGestureOwner>, String> {
+    let path = root.path().join(GESTURES_FILE);
+    let read_database = || -> Result<GestureDb, String> {
+        match crate::mouse_gestures::db::load_gestures_typed(&path).map_err(|error| error.to_string())? {
+            crate::common::persistence::LoadState::Missing | crate::common::persistence::LoadState::Empty => Ok(GestureDb::default()),
+            crate::common::persistence::LoadState::Loaded(database) => Ok(database),
+        }
+    };
+    let initial = read_database();
+    let runtime = SERVICE.get_or_init(|| Mutex::new(MouseGestureRuntime::new_at(path.clone())));
+    let mut runtime = runtime.lock().map_err(|_| "Mouse Gestures runtime unavailable".to_owned())?;
+    if runtime.gpui.is_some() { return Err("Mouse Gestures already has a GPUI owner".into()); }
+    if runtime.path != path { return Err("Mouse Gestures is already bound to a different profile".into()); }
+    if runtime.watcher.is_none() { return Err("Mouse Gestures database watcher is unavailable".into()); }
+    let latest = read_database();
+    if let (Ok(first), Ok(second)) = (&initial, &latest) && first != second {
+        return Err("Mouse Gestures database changed while starting".into());
+    }
+    let startup_error = latest.as_ref().err().cloned();
+    let database = latest.unwrap_or_default();
+    crate::mouse_gestures::service::install_gesture_visibility_revision(visibility_revision, visibility_active)?;
+    *runtime.db.lock().map_err(|_| "Mouse Gestures database unavailable".to_owned())? = database;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(64);
+    let generation = crate::mouse_gestures::service::gesture_database_generation();
+    generation.fetch_add(1, Ordering::AcqRel);
+    let latest_sequence = crate::mouse_gestures::service::gesture_stroke_sequence();
+    latest_sequence.fetch_add(1, Ordering::AcqRel);
+    let owner = Arc::new(GpuiGestureOwner { db: runtime.db.clone(), generation, editor_revision: AtomicU64::new(0), latest_sequence, active: AtomicBool::new(true), ready: AtomicBool::new(startup_error.is_none()), sender, receiver: Mutex::new(receiver), wake, shutdown_gate: Mutex::new(()), shutdown_complete: AtomicBool::new(false), status: Mutex::new((None, false)), shutdown_error: Mutex::new(None) });
+    runtime.settings = settings;
+    runtime.plugin_enabled = enabled;
+    runtime.gpui = Some(owner.clone());
+    if let Some(error) = startup_error { owner.set_status(Some(format!("Mouse Gestures database could not be loaded: {error}"))); }
+    with_gesture_service(|service| { service.stop(); service.update_release_sink(Some(owner.clone())); });
+    runtime.apply();
+    Ok(owner)
+}
+
 fn with_service<F>(f: F)
 where
     F: FnOnce(&mut MouseGestureRuntime),
@@ -462,7 +727,10 @@ fn gesture_db_snapshot() -> GestureDb {
 
 pub fn publish_committed_gesture_db(committed: GestureDb) {
     with_service(|service| {
+        if let Some(owner) = &service.gpui { owner.close_admission(); }
+        let mut published = false;
         let changed = if let Ok(mut db) = service.db.lock() {
+            published = true;
             if *db != committed {
                 *db = committed;
                 true
@@ -475,6 +743,10 @@ pub fn publish_committed_gesture_db(committed: GestureDb) {
         if changed {
             service.bump_directory_revision();
         }
+        if let Some(owner) = &service.gpui {
+            if published { owner.open_admission(); } else { owner.set_status(Some("Mouse Gestures database unavailable".into())); }
+        }
+        if service.gpui.is_some() { service.apply(); }
     });
 }
 
@@ -1115,6 +1387,96 @@ mod persistence_tests {
     }
 
     #[test]
+    fn gpui_release_requires_exact_selected_set_query_and_live_generation() {
+        use crate::mouse_gestures::service::{GestureReleaseSink, GestureReleaseDisposition::{Accepted, Ignore, PassThrough}};
+        let mut database = db("left");
+        let query = BindingEntry { label: "query".into(), kind: BindingKind::SetQuery, action: "hello".into(), args: None, enabled: true };
+        let unsupported = BindingEntry { label: "other".into(), kind: BindingKind::Execute, action: "query:hello".into(), args: None, enabled: true };
+        database.gestures[0].bindings = vec![unsupported.clone(), query.clone()];
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let owner = GpuiGestureOwner { db: Arc::new(Mutex::new(database)), generation: Arc::new(AtomicU64::new(9)), editor_revision: AtomicU64::new(0), latest_sequence: Arc::new(AtomicU64::new(0)), active: AtomicBool::new(true), ready: AtomicBool::new(true), sender, receiver: Mutex::new(receiver), wake: Arc::new(|| {}), shutdown_gate: Mutex::new(()), shutdown_complete: AtomicBool::new(false), status: Mutex::new((None, false)), shutdown_error: Mutex::new(None) };
+        let foreground = Some(crate::mouse_gestures::service::GestureForeground { hwnd: 1, process_id: 2, thread_id: 3 });
+        assert_eq!(owner.release(9, Some(0), foreground, Some(0), "L", DirMode::Four, 0, unsupported.to_action("left")), PassThrough);
+        assert_eq!(owner.release(9, Some(0), foreground, Some(0), "L", DirMode::Four, 1, query.to_action("left")), Accepted);
+        let queued = owner.take().pop().unwrap();
+        assert!(owner.is_current(&queued));
+        owner.latest_sequence.fetch_add(1, Ordering::AcqRel);
+        assert!(!owner.is_current(&queued));
+        assert_eq!(owner.release(9, Some(1), foreground, Some(0), "L", DirMode::Four, 1, query.to_action("left")), Accepted);
+        let queued = owner.take().pop().unwrap();
+        assert!(owner.is_current(&queued));
+        owner.invalidate();
+        assert!(!owner.is_current(&queued));
+        assert_eq!(owner.release(9, Some(0), foreground, Some(0), "L", DirMode::Four, 1, query.to_action("left")), Ignore);
+        owner.fence();
+        assert_eq!(owner.release(owner.stroke_generation(), Some(0), foreground, Some(0), "L", DirMode::Four, 1, query.to_action("left")), Ignore);
+    }
+
+    #[test]
+    fn gpui_reload_fence_and_duplicate_mode_admission() {
+        use crate::mouse_gestures::service::{GestureReleaseSink, GestureReleaseDisposition::{Accepted, Ignore, PassThrough}};
+        let mut database = db("Zebra");
+        let binding = BindingEntry { label: "query".into(), kind: BindingKind::SetQuery, action: "hello".into(), args: None, enabled: true };
+        database.gestures[0].dir_mode = DirMode::Eight;
+        database.gestures[0].tokens = "4".into();
+        database.gestures[0].bindings.push(binding.clone());
+        assert!(!gpui_binding_available(&database, DirMode::Four));
+        assert!(gpui_binding_available(&database, DirMode::Eight));
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let owner = GpuiGestureOwner { db: Arc::new(Mutex::new(database)), generation: Arc::new(AtomicU64::new(9)), editor_revision: AtomicU64::new(0), latest_sequence: Arc::new(AtomicU64::new(0)), active: AtomicBool::new(true), ready: AtomicBool::new(true), sender, receiver: Mutex::new(receiver), wake: Arc::new(|| {}), shutdown_gate: Mutex::new(()), shutdown_complete: AtomicBool::new(false), status: Mutex::new((None, false)), shutdown_error: Mutex::new(None) };
+        let foreground = Some(crate::mouse_gestures::service::GestureForeground { hwnd: 1, process_id: 2, thread_id: 3 });
+        owner.close_admission();
+        let interim = owner.stroke_generation();
+        assert_eq!(owner.release(interim, Some(0), foreground, Some(0), "4", DirMode::Eight, 0, binding.to_action("Zebra")), Ignore);
+        owner.open_admission();
+        assert_eq!(owner.release(interim, Some(0), foreground, Some(0), "4", DirMode::Eight, 0, binding.to_action("Zebra")), Ignore);
+        let current = owner.stroke_generation();
+        assert_eq!(owner.release(current, Some(0), foreground, Some(0), "4", DirMode::Eight, 0, binding.to_action("Zebra")), Accepted);
+        let mut database = owner.db.lock().unwrap();
+        let mut duplicate = database.gestures[0].clone(); duplicate.label = "Alpha".into();
+        database.gestures.push(duplicate);
+        assert!(!gpui_binding_available(&database, DirMode::Eight));
+        drop(database);
+        assert_eq!(owner.release(current, Some(0), foreground, Some(0), "4", DirMode::Eight, 0, binding.to_action("Zebra")), PassThrough);
+        let mut database = owner.db.lock().unwrap();
+        database.gestures[0].bindings.clear();
+        assert!(!gpui_binding_available(&database, DirMode::Eight));
+    }
+
+    #[test]
+    fn gpui_capture_requires_usable_tokens_and_query() {
+        let mut database = db("blank");
+        database.gestures[0].tokens.clear();
+        database.gestures[0].bindings.push(BindingEntry { label: "query".into(), kind: BindingKind::SetQuery, action: "hello".into(), args: None, enabled: true });
+        assert!(!gpui_binding_available(&database, DirMode::Four));
+        database.gestures[0].tokens = "L".into();
+        database.gestures[0].bindings[0].action = "\n".into();
+        assert!(!gpui_binding_available(&database, DirMode::Four));
+        database.gestures[0].bindings[0].action = "hello".into();
+        assert!(gpui_binding_available(&database, DirMode::Four));
+    }
+
+    #[test]
+    fn gpui_watched_reload_stays_fenced_until_valid_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mouse_gestures.json");
+        let initial = db("initial");
+        let shared = Arc::new(Mutex::new(initial.clone()));
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let owner = GpuiGestureOwner { db: shared.clone(), generation: Arc::new(AtomicU64::new(1)), editor_revision: AtomicU64::new(0), latest_sequence: Arc::new(AtomicU64::new(0)), active: AtomicBool::new(true), ready: AtomicBool::new(true), sender, receiver: Mutex::new(receiver), wake: Arc::new(|| {}), shutdown_gate: Mutex::new(()), shutdown_complete: AtomicBool::new(false), status: Mutex::new((None, false)), shutdown_error: Mutex::new(None) };
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(reload_gpui_database(&path, &shared, &owner).is_err());
+        assert!(!owner.ready.load(Ordering::Acquire));
+        assert_eq!(*shared.lock().unwrap(), initial);
+        assert!(owner.take_status().is_some());
+        let recovered = db("recovered");
+        crate::common::persistence::save_json_atomic(&path, &recovered).unwrap();
+        assert!(reload_gpui_database(&path, &shared, &owner).unwrap());
+        assert!(owner.ready.load(Ordering::Acquire));
+        assert_eq!(*shared.lock().unwrap(), recovered);
+    }
+
+    #[test]
     fn mouse_gesture_timing_defaults_and_round_trip() {
         let old_settings: MouseGestureSettings = serde_json::from_value(serde_json::json!({
             "enabled": true,
@@ -1209,6 +1571,10 @@ mod persistence_tests {
             db: Arc::clone(&shared),
             directory_revision: 7,
             watcher: None,
+            gpui: None,
+            watcher_active: Arc::new(AtomicBool::new(true)),
+            watcher_gate: Arc::new(Mutex::new(())),
+            path: std::path::PathBuf::from(GESTURES_FILE),
         };
         let before = hotkey_directory_source_from_runtime(&runtime);
         assert_eq!(before.revision, 7);

@@ -40,7 +40,7 @@ Priority values encode user tier and preferred order, for example P0.02. For an 
 | Macros | `macros` | G19 | P1.08 | 1 → 3 | — | Shared macro execution and authoring routes | — | — | Stock macro engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | MkMacro | `mkmacro` | G19 | P1.08 | 1 → 3 | — | Retained macro editor and safe run | — | — | Stock macro engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Keyboard actions | `keys` | G21 | P3.10 | 1 → 2 | — | Typed approved input actions | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
-| Ordinary Mouse Gestures | `mouse_gestures` | G21 | P0.18 | 1 → 3 | — | Start stock runtime and migrate ordinary authoring | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Ordinary Mouse Gestures | `mouse_gestures` | G21 | P0.18 | 2 → 3 | Checked Four-direction Set Query authoring, release and reveal, Enabled and Practice | Physical Windows replay and remaining ordinary control and binding types | [Mouse Gestures checkpoint](CHECKPOINTS.md#p018-checked-ordinary-mouse-gestures) | Focused only | Stock native gesture engine and one canonical watcher | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | MultiManager | `MultiManager` | G24 | P0.10 | 2 → 3 | Checked workspace authoring, Reconnect, current-desktop Home/Target and one-shot capture | Replay the ordinary workspace workflow | [Capture](CHECKPOINTS.md#p010-one-shot-multimanager-capture-active-window) | Queued | Stock Windows/system services | Runtime, settings, hotkeys and secondary criteria | [Authoring](CHECKPOINTS.md#p010-checked-multimanager-workspace-authoring) |
 | Favorites | `favorites` | G05/G06 | P1.05 | 2 → 3 | Checked canonical CRUD and Search | Remaining common host/workspace and native checks | [V](#evidence-keys) | Scoped native CRUD | Shared Search and typed dispatch · Canonical stores and Settings | Later original secondary criteria | [V](#evidence-keys) |
 | Missing applications | `missing` | G06 | P0.02 | 1 → 3 | — | App repair against existing catalog | — | — | Canonical stores and Settings | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
@@ -152,7 +152,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 | P0.15 Google and general Search | web_search and web providers | G05 | 3 → 3 | Stock provider admission and external execution | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.16 Temporary Files | tempfile | G13 | 2 → 3 | Canonical Create, list, checked Open and typed Alias and Remove. Matched Shell and authoring replay remain open. | [Alias and removal](CHECKPOINTS.md#p016-checked-temporary-file-alias-and-removal) |
 | P0.17 Timers and Alarms | timer | G23 | 2 → 3 | Canonical alarm restore and checked cancellation, stock scheduler and notifications. Essential Windows replay remains open. | [Timer and Alarm checkpoint](CHECKPOINTS.md#p017-retained-timers-and-checked-alarms) |
-| P0.18 Ordinary Mouse Gestures | mouse_gestures | G21 | 1 → 3 | Stock native gesture capture and action dispatch | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.18 Ordinary Mouse Gestures | mouse_gestures | G21 | 2 → 3 | Stock capture and action dispatch, checked retained authoring and essential settings. Physical replay remains open. | [Mouse Gestures checkpoint](CHECKPOINTS.md#p018-checked-ordinary-mouse-gestures) |
 | P0.19 Common Jump Mode | — | G05 | 3 → 3 | Launcher scope and fresh keyboard activation | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 
 | Other major application workflow | Registration | Original goal | Priority and stage → target | Working route and next action | Dependencies, verification and deferred criteria |
@@ -173,11 +173,11 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 
 Count built-in rows once by registration identifier. Report Stage 1–5 separately, real GPUI functionality, Search admission only, and unstarted routes. Report P0 workflow readiness separately using its 19-row register. For tier counts, use built-in rows plus separately identified non-plugin workflow rows, tallying those two denominators explicitly where overlapping workflows would otherwise be double counted. A target met means the listed interim stage passed with applicable evidence. Pending means no active implementation, and blocked requires a concrete dependency. Original GUI and acceptance counts stay in [Progress](PROGRESS.md) and the [parity matrix](PARITY_MATRIX.md).
 
-Windows snapshot after P0.17 Timers and Alarms. **91 built-ins**, with **57 Stage 1, 27 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **34** have real GPUI functionality within the stated route. **0** have Search admission alone. **57** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **15 at Stage 2** and **3 at Stage 3 or higher**.
+Windows snapshot after P0.18 ordinary Mouse Gestures. **91 built-ins**, with **56 Stage 1, 28 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **35** have real GPUI functionality within the stated route. **0** have Search admission alone. **56** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **16 at Stage 2** and **3 at Stage 3 or higher**.
 
 | Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 | 21 | 2 | 15 | 4 | 0 |
+| P0 | 21 | 2 | 16 | 3 | 0 |
 | P1 | 16 | 4 | 6 | 6 | 0 |
 | P2 | 27 | 5 | 0 | 22 | 0 |
 | P3 | 25 | 1 | 0 | 24 | 0 |
@@ -187,7 +187,7 @@ The P2 interim floor is Stage 2. P4's existing functional Clipboard History is p
 
 | Priority tier · separate workflow view | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 · readiness workflows | 19 | 3 | 15 | 1 | 0 |
+| P0 · readiness workflows | 19 | 3 | 16 | 0 | 0 |
 | P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 1 | 3 | 0 |
 | P2 · represented by its built-ins | 0 | 0 | 0 | 0 | 0 |
 | P3 · other workspace and companion groups above | 5 | 0 | 0 | 5 | 0 |

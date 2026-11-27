@@ -24,6 +24,8 @@ pub enum ScopedSetting {
     StaticLocationEnabled,
     StaticPosition,
     StaticSize,
+    MouseGesturesEnabled,
+    MouseGesturesPracticeMode,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,6 +94,8 @@ impl ScopedSetting {
             Self::StaticLocationEnabled => ("static_location_enabled", None),
             Self::StaticPosition => ("static_pos", None),
             Self::StaticSize => ("static_size", None),
+            Self::MouseGesturesEnabled => ("plugin_settings", Some("enabled")),
+            Self::MouseGesturesPracticeMode => ("plugin_settings", Some("practice_mode")),
         }
     }
     pub fn value(self, settings: &Settings) -> ScopedSettingValue {
@@ -119,6 +123,8 @@ impl ScopedSetting {
             Self::StaticLocationEnabled => Bool(settings.static_location_enabled),
             Self::StaticPosition => OptionalPair(settings.static_pos),
             Self::StaticSize => OptionalPair(settings.static_size),
+            Self::MouseGesturesEnabled => Bool(settings.plugin_settings.get("mouse_gestures").and_then(|value| value.get("enabled")).and_then(serde_json::Value::as_bool).unwrap_or(true)),
+            Self::MouseGesturesPracticeMode => Bool(settings.plugin_settings.get("mouse_gestures").and_then(|value| value.get("practice_mode")).and_then(serde_json::Value::as_bool).unwrap_or(false)),
         }
     }
     fn valid(self, value: &ScopedSettingValue) -> bool {
@@ -145,7 +151,7 @@ impl ScopedSetting {
                 | Self::GridRespectCapability,
                 Bool(_),
             ) => true,
-            (Self::FollowMouse | Self::StaticLocationEnabled,
+            (Self::FollowMouse | Self::StaticLocationEnabled | Self::MouseGesturesEnabled | Self::MouseGesturesPracticeMode,
                 Bool(_),
             ) => true,
             _ => false,
@@ -168,7 +174,59 @@ impl ScopedSettingValue {
     }
 }
 
+fn mouse_gestures_objects(root: &RawSettingsObject) -> Result<(RawSettingsObject, RawSettingsObject), ScopedSettingsError> {
+    let plugins: RawSettingsObject = match root.get("plugin_settings") {
+        None => RawSettingsObject::new(),
+        Some(value) => serde_json::from_str(value.get()).map_err(|error| ScopedSettingsError::Store(format!("Invalid plugin_settings: {error}")))?,
+    };
+    let mouse: RawSettingsObject = match plugins.get("mouse_gestures") {
+        None => RawSettingsObject::new(),
+        Some(value) => serde_json::from_str(value.get()).map_err(|error| ScopedSettingsError::Store(format!("Invalid Mouse Gestures settings: {error}")))?,
+    };
+    for key in ["enabled", "practice_mode"] {
+        if let Some(value) = mouse.get(key) {
+            serde_json::from_str::<bool>(value.get()).map_err(|error| ScopedSettingsError::Store(format!("Invalid Mouse Gestures {key}: {error}")))?;
+        }
+    }
+    Ok((plugins, mouse))
+}
+
 impl Settings {
+    pub fn read_mouse_gesture_preferences(path: impl AsRef<Path>) -> Result<(bool, bool), String> {
+        let path = path.as_ref();
+        let _transaction = transaction_guard();
+        let bytes = read_exact_bytes(path).map_err(|error| error.to_string())?;
+        let settings = parse_effective_settings(path, &bytes).map_err(|error| error.to_string())?;
+        if !bytes.iter().all(u8::is_ascii_whitespace) {
+            let raw: RawSettingsObject = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            mouse_gestures_objects(&raw).map_err(|error| error.to_string())?;
+        }
+        let ScopedSettingValue::Bool(enabled) = ScopedSetting::MouseGesturesEnabled.value(&settings) else { unreachable!() };
+        let ScopedSettingValue::Bool(practice) = ScopedSetting::MouseGesturesPracticeMode.value(&settings) else { unreachable!() };
+        Ok((enabled, practice))
+    }
+
+    /// Validate durable gesture leaves under the Settings transaction through
+    /// the caller's live application step, without rewriting the file.
+    pub fn with_checked_mouse_gesture_preferences<T>(
+        path: impl AsRef<Path>, enabled: Option<bool>, practice: Option<bool>,
+        apply: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let path = path.as_ref();
+        let _transaction = transaction_guard();
+        let bytes = read_exact_bytes(path).map_err(|error| error.to_string())?;
+        let settings = parse_effective_settings(path, &bytes).map_err(|error| error.to_string())?;
+        if !bytes.iter().all(u8::is_ascii_whitespace) {
+            let raw: RawSettingsObject = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            mouse_gestures_objects(&raw).map_err(|error| error.to_string())?;
+        }
+        if enabled.is_some_and(|value| ScopedSetting::MouseGesturesEnabled.value(&settings) != ScopedSettingValue::Bool(value))
+            || practice.is_some_and(|value| ScopedSetting::MouseGesturesPracticeMode.value(&settings) != ScopedSettingValue::Bool(value)) {
+            return Err("Mouse Gestures settings changed; reload before applying.".into());
+        }
+        apply()
+    }
+
     pub fn save_scoped_preferences_checked(
         path: impl AsRef<Path>,
         changes: &[ScopedSettingChange],
@@ -202,6 +260,7 @@ impl Settings {
         }
         let placement = [ScopedSetting::FollowMouse, ScopedSetting::StaticLocationEnabled, ScopedSetting::StaticPosition, ScopedSetting::StaticSize];
         let grouped = placement.iter().any(|field| seen.contains(field));
+        let mouse_group = seen.contains(&ScopedSetting::MouseGesturesEnabled) || seen.contains(&ScopedSetting::MouseGesturesPracticeMode);
         if grouped && !placement.iter().all(|field| seen.contains(field)) {
             return Err(ScopedSettingsError::Invalid(ScopedSetting::FollowMouse));
         }
@@ -213,6 +272,10 @@ impl Settings {
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
         let settings = parse_effective_settings(path, &bytes)
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
+        if mouse_group && !bytes.iter().all(u8::is_ascii_whitespace) {
+            let root: RawSettingsObject = serde_json::from_slice(&bytes).map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
+            mouse_gestures_objects(&root)?;
+        }
         let mut pending = Vec::new();
         for change in changes.iter().filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field))) {
             let actual = change.field.value(&settings);
@@ -253,6 +316,14 @@ impl Settings {
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?,
         };
         for change in pending {
+            if matches!(change.field, ScopedSetting::MouseGesturesEnabled | ScopedSetting::MouseGesturesPracticeMode) {
+                let (mut plugins, mut mouse) = mouse_gestures_objects(&root)?;
+                let member = if change.field == ScopedSetting::MouseGesturesEnabled { "enabled" } else { "practice_mode" };
+                mouse.insert(member.to_owned(), change.desired.raw()?);
+                plugins.insert("mouse_gestures".to_owned(), raw_value(&mouse).map_err(|error| ScopedSettingsError::Store(error.to_string()))?);
+                root.insert("plugin_settings".to_owned(), raw_value(&plugins).map_err(|error| ScopedSettingsError::Store(error.to_string()))?);
+                continue;
+            }
             let (key, member) = change.field.keys();
             if let Some(member) = member {
                 let mut nested: RawSettingsObject = match root.get(key) {
@@ -292,14 +363,14 @@ impl Settings {
                 "Settings patch did not produce the requested values".into(),
             ));
         }
-        if grouped {
+        if grouped || mouse_group {
             let failure = std::cell::RefCell::new(None);
             let committed = std::cell::Cell::new(false);
             let result = crate::common::atomic_file::save_atomic_if(path, &candidate, || {
                 let error = match read_exact_bytes(path) {
                     Ok(current) if current == bytes => if !committed.get() && token.is_some_and(|token| !token.begin_irrevocable_commit()) { Some(ScopedSettingsError::Cancelled) } else { committed.set(true); None },
                     Ok(current) => match parse_effective_settings(path, &current) {
-                        Ok(settings) => changes.iter().find(|change| placement.contains(&change.field) && change.field.value(&settings) != change.baseline).map(|change| ScopedSettingsError::Conflict(change.field)).or_else(|| Some(ScopedSettingsError::Store("Settings changed while saving; retry the save".into()))),
+                        Ok(settings) => changes.iter().find(|change| (placement.contains(&change.field) || matches!(change.field, ScopedSetting::MouseGesturesEnabled | ScopedSetting::MouseGesturesPracticeMode)) && change.field.value(&settings) != change.baseline).map(|change| ScopedSettingsError::Conflict(change.field)).or_else(|| Some(ScopedSettingsError::Store("Settings changed while saving; retry the save".into()))),
                         Err(error) => Some(ScopedSettingsError::Store(error.to_string())),
                     },
                     Err(error) => Some(ScopedSettingsError::Store(error.to_string())),
@@ -488,5 +559,47 @@ mod tests {
         changed[3].desired = changed[3].baseline.clone();
         std::fs::write(&path, br#"{"follow_mouse":false,"static_location_enabled":true,"static_pos":[-40,20],"static_size":[601,400]}"#).unwrap();
         assert_eq!(Settings::save_scoped_preferences_checked(&path, &changed), Err(ScopedSettingsError::Conflict(Field::StaticSize)));
+    }
+
+    #[test]
+    fn mouse_gesture_leaves_preserve_raw_siblings_and_reject_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = br#"{"plugin_settings":{"mouse_gestures":{"custom":{"wide":123456789012345678901}},"other":{"opaque":[1,2,3]}},"extra":123456789012345678901}"#;
+        std::fs::write(&path, original).unwrap();
+        let changes = [
+            change(Field::MouseGesturesEnabled, Value::Bool(true), Value::Bool(false)),
+            change(Field::MouseGesturesPracticeMode, Value::Bool(false), Value::Bool(true)),
+        ];
+        let token = SettingsBooleanSaveToken::new(444);
+        assert!(token.request_cancel());
+        assert_eq!(Settings::save_scoped_preferences_cancellable(&path, &changes, &token), Err(ScopedSettingsError::Cancelled));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let ack = Settings::save_scoped_preferences_checked(&path, &changes).unwrap();
+        assert_eq!(ack.values.len(), 2);
+        let raw: RawSettingsObject = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let (plugins, mouse) = mouse_gestures_objects(&raw).unwrap();
+        assert_eq!(mouse["enabled"].get(), "false");
+        assert_eq!(mouse["practice_mode"].get(), "true");
+        assert_eq!(mouse["custom"].get(), "{\"wide\":123456789012345678901}");
+        assert_eq!(plugins["other"].get(), "{\"opaque\":[1,2,3]}");
+        assert_eq!(raw["extra"].get(), "123456789012345678901");
+        for invalid in [br#"{"plugin_settings":{"mouse_gestures":false}}"#.as_slice(), br#"{"plugin_settings":{"mouse_gestures":{"enabled":"yes"}}}"#.as_slice()] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(Settings::save_scoped_preferences_checked(&path, &changes).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), invalid);
+        }
+    }
+
+    #[test]
+    fn mouse_gesture_apply_checks_current_durable_leaves_without_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let bytes = br#"{"plugin_settings":{"mouse_gestures":{"enabled":false,"practice_mode":true}},"opaque":7}"#;
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(Settings::read_mouse_gesture_preferences(&path).unwrap(), (false, true));
+        assert_eq!(Settings::with_checked_mouse_gesture_preferences(&path, Some(false), Some(true), || Ok(42)).unwrap(), 42);
+        assert!(Settings::with_checked_mouse_gesture_preferences(&path, Some(true), None, || -> Result<(), String> { panic!("stale preferences must not apply") }).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 }

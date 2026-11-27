@@ -12,7 +12,7 @@ use anyhow::anyhow;
 use chrono::Local;
 use once_cell::sync::OnceCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -76,6 +76,56 @@ impl Default for MouseGestureConfig {
 
 use crate::gui::{WatchEvent, send_event};
 
+/// Frontend-specific, nonblocking admission for a selected release.
+pub trait GestureReleaseSink: Send + Sync {
+    fn stroke_generation(&self) -> u64;
+    fn release(&self, generation: u64, sequence: Option<u64>, foreground: Option<GestureForeground>, visibility_revision: Option<u64>, tokens: &str, mode: DirMode, index: usize, action: crate::actions::Action) -> GestureReleaseDisposition;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureReleaseDisposition { Accepted, PassThrough, Ignore }
+
+#[cfg(any(windows, test))]
+fn passive_hook_ready(has_thread_id: bool, stopping: bool, finished: bool) -> bool {
+    has_thread_id && !stopping && !finished
+}
+
+#[cfg(any(windows, test))]
+fn gesture_capture_ready(gpui_active: Option<bool>) -> bool { gpui_active.unwrap_or(true) }
+
+#[cfg(any(windows, test))]
+fn route_right_button(is_down: bool, enabled: bool, ready: bool, paired_up: bool) -> bool {
+    if is_down { enabled && ready } else { paired_up }
+}
+
+#[cfg(windows)]
+fn gesture_root_ready() -> bool {
+    gesture_capture_ready(GESTURE_VISIBILITY_ACTIVE.get().map(|active| active.load(Ordering::Acquire)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GestureForeground { pub hwnd: usize, pub process_id: u32, pub thread_id: u32 }
+
+#[cfg(windows)]
+fn gesture_foreground() -> Option<GestureForeground> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() { return None; }
+    let mut process_id = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    (process_id != 0 && thread_id != 0).then_some(GestureForeground { hwnd: hwnd.0 as usize, process_id, thread_id })
+}
+#[cfg(not(windows))]
+fn gesture_foreground() -> Option<GestureForeground> { None }
+
+fn deliver_release(sink: &dyn GestureReleaseSink, foreground: Option<GestureForeground>, visibility_revision: Option<u64>, generation: u64, sequence: Option<u64>, tokens: &str, mode: DirMode, index: usize, action: crate::actions::Action, right_click: &dyn RightClickBackend) {
+    if foreground.is_none() || gesture_foreground() != foreground { return; }
+    if sink.release(generation, sequence, foreground, visibility_revision, tokens, mode, index, action) == GestureReleaseDisposition::PassThrough
+        && foreground.is_some() && gesture_foreground() == foreground {
+        right_click.send_right_click();
+    }
+}
+
 pub fn should_ignore_window_title(ignore: &[String], title: &str) -> bool {
     if ignore.is_empty() {
         return false;
@@ -130,8 +180,8 @@ impl WheelCycleGate {
 
 #[derive(Debug, Clone, Copy)]
 pub enum HookEvent {
-    RButtonDown,
-    RButtonUp,
+    RButtonDown(Option<u64>, Option<u64>),
+    RButtonUp(Option<GestureForeground>, Option<u64>),
     CycleNext,
     CyclePrev,
     SelectBinding(usize),
@@ -182,6 +232,8 @@ pub trait HookBackend: Send {
     }
 
     fn uninstall(&mut self) -> anyhow::Result<()>;
+    /// Checked terminal retirement may wait briefly for a captured physical release.
+    fn uninstall_checked(&mut self) -> anyhow::Result<()> { self.uninstall() }
     fn is_installed(&self) -> bool;
 }
 
@@ -263,11 +315,13 @@ pub struct MouseGestureService {
     click_observer: Option<ClickObserverLease>,
     next_click_observation_token: u64,
     db: Option<SharedGestureDb>,
+    release_sink: Option<Arc<dyn GestureReleaseSink>>,
     backend: Box<dyn HookBackend>,
     overlay_factory: Arc<dyn OverlayFactory>,
     right_click_backend: Arc<dyn RightClickBackend>,
     cursor_provider: Arc<dyn CursorPositionProvider>,
     worker: Option<WorkerHandle>,
+    last_install_error: Option<String>,
     frontend_restart_reserved: bool,
     frontend_restart_retired: bool,
 }
@@ -317,11 +371,13 @@ impl MouseGestureService {
             click_observer: None,
             next_click_observation_token: 0,
             db,
+            release_sink: None,
             backend,
             overlay_factory,
             right_click_backend,
             cursor_provider,
             worker: None,
+            last_install_error: None,
             frontend_restart_reserved: false,
             frontend_restart_retired: false,
         }
@@ -338,6 +394,29 @@ impl MouseGestureService {
     pub fn stop(&mut self) {
         self.config.enabled = false;
         self.reconcile_running_state(false);
+    }
+
+    /// Retire only the gesture consumer, preserving any independent click lease.
+    pub fn stop_gesture_checked(&mut self) -> Result<(), String> {
+        self.config.enabled = false;
+        self.backend.set_enabled(false);
+        let mut errors = Vec::new();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.stop_tx.send(());
+            if worker.join.join().is_err() { errors.push("mouse gesture worker panicked during shutdown".to_owned()); }
+        }
+        if self.click_observer.is_some() {
+            self.backend.clear_gesture_consumer();
+        } else if self.backend.is_installed() {
+            if let Err(error) = self.backend.uninstall_checked() { errors.push(format!("mouse gesture hook uninstall failed: {error}")); }
+            if self.backend.is_installed() { errors.push("mouse gesture hook remained installed".to_owned()); }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+    }
+
+    pub fn gesture_capture_status(&self) -> Result<(), String> {
+        if !self.should_run() || (self.worker.as_ref().is_some_and(|worker| !worker.join.is_finished()) && self.backend.is_installed()) { return Ok(()); }
+        Err(self.last_install_error.clone().unwrap_or_else(|| "mouse gesture hook is not running".to_owned()))
     }
 
     pub fn update_config(&mut self, config: MouseGestureConfig) {
@@ -360,14 +439,27 @@ impl MouseGestureService {
         if self.frontend_restart_reserved || self.frontend_restart_retired {
             return;
         }
+        if match (&self.db, &db) { (Some(current), Some(next)) => Arc::ptr_eq(current, next), (None, None) => true, _ => false } { return; }
         self.db = db;
         // If the worker is already running, it captured the old Option<db> by value.
         // Restart so the worker sees the new DB.
         self.reconcile_running_state(self.worker.is_some());
     }
 
+    pub fn update_release_sink(&mut self, sink: Option<Arc<dyn GestureReleaseSink>>) {
+        self.release_sink = sink;
+        self.reconcile_running_state(self.worker.is_some());
+    }
+
     pub fn is_running(&self) -> bool {
         self.worker.is_some()
+    }
+
+    /// Retry the current committed configuration after a failed hook install.
+    pub fn reconcile_current(&mut self) {
+        if !self.frontend_restart_reserved && !self.frontend_restart_retired {
+            self.reconcile_running_state(false);
+        }
     }
 
     /// Temporarily prevents the gesture hook from running without changing the
@@ -557,14 +649,17 @@ impl MouseGestureService {
         let (stop_tx, stop_rx) = mpsc::channel();
 
         self.backend.set_enabled(false);
+        self.last_install_error = None;
         if let Err(err) = self.backend.install(event_tx) {
             self.backend.set_enabled(false);
+            self.last_install_error = Some(format!("failed to install mouse gesture hook: {err}"));
             tracing::error!(?err, "failed to install mouse hook");
             return;
         }
 
         let config = self.config.clone();
         let db = self.db.clone();
+        let release_sink = self.release_sink.clone();
         let overlay_factory = Arc::clone(&self.overlay_factory);
         let right_click_backend = Arc::clone(&self.right_click_backend);
         let cursor_provider = Arc::clone(&self.cursor_provider);
@@ -577,6 +672,7 @@ impl MouseGestureService {
                 overlay_factory,
                 right_click_backend,
                 cursor_provider,
+                release_sink,
             )
         });
         self.worker = Some(WorkerHandle { stop_tx, join });
@@ -894,6 +990,7 @@ fn worker_loop(
     overlay_factory: Arc<dyn OverlayFactory>,
     right_click_backend: Arc<dyn RightClickBackend>,
     cursor_provider: Arc<dyn CursorPositionProvider>,
+    release_sink: Option<Arc<dyn GestureReleaseSink>>,
 ) {
     let mut tracker = GestureTracker::new(
         config.dir_mode,
@@ -937,6 +1034,8 @@ fn worker_loop(
     let mut selection_state = load_selection_state(GESTURES_STATE_FILE);
     let mut exact_selection_key: Option<String> = None;
     let mut exact_binding_count: usize = 0;
+    let mut stroke_generation = 0;
+    let mut stroke_sequence = None;
 
     loop {
         #[cfg(windows)]
@@ -958,7 +1057,12 @@ fn worker_loop(
         }
         match event_rx.recv_timeout(poll_interval) {
             Ok(event) => match event {
-                HookEvent::RButtonDown => {
+                HookEvent::RButtonDown(physical_generation, physical_sequence) => {
+                    stroke_sequence = physical_sequence;
+                    stroke_generation = release_sink.as_ref().map_or(0, |sink| {
+                        let generation = sink.stroke_generation();
+                        if physical_generation == Some(generation) { generation } else { 0 }
+                    });
                     active = true;
                     exceeded_deadzone = false;
                     tracker.reset();
@@ -986,7 +1090,7 @@ fn worker_loop(
                     hook_dispatch().set_active(true);
                 }
 
-                HookEvent::RButtonUp => {
+                HookEvent::RButtonUp(foreground, visibility_revision) => {
                     if active {
                         // Sample cursor pos once on release so we tokenize the final motion.
                         let cursor_pos = cursor_provider.cursor_position().unwrap_or(start_pos);
@@ -1049,7 +1153,9 @@ fn worker_loop(
                                         "mouse gesture practice match"
                                     );
                                 } else {
-                                    send_event(WatchEvent::ExecuteAction(prepared.action));
+                                    if let Some(sink) = &release_sink {
+                                        deliver_release(sink.as_ref(), foreground, visibility_revision, stroke_generation, stroke_sequence, &tokens, config.dir_mode, prepared.binding_idx, prepared.action, right_click_backend.as_ref());
+                                    } else { send_event(WatchEvent::ExecuteAction(prepared.action)); }
                                 }
                             } else if let Some((gesture_label, actions)) =
                                 match_binding_actions(&db, &tokens, config.dir_mode)
@@ -1085,7 +1191,9 @@ fn worker_loop(
                                             "mouse gesture practice match"
                                         );
                                     } else {
-                                        send_event(WatchEvent::ExecuteAction(action));
+                                        if let Some(sink) = &release_sink {
+                                            deliver_release(sink.as_ref(), foreground, visibility_revision, stroke_generation, stroke_sequence, &tokens, config.dir_mode, idx, action, right_click_backend.as_ref());
+                                        } else { send_event(WatchEvent::ExecuteAction(action)); }
                                     }
                                 }
                             } else {
@@ -1963,6 +2071,8 @@ mod tests {
             .unwrap();
         service.start();
         service.stop();
+        service.start();
+        service.stop_gesture_checked().unwrap();
 
         assert!(!service.is_running());
         assert_eq!(handle.install_count(), 1);
@@ -2170,6 +2280,66 @@ mod tests {
     }
 
     #[test]
+    fn checked_gesture_stop_reports_worker_join_failure() {
+        let (backend, _) = MockHookBackend::new();
+        let mut service = MouseGestureService::new_with_backend(Box::new(backend));
+        let (stop_tx, _stop_rx) = mpsc::channel();
+        service.worker = Some(WorkerHandle { stop_tx, join: thread::spawn(|| panic!("owned fake worker")) });
+        assert!(service.stop_gesture_checked().unwrap_err().contains("panicked"));
+        assert!(service.worker.is_none());
+    }
+
+    #[test]
+    fn checked_capture_status_reports_hook_install_failure() {
+        struct FailingHook;
+        impl HookBackend for FailingHook {
+            fn install(&mut self, _: Sender<HookEvent>) -> anyhow::Result<()> { Err(anyhow!("owned fake install failure")) }
+            fn uninstall(&mut self) -> anyhow::Result<()> { Ok(()) }
+            fn is_installed(&self) -> bool { false }
+        }
+        let mut service = MouseGestureService::new_with_backend(Box::new(FailingHook));
+        service.start();
+        assert!(service.gesture_capture_status().unwrap_err().contains("owned fake install failure"));
+        service.stop_gesture_checked().unwrap();
+    }
+
+    #[test]
+    fn passive_observer_requires_ready_live_hook_pump() {
+        assert!(passive_hook_ready(true, false, false));
+        assert!(!passive_hook_ready(false, false, false));
+        assert!(!passive_hook_ready(true, true, false));
+        assert!(!passive_hook_ready(true, false, true));
+    }
+
+    #[test]
+    fn gpui_gesture_hook_does_not_capture_before_root_ready() {
+        assert!(gesture_capture_ready(None));
+        assert!(!gesture_capture_ready(Some(false)));
+        assert!(gesture_capture_ready(Some(true)));
+    }
+
+    #[test]
+    fn right_button_release_follows_the_original_down_decision() {
+        assert!(!route_right_button(true, true, false, false));
+        assert!(!route_right_button(false, true, true, false));
+        assert!(route_right_button(true, true, true, false));
+        assert!(route_right_button(false, false, false, true));
+        assert!(!route_right_button(false, true, true, false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn captured_release_drain_is_bounded_and_observes_release() {
+        let dispatch = HookDispatch::new();
+        assert!(dispatch.wait_for_captured_release(Duration::ZERO));
+        dispatch.captured_right_press.store(true, Ordering::Release);
+        assert!(!dispatch.wait_for_captured_release(Duration::ZERO));
+        dispatch.captured_right_press.store(false, Ordering::Release);
+        dispatch.release_wake.notify_all();
+        assert!(dispatch.wait_for_captured_release(Duration::ZERO));
+    }
+
+    #[test]
     fn legacy_hook_backend_is_uninstalled_during_suppression() {
         #[derive(Clone)]
         struct LegacyHookCounts {
@@ -2350,8 +2520,10 @@ fn send_right_click() {}
 
 #[cfg(windows)]
 struct HookThread {
-    thread_id: u32,
-    join: std::thread::JoinHandle<()>,
+    thread_id: Option<u32>,
+    ready: Option<Receiver<anyhow::Result<u32>>>,
+    join: std::thread::JoinHandle<anyhow::Result<()>>,
+    stopping: bool,
 }
 
 #[cfg(windows)]
@@ -2386,6 +2558,11 @@ impl HookBackend for DefaultHookBackend {
         &mut self,
         target: Option<ClickObservationTarget>,
     ) -> anyhow::Result<()> {
+        if target.is_some() && !self.hook_thread.as_ref().is_some_and(|thread| {
+            passive_hook_ready(thread.thread_id.is_some(), thread.stopping, thread.join.is_finished())
+        }) {
+            return Err(anyhow!("mouse hook pump is not ready for passive observation"));
+        }
         hook_dispatch().set_click_observer(target);
         Ok(())
     }
@@ -2398,23 +2575,15 @@ impl HookBackend for DefaultHookBackend {
     }
 
     fn uninstall(&mut self) -> anyhow::Result<()> {
-        // Stop dispatch first to avoid any new work while shutting down.
+        self.uninstall_hook(false)
+    }
+
+    fn uninstall_checked(&mut self) -> anyhow::Result<()> {
         hook_dispatch().set_enabled(false);
-        hook_dispatch().set_tracking(false);
-        hook_dispatch().set_active(false);
-        hook_dispatch().set_sender(None);
-        hook_dispatch().set_click_observer(None);
-
-        if let Some(th) = self.hook_thread.take() {
-            use windows::Win32::Foundation::{LPARAM, WPARAM};
-            use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
-            unsafe {
-                let _ = PostThreadMessageW(th.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-            }
-            let _ = th.join.join();
+        if !hook_dispatch().wait_for_captured_release(Duration::from_secs(2)) {
+            tracing::warn!("captured right button remained held during shutdown; retiring the hook without synthesizing input");
         }
-
-        Ok(())
+        self.uninstall_hook(true)
     }
 
     fn is_installed(&self) -> bool {
@@ -2437,9 +2606,51 @@ impl HookBackend for DefaultHookBackend {
 
 #[cfg(windows)]
 impl DefaultHookBackend {
+    fn uninstall_hook(&mut self, allow_held: bool) -> anyhow::Result<()> {
+        // Stop dispatch first to avoid any new work while shutting down.
+        hook_dispatch().set_enabled(false);
+        hook_dispatch().set_tracking(false);
+        hook_dispatch().set_active(false);
+        if !allow_held && hook_dispatch().captured_right_press.load(Ordering::Acquire) {
+            return Err(anyhow!("mouse gesture is waiting for its captured right-button release"));
+        }
+        hook_dispatch().set_sender(None);
+        hook_dispatch().set_click_observer(None);
+
+        if let Some(th) = self.hook_thread.as_mut() {
+            use windows::Win32::Foundation::{LPARAM, WPARAM};
+            use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+            th.stopping = true;
+            if th.thread_id.is_none() && let Some(ready) = th.ready.as_ref() {
+                match ready.try_recv() {
+                    Ok(Ok(thread_id)) => { th.thread_id = Some(thread_id); th.ready = None; }
+                    Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => { th.ready = None; }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if !th.join.is_finished() {
+                let Some(thread_id) = th.thread_id else {
+                    return Err(anyhow!("mouse hook thread has not completed startup; ownership retained"));
+                };
+                if let Err(error) = unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) } {
+                    if !th.join.is_finished() { return Err(anyhow!("could not post mouse hook shutdown: {error}; ownership retained")); }
+                }
+            }
+            let Some(th) = self.hook_thread.take() else { unreachable!() };
+            let result = th.join.join().map_err(|_| anyhow!("mouse hook pump panicked"));
+            hook_dispatch().captured_right_press.store(false, Ordering::Release);
+            result??;
+        }
+
+        hook_dispatch().captured_right_press.store(false, Ordering::Release);
+
+        Ok(())
+    }
     fn ensure_hook_thread(&mut self) -> anyhow::Result<()> {
         if self.hook_thread.is_some() {
-            return Ok(());
+            let thread = self.hook_thread.as_ref().unwrap();
+            return if !thread.stopping && thread.thread_id.is_some() && !thread.join.is_finished() { Ok(()) }
+                else { Err(anyhow!("previous mouse hook thread is not available; ownership retained")) };
         }
 
         use std::time::Duration;
@@ -2467,8 +2678,8 @@ impl DefaultHookBackend {
             let hmodule = match unsafe { GetModuleHandleW(None) } {
                 Ok(h) => h,
                 Err(e) => {
-                    let _ = ready_tx.send(Err(anyhow!(e)));
-                    return;
+                    let _ = ready_tx.send(Err(anyhow!(e.to_string())));
+                    return Err(anyhow!(e));
                 }
             };
 
@@ -2478,11 +2689,11 @@ impl DefaultHookBackend {
                 Ok(h) if !h.0.is_null() => h,
                 Ok(_) => {
                     let _ = ready_tx.send(Err(anyhow!(windows::core::Error::from_win32())));
-                    return;
+                    return Err(anyhow!("mouse hook installation returned a null handle"));
                 }
                 Err(e) => {
-                    let _ = ready_tx.send(Err(anyhow!(e)));
-                    return;
+                    let _ = ready_tx.send(Err(anyhow!(e.to_string())));
+                    return Err(anyhow!(e));
                 }
             };
 
@@ -2492,23 +2703,18 @@ impl DefaultHookBackend {
                 Ok(h) if !h.0.is_null() => h,
                 Ok(_) => {
                     let _ = ready_tx.send(Err(anyhow!(windows::core::Error::from_win32())));
-                    unsafe {
-                        let _ = UnhookWindowsHookEx(mouse_hook);
-                    }
-                    return;
+                    return unsafe { UnhookWindowsHookEx(mouse_hook) }.map_err(|error| anyhow!("mouse hook cleanup failed: {error}"));
                 }
                 Err(e) => {
                     let _ = ready_tx.send(Err(anyhow!(e)));
-                    unsafe {
-                        let _ = UnhookWindowsHookEx(mouse_hook);
-                    }
-                    return;
+                    return unsafe { UnhookWindowsHookEx(mouse_hook) }.map_err(|error| anyhow!("mouse hook cleanup failed: {error}"));
                 }
             };
 
             let _ = ready_tx.send(Ok(thread_id));
 
             // Message loop keeps WH_MOUSE_LL callbacks flowing.
+            let mut failures = Vec::new();
             loop {
                 let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
                 if r.0 == 0 {
@@ -2516,6 +2722,7 @@ impl DefaultHookBackend {
                     break;
                 }
                 if r.0 == -1 {
+                    failures.push(format!("mouse hook message pump failed: {}", windows::core::Error::from_win32()));
                     break;
                 }
                 unsafe {
@@ -2524,18 +2731,25 @@ impl DefaultHookBackend {
                 }
             }
 
-            unsafe {
-                let _ = UnhookWindowsHookEx(mouse_hook);
-                let _ = UnhookWindowsHookEx(keyboard_hook);
-            }
+            if let Err(error) = unsafe { UnhookWindowsHookEx(mouse_hook) } { failures.push(format!("mouse hook uninstall failed: {error}")); }
+            if let Err(error) = unsafe { UnhookWindowsHookEx(keyboard_hook) } { failures.push(format!("keyboard hook uninstall failed: {error}")); }
+            if failures.is_empty() { Ok(()) } else { Err(anyhow!(failures.join("; "))) }
         });
 
-        let thread_id = ready_rx
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| anyhow!("hook thread did not signal readiness"))??;
-
-        self.hook_thread = Some(HookThread { thread_id, join });
-        Ok(())
+        match ready_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(thread_id)) => {
+                self.hook_thread = Some(HookThread { thread_id: Some(thread_id), ready: None, join, stopping: false });
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                self.hook_thread = Some(HookThread { thread_id: None, ready: None, join, stopping: true });
+                Err(error)
+            }
+            Err(error) => {
+                self.hook_thread = Some(HookThread { thread_id: None, ready: Some(ready_rx), join, stopping: true });
+                Err(anyhow!("hook thread did not signal readiness: {error}; ownership retained"))
+            }
+        }
     }
 }
 
@@ -2731,7 +2945,7 @@ impl MockHookHandle {
             if let Ok(guard) = self.state.sender.try_lock()
                 && let Some(sender) = guard.as_ref()
             {
-                let _ = sender.send(HookEvent::RButtonDown);
+                let _ = sender.send(HookEvent::RButtonDown(None, None));
             }
             true
         } else {
@@ -2750,10 +2964,23 @@ struct HookDispatch {
     ignore_window_titles: Mutex<Vec<String>>,
     sender: Mutex<Option<Sender<HookEvent>>>,
     click_observer: Mutex<Option<ClickObservationTarget>>,
+    captured_right_press: AtomicBool,
+    release_wait: Mutex<()>,
+    release_wake: std::sync::Condvar,
 }
 
 #[cfg(windows)]
 impl HookDispatch {
+    fn new() -> Self {
+        Self { enabled: AtomicBool::new(false), tracking: AtomicBool::new(false), injecting: AtomicBool::new(false), active: AtomicBool::new(false), wheel_gate: AtomicUsize::new(WheelCycleGate::Deadzone.as_usize()), ignore_window_titles: Mutex::new(Vec::new()), sender: Mutex::new(None), click_observer: Mutex::new(None), captured_right_press: AtomicBool::new(false), release_wait: Mutex::new(()), release_wake: std::sync::Condvar::new() }
+    }
+    fn wait_for_captured_release(&self, timeout: Duration) -> bool {
+        if !self.captured_right_press.load(Ordering::Acquire) { return true; }
+        if let Ok(guard) = self.release_wait.lock() {
+            drop(self.release_wake.wait_timeout_while(guard, timeout, |_| self.captured_right_press.load(Ordering::Acquire)));
+        }
+        !self.captured_right_press.load(Ordering::Acquire)
+    }
     fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
     }
@@ -2830,19 +3057,30 @@ impl HookDispatch {
 
 #[cfg(windows)]
 static HOOK_DISPATCH: OnceCell<HookDispatch> = OnceCell::new();
+static GESTURE_VISIBILITY_REVISION: OnceCell<Arc<AtomicU64>> = OnceCell::new();
+static GESTURE_VISIBILITY_ACTIVE: OnceCell<Arc<AtomicBool>> = OnceCell::new();
+static GESTURE_DATABASE_GENERATION: OnceCell<Arc<AtomicU64>> = OnceCell::new();
+static GESTURE_STROKE_SEQUENCE: OnceCell<Arc<AtomicU64>> = OnceCell::new();
+
+pub fn install_gesture_visibility_revision(revision: Arc<AtomicU64>, active: Arc<AtomicBool>) -> Result<(), String> {
+    if let Some(current) = GESTURE_VISIBILITY_REVISION.get() {
+        return if Arc::ptr_eq(current, &revision) && GESTURE_VISIBILITY_ACTIVE.get().is_some_and(|existing| Arc::ptr_eq(existing, &active)) { Ok(()) } else { Err("Mouse Gestures visibility owner changed".into()) };
+    }
+    GESTURE_VISIBILITY_ACTIVE.set(active).map_err(|_| "Mouse Gestures visibility owner already installed".to_owned())?;
+    GESTURE_VISIBILITY_REVISION.set(revision).map_err(|_| "Mouse Gestures visibility owner already installed".to_owned())
+}
+
+pub fn gesture_database_generation() -> Arc<AtomicU64> {
+    GESTURE_DATABASE_GENERATION.get_or_init(|| Arc::new(AtomicU64::new(1))).clone()
+}
+
+pub fn gesture_stroke_sequence() -> Arc<AtomicU64> {
+    GESTURE_STROKE_SEQUENCE.get_or_init(|| Arc::new(AtomicU64::new(0))).clone()
+}
 
 #[cfg(windows)]
 fn hook_dispatch() -> &'static HookDispatch {
-    HOOK_DISPATCH.get_or_init(|| HookDispatch {
-        enabled: AtomicBool::new(false),
-        tracking: AtomicBool::new(false),
-        injecting: AtomicBool::new(false),
-        active: AtomicBool::new(false),
-        wheel_gate: AtomicUsize::new(WheelCycleGate::Deadzone.as_usize()),
-        ignore_window_titles: Mutex::new(Vec::new()),
-        sender: Mutex::new(None),
-        click_observer: Mutex::new(None),
-    })
+    HOOK_DISPATCH.get_or_init(HookDispatch::new)
 }
 
 /// Read-only indication that the global gesture hook currently owns the
@@ -2894,9 +3132,17 @@ unsafe extern "system" fn mouse_hook_proc(
             }
         }
 
-        if (msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MOUSEWHEEL)
-            && dispatch.enabled.load(Ordering::Acquire)
-        {
+        let is_gesture_message = msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MOUSEWHEEL;
+        let physical = if is_gesture_message {
+            let info = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
+            !dispatch.is_injecting() && (info.flags & 0x3) == 0 && info.dwExtraInfo != MG_INJECT_TAG
+        } else { false };
+        let paired_up = physical && msg == WM_RBUTTONUP && dispatch.captured_right_press.swap(false, Ordering::AcqRel);
+        if paired_up { dispatch.release_wake.notify_all(); }
+        let capture_new = dispatch.enabled.load(Ordering::Acquire) && gesture_root_ready();
+        if physical && (((msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP)
+            && route_right_button(msg == WM_RBUTTONDOWN, dispatch.enabled.load(Ordering::Acquire), gesture_root_ready(), paired_up))
+            || (msg == WM_MOUSEWHEEL && capture_new && dispatch.captured_right_press.load(Ordering::Acquire))) {
             // If we're injecting (or the event is injected), do NOT consume it and do NOT forward to worker.
             let info = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
 
@@ -2915,7 +3161,7 @@ unsafe extern "system" fn mouse_hook_proc(
                 };
             }
 
-            if let Some(title) = get_foreground_window_title()
+            if msg != WM_RBUTTONUP && let Some(title) = get_foreground_window_title()
                 && dispatch.should_ignore_window_title(&title)
             {
                 return unsafe {
@@ -2953,16 +3199,22 @@ unsafe extern "system" fn mouse_hook_proc(
                 }
             }
 
+            let mut captured_down = false;
             if let Ok(guard) = dispatch.sender.try_lock()
                 && let Some(sender) = guard.as_ref()
             {
                 if msg == WM_RBUTTONDOWN {
                     // Wheel-cycling is only enabled after worker exceeds deadzone.
                     dispatch.set_tracking(false);
-                    let _ = sender.send(HookEvent::RButtonDown);
+                    let generation = GESTURE_DATABASE_GENERATION.get().map(|generation| generation.load(Ordering::Acquire));
+                    let sequence = GESTURE_STROKE_SEQUENCE.get().map(|sequence| sequence.fetch_add(1, Ordering::AcqRel).wrapping_add(1));
+                    captured_down = sender.send(HookEvent::RButtonDown(generation, sequence)).is_ok();
+                    if captured_down { dispatch.captured_right_press.store(true, Ordering::Release); }
                 } else if msg == WM_RBUTTONUP {
                     dispatch.set_tracking(false);
-                    let _ = sender.send(HookEvent::RButtonUp);
+                    let revision = GESTURE_VISIBILITY_ACTIVE.get().filter(|active| active.load(Ordering::Acquire))
+                        .and_then(|active| GESTURE_VISIBILITY_REVISION.get().map(|revision| revision.load(Ordering::Acquire)).filter(|_| active.load(Ordering::Acquire)));
+                    let _ = sender.send(HookEvent::RButtonUp(gesture_foreground(), revision));
                 } else if msg == WM_MOUSEWHEEL {
                     // mouseData high word contains signed wheel delta (WHEEL_DELTA multiples).
                     let delta = ((info.mouseData >> 16) & 0xFFFF) as i16;
@@ -2975,7 +3227,7 @@ unsafe extern "system" fn mouse_hook_proc(
             }
 
             // Consume while MG is enabled (RMB always, wheel only when tracking).
-            return windows::Win32::Foundation::LRESULT(1);
+            if msg != WM_RBUTTONDOWN || captured_down { return windows::Win32::Foundation::LRESULT(1); }
         }
     }
 
@@ -3011,6 +3263,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             if !injected {
                 let dispatch = hook_dispatch();
                 if dispatch.enabled.load(Ordering::Acquire)
+                    && gesture_root_ready()
                     && dispatch.is_active()
                     && let Ok(guard) = dispatch.sender.try_lock()
                     && let Some(sender) = guard.as_ref()

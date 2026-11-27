@@ -9,3 +9,7 @@ G21 owns `mouse-gestures`. `mg edit` opens the retained editor. Search and list 
 | GESTURE-EDITOR-03 | Keep authoring distinct from runtime dispatch, practice mode and global right-click policy. Cancel and passive editor opening produce no dispatch. |
 
 Select `gesture_delete_is_queued_until_confirmed`, `cancelling_gesture_delete_keeps_db_and_selection`, `save_failure_restores_committed_dialog_snapshot_and_retains_disk`, `jump_mode_mouse_gestures_review_canvas_capture_retires_when_root_hides` and `practice_mode_suppresses_execute_action`. `G21-EGUI-GESTURE-AUTHORING` verifies the editor route, immediate default add, rename cancellation and return from the binding child. Capture, dispatch and GPUI remain pending.
+
+## Retained GPUI catalog
+
+Stock `mg edit` opens the retained catalog. Checked Add, Rename, Four-direction tokens, Set Query, Enabled and Practice use the canonical gesture and Settings owners. The physical Windows gesture, foreground, click pass-through and retirement replay remains open. [Mouse Gestures checkpoint](../CHECKPOINTS.md#p018-checked-ordinary-mouse-gestures)

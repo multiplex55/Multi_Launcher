@@ -53,6 +53,8 @@ mod snippet_fill;
 mod clipboard_modify_view;
 mod tempfile_view;
 mod timer_view;
+mod gesture_editor;
+mod gesture_query;
 mod tempfile_search;
 mod clipboard_modify_startup;
 mod regex_history;
@@ -2517,9 +2519,13 @@ struct RootWindow {
     multi_manager_view: Option<Entity<multi_manager::MultiManagerView>>,
     calculation_pad_view: Option<Entity<calculation_pad::CalculationPadView>>,
     timer_view: Option<Entity<timer_view::TimerView>>,
+    gesture_editor: Option<Entity<gesture_editor::GestureEditor>>,
     timer_session: Option<Arc<multi_launcher::plugins::timer_session::TimerSession>>,
     timer_wake: Arc<HashWakeSignal>,
     timer_busy: Arc<AtomicBool>,
+    gesture_owner: Option<Arc<multi_launcher::plugins::mouse_gestures::GpuiGestureOwner>>,
+    gesture_wake: Arc<HashWakeSignal>,
+    gesture_status: Option<String>,
     timer_completion: Option<(u64, String)>,
     timer_completion_revision: u64,
     note_open_epoch: Arc<AtomicU64>,
@@ -3704,6 +3710,7 @@ enum RootCloseBlocker {
     SnippetsSave,
     TempfileSave,
     TimerOperation,
+    GestureEditor,
     FileSearchEffect,
     FolderSize,
     FileLock,
@@ -4666,6 +4673,7 @@ struct AcceptedRestart {
     restart_exit: Rc<RefCell<Option<(RestartContext, Vec<NativeWindow>)>>>,
     restart_failure: Rc<RefCell<Option<String>>>,
     timer_session: Option<Arc<multi_launcher::plugins::timer_session::TimerSession>>,
+    gesture_owner: Option<Arc<multi_launcher::plugins::mouse_gestures::GpuiGestureOwner>>,
 }
 
 async fn wait_for_native_retirement(cx: &mut AsyncApp, windows: &[NativeWindow]) -> bool {
@@ -5701,6 +5709,9 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        let gesture_reservation = multi_launcher::plugins::mouse_gestures::reserve_frontend_restart()
+            .map_err(|error| format!("Mouse Gestures prevents restart: {error}. Disable gestures and stop click observation, or quit and reopen."))?;
+        drop(gesture_reservation);
         if self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(folder_size::WAIT.into()); }
         if self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(file_lock::WAIT.into()); }
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(duplicate_finder::WAIT.into()); }
@@ -6186,9 +6197,14 @@ impl RootWindow {
         let root_window = self.root_window.ok_or_else(|| {
             "The GPUI root window handle is unavailable; no egui process was started.".to_owned()
         })?;
+        let gesture_reservation = multi_launcher::plugins::mouse_gestures::reserve_frontend_restart()
+            .map_err(|error| format!("Mouse Gestures prevents restart: {error}. Disable gestures and stop click observation, or quit and reopen."))?;
         self.restart_admission
             .try_accept(snapshot.hash_work)
             .map_err(restart_blocker_message)?;
+        self.gesture_wake.close();
+        if let Some(owner) = &self.gesture_owner { owner.fence(); }
+        drop(gesture_reservation);
         self.drain_hash_native_geometry(cx, true);
 
         self.query
@@ -6273,6 +6289,7 @@ impl RootWindow {
             restart_exit: Rc::clone(&self.restart_exit),
             restart_failure: Rc::clone(&self.restart_failure),
             timer_session,
+            gesture_owner: self.gesture_owner.clone(),
         })
     }
 
@@ -6303,6 +6320,7 @@ impl RootWindow {
         let listener_slot = Arc::clone(&accepted.listener_slot);
         let coordinate_controller = Arc::clone(&accepted.coordinate_controller);
         let coordinate_shutdown_complete = Arc::clone(&accepted.coordinate_shutdown_complete);
+        let gesture_owner = accepted.gesture_owner.clone();
         let teardown = cx
             .background_executor()
             .spawn(async move {
@@ -6318,6 +6336,7 @@ impl RootWindow {
                     .map_err(|_| "the Coordinate HUD controller lock was poisoned".to_owned())?
                     .shutdown()?;
                 coordinate_shutdown_complete.store(true, Ordering::Release);
+                if let Some(owner) = gesture_owner { owner.shutdown_checked()?; }
                 Ok::<(), String>(())
             })
             .await;
@@ -7255,6 +7274,8 @@ impl RootWindow {
                         || self.tempfile_search.projected(&query, action)
                 } else if provider == "timer" {
                     timer_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                } else if provider == "mouse_gestures" {
+                    gesture_editor::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "snippets" {
                     snippets::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                         || self.snippets_search.projection.as_ref().is_some_and(|(raw, _, snapshot)| {
@@ -8156,6 +8177,12 @@ impl RootWindow {
             if timer_view::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 let alarm = matches!(parse_action(&result.action), Ok(Command::Timer(multi_launcher::commands::TimerCommand::AlarmDialog)));
                 self.open_timer(alarm, window, cx);
+            }
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "mouse_gestures") {
+            if gesture_editor::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                self.open_gesture_editor(window, cx);
             }
             return;
         }
@@ -10505,6 +10532,7 @@ impl RootWindow {
             Some(RootCloseBlocker::CalculationPad) => { self.restart_status = Some(calculation_pad::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::TimerOperation) => { self.restart_status = Some(timer_view::WAIT.to_owned()); }
+            Some(RootCloseBlocker::GestureEditor) => { self.restart_status = Some("Finish the Mouse Gestures operation, or save or discard its draft before closing.".into()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
             Some(RootCloseBlocker::RegexPresets) => { self.restart_status = Some(regex_presets::WAIT_QUIT.to_owned()); }
@@ -10550,6 +10578,8 @@ impl RootWindow {
         if self.xml_terminal_quit { return; }
         self.xml_terminal_quit = true;
         self.snippets_search.wake.close();
+        self.gesture_wake.close();
+        if let Some(owner) = &self.gesture_owner { owner.fence(); }
         self.restart_admission.fence();
         self.root_visibility.deactivate();
         if let Some(view) = &self.file_search { view.read(cx).retire_explorer(); }
@@ -10593,9 +10623,19 @@ impl RootWindow {
         let view = self.xml_view.clone();
         self.timer_wake.close();
         let timer = self.timer_session.clone();
+        let gesture = self.gesture_owner.clone();
+        let coordinate = self.coordinate_hud_probe_controller.clone();
+        let coordinate_done = self.coordinate_shutdown_complete.clone();
         if let Some(view) = &view { view.update(cx, |view, cx| view.shutdown(cx)); }
         cx.spawn(async move |_, cx| {
             if let Some(timer) = timer { let _ = cx.background_executor().spawn(async move { timer.shutdown() }).await; }
+            let stopped = cx.background_executor().spawn(async move {
+                coordinate.lock().map_err(|_| "Coordinate controller unavailable".to_owned())?.shutdown()?;
+                coordinate_done.store(true, Ordering::Release);
+                if let Some(gesture) = gesture { gesture.shutdown_checked()?; }
+                Ok::<(), String>(())
+            }).await;
+            if let Err(error) = stopped { tracing::warn!(%error, "Mouse Gestures teardown will be retried after the GPUI loop"); }
             for retiring in retiring_clipboard { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             for retiring in retiring_search { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             for retiring in retiring_regex { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
@@ -10617,6 +10657,7 @@ impl RootWindow {
         cx: &App,
     ) -> Option<RootCloseBlocker> {
         if self.timer_busy.load(Ordering::Acquire) { return Some(RootCloseBlocker::TimerOperation); }
+        if self.gesture_editor.as_ref().is_some_and(|view| view.read(cx).blocks_root_close(cx)) { return Some(RootCloseBlocker::GestureEditor); }
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::DuplicateFinder); }
@@ -11179,6 +11220,7 @@ impl Render for RootWindow {
                     })))
                 }))
                 .children(self.structured_pins.error.clone().map(|status| Label::new(status)))
+                .children(self.gesture_status.clone().map(|status| Label::new(status).id("mouse-gesture-status")))
                 .children((if self.hash_pin.pending.is_some() { Some("Unpinning Hash Generator…".to_owned()) } else { self.hash_pin.error.clone() }).map(|status| {
                     Label::new(status).id("pinned-hash-toolbar-status").w_full().min_w(px(0.0))
                 })));
@@ -11602,6 +11644,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.timer_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.gesture_editor.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -12634,6 +12679,7 @@ struct RootVisibility {
 }
 
 enum RootVisibilityRequest {
+    GestureQuery(gesture_query::Request),
     DockHash(hash_dock::Reveal),
     DockUtility(utility_mount::UtilityKind, hash_dock::UtilityReveal),
     HideAfterExternalLaunch(u64),
@@ -12670,6 +12716,15 @@ fn utility_dock_ack_allowed(activated: bool, delivered: bool, current: bool) -> 
 }
 
 impl RootWindow {
+    fn gesture_query_destination_available(&self, window: &mut Window, cx: &mut App) -> bool {
+        let contexts = window.context_stack();
+        !self.file_menu_open && !self.settings_menu_open && !self.help_menu_open
+            && self.action_sheet.is_none() && self.context_favorite_popup.is_none()
+            && !window.has_active_dialog(cx)
+            && !context_stack_has_primary(&contexts, "PopupMenu")
+            && !context_stack_has_primary(&contexts, "Dialog")
+            && !context_stack_has_primary(&contexts, "AlertDialog")
+    }
     fn utility_dock_focus_available(&self, window: &mut Window, cx: &mut App) -> bool {
         let contexts = window.context_stack();
         utility_dock_focus_allowed(self.action_sheet.is_some(), window.has_active_dialog(cx),
@@ -12716,6 +12771,7 @@ impl RootWindow {
 impl RootVisibilityRequest {
     fn is_current(&self, revision: u64, visible: bool, newer_pending: bool) -> bool {
         match self {
+            Self::GestureQuery(request) => request.revision == revision && request.owner.is_current(&request.release) && !newer_pending,
             Self::DockHash(reveal) => reveal.gesture.visibility_revision == revision && !newer_pending,
             Self::DockUtility(_, reveal) => reveal.gesture.visibility_revision == revision && reveal.mount.is_current() && !newer_pending,
             Self::HideAfterExternalLaunch(expected) | Self::HideAfterWindowSwitch(expected, _, _)
@@ -12727,11 +12783,17 @@ impl RootVisibilityRequest {
     }
 
     fn superseded_by_hotkey(&self, take_hotkey: impl FnOnce() -> bool) -> bool {
-        matches!(self, Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _) | Self::HideAfterWindowClose(_, _, _, _) | Self::HideAfterClipboardUndo(_, _, _, _, _, _, _)) && take_hotkey()
+        matches!(self, Self::GestureQuery(_) | Self::HideAfterExternalLaunch(_) | Self::HideAfterWindowSwitch(_, _, _) | Self::HideAfterWindowClose(_, _, _, _) | Self::HideAfterClipboardUndo(_, _, _, _, _, _, _)) && take_hotkey()
     }
 }
 
 impl RootVisibility {
+    #[cfg(windows)]
+    fn has_current_established_request(&self) -> bool {
+        let Ok(pending) = self.requested_visible.lock() else { return true; };
+        pending.as_ref().is_some_and(|request| !matches!(request, RootVisibilityRequest::GestureQuery(_))
+            && request.is_current(self.request_revision.load(Ordering::Acquire), self.visible.load(Ordering::Acquire), false))
+    }
     fn new() -> Self {
         Self {
             visible: Arc::new(AtomicBool::new(true)),
@@ -12847,10 +12909,14 @@ impl RootVisibility {
                     | RootVisibilityRequest::HideAfterWindowClose(_, _, _, _));
             let dock_supersedes_undo = matches!(pending.as_ref(), Some(RootVisibilityRequest::HideAfterClipboardUndo(_, _, _, _, _, _, _)))
                 && matches!(&request, RootVisibilityRequest::DockHash(_) | RootVisibilityRequest::DockUtility(_, _));
+            let supersedes_gesture = gesture_query::supersedes_pending_gesture(
+                matches!(pending.as_ref(), Some(RootVisibilityRequest::GestureQuery(_))),
+                matches!(&request, RootVisibilityRequest::GestureQuery(_)),
+                pending.as_ref().is_some_and(|pending| match pending { RootVisibilityRequest::GestureQuery(request) => request.owner.is_current(&request.release), _ => false }));
             if !request.is_current(
                 self.request_revision.load(Ordering::Acquire),
                 self.visible.load(Ordering::Acquire),
-                pending.is_some() && !supersedes_dock && !dock_supersedes_undo,
+                pending.is_some() && !supersedes_dock && !dock_supersedes_undo && !supersedes_gesture,
             ) {
                 return false;
             }
@@ -12906,6 +12972,10 @@ impl RootVisibility {
             return None;
         }
         let visible = match request {
+            RootVisibilityRequest::GestureQuery(request) => {
+                if !request.current(request.root, current_foreground_identity(), self.request_revision.load(Ordering::Acquire), false) { return None; }
+                true
+            }
             RootVisibilityRequest::DockHash(_) => true,
             RootVisibilityRequest::DockUtility(_, _) => true,
             RootVisibilityRequest::HideAfterExternalLaunch(_) => false,
@@ -13006,6 +13076,31 @@ fn rollback_reveal_unless_hotkey_pending(visibility: &RootVisibility, revision: 
         }
     }
     false
+}
+
+#[cfg(windows)]
+fn reconcile_aborted_gesture_show(visibility: &RootVisibility, revision: u64, native: NativeWindow, fallback: bool) -> bool {
+    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsIconic};
+    if visibility.is_current(revision, true) {
+        let shown = native_window_is_visible(native).map(|visible| visible && !unsafe { IsIconic(HWND(native.identity.hwnd as *mut c_void)) }.as_bool()).unwrap_or(fallback);
+        visibility.visible.store(shown, Ordering::Release);
+        true
+    } else { false }
+}
+
+#[cfg(windows)]
+fn settle_failed_gesture_show(visibility: &RootVisibility, revision: u64, native: NativeWindow,
+    prior: Option<gesture_query::PriorWindowState>, fallback: bool) {
+    let may_rollback = gesture_query::owns_native_show(
+        visibility.active.load(Ordering::Acquire),
+        visibility.request_revision.load(Ordering::Acquire) == revision,
+        native_window_is_valid(native), true,
+    );
+    if may_rollback && let Some(prior) = prior && gesture_query::rollback_show(native, prior) {
+        if visibility.request_revision.load(Ordering::Acquire) == revision {
+            visibility.visible.store(prior == gesture_query::PriorWindowState::Visible, Ordering::Release);
+        }
+    } else { let _ = reconcile_aborted_gesture_show(visibility, revision, native, fallback); }
 }
 
 #[cfg(windows)]
@@ -13120,6 +13215,7 @@ pub(crate) fn run_foundation_window(
     search_startup: LauncherSearchStartup,
     root_placement: root_placement::RootPlacement,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
+    mouse_gesture_settings: Result<multi_launcher::plugins::mouse_gestures::MouseGestureSettings, String>,
     app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     external_launch_preferences: ExternalLaunchPreferences,
     coordinate_tool_preferences: CoordinateToolPreferences,
@@ -13247,6 +13343,15 @@ pub(crate) fn run_foundation_window(
 
     let startup_pin_order = hash_pin::startup_order(&saved_pinned_panels);
     let appearance_settings_for_run = theme_settings.clone();
+    let gesture_wake = Arc::new(HashWakeSignal::default());
+    let gesture_notify = gesture_wake.clone();
+    let gesture_enabled = enabled_plugins.as_ref().is_none_or(|enabled| enabled.contains("mouse_gestures"));
+    let gesture_start = mouse_gesture_settings.and_then(|settings| multi_launcher::plugins::mouse_gestures::start_gpui_gestures(settings, gesture_enabled, &app_data_root, visibility.request_revision.clone(), visibility.active.clone(), Arc::new(move || gesture_notify.notify())));
+    let (gesture_lifetime, gesture_start_error) = match gesture_start {
+        Ok(owner) => (Some(owner), None), Err(error) => (None, Some(error)),
+    };
+    let gesture_owner_for_run = gesture_lifetime.clone();
+    let gesture_wake_for_run = gesture_wake.clone();
     let timer_wake = Arc::new(HashWakeSignal::default());
     let timer_notify = timer_wake.clone();
     let (timer_lifetime, timer_start_error) = match multi_launcher::plugins::timer_session::TimerSession::start(app_data_root.clone(), Arc::new(move || timer_notify.notify())) {
@@ -13280,10 +13385,14 @@ pub(crate) fn run_foundation_window(
         let settings_save_workers_for_quit = settings_save_workers_for_quit.clone();
         let quit_subscription = cx.on_app_quit(move |app| {
             let mut timer = None;
+            let mut gesture = None;
             if let Some(root) = root_for_quit_callback.borrow().clone() {
                 let _ = root.update(app, |root, cx| {
                     root.timer_wake.close();
                     timer = root.timer_session.clone();
+                    root.gesture_wake.close();
+                    gesture = root.gesture_owner.clone();
+                    if let Some(owner) = &gesture { owner.fence(); }
                     root.snippets_search.wake.close();
                     if let Some(token) = root.settings_search.as_ref().and_then(|view| view.read(cx).pending_token()) { token.request_cancel(); }
                     root.retire_search_jump_mode();
@@ -13326,7 +13435,8 @@ pub(crate) fn run_foundation_window(
                 listener.stop();
             }
             let timer_task = timer.map(|timer| app.background_executor().spawn(async move { timer.shutdown() }));
-            async move { if let Some(task) = timer_task { let _ = task.await; } }
+            let gesture_task = gesture.map(|gesture| app.background_executor().spawn(async move { gesture.shutdown_checked() }));
+            async move { if let Some(task) = timer_task { let _ = task.await; } if let Some(task) = gesture_task { let _ = task.await; } }
         });
         subscription_sink.borrow_mut().push(quit_subscription);
 
@@ -13546,6 +13656,10 @@ pub(crate) fn run_foundation_window(
                 multi_manager_view: None,
                 calculation_pad_view: None,
                 timer_view: None,
+                gesture_editor: None,
+                gesture_owner: gesture_owner_for_run.clone(),
+                gesture_wake: gesture_wake_for_run.clone(),
+                gesture_status: None,
                 timer_session: timer_session_for_run.clone(),
                 timer_wake: timer_wake_for_run.clone(),
                 timer_busy: timer_busy_for_run.clone(),
@@ -13959,7 +14073,7 @@ pub(crate) fn run_foundation_window(
                 match blocker {
                     None => {
                         let deferred = root_for_window_close.update(app, |root, cx| {
-                            if root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                            if root.gesture_owner.is_some() || root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                         }).unwrap_or(true);
                         if deferred { return false; }
                         let _ = root_for_window_close.update(app, |root, cx| {
@@ -13995,7 +14109,7 @@ pub(crate) fn run_foundation_window(
                             .unwrap_or(false);
                         if close_now {
                             let deferred = root_for_window_close.update(app, |root, cx| {
-                                if root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                                if root.gesture_owner.is_some() || root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                             }).unwrap_or(true);
                             if deferred { return false; }
                             let _ = root_for_window_close.update(app, |root, cx| {
@@ -14084,6 +14198,7 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::CalculationPad) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(calculation_pad::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TimerOperation) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(timer_view::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::GestureEditor) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Finish the Mouse Gestures operation, or save or discard its draft before closing.".into()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::RegexPresets) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_presets::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
@@ -14113,6 +14228,7 @@ pub(crate) fn run_foundation_window(
             }
         };
         *root_for_quit.borrow_mut() = Some(root_view.downgrade());
+        root_view.update(cx, |root, cx| root.start_gesture_dispatch(gesture_start_error, cx));
         root_view.update(cx, |root, cx| root.start_timer_wake(timer_restore_for_run, timer_start_error, cx));
 
         let native_window =
@@ -14384,11 +14500,27 @@ pub(crate) fn run_foundation_window(
                         );
                     }
 
-                    let was_visible = if matches!(requested_visible.as_ref(), Some(RootVisibilityRequest::DockUtility(_, _))) {
+                    let was_visible = if matches!(requested_visible.as_ref(), Some(RootVisibilityRequest::DockUtility(_, _) | RootVisibilityRequest::GestureQuery(_))) {
                         visibility.current_visible_revision(native_window).is_some()
                     } else { visibility.visible.load(Ordering::Acquire) };
                     let hotkey_for_conditional = requested_visible.as_ref()
                         .is_some_and(|request| request.superseded_by_hotkey(|| trigger.take()));
+                    let gesture_request = requested_visible.as_ref().and_then(|request| match request {
+                        RootVisibilityRequest::GestureQuery(request) => Some(request.clone()), _ => None,
+                    });
+                    let gesture_outcome = gesture_request.as_ref().and_then(|request| request.outcome()).filter(|outcome| query_set_outcome_text(outcome).is_some());
+                    let gesture_prior_state = gesture_request.as_ref().and_then(|_| gesture_query::prior_window_state(native_window));
+                    let gesture_destination_available = gesture_request.as_ref().is_none_or(|request| {
+                        (request.source().process_id != std::process::id() || request.source() == native_window.identity)
+                            && gesture_outcome.is_some() && gesture_prior_state.is_some()
+                            && update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| {
+                                root.native_window == Some(native_window) && root.gesture_query_destination_available(window, cx)
+                            }).unwrap_or(false)
+                    });
+                    let gesture_current = gesture_request.as_ref().is_none_or(|request| request.current(
+                        native_window, current_foreground_identity(), visibility.request_revision.load(Ordering::Acquire),
+                        restart_admission_for_hotkey.is_fenced(),
+                    ) && native_window_is_valid(NativeWindow { identity: request.source() }) && gesture_destination_available);
                     let switch_hide = requested_visible.as_ref().and_then(|request| match request {
                         RootVisibilityRequest::HideAfterWindowSwitch(_, target, query) => Some((*target, Arc::clone(query))),
                         _ => None,
@@ -14436,12 +14568,13 @@ pub(crate) fn run_foundation_window(
                             && native_window_is_valid(gesture.source)
                             && !restart_admission_for_hotkey.is_fenced()
                     });
-                    let accepted_visible = if hotkey_for_conditional || !switch_query_current || !close_current || !undo_current || !dock_current || !utility_destination_current {
+                    let accepted_visible = if hotkey_for_conditional || !gesture_current || !switch_query_current || !close_current || !undo_current || !dock_current || !utility_destination_current {
                         None
                     } else {
                         requested_visible.as_ref().and_then(|request| visibility.accept_requested_visible(request))
                     };
                     let dock_reveal = accepted_visible.is_some().then_some(dock_reveal).flatten();
+                    let gesture_request = accepted_visible.is_some().then_some(gesture_request).flatten();
                     let switch_hide = accepted_visible.is_some().then_some(switch_hide).flatten();
                     let close_hide = if accepted_visible.is_some() {
                         requested_visible.as_ref().and_then(|request| match request {
@@ -14465,7 +14598,9 @@ pub(crate) fn run_foundation_window(
                         } else {
                             continue;
                         };
-                    let (foreground, snippet_origin) = if let Some((gesture, _, _)) = &dock_reveal {
+                    let (foreground, snippet_origin) = if let Some(request) = &gesture_request {
+                        (Some(request.source()), None)
+                    } else if let Some((gesture, _, _)) = &dock_reveal {
                         (gesture.foreground_authorized.then_some(gesture.source.identity), None)
                     } else if desired_visible {
                         cx.background_executor().spawn(async {
@@ -14479,12 +14614,25 @@ pub(crate) fn run_foundation_window(
                         continue;
                     }
                     let checked_hotkey_reveal = hotkey_toggle && desired_visible && !was_visible;
+                    let checked_gesture_reveal = gesture_request.is_some();
+                    let gesture_still_current = || gesture_request.as_ref().is_none_or(|request| {
+                        visibility.is_current(revision, true) && request.owner.is_current(&request.release) && request.root == native_window
+                            && native_window_is_valid(native_window)
+                            && current_foreground_identity() == Some(request.source())
+                            && native_window_is_valid(NativeWindow { identity: request.source() })
+                            && !restart_admission_for_hotkey.is_fenced() && !hotkey_edge_pending(&trigger) && !visibility.has_current_established_request()
+                    });
+                    if checked_gesture_reveal && !gesture_still_current() {
+                        let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible);
+                        continue;
+                    }
                     if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
-                    if checked_hotkey_reveal {
+                    if checked_hotkey_reveal || checked_gesture_reveal {
                         if let Some(expected) = foreground.filter(|identity| *identity != native_window.identity) {
                             let worker_visibility = visibility.clone();
                             let worker_trigger = trigger.clone();
                             let worker_admission = restart_admission_for_hotkey.clone();
+                            let worker_gesture = gesture_request.clone();
                             let request = multi_launcher::window_activation::CheckedRootDesktop {
                                 identity: multi_launcher::window_catalog::WindowNativeIdentity {
                                     hwnd: native_window.identity.hwnd,
@@ -14496,6 +14644,8 @@ pub(crate) fn run_foundation_window(
                                         && !worker_admission.is_fenced() && native_window_is_valid(native_window)
                                         && native_window_is_valid(NativeWindow { identity: expected })
                                         && current_foreground_identity() == Some(expected)
+                                        && worker_gesture.as_ref().is_none_or(|request| request.owner.is_current(&request.release))
+                                        && worker_gesture.as_ref().is_none_or(|_| !worker_visibility.has_current_established_request())
                                 }),
                             };
                             let result = cx.background_executor().spawn(async move {
@@ -14504,8 +14654,8 @@ pub(crate) fn run_foundation_window(
                             if let Err(error) = result {
                                 // Keep the pending-edge observation and rollback ordered against
                                 // listener publication. A second press remains queued for its own toggle.
-                                let reverted = rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger);
-                                if reverted {
+                                let reverted = if checked_gesture_reveal { reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible) } else { rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger) };
+                                if reverted && gesture_request.as_ref().is_none_or(|request| request.owner.is_current(&request.release)) {
                                     let _ = root_view.update(&mut *cx, |root, cx| {
                                         root.launcher_search_error = Some(format!("Could not show launcher on the current desktop: {error}"));
                                         cx.notify();
@@ -14516,6 +14666,10 @@ pub(crate) fn run_foundation_window(
                         }
                     }
                     if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
+                    if checked_gesture_reveal && !gesture_still_current() { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); continue; }
+                    if checked_gesture_reveal && !update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| root.gesture_query_destination_available(window, cx)).unwrap_or(false) {
+                        let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); continue;
+                    }
                     if root_placement::should_place_reveal(was_visible, desired_visible, visibility.is_current(revision, desired_visible)) {
                         let current_placement = *placement_preferences.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         if let Err(error) = root_placement::apply_placement(current_placement, native_window, root_placement::PlacementEdge::Reveal, || {
@@ -14523,6 +14677,7 @@ pub(crate) fn run_foundation_window(
                                 && (!checked_hotkey_reveal || (!hotkey_edge_pending(&trigger)
                                     && foreground.is_none_or(|expected| current_foreground_identity() == Some(expected)
                                         && native_window_is_valid(NativeWindow { identity: expected }))))
+                                && gesture_still_current()
                         }) {
                             tracing::warn!(%error, "could not apply saved launcher placement");
                         }
@@ -14530,15 +14685,18 @@ pub(crate) fn run_foundation_window(
                             continue;
                         }
                     }
-                    let reveal_current = || !checked_hotkey_reveal || (
+                    let reveal_current = || gesture_still_current() && (!checked_hotkey_reveal || (
                         reveal_edge_is_current(visibility.is_current(revision, true), hotkey_edge_pending(&trigger))
                             && !restart_admission_for_hotkey.is_fenced() && native_window_is_valid(native_window)
                             && foreground.is_none_or(|expected| current_foreground_identity() == Some(expected)
                                 && native_window_is_valid(NativeWindow { identity: expected }))
-                    );
+                    ));
                     if !reveal_current() {
-                        rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger);
+                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger); }
                         continue;
+                    }
+                    if checked_gesture_reveal && !update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| root.gesture_query_destination_available(window, cx)).unwrap_or(false) {
+                        let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); continue;
                     }
                     let switch_hide_accepted = switch_hide.is_some();
                     let guarded_hide = switch_hide_accepted || close_hide.is_some() || undo_hide.is_some();
@@ -14576,7 +14734,7 @@ pub(crate) fn run_foundation_window(
                             }
                             let utility_requested = dock_reveal.as_ref().is_some_and(|(_, _, utility)| utility.is_some());
                             let utility_focus_available = !utility_requested || root.utility_dock_focus_available(window, cx);
-                            if desired_visible && root.action_sheet.is_none() && utility_focus_available
+                            if desired_visible && gesture_request.is_none() && root.action_sheet.is_none() && utility_focus_available
                                 && visibility.is_current(revision, true)
                                 && root.native_window == Some(native_window)
                                 && !root.restart_admission.is_fenced()
@@ -14657,7 +14815,7 @@ pub(crate) fn run_foundation_window(
                         }
                     };
                     if !reveal_current() {
-                        rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger);
+                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger); }
                         continue;
                     }
                     if !visibility.is_current(revision, desired_visible) {
@@ -14709,12 +14867,17 @@ pub(crate) fn run_foundation_window(
                         }
                     }
                     if !reveal_current() {
-                        rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger);
+                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger); }
                         continue;
+                    }
+                    if checked_gesture_reveal && !update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| root.gesture_query_destination_available(window, cx)).unwrap_or(false) {
+                        let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); continue;
                     }
                     if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
                     if let Err(error) = set_native_window_visible(native_window, desired_visible) {
-                        if checked_hotkey_reveal {
+                        if checked_gesture_reveal {
+                            settle_failed_gesture_show(&visibility, revision, native_window, gesture_prior_state, was_visible);
+                        } else if checked_hotkey_reveal {
                             rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger);
                         } else {
                             visibility.revert_if_current(revision, desired_visible);
@@ -14723,7 +14886,7 @@ pub(crate) fn run_foundation_window(
                         continue;
                     }
                     if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
-                    if desired_visible && !(was_visible && dock_reveal.as_ref().is_some_and(|(_, _, mount)| mount.is_some())) {
+                    if desired_visible && !checked_gesture_reveal && !(was_visible && dock_reveal.as_ref().is_some_and(|(_, _, mount)| mount.is_some())) {
                         return_target = foreground
                             .filter(|captured| Some(*captured) == foreground_before_transition)
                             .filter(|captured| captured.hwnd != native_window.identity.hwnd)
@@ -14776,7 +14939,36 @@ pub(crate) fn run_foundation_window(
                         None
                     };
                     let mut root_activation_accepted = false;
-                    if let Some((gesture, generation, utility_mount_receipt)) = dock_reveal {
+                    if let Some(request) = &gesture_request {
+                        let mut committed = false;
+                        let destination_available = update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| root.gesture_query_destination_available(window, cx)).unwrap_or(false);
+                        if destination_available && gesture_still_current() && visibility.is_current(revision, true) {
+                            root_activation_accepted = if request.source() == native_window.identity {
+                                current_foreground_identity() == Some(native_window.identity)
+                            } else {
+                                activate_native_window(native_window).is_ok() && current_foreground_identity() == Some(native_window.identity)
+                            };
+                        }
+                        if root_activation_accepted && visibility.is_current(revision, true) && request.owner.is_current(&request.release)
+                            && !hotkey_edge_pending(&trigger) && !restart_admission_for_hotkey.is_fenced() {
+                            committed = update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| {
+                                if root.native_window != Some(native_window) || current_foreground_identity() != Some(native_window.identity)
+                                    || !visibility.is_current(revision, true) || !request.owner.is_current(&request.release)
+                                    || root.restart_admission.is_fenced() || hotkey_edge_pending(&trigger) || visibility.has_current_established_request()
+                                    || !root.gesture_query_destination_available(window, cx) { return false; }
+                                let Some(outcome) = gesture_outcome.clone() else { return false; };
+                                let Some(permit) = root.restart_admission.admit() else { return false; };
+                                if let Err(error) = root.apply_query_set_outcome(outcome, permit, window, cx) { root.launcher_search_error = Some(error); return false; }
+                                cx.notify();
+                                true
+                            }).unwrap_or(false);
+                        }
+                        if committed {
+                            return_target = gesture_query::committed_return_target(return_target, request.source(), native_window.identity);
+                        } else {
+                            settle_failed_gesture_show(&visibility, revision, native_window, gesture_prior_state, was_visible);
+                        }
+                    } else if let Some((gesture, generation, utility_mount_receipt)) = dock_reveal {
                         let current = visibility.is_current(revision, true)
                             && generation.is_none_or(|generation| dock_mount_generation.load(Ordering::Acquire) == generation)
                             && utility_mount_receipt.as_ref().is_none_or(|(mount, _)| mount.is_current())
@@ -14890,6 +15082,8 @@ pub(crate) fn run_foundation_window(
         }
     });
 
+    gesture_wake.close();
+    if let Some(owner) = &gesture_lifetime { owner.fence(); }
     timer_wake.close();
     if let Some(timer) = timer_lifetime { if let Err(error) = timer.shutdown() { tracing::error!(%error, "Timer shutdown failed"); } }
     if let Some(restore) = timer_restore { let _ = restore.join(); }
@@ -14912,6 +15106,8 @@ pub(crate) fn run_foundation_window(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .shutdown()
     };
+    let gesture_shutdown_result = gesture_lifetime.as_ref().map_or(Ok(()), |owner| owner.shutdown_checked());
+    if let Err(error) = &gesture_shutdown_result { tracing::error!(%error, "Mouse Gestures shutdown failed"); }
     if let Err(error) = &coordinate_shutdown_result {
         if restart_exit.is_none() {
             tracing::warn!(%error, "could not fully shut down the GPUI Coordinate HUD probe");
@@ -14948,6 +15144,7 @@ pub(crate) fn run_foundation_window(
             Frontend::Egui.selector_argument()
         ));
     }
+    if let Err(error) = gesture_shutdown_result { return Err(format!("Mouse Gestures shutdown failed: {error}")); }
     if let Some(error) = restart_failure_after_run.borrow_mut().take() {
         return Err(error);
     }
@@ -17161,9 +17358,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -19251,6 +19448,20 @@ mod tests {
         assert!(super::rollback_reveal_unless_hotkey_pending(&visibility, fresh, &trigger));
         let (_, visible) = visibility.next_toggle();
         assert!(visible);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn gesture_show_yields_to_live_established_visibility_request() {
+        let visibility = super::RootVisibility::new();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        visibility.bind_request_sender(tx);
+        assert!(visibility.activate());
+        let revision = visibility.request_revision.load(std::sync::atomic::Ordering::Acquire);
+        assert!(visibility.queue_visible(super::RootVisibilityRequest::HideAfterExternalLaunch(revision)));
+        assert!(visibility.has_current_established_request());
+        visibility.set_visible(false);
+        assert!(!visibility.has_current_established_request());
     }
 
     #[test]

@@ -4885,6 +4885,8 @@ fn main() -> anyhow::Result<()> {
             settings.plugin_settings.get("file_search")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default(),
+            settings.plugin_settings.get("mouse_gestures")
+                .map_or_else(|| Ok(Default::default()), |value| serde_json::from_value(value.clone()).map_err(|error| error.to_string())),
             app_data_root.clone(),
             gpui_frontend::ExternalLaunchPreferences {
                 preserve_command: settings.preserve_command,

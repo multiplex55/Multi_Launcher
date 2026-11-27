@@ -14,6 +14,22 @@ pub(super) struct CalculatorMetadata(multi_launcher::plugins_builtin::Calculator
 
 pub(super) struct MultiManagerBare;
 pub(super) struct TimerBare;
+pub(super) struct MouseGestureEdit;
+impl multi_launcher::plugin::Plugin for MouseGestureEdit {
+    fn name(&self) -> &str { "mouse_gestures" }
+    fn description(&self) -> &str { "Edit mouse gestures" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["mg"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if !query.trim().eq_ignore_ascii_case("mg edit") { return Vec::new(); }
+        multi_launcher::plugin::Plugin::search(&multi_launcher::plugins::mouse_gestures::MouseGesturesPlugin::default(), query)
+            .into_iter().filter(|action| action.action == "mg:dialog" && action.args.is_none()).collect()
+    }
+    fn commands(&self) -> Vec<Action> {
+        multi_launcher::plugin::Plugin::commands(&multi_launcher::plugins::mouse_gestures::MouseGesturesPlugin::default())
+            .into_iter().filter(|action| action.action == "mg:dialog" && action.args.is_none()).collect()
+    }
+}
 impl multi_launcher::plugin::Plugin for TimerBare {
     fn name(&self) -> &str { "timer" }
     fn description(&self) -> &str { "Create timers and alarms (prefix: `timer` / `alarm`)" }
@@ -312,6 +328,7 @@ pub(super) struct InstalledLauncherProviders {
     xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
     regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
     timer: TimerBare,
+    mouse_gestures: MouseGestureEdit,
     clipboard: ClipboardBare,
     snippets: SnippetsBare,
     tempfile: TempfileBare,
@@ -413,6 +430,7 @@ impl InstalledLauncherProviders {
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             timer: TimerBare,
+            mouse_gestures: MouseGestureEdit,
             clipboard: ClipboardBare,
             snippets: SnippetsBare::default(),
             tempfile: TempfileBare,
@@ -462,6 +480,7 @@ impl InstalledLauncherProviders {
             Some(&self.xml_toolkit as &dyn multi_launcher::plugin::Plugin),
             Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
             Some(&self.timer as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.mouse_gestures as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard as &dyn multi_launcher::plugin::Plugin),
             Some(&self.snippets as &dyn multi_launcher::plugin::Plugin),
             Some(&self.tempfile as &dyn multi_launcher::plugin::Plugin),

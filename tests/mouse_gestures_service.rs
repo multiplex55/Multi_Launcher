@@ -239,13 +239,13 @@ fn disabling_config_stops_worker_and_blocks_hook_events() {
     config.enabled = true;
     service.update_config(config.clone());
     assert!(service.is_running());
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
 
     config.enabled = false;
     service.update_config(config);
 
     assert!(!service.is_running());
-    assert!(!handle.emit(HookEvent::RButtonDown));
+    assert!(!handle.emit(HookEvent::RButtonDown(None, None)));
 }
 
 #[test]
@@ -381,7 +381,7 @@ fn cancel_event_clears_overlays_and_does_not_click() {
     config.cancel_behavior = CancelBehavior::DoNothing;
     service.update_config(config);
 
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     sleep(Duration::from_millis(50));
     let clears_before = overlay_state.trail_clears.load(Ordering::SeqCst);
     let hides_before = overlay_state.hint_hides.load(Ordering::SeqCst);
@@ -425,11 +425,11 @@ fn no_match_pass_through_click_sends_right_click() {
     config.recognition_interval_ms = 1;
     service.update_config(config);
 
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     // Give the worker time to capture the initial cursor position before moving.
     sleep(Duration::from_millis(50));
     cursor_provider.set_position((50.0, 0.0));
-    assert!(handle.emit(HookEvent::RButtonUp));
+    assert!(handle.emit(HookEvent::RButtonUp(None, None)));
     sleep(Duration::from_millis(50));
 
     assert_eq!(click_backend.clicks.load(Ordering::SeqCst), 1);
@@ -464,11 +464,11 @@ fn no_match_noop_does_not_send_right_click() {
     config.recognition_interval_ms = 1;
     service.update_config(config);
 
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     // Give the worker time to capture the initial cursor position before moving.
     sleep(Duration::from_millis(50));
     cursor_provider.set_position((50.0, 0.0));
-    assert!(handle.emit(HookEvent::RButtonUp));
+    assert!(handle.emit(HookEvent::RButtonUp(None, None)));
     sleep(Duration::from_millis(50));
 
     assert_eq!(click_backend.clicks.load(Ordering::SeqCst), 0);
@@ -522,7 +522,7 @@ fn hint_text_includes_best_guess_and_match_type() {
     config.recognition_interval_ms = 1;
     service.update_config(config);
 
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     // Give the worker time to capture the initial cursor position before moving.
     sleep(Duration::from_millis(50));
     cursor_provider.set_position((50.0, 0.0));
@@ -587,10 +587,10 @@ fn practice_mode_suppresses_execute_action() {
     let (tx, rx) = std::sync::mpsc::channel();
     let _event_sink = register_event_sender(tx);
 
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
-    assert!(handle.emit(HookEvent::RButtonUp));
+    assert!(handle.emit(HookEvent::RButtonUp(None, None)));
     sleep(Duration::from_millis(20));
 
     assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
@@ -659,7 +659,7 @@ fn cheat_sheet_overlay_shows_after_delay_without_tokens() {
     config.recognition_interval_ms = 10;
     service.update_config(config);
 
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     sleep(Duration::from_millis(300));
 
     let last = wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
@@ -728,13 +728,13 @@ fn selection_persists_across_gesture_sessions() {
     config.recognition_interval_ms = 1;
     service.update_config(config.clone());
 
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
     sleep(Duration::from_millis(20));
     assert!(handle.emit(HookEvent::SelectBinding(1)));
     sleep(Duration::from_millis(10));
-    assert!(handle.emit(HookEvent::RButtonUp));
+    assert!(handle.emit(HookEvent::RButtonUp(None, None)));
     sleep(Duration::from_millis(20));
 
     service.stop();
@@ -753,7 +753,7 @@ fn selection_persists_across_gesture_sessions() {
     service.update_db(Some(Arc::new(Mutex::new(db))));
     service.update_config(config);
 
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
     sleep(Duration::from_millis(50));
@@ -824,7 +824,7 @@ fn numeric_selection_updates_hint_text() {
     service.update_config(config);
 
     let reads_before_down = cursor_provider.read_count();
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     assert!(
         cursor_provider.wait_for_read_after(reads_before_down, Duration::from_secs(2)),
         "worker did not capture the gesture start position"
@@ -941,7 +941,7 @@ fn passive_tooltip_gesture_backends_stay_on_the_actual_worker_thread() {
     assert_eq!((first.0, second.0), ("create", "create"));
     assert_eq!(first.1, second.1);
     assert_ne!(first.1, thread::current().id());
-    assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(handle.emit(HookEvent::RButtonDown(None, None)));
     assert_eq!(receive.recv_timeout(timeout).unwrap(), ("use", first.1));
     assert!(handle.emit(HookEvent::Cancel));
     service.stop();
