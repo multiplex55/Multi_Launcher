@@ -8,4 +8,4 @@ G05 owns `plugin-settings-omni-search` in the common Settings host. Feature effe
 
 Select `settings_ui_reseeds_defaults_for_malformed_json` and `omni_results_keep_catalog_order_and_first_source_dedup`. Use synthetic catalog contents.
 
-Native and GPUI remain pending.
+The retained GPUI Settings section uses the six stock controls and the typed destination focuses Search apps. Checked save preserves unrelated settings and updates the live provider after exact acknowledgement. Paired Windows replay remains open. [Omni category Settings checkpoint](../CHECKPOINTS.md#p006-omni-search-category-settings)

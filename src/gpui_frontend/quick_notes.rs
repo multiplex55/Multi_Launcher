@@ -2,6 +2,18 @@
 use super::*;
 use multi_launcher::plugins::note::{self, Note, NotePlugin, QuickNoteDraft, QuickNoteWrite};
 
+struct NoteReservation { flag: Arc<AtomicBool>, committed: bool }
+impl NoteReservation {
+    fn acquire(flag: Arc<AtomicBool>) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok()?;
+        Some(Self { flag, committed: false })
+    }
+    fn commit(&mut self) { self.committed = true; }
+}
+impl Drop for NoteReservation {
+    fn drop(&mut self) { if !self.committed { self.flag.store(false, Ordering::Release); } }
+}
+
 pub(super) const WAIT: &str = "Save or Cancel the Quick Notes draft before closing.";
 
 fn notes_owner_needed(direct: bool, omni_search: bool, include_notes: bool) -> bool {
@@ -701,7 +713,7 @@ impl Render for QuickNotesView {
 }
 
 impl RootWindow {
-    pub(super) fn start_notes_owner(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn ensure_notes_owner(&mut self, _cx: &mut Context<Self>) {
         let direct = self
             .enabled_plugins
             .as_ref()
@@ -717,16 +729,18 @@ impl RootWindow {
         ) {
             return;
         }
+        let Some(mut reservation) = NoteReservation::acquire(self.search_catalog.providers.notes_started.clone()) else { return; };
+        let Some(permit) = self.restart_admission.admit() else { return; };
         let owner = self.search_catalog.providers.notes_owner();
         let wake = self.search_catalog.providers.notes_wake.clone();
         let errors = self.search_catalog.providers.notes_error.clone();
         let settings = self.search_catalog.note_provider_settings.clone();
         let admission = self.restart_admission.clone();
         let worker_wake = wake.clone();
-        let task = cx.background_executor().spawn(async move {
-            if admission.is_fenced() {
-                return;
-            }
+        let mut worker = self.search_catalog.providers.notes_worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let task = std::thread::Builder::new().name("gpui-notes-start".into()).spawn(move || {
+            let _permit = permit;
+            if admission.is_fenced() { return; }
             let callback_wake = worker_wake.clone();
             let mut plugin = NotePlugin::new_with_wake(move |result| {
                 *errors
@@ -737,19 +751,20 @@ impl RootWindow {
             if let Some(settings) = settings {
                 multi_launcher::plugin::Plugin::apply_settings(&mut plugin, &settings);
             }
-            if admission.is_fenced() {
-                return;
-            }
+            if admission.is_fenced() { return; }
             let plugin = Arc::new(plugin);
             *owner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plugin);
+            reservation.commit();
             worker_wake.notify();
         });
-        cx.spawn(async move |_, _| {
-            task.await;
-        })
-        .detach();
+        match task { Ok(task) => worker.push(task), Err(error) => { log::error!("Could not start Notes owner: {error}"); } }
+    }
+
+    pub(super) fn start_notes_owner(&mut self, cx: &mut Context<Self>) {
+        self.ensure_notes_owner(cx);
+        let wake = self.search_catalog.providers.notes_wake.clone();
         cx.spawn(async move |weak, cx| {
             while wake.wait().await {
                 if weak
@@ -923,6 +938,18 @@ mod tests {
         let mut forged = action;
         forged.args = Some("other".into());
         assert!(!current_provider("note", &forged, None, None));
+    }
+
+    #[test]
+    fn notes_start_reservation_is_single_and_failed_start_is_retryable() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first = super::NoteReservation::acquire(flag.clone()).unwrap();
+        assert!(super::NoteReservation::acquire(flag.clone()).is_none());
+        drop(first);
+        let mut second = super::NoteReservation::acquire(flag.clone()).unwrap();
+        second.commit();
+        drop(second);
+        assert!(super::NoteReservation::acquire(flag).is_none());
     }
 
     #[test]

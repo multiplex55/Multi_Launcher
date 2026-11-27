@@ -31,14 +31,14 @@ pub(super) enum OpenOrigin {
 enum Identity { Existing, New(String) }
 
 #[derive(Clone)]
-struct Destination { note: Note, identity: Identity, resolve_slug: Option<String> }
+struct Destination { note: Note, identity: Identity, resolve_slug: Option<String>, omni: bool }
 
 impl Destination {
-    fn existing(note: Note) -> Self { Self { note, identity: Identity::Existing, resolve_slug: None } }
+    fn existing(note: Note) -> Self { Self { note, identity: Identity::Existing, resolve_slug: None, omni: false } }
     fn resolved(slug: String, result: CheckedNewNote) -> Self {
         match result {
-            CheckedNewNote::Existing(note) => Self { note, identity: Identity::Existing, resolve_slug: Some(slug) },
-            CheckedNewNote::Draft(note) => Self { note, identity: Identity::New(slug.clone()), resolve_slug: Some(slug) },
+            CheckedNewNote::Existing(note) => Self { note, identity: Identity::Existing, resolve_slug: Some(slug), omni: false },
+            CheckedNewNote::Draft(note) => Self { note, identity: Identity::New(slug.clone()), resolve_slug: Some(slug), omni: false },
         }
     }
 }
@@ -247,6 +247,9 @@ impl NoteEditor {
             self.body.update(cx, |body, cx| body.set_readonly(false, cx));
         }
         cx.notify();
+    }
+    pub(super) fn revoke_omni_switch(&mut self, cx: &mut Context<Self>) {
+        if matches!(&self.decision, Some(Decision::Switch(target)) if target.omni) { self.revoke_switch(cx); }
     }
     pub(super) fn blocks_close(&self, cx: &App) -> bool {
         self.open
@@ -1061,7 +1064,9 @@ impl RootWindow {
                             return;
                         }
                     };
-                    root.mount_note_destination(Destination::existing(note), native, window, cx);
+                    let mut destination = Destination::existing(note);
+                    destination.omni = matches!(origin, OpenOrigin::Omni { .. });
+                    root.mount_note_destination(destination, native, window, cx);
                     cx.notify();
                 });
             });
@@ -1118,8 +1123,8 @@ mod tests {
         let draft = note("", "");
         assert!(same_identity(&Identity::New("alpha".into()), &draft, &Identity::New("alpha".into()), &draft));
         assert!(!same_identity(&Identity::New("alpha".into()), &draft, &Identity::New("beta".into()), &draft));
-        let destination = Destination { note: draft.clone(), identity: Identity::New("alpha".into()), resolve_slug: Some("alpha".into()) };
-        let existing = Destination { note: note("alpha", "alpha.md"), identity: Identity::Existing, resolve_slug: Some("alpha".into()) };
+        let destination = Destination { note: draft.clone(), identity: Identity::New("alpha".into()), resolve_slug: Some("alpha".into()), omni: false };
+        let existing = Destination { note: note("alpha", "alpha.md"), identity: Identity::Existing, resolve_slug: Some("alpha".into()), omni: false };
         assert!(!same_destination(&destination, &existing));
         assert!(same_destination(&destination, &destination.clone()));
     }

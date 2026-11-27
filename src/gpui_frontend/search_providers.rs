@@ -392,6 +392,8 @@ pub(super) struct InstalledLauncherProviders {
     pub(super) omni: super::omni_search::Provider,
     pub(super) omni_wake: Arc<super::HashWakeSignal>,
     pub(super) notes_wake: Arc<super::HashWakeSignal>,
+    pub(super) notes_started: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) notes_worker: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
     pub(super) notes_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
@@ -464,6 +466,8 @@ impl InstalledLauncherProviders {
             omni,
             omni_wake,
             notes_wake: Arc::new(super::HashWakeSignal::default()),
+            notes_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            notes_worker: Arc::new(std::sync::Mutex::new(Vec::new())),
             notes_error: Arc::new(std::sync::Mutex::new(None)),
             hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
             settings: multi_launcher::plugins::settings::SettingsPlugin,

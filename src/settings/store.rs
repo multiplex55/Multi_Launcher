@@ -4,6 +4,9 @@ pub use scoped_preferences::{ScopedSetting, ScopedSettingChange, ScopedSettingVa
 #[path = "launcher_hotkey.rs"]
 mod launcher_hotkey;
 pub use launcher_hotkey::LauncherHotkeySnapshot;
+#[path = "omni_preferences.rs"]
+mod omni_preferences;
+pub use omni_preferences::{OmniPreferencesSnapshot, OmniPreferencesAcknowledgement, OmniCommittedUnverified};
 
 use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};

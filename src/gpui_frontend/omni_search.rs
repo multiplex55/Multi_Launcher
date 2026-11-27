@@ -46,6 +46,7 @@ impl Projection {
         self.calendar.clone()
     }
     pub fn source_for(&self, action: &Action) -> Option<OmniSource> {
+        if self.settings_revision.0.load(Ordering::Acquire) != self.settings_revision.1 { return None; }
         let source = self
             .rows
             .get(&action_hash(action))?
@@ -61,6 +62,7 @@ impl Projection {
         &self,
         action: &Action,
     ) -> Option<(u64, Arc<multi_launcher::plugins::note::Note>)> {
+        if self.settings_revision.0.load(Ordering::Acquire) != self.settings_revision.1 { return None; }
         let snapshot = self.notes.as_ref()?;
         if snapshot.version != multi_launcher::plugins::note::note_version() {
             return None;
@@ -161,12 +163,15 @@ impl Provider {
         if let Ok(mut slot) = self.calendar.write() { *slot = Some(owner); }
     }
     pub fn configure(&self, value: Option<&serde_json::Value>) {
-        if let Some(settings) = value.and_then(|value| serde_json::from_value(value.clone()).ok())
-            && let Ok(mut current) = self.settings.write()
-        {
-            *current = settings;
-            self.settings_revision.fetch_add(1, Ordering::AcqRel);
-        }
+        self.apply_categories(value.and_then(|value| serde_json::from_value(value.clone()).ok()).unwrap_or_default());
+    }
+    pub fn apply_categories(&self, settings: OmniSearchSettings) -> bool {
+        let Ok(mut current) = self.settings.write() else { return false; };
+        if *current == settings { return false; }
+        *current = settings;
+        self.settings_revision.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut projection) = self.projected.lock() { *projection = None; }
+        true
     }
     pub fn install(&self, catalog: Option<Arc<OmniAppCatalog>>) {
         if let Ok(mut current) = self.catalog.write() {
@@ -185,7 +190,7 @@ impl Provider {
             .lock()
             .ok()?
             .as_ref()
-            .filter(|value| value.query == effective)
+            .filter(|value| value.query == effective && value.settings_revision.0.load(Ordering::Acquire) == value.settings_revision.1)
             .cloned()
     }
     pub fn source_for(&self, raw_query: &str, action: &Action) -> Option<OmniSource> {
@@ -225,6 +230,20 @@ impl Owner {
 }
 
 impl RootWindow {
+    pub(super) fn apply_omni_categories(&mut self, categories: OmniSearchSettings, cx: &mut Context<Self>) {
+        if self.search_catalog.providers.omni.settings() == categories { return; }
+        self.external_launch.retire_omni_categories_before_effect();
+        let had_replacement = self.calendar_results.has_replacement();
+        self.calendar_results.retire();
+        if !self.search_catalog.providers.omni.apply_categories(categories) { return; }
+        self.ensure_notes_owner(cx);
+        let query = self.query.read(cx).value().to_string();
+        if let Some(view) = &self.note_editor_view { view.update(cx, |view, cx| view.revoke_omni_switch(cx)); }
+        if is_omni_query(&query) || had_replacement {
+            self.refresh_launcher_results_preserving_entered_omni(query, cx);
+        }
+        cx.notify();
+    }
     pub(super) fn start_omni_watch(&mut self, cx: &mut Context<Self>) {
         let signal = self.search_catalog.providers.omni_wake.clone();
         let root = cx.entity().downgrade();
@@ -639,6 +658,25 @@ mod tests {
         assert!(projection.todo_for(&rows[0]).is_none());
         assert!(provider.search("o Café").is_empty());
         owner.shutdown();
+    }
+
+    #[test]
+    fn category_updates_revoke_old_projection_across_off_on() {
+        let provider = Provider::new(None, None, Arc::new(Mutex::new(None)), Arc::new(super::super::search_providers::NoteSnapshots::default()));
+        provider.search("o");
+        let before = provider.projection("o").unwrap();
+        let original = provider.settings();
+        let mut disabled = original.clone(); disabled.include_calendar = false;
+        assert!(provider.apply_categories(disabled));
+        assert!(provider.projection("o").is_none());
+        assert_ne!(before.settings_revision.0.load(std::sync::atomic::Ordering::Acquire), before.settings_revision.1);
+        provider.search("o");
+        let middle = provider.projection("o").unwrap();
+        assert!(provider.apply_categories(original.clone()));
+        assert_ne!(middle.settings_revision.0.load(std::sync::atomic::Ordering::Acquire), middle.settings_revision.1);
+        assert!(!provider.apply_categories(original));
+        provider.search("o");
+        assert!(provider.projection("o").is_some());
     }
 
     #[test]

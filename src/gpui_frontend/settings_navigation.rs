@@ -5,6 +5,7 @@ use multi_launcher::settings_editor::catalog::{SettingsCatalog, ids};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Target {
     LauncherHotkey,
+    OmniCategories,
     Autocomplete,
     Exact,
     Fuzzy,
@@ -30,6 +31,7 @@ impl Target {
     fn from_id(id: &str) -> Option<Self> {
         Some(match id {
             ids::HOTKEY_LAUNCHER => Self::LauncherHotkey,
+            "plugin.omni_search.included_categories" => Self::OmniCategories,
             ids::SEARCH_AUTOCOMPLETE => Self::Autocomplete,
             ids::SEARCH_MATCH_EXACT => Self::Exact,
             ids::SEARCH_FUZZY_WEIGHT | ids::SEARCH_FUZZY_WEIGHT_VALUE => Self::Fuzzy,
@@ -127,6 +129,7 @@ impl SettingsNavigation {
         search: Option<Entity<settings_search::SearchSettings>>,
         actions: Option<Entity<settings_actions::ActionsSettings>>,
         hotkey: Option<Entity<settings_hotkey::SettingsHotkey>>,
+        omni: Option<Entity<settings_omni::SettingsOmni>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -149,6 +152,7 @@ impl SettingsNavigation {
         if let Some(hotkey) = hotkey {
             watchers.push(cx.observe(&hotkey, |_: &mut Self, _, cx| cx.notify()));
         }
+        if let Some(omni) = omni { watchers.push(cx.observe(&omni, |_: &mut Self, _, cx| cx.notify())); }
         Self {
             root,
             owner,
@@ -239,7 +243,9 @@ impl SettingsNavigation {
             .into_iter()
             .filter_map(|entry| {
                 let target = Target::from_id(entry.id.as_str())?;
-                let available = if target == Target::LauncherHotkey {
+                let available = if target == Target::OmniCategories {
+                    root.settings_omni.as_ref().is_some_and(|view| view.read(cx).can_focus())
+                } else if target == Target::LauncherHotkey {
                     root.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).can_focus())
                 } else if target.search_section() {
                     root.settings_search
@@ -293,7 +299,9 @@ fn navigate(
         return;
     }
     let state = root_entity.read(app);
-    let target_live = if target == Target::LauncherHotkey {
+    let target_live = if target == Target::OmniCategories {
+        state.settings_omni.as_ref().is_some_and(|view| view.read(app).can_focus())
+    } else if target == Target::LauncherHotkey {
         state.settings_hotkey.as_ref().is_some_and(|view| view.read(app).can_focus())
     } else if target.search_section() {
         state
@@ -366,7 +374,9 @@ fn navigate(
             {
                 return;
             }
-            let focused = if target == Target::LauncherHotkey {
+            let focused = if target == Target::OmniCategories {
+                root.settings_omni.as_ref().is_some_and(|view| view.update(cx, |view, cx| view.focus_control(window, cx)))
+            } else if target == Target::LauncherHotkey {
                 root.settings_hotkey.as_ref().is_some_and(|view| view.update(cx, |view, cx| view.focus_control(window, cx)))
             } else if target.search_section() {
                 root.settings_search.as_ref().is_some_and(|view| {
@@ -379,7 +389,7 @@ fn navigate(
             };
             if focused {
                 root.settings_panel_scroll
-                    .scroll_to_top_of_item(if target == Target::LauncherHotkey { 2 } else if target.search_section() { 3 } else { 4 });
+                    .scroll_to_top_of_item(if target == Target::LauncherHotkey { 2 } else if target.search_section() { 3 } else if target == Target::OmniCategories { 5 } else { 4 });
                 cx.notify();
             }
         });
@@ -463,6 +473,12 @@ mod tests {
     use super::{Target, current_provider, navigation_receipt_current};
     use multi_launcher::plugin::Plugin;
     use std::collections::{HashMap, HashSet};
+    #[test]
+    fn omni_category_catalog_maps_to_search_apps_target() {
+        assert_eq!(super::Target::from_id("plugin.omni_search.included_categories"), Some(super::Target::OmniCategories));
+        assert!(multi_launcher::settings_editor::catalog::SettingsCatalog::default().search("omni search").iter().any(|entry| super::Target::from_id(entry.id.as_str()) == Some(super::Target::OmniCategories)));
+    }
+
     #[test]
     fn typed_settings_admission_requires_exact_installed_provider_row() {
         let query = "settings   toast duration";

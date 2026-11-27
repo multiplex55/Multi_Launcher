@@ -678,6 +678,7 @@ struct Pending {
     snippet_effect: bool,
     omni_lease: Option<Arc<AtomicBool>>,
     omni_gate: Option<Arc<EffectGate>>,
+    omni_category_effect: bool,
 }
 
 #[derive(Default)]
@@ -737,6 +738,13 @@ impl ExternalLaunch {
             && let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
     }
 
+    pub(super) fn retire_omni_categories_before_effect(&self) {
+        if let Some(pending) = &self.pending
+            && pending.omni_category_effect
+            && pending.omni_gate.as_ref().is_some_and(|gate| gate.revoke_pending())
+            && let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
+    }
+
     pub(super) fn set_snippet_preview_lease(&mut self, lease: Arc<std::sync::atomic::AtomicBool>) {
         if let Some(previous) = self.preview_lease.replace(lease) { previous.store(false, Ordering::Release); }
     }
@@ -781,6 +789,7 @@ impl ExternalLaunch {
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
             omni_lease: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_category_effect: match &request.command { RunCommand::Omni { target, .. } => !matches!(target, OmniTarget::Tempfile(_)), RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } => true, _ => false },
             omni_gate: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
         });
         Some(ticket)
@@ -2145,7 +2154,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "o".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())),
+            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())), omni_category_effect: true,
         });
         assert!(owner.defer_notes_wake_for_omni());
         assert!(owner.defer_notes_wake_for_omni());
@@ -2156,6 +2165,36 @@ mod tests {
         owner.pending.take();
         assert!(owner.take_deferred_notes_wake());
         assert!(!owner.take_deferred_notes_wake());
+    }
+
+    #[test]
+    fn category_retirement_preserves_direct_and_entered_effects() {
+        let admission = Arc::new(RestartAdmission::default());
+        let lease = Arc::new(AtomicBool::new(true));
+        let gate = Arc::new(EffectGate::default());
+        let mut owner = ExternalLaunch::default();
+        owner.pending = Some(Pending {
+            ticket: 1,
+            stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "tmp list".into(), focus: None },
+            permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
+            clipboard_lease: None, focus_guard: None, snippet_effect: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false,
+        });
+        owner.retire_omni_categories_before_effect();
+        assert!(lease.load(Ordering::Acquire));
+        assert_eq!(gate.0.load(Ordering::Acquire), EFFECT_PENDING);
+        owner.pending.as_mut().unwrap().omni_category_effect = true;
+        owner.retire_omni_categories_before_effect();
+        assert!(!lease.load(Ordering::Acquire));
+        assert_eq!(gate.0.load(Ordering::Acquire), EFFECT_REVOKED);
+        let entered = Arc::new(EffectGate::default());
+        assert!(claim_omni_effect(&entered, || true));
+        let lease = Arc::new(AtomicBool::new(true));
+        let pending = owner.pending.as_mut().unwrap();
+        pending.omni_gate = Some(entered.clone()); pending.omni_lease = Some(lease.clone());
+        owner.retire_omni_categories_before_effect();
+        assert!(lease.load(Ordering::Acquire));
+        assert_eq!(entered.0.load(Ordering::Acquire), EFFECT_ENTERED);
     }
 
     #[test]

@@ -95,6 +95,7 @@ impl Owner {
     pub fn acknowledge_source(&mut self) {
         self.source_dirty = false;
     }
+    pub fn has_replacement(&self) -> bool { self.replacement.is_some() }
     pub fn is_pending(&self) -> bool {
         self.pending.is_some()
     }

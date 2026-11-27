@@ -20,6 +20,7 @@ mod multi_manager;
 mod file_search_handoff;
 mod file_search_preview;
 mod settings_actions;
+mod settings_omni;
 mod settings_search;
 mod settings_hotkey;
 mod settings_navigation;
@@ -1283,6 +1284,7 @@ struct SettingsEditorPanel {
     scroll: ScrollHandle,
     search: Option<Entity<settings_search::SearchSettings>>,
     actions: Option<Entity<settings_actions::ActionsSettings>>,
+    omni: Option<Entity<settings_omni::SettingsOmni>>,
     hotkey: Option<Entity<settings_hotkey::SettingsHotkey>>,
     busy: bool,
     status: Option<String>, index_busy: bool, index_status: Option<String>, width: f32,
@@ -1739,6 +1741,7 @@ impl RenderOnce for SettingsEditorPanel {
             .when_some(self.hotkey, |panel, hotkey| panel.child(hotkey))
             .when_some(self.search, |panel, search| panel.child(search))
             .when_some(self.actions, |panel, actions| panel.child(actions))
+            .when_some(self.omni, |panel, omni| panel.child(omni))
             .child(Button::new("settings-reload-application-index").label("Reload application index")
                 .disabled(self.index_busy || self.busy).on_click(move |_, _, app| {
                     let _ = reload_root.update(app, |root, cx| root.reload_application_index(cx));
@@ -2424,9 +2427,11 @@ struct RootWindow {
     settings_navigation: Option<Entity<settings_navigation::SettingsNavigation>>,
     settings_hotkey: Option<Entity<settings_hotkey::SettingsHotkey>>,
     hotkey_reconciliation: Arc<AtomicBool>,
+    omni_reconciliation: bool,
     hotkey_reconciliation_proof: Arc<Mutex<Option<settings_hotkey::RecoveryProof>>>,
     settings_panel_scroll: ScrollHandle,
     settings_actions: Option<Entity<settings_actions::ActionsSettings>>,
+    settings_omni: Option<Entity<settings_omni::SettingsOmni>>,
     app_editor: add_action::AppEditorState,
     omni_search: omni_search::Owner,
     folder_authoring: folder_authoring::State,
@@ -3749,6 +3754,8 @@ enum RootCloseBlocker {
     ExternalLaunch,
     BooleanPreferenceSave,
     SettingsActionsSave,
+    SettingsOmniSave,
+    SettingsOmniDraft,
     LauncherHotkeySave,
     LauncherHotkeyDraft,
     PluginPreferenceSave,
@@ -4674,6 +4681,7 @@ struct RestartDrafts {
     hash_window_open: bool,
     settings_search: Option<settings_search::RestartDraft>,
     settings_hotkey: Option<(Option<String>, String)>,
+    settings_omni: Option<(multi_launcher::plugins::omni_search::OmniSearchSettings, multi_launcher::plugins::omni_search::OmniSearchSettings)>,
     show_examples: bool,
     file_search_open: bool,
     downloads_triage_open: bool,
@@ -4927,7 +4935,7 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.hash.algorithm != HashAlgorithm::Sha256 {
         names.push("non-default Hash Generator algorithm");
     }
-    if drafts.settings_search.as_ref().is_some_and(|draft| draft.dirty()) || drafts.settings_hotkey.as_ref().is_some_and(|(baseline, draft)| baseline.as_deref().unwrap_or("") != draft.as_str()) { names.push("unsaved Settings preference"); }
+    if drafts.settings_search.as_ref().is_some_and(|draft| draft.dirty()) || drafts.settings_hotkey.as_ref().is_some_and(|(baseline, draft)| baseline.as_deref().unwrap_or("") != draft.as_str()) || drafts.settings_omni.as_ref().is_some_and(|(baseline, draft)| baseline != draft) { names.push("unsaved Settings preference"); }
     if drafts.file_search_open {
         names.push("File Search form and results");
     }
@@ -5762,6 +5770,7 @@ impl RootWindow {
         }
         if self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_search::WAIT.to_owned()); }
         if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_hotkey::WAIT.to_owned()); }
+        if self.omni_reconciliation { return Err("Omni Search save needs reconciliation. Cancel Settings, close Multi Launcher, then manually relaunch from the canonical Settings file.".into()); }
         if self.hotkey_reconciliation.load(Ordering::Acquire) { return Err("Launcher hotkey state is unresolved. Cancel Settings to discard the draft, then close Multi Launcher and manually relaunch the desired frontend.".into()); }
         if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).dirty(cx)) { return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned()); }
         if self.command_help.pending.is_some() {
@@ -5770,6 +5779,8 @@ impl RootWindow {
                     .to_owned(),
             );
         }
+        if self.settings_omni.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_omni::WAIT.to_owned()); }
+        if self.settings_omni.as_ref().is_some_and(|view| view.read(cx).dirty()) { return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned()); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_actions::WAIT.to_owned()); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).restart_draft(cx).dirty()) { return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned()); }
         if self.settings_search.as_ref().is_some_and(|view| view.read(cx).restart_draft(cx).dirty()) {
@@ -6084,6 +6095,7 @@ impl RootWindow {
                 hash_window_open,
                 settings_search: self.settings_search.as_ref().map(|view| view.read(cx).restart_draft(cx)),
                 settings_hotkey: self.settings_hotkey.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
+                settings_omni: self.settings_omni.as_ref().and_then(|view| view.read(cx).restart_draft()),
                 show_examples: self.command_help.show_examples,
                 file_search_open: self.file_search.as_ref().is_some_and(|view| view.read(cx).open),
                 downloads_triage_open: self.downloads_triage_open(cx),
@@ -7086,11 +7098,13 @@ impl RootWindow {
         self.open_search_settings(window, cx);
         self.open_actions_settings(window, cx);
         self.open_settings_hotkey(window, cx);
+        self.open_omni_settings(window, cx);
         let root = cx.entity().downgrade();
         let search = self.settings_search.clone();
         let actions = self.settings_actions.clone();
         let hotkey = self.settings_hotkey.clone();
-        self.settings_navigation = Some(cx.new(|cx| settings_navigation::SettingsNavigation::new(root, search, actions, hotkey, window, cx)));
+        let omni = self.settings_omni.clone();
+        self.settings_navigation = Some(cx.new(|cx| settings_navigation::SettingsNavigation::new(root, search, actions, hotkey, omni, window, cx)));
         self.settings_panel_scroll.set_offset(point(px(0.0), px(0.0)));
         self.settings_focus_handle.focus(window, cx); cx.notify();
     }
@@ -7150,6 +7164,9 @@ impl RootWindow {
                 self.settings_owner_focus_handle.contains_focused(window, cx),
                 self.restart_admission.is_fenced(),
             );
+        if self.settings_omni.as_ref().is_some_and(|view| view.read(cx).busy()) {
+            self.settings_editor.status = Some(settings_omni::WAIT.into()); cx.notify(); return;
+        }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) {
             self.settings_editor.status = Some(settings_actions::WAIT.into()); cx.notify(); return;
         }
@@ -7164,6 +7181,7 @@ impl RootWindow {
         if let Some(view) = self.settings_navigation.take() { view.update(cx, |view, _| view.retire()); }
         if let Some(view) = self.settings_search.take() { view.update(cx, |view, _| view.retire()); }
         if let Some(view) = self.settings_actions.take() { view.update(cx, |view, _| view.retire()); }
+        if let Some(view) = self.settings_omni.take() { view.update(cx, |view, _| view.retire()); }
         if let Some(view) = self.settings_hotkey.take() { view.update(cx, |view, _| view.retire()); }
         panel_stack::retire(&mut self.panel_stack, Panel::Settings);
         clear_stale_settings_restart_status(&mut self.restart_status, true);
@@ -7200,6 +7218,14 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
+        self.refresh_launcher_results_inner(query, scroll_to_search, false, cx);
+    }
+
+    fn refresh_launcher_results_preserving_entered_omni(&mut self, query: String, cx: &mut Context<Self>) {
+        self.refresh_launcher_results_inner(query, false, true, cx);
+    }
+
+    fn refresh_launcher_results_inner(&mut self, query: String, scroll_to_search: bool, preserve_entered_omni: bool, cx: &mut Context<Self>) {
         if self.launcher_results.query != query {
             if let Some(view) = &self.multi_manager_view { view.update(cx, |view, _| view.revoke_restore()); }
             self.note_open_epoch.fetch_add(1, Ordering::AcqRel);
@@ -7207,7 +7233,7 @@ impl RootWindow {
         }
         self.calendar_results.retire();
         if let Some(view) = &self.calendar_view { view.update(cx, |view, _| view.search_refreshed(&query, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())); }
-        self.external_launch.retire_omni();
+        if preserve_entered_omni { self.external_launch.retire_omni_categories_before_effect(); } else { self.external_launch.retire_omni(); }
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
         if !external_drop::same_query_projection(&self.launcher_results.query, &query) { self.external_drop.revoke(); }
@@ -10592,6 +10618,8 @@ impl RootWindow {
             }
             Some(RootCloseBlocker::RegexHistory) => { self.restart_status = Some(regex_history::WAIT_QUIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardModifyBlocked) => { self.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
+            Some(RootCloseBlocker::SettingsOmniSave) => { self.restart_status = Some(settings_omni::WAIT.to_owned()); }
+            Some(RootCloseBlocker::SettingsOmniDraft) => { self.restart_status = Some("Save Omni Search or cancel Settings before closing.".into()); }
             Some(RootCloseBlocker::SettingsActionsSave) => { self.restart_status = Some(settings_actions::WAIT.to_owned()); }
             Some(RootCloseBlocker::LauncherHotkeySave) => { self.restart_status = Some(settings_hotkey::WAIT.to_owned()); }
             Some(RootCloseBlocker::LauncherHotkeyDraft) => { self.restart_status = Some("Save the launcher hotkey or cancel Settings before closing.".into()); }
@@ -10732,6 +10760,8 @@ impl RootWindow {
         if self.timer_busy.load(Ordering::Acquire) { return Some(RootCloseBlocker::TimerOperation); }
         if self.gesture_editor.as_ref().is_some_and(|view| view.read(cx).blocks_root_close(cx)) { return Some(RootCloseBlocker::GestureEditor); }
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
+        if self.settings_omni.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsOmniSave); }
+        if self.settings_omni.as_ref().is_some_and(|view| view.read(cx).dirty()) { return Some(RootCloseBlocker::SettingsOmniDraft); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
         if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::LauncherHotkeySave); }
         if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).dirty(cx)) { return Some(RootCloseBlocker::LauncherHotkeyDraft); }
@@ -11216,10 +11246,11 @@ impl Render for RootWindow {
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
             root: cx.entity().downgrade(), navigation: self.settings_navigation.clone(), scroll: self.settings_panel_scroll.clone(),
             search: self.settings_search.clone(), actions: self.settings_actions.clone(),
-            hotkey: self.settings_hotkey.clone(),
+            hotkey: self.settings_hotkey.clone(), omni: self.settings_omni.clone(),
             busy: self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy())
                 || self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy())
-                || self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy()),
+                || self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy())
+                || self.settings_omni.as_ref().is_some_and(|view| view.read(cx).busy()),
             status: self.settings_editor.status.clone(), index_busy: self.indexed_applications.busy(),
             index_status: self.indexed_applications.status.clone(), width: root_controls_width, metrics, palette,
             settings_owner_focus_handle: self.settings_owner_focus_handle.clone(),
@@ -13328,6 +13359,8 @@ pub(crate) fn run_foundation_window(
     let calendar_slot = Arc::new(Mutex::new(None));
     let launcher_search_catalog =
         LauncherSearchCatalog::new(search_startup, enabled_plugins.as_ref());
+    let notes_worker = launcher_search_catalog.providers.notes_worker.clone();
+    let notes_owner = launcher_search_catalog.providers.notes_owner();
     launcher_search_catalog.providers.omni.attach_todos(todo_slot.clone());
     launcher_search_catalog.providers.omni.attach_calendar(calendar_slot.clone());
     let search_jump_geometry_frame_for_root =
@@ -13669,9 +13702,11 @@ pub(crate) fn run_foundation_window(
                 settings_navigation: None,
                 settings_hotkey: None,
                 hotkey_reconciliation: Arc::new(AtomicBool::new(false)),
+                omni_reconciliation: false,
                 hotkey_reconciliation_proof: Arc::new(Mutex::new(None)),
                 settings_panel_scroll: ScrollHandle::new(),
                 settings_actions: None,
+                settings_omni: None,
                 app_editor: add_action::AppEditorState::new(cx),
                 omni_search: omni_search::Owner::default(),
                 folder_authoring: folder_authoring::State::default(),
@@ -14324,6 +14359,8 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::RegexHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_history::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardModifyBlocked) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::SettingsOmniSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(settings_omni::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::SettingsOmniDraft) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Save Omni Search or cancel Settings before closing.".into()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SettingsActionsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(settings_actions::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::LauncherHotkeySave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(settings_hotkey::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::LauncherHotkeyDraft) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Save the launcher hotkey or cancel Settings before closing.".into()); cx.notify(); }); false }
@@ -15255,6 +15292,8 @@ pub(crate) fn run_foundation_window(
     });
 
     restart_admission.fence();
+    for worker in notes_worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain(..) { let _ = worker.join(); }
+    notes_owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
     todo_wake.close();
     calendar_wake.close();
     let _ = calendar_start.join();

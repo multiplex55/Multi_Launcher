@@ -983,6 +983,33 @@ impl SettingsSaveWorkerRegistry {
         Ok(receiver)
     }
 
+    /// Read the exact Omni Search baseline under the registered Settings owner.
+    pub fn begin_omni_preferences_read(&self, settings_path: String) -> Result<Receiver<Result<crate::settings::OmniPreferencesSnapshot, String>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        self.spawn(move || { let _ = sender.send(Settings::omni_preferences_snapshot(&settings_path).map_err(|error| error.to_string())); })
+            .map_err(|error| format!("could not start the Omni Search baseline reader: {error}"))?;
+        Ok(receiver)
+    }
+
+    /// Register the complete Omni Search category transaction under the Settings owner.
+    pub fn begin_omni_preferences_save(&self, settings_path: String, baseline: crate::settings::OmniPreferencesSnapshot, desired: crate::plugins::omni_search::OmniSearchSettings)
+        -> Result<(Receiver<anyhow::Result<crate::settings::OmniPreferencesAcknowledgement>>, SettingsBooleanSaveToken), String> {
+        let token = self.reserve_preference_token()?;
+        let (sender, receiver) = mpsc::channel();
+        let registry = self.clone();
+        let worker_token = token.clone();
+        if let Err(error) = self.spawn(move || {
+            let result = Settings::save_omni_preferences_cancellable(std::path::Path::new(&settings_path), &baseline, &desired, &worker_token);
+            let failure = result.as_ref().err().filter(|_| !worker_token.is_canceled()).map(ToString::to_string);
+            registry.complete_preference_token(worker_token.id(), failure);
+            let _ = sender.send(result);
+        }) {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).boolean_preference_pending.remove(&token.id());
+            return Err(format!("could not start the Omni Search preference writer: {error}"));
+        }
+        Ok((receiver, token))
+    }
+
     /// Register a cancellable multi-field Settings transaction under the same shutdown owner.
     pub fn begin_scoped_preferences_save(&self, settings_path: String, changes: Vec<crate::settings::ScopedSettingChange>)
         -> Result<(Receiver<Result<crate::settings::ScopedSettingsAcknowledgement, crate::settings::ScopedSettingsError>>, SettingsBooleanSaveToken), String> {

@@ -20,6 +20,7 @@ pub use model::*;
 pub(crate) use store::LauncherClosePreferences;
 pub use store::{
     LauncherHotkeySnapshot,
+    OmniPreferencesSnapshot, OmniPreferencesAcknowledgement, OmniCommittedUnverified,
     ScopedSetting, ScopedSettingChange, ScopedSettingValue, ScopedSettingsAcknowledgement, ScopedSettingsError,
     SearchCapabilityError, SearchCapabilitySaveAcknowledgement, SearchCapabilitySaveRequest,
     SearchCapabilitySnapshot, provider_capability_enabled, provider_search_capability_enabled,
