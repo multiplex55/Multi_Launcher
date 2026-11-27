@@ -28,8 +28,16 @@ struct TimerInboxOwner {
     publisher: crate::notifications::InboxPublisher,
     session: [u8; 16],
     completed: VecDeque<CompletedInboxTimer>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    alarm_path: Option<String>,
+    alarm_error: Option<String>,
 }
 static TIMER_INBOX: Lazy<Mutex<Option<TimerInboxOwner>>> = Lazy::new(|| Mutex::new(None));
+static TIMER_GPUI_RESERVATION: Lazy<Mutex<Option<[u8; 16]>>> = Lazy::new(|| Mutex::new(None));
+static TIMER_COMPLETION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static SESSION_ALARM_BASELINE: Lazy<Mutex<Option<(String, Option<Vec<u8>>)>> > = Lazy::new(|| Mutex::new(None));
+#[cfg(test)]
+pub(crate) static TEST_TIMER_INBOX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Attach the current app-session publisher. Reattachment invalidates old snooze authority.
 pub(crate) fn attach_inbox_timer(
@@ -39,13 +47,83 @@ pub(crate) fn attach_inbox_timer(
     if session == [0; 16] {
         return;
     }
+    let Ok(reservation) = TIMER_GPUI_RESERVATION.lock() else { return; };
+    if reservation.is_some() { return; }
     if let Ok(mut owner) = TIMER_INBOX.lock() {
         *owner = Some(TimerInboxOwner {
             publisher,
             session,
             completed: VecDeque::new(),
+            wake: None,
+            alarm_path: None,
+            alarm_error: None,
         });
     }
+}
+
+pub(crate) fn reserve_gpui_timer(session: [u8; 16]) -> bool {
+    let Ok(mut reservation) = TIMER_GPUI_RESERVATION.lock() else { return false; };
+    let Ok(owner) = TIMER_INBOX.lock() else { return false; };
+    if session == [0; 16] || reservation.is_some() || owner.is_some() { return false; }
+    *reservation = Some(session);
+    true
+}
+
+pub(crate) fn release_gpui_timer(session: [u8; 16]) {
+    if let Ok(mut reservation) = TIMER_GPUI_RESERVATION.lock() && *reservation == Some(session) {
+        *reservation = None;
+    }
+}
+
+pub(crate) fn attach_gpui_timer_inbox(publisher: crate::notifications::InboxPublisher, session: [u8; 16], wake: Arc<dyn Fn() + Send + Sync>, alarm_path: String) -> bool {
+    let Ok(reservation) = TIMER_GPUI_RESERVATION.lock() else { return false; };
+    if *reservation != Some(session) { return false; }
+    let Ok(mut owner) = TIMER_INBOX.lock() else { return false; };
+    if session == [0; 16] || owner.is_some() { return false; }
+    *owner = Some(TimerInboxOwner { publisher, session, completed: VecDeque::new(), wake: Some(wake), alarm_path: Some(alarm_path), alarm_error: None });
+    true
+}
+
+pub(crate) fn detach_gpui_timer_inbox(session: [u8; 16], owned: &[u64]) {
+    let _completion = TIMER_COMPLETION_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Ok(mut timers) = ACTIVE_TIMERS.lock() {
+        for id in owned { if timers.remove(id).is_some() { TIMER_MANAGER.remove(*id); } }
+    }
+    if let Ok(mut owner) = TIMER_INBOX.lock() && owner.as_ref().is_some_and(|owner| owner.session == session) {
+        *owner = None;
+        if let Ok(mut baseline) = SESSION_ALARM_BASELINE.lock() { *baseline = None; }
+        if let Ok(mut messages) = FINISHED_MESSAGES.lock() { messages.clear(); }
+    }
+}
+
+pub(crate) fn take_gpui_timer_messages(session: [u8; 16]) -> Vec<String> {
+    let Ok(owner) = TIMER_INBOX.lock() else { return Vec::new(); };
+    if !owner.as_ref().is_some_and(|owner| owner.session == session) { return Vec::new(); }
+    take_finished_messages()
+}
+
+pub(crate) fn take_gpui_alarm_error(session: [u8; 16]) -> Option<String> {
+    let mut owner = TIMER_INBOX.lock().ok()?;
+    owner.as_mut().filter(|owner| owner.session == session)?.alarm_error.take()
+}
+
+fn report_gpui_alarm_error(error: &anyhow::Error) {
+    if let Ok(mut owner) = TIMER_INBOX.lock() && let Some(owner) = owner.as_mut() && owner.alarm_path.is_some() {
+        owner.alarm_error = Some(format!("An alarm was not triggered because its saved file could not be updated: {error}. Review alarms.json and restart Multi Launcher."));
+    }
+    wake_timer_inbox();
+}
+
+fn wake_timer_inbox() {
+    let wake = TIMER_INBOX.lock().ok().and_then(|owner| owner.as_ref().and_then(|owner| owner.wake.clone()));
+    if let Some(wake) = wake { wake(); }
+}
+
+fn queue_timer_completion(message: String) {
+    if let Ok(mut messages) = FINISHED_MESSAGES.lock() {
+        messages.push(message);
+    }
+    wake_timer_inbox();
 }
 
 fn record_inbox_completion(entry: &TimerEntry) {
@@ -230,6 +308,35 @@ fn saved_alarm(timer: &TimerEntry) -> SavedAlarm {
     }
 }
 
+fn read_session_alarm_bytes(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn save_session_alarms(path: &str, timers: &HashMap<u64, TimerEntry>, candidate: Option<&TimerEntry>, excluded: Option<u64>) -> anyhow::Result<()> {
+    let path = std::path::Path::new(path);
+    let before = read_session_alarm_bytes(path)?;
+    let mut baseline = SESSION_ALARM_BASELINE.lock().map_err(|_| anyhow::anyhow!("alarm baseline unavailable"))?;
+    if !baseline.as_ref().is_some_and(|(expected_path, bytes)| Some(expected_path.as_str()) == path.to_str() && *bytes == before) {
+        anyhow::bail!("Alarm file changed since it was loaded; existing alarms were preserved");
+    }
+    if let Some(bytes) = before.as_ref().filter(|bytes| !bytes.iter().all(u8::is_ascii_whitespace)) {
+        let _: Vec<SavedAlarm> = serde_json::from_slice(bytes)?;
+    }
+    let mut saved: Vec<SavedAlarm> = timers.values().filter(|entry| entry.persist && Some(entry.id) != excluded).map(saved_alarm).collect();
+    if let Some(entry) = candidate.filter(|entry| entry.persist) { saved.push(saved_alarm(entry)); }
+    let bytes = serde_json::to_vec_pretty(&saved)?;
+    crate::common::atomic_file::save_atomic_if(path, &bytes, || match std::fs::read(path) {
+        Ok(current) => before.as_ref() == Some(&current),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound && before.is_none(),
+    })?;
+    *baseline = Some((path.to_string_lossy().into_owned(), Some(bytes)));
+    Ok(())
+}
+
 pub static ACTIVE_TIMERS: Lazy<Mutex<HashMap<u64, TimerEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -379,6 +486,17 @@ fn take_finished_timer(
     }
 }
 
+fn claim_session_alarm(
+    timers: &mut HashMap<u64, TimerEntry>, id: u64, generation: u64,
+    persist_removal: impl FnOnce(&HashMap<u64, TimerEntry>, u64) -> anyhow::Result<()>,
+) -> anyhow::Result<Option<TimerEntry>> {
+    if !timers.get(&id).is_some_and(|entry| entry.persist && entry.generation == generation && !entry.paused) {
+        return Ok(None);
+    }
+    persist_removal(timers, id)?;
+    Ok(timers.remove(&id))
+}
+
 impl TimerManager {
     fn new() -> Self {
         let inner = Arc::new(Inner {
@@ -427,13 +545,27 @@ impl TimerManager {
     }
 
     fn fire_timer(id: u64, generation: u64) {
+        let _completion = TIMER_COMPLETION_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let alarm_path = TIMER_INBOX.lock().ok().and_then(|owner| owner.as_ref().and_then(|owner| owner.alarm_path.clone()));
         let mut list = match ACTIVE_TIMERS.lock().ok() {
             Some(l) => l,
             None => return,
         };
-        if let Some(entry) = take_finished_timer(&mut list, id, generation) {
+        let entry = if let Some(path) = alarm_path.as_deref() && list.get(&id).is_some_and(|entry| entry.persist) {
+            match claim_session_alarm(&mut list, id, generation, |timers, id| save_session_alarms(path, timers, None, Some(id))) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    // The heap occurrence is already consumed. Retire it without retrying or emitting effects.
+                    let _ = take_finished_timer(&mut list, id, generation);
+                    drop(list);
+                    report_gpui_alarm_error(&error);
+                    return;
+                }
+            }
+        } else { take_finished_timer(&mut list, id, generation) };
+        if let Some(entry) = entry {
             if entry.persist {
-                save_persistent_alarms_locked(&list);
+                if alarm_path.is_none() { save_persistent_alarms_locked(&list); }
             }
             drop(list);
             record_inbox_completion(&entry);
@@ -444,9 +576,7 @@ impl TimerManager {
             };
             crate::sound::play_sound(&entry.sound);
             notify(&msg);
-            if let Ok(mut msgs) = FINISHED_MESSAGES.lock() {
-                msgs.push(msg);
-            }
+            queue_timer_completion(msg);
         }
     }
 
@@ -535,12 +665,19 @@ fn load_saved_alarm_entries(
     wall_now: chrono::DateTime<chrono::Local>,
     monotonic_now: Instant,
 ) -> anyhow::Result<Vec<TimerEntry>> {
-    use chrono::Utc;
-
     let alarms = match load_json::<Vec<SavedAlarm>>(path)? {
         LoadState::Missing | LoadState::Empty => return Ok(Vec::new()),
         LoadState::Loaded(alarms) => alarms,
     };
+    alarm_entries_from_saved(alarms, wall_now, monotonic_now)
+}
+
+fn alarm_entries_from_saved(
+    alarms: Vec<SavedAlarm>,
+    wall_now: chrono::DateTime<chrono::Local>,
+    monotonic_now: Instant,
+) -> anyhow::Result<Vec<TimerEntry>> {
+    use chrono::Utc;
     let utc_now = wall_now.with_timezone(&Utc);
     let current_start_ts = unix_timestamp(wall_now.timestamp())?;
     let mut entries = Vec::with_capacity(alarms.len());
@@ -574,6 +711,17 @@ fn load_saved_alarm_entries(
         });
     }
     Ok(entries)
+}
+
+fn alarm_entries_from_bytes(
+    bytes: Option<&[u8]>, wall_now: chrono::DateTime<chrono::Local>, monotonic_now: Instant,
+) -> anyhow::Result<Vec<TimerEntry>> {
+    let records = match bytes {
+        None => Vec::new(),
+        Some(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Vec::new(),
+        Some(bytes) => serde_json::from_slice::<Vec<SavedAlarm>>(bytes)?,
+    };
+    alarm_entries_from_saved(records, wall_now, monotonic_now)
 }
 
 fn remaining_until_timestamp(
@@ -1132,6 +1280,40 @@ fn publish_restored_entry(entry: TimerEntry) -> anyhow::Result<u64> {
     publish_entry(entry, false)
 }
 
+pub(crate) fn restore_session_alarms(path: &str) -> anyhow::Result<Vec<u64>> {
+    let _completion = TIMER_COMPLETION_LOCK.lock().map_err(|_| anyhow::anyhow!("timer completion unavailable"))?;
+    let before = read_session_alarm_bytes(std::path::Path::new(path))?;
+    let entries = alarm_entries_from_bytes(before.as_deref(), chrono::Local::now(), Instant::now())?;
+    if read_session_alarm_bytes(std::path::Path::new(path))? != before { anyhow::bail!("Alarm file changed while loading"); }
+    *SESSION_ALARM_BASELINE.lock().map_err(|_| anyhow::anyhow!("alarm baseline unavailable"))? = Some((path.to_owned(), before));
+    let mut timers = ACTIVE_TIMERS.lock().map_err(|_| anyhow::anyhow!("timer state unavailable"))?;
+    let mut ids = Vec::with_capacity(entries.len());
+    for entry in entries {
+        ids.push(publish_entry_into_map(&mut timers, entry, false, |_, _| Ok(()), |deadline, id, generation| TIMER_MANAGER.register(deadline, id, generation))?);
+    }
+    Ok(ids)
+}
+
+pub(crate) fn start_session_alarm(path: &str, spec: AlarmSpec, name: Option<String>, sound: String) -> anyhow::Result<u64> {
+    use chrono::TimeZone;
+    let _completion = TIMER_COMPLETION_LOCK.lock().map_err(|_| anyhow::anyhow!("timer completion unavailable"))?;
+    let entry = alarm_entry_at(allocate_timer_id()?, spec, name, sound, chrono::Local::now(), Instant::now(), |local| chrono::Local.from_local_datetime(&local))?;
+    let mut timers = ACTIVE_TIMERS.lock().map_err(|_| anyhow::anyhow!("timer state unavailable"))?;
+    publish_entry_into_map(&mut timers, entry, true, |current, candidate| save_session_alarms(path, current, Some(candidate), None), |deadline, id, generation| TIMER_MANAGER.register(deadline, id, generation))
+}
+
+pub(crate) fn cancel_session_entry(path: &str, id: u64, generation: u64) -> anyhow::Result<bool> {
+    let _completion = TIMER_COMPLETION_LOCK.lock().map_err(|_| anyhow::anyhow!("timer completion unavailable"))?;
+    let mut timers = ACTIVE_TIMERS.lock().map_err(|_| anyhow::anyhow!("timer state unavailable"))?;
+    let Some(entry) = timers.get(&id).filter(|entry| entry.generation == generation) else { return Ok(false); };
+    if entry.persist {
+        save_session_alarms(path, &timers, None, Some(id))?;
+    }
+    timers.remove(&id);
+    TIMER_MANAGER.remove(id);
+    Ok(true)
+}
+
 /// Start a timer with checked duration, clock and persistence state.
 pub fn try_start_timer_named(
     duration: Duration,
@@ -1485,7 +1667,73 @@ mod tests {
     }
 
     #[test]
+    fn captured_alarm_bytes_control_restored_entries() {
+        let future = (chrono::Utc::now().timestamp() + 3600) as u64;
+        let captured = serde_json::to_vec(&vec![SavedAlarm { label: "captured".into(), end_ts: future, start_ts: 0, sound: "None".into() }]).unwrap();
+        let replacement = serde_json::to_vec(&vec![SavedAlarm { label: "replacement".into(), end_ts: future, start_ts: 0, sound: "None".into() }]).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("alarms.json");
+        std::fs::write(&path, &replacement).unwrap();
+        let rows = alarm_entries_from_bytes(Some(&captured), chrono::Local::now(), Instant::now()).unwrap();
+        std::fs::write(&path, &captured).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "captured");
+        assert!(alarm_entries_from_bytes(Some(b" \r\n"), chrono::Local::now(), Instant::now()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn checked_alarm_expiry_requires_persisted_current_occurrence() {
+        let _owner = TEST_TIMER_INBOX_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("alarms.json");
+        let path_str = path.to_str().unwrap();
+        let mut entry = test_entry(71, true);
+        entry.generation = 5;
+        let saved = serde_json::to_vec_pretty(&vec![saved_alarm(&entry)]).unwrap();
+        std::fs::write(&path, &saved).unwrap();
+        *SESSION_ALARM_BASELINE.lock().unwrap() = Some((path_str.to_owned(), Some(saved.clone())));
+        let mut rows = HashMap::from([(entry.id, entry)]);
+        let effect = |timers: &HashMap<u64, TimerEntry>, id| save_session_alarms(path_str, timers, None, Some(id));
+        assert!(claim_session_alarm(&mut rows, 71, 4, effect).unwrap().is_none());
+        std::fs::write(&path, b"[]").unwrap();
+        assert!(claim_session_alarm(&mut rows, 71, 5, effect).is_err());
+        assert!(rows.contains_key(&71));
+        assert_eq!(std::fs::read(&path).unwrap(), b"[]");
+        std::fs::write(&path, &saved).unwrap();
+        assert!(claim_session_alarm(&mut rows, 71, 5, effect).unwrap().is_some());
+        assert!(!rows.contains_key(&71));
+        assert_eq!(serde_json::from_slice::<Vec<SavedAlarm>>(&std::fs::read(&path).unwrap()).unwrap().len(), 0);
+        *SESSION_ALARM_BASELINE.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn gpui_timer_completion_wakes_after_queue_and_drains_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _owner = TEST_TIMER_INBOX_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let mut service = crate::notifications::InboxService::start(root, Arc::new(|| {})).unwrap();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let callback_wakes = wakes.clone();
+        let session = [7; 16];
+        assert!(reserve_gpui_timer(session));
+        assert!(attach_gpui_timer_inbox(service.publisher(), session, Arc::new(move || {
+            assert!(!FINISHED_MESSAGES.lock().unwrap().is_empty());
+            callback_wakes.fetch_add(1, Ordering::SeqCst);
+        }), temp.path().join("alarms.json").to_string_lossy().into_owned()));
+        queue_timer_completion("Timer finished: tea".into());
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert!(take_gpui_timer_messages([8; 16]).is_empty());
+        assert_eq!(take_gpui_timer_messages(session), ["Timer finished: tea"]);
+        assert!(take_gpui_timer_messages(session).is_empty());
+        detach_gpui_timer_inbox(session, &[]);
+        service.shutdown_checked().unwrap();
+        release_gpui_timer(session);
+    }
+
+    #[test]
     fn notification_inbox_timer_completion_emits_sanitized_typed_fact() {
+        let _owner = TEST_TIMER_INBOX_LOCK.lock().unwrap();
         use crate::notifications::{FactId, InboxService, RelatedItem};
         let temp = tempfile::tempdir().unwrap();
         let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
@@ -1549,6 +1797,9 @@ mod tests {
         let mut owner = TimerInboxOwner {
             publisher: service.publisher(),
             session,
+            wake: None,
+            alarm_path: None,
+            alarm_error: None,
             completed: VecDeque::from([CompletedInboxTimer {
                 id: 42,
                 generation: 3,

@@ -52,6 +52,7 @@ mod snippets;
 mod snippet_fill;
 mod clipboard_modify_view;
 mod tempfile_view;
+mod timer_view;
 mod tempfile_search;
 mod clipboard_modify_startup;
 mod regex_history;
@@ -2515,6 +2516,12 @@ struct RootWindow {
     note_editor_view: Option<Entity<note_editor::NoteEditor>>,
     multi_manager_view: Option<Entity<multi_manager::MultiManagerView>>,
     calculation_pad_view: Option<Entity<calculation_pad::CalculationPadView>>,
+    timer_view: Option<Entity<timer_view::TimerView>>,
+    timer_session: Option<Arc<multi_launcher::plugins::timer_session::TimerSession>>,
+    timer_wake: Arc<HashWakeSignal>,
+    timer_busy: Arc<AtomicBool>,
+    timer_completion: Option<(u64, String)>,
+    timer_completion_revision: u64,
     note_open_epoch: Arc<AtomicU64>,
     file_lock_popup: Option<utility_mount::UtilityPopup>,
     file_lock_retiring: Vec<RetiringHashWindow>,
@@ -3696,6 +3703,7 @@ enum RootCloseBlocker {
     ClipboardModifyBlocked,
     SnippetsSave,
     TempfileSave,
+    TimerOperation,
     FileSearchEffect,
     FolderSize,
     FileLock,
@@ -4657,6 +4665,7 @@ struct AcceptedRestart {
     restart_retiring: Arc<AtomicBool>,
     restart_exit: Rc<RefCell<Option<(RestartContext, Vec<NativeWindow>)>>>,
     restart_failure: Rc<RefCell<Option<String>>>,
+    timer_session: Option<Arc<multi_launcher::plugins::timer_session::TimerSession>>,
 }
 
 async fn wait_for_native_retirement(cx: &mut AsyncApp, windows: &[NativeWindow]) -> bool {
@@ -6241,6 +6250,8 @@ impl RootWindow {
             .store(true, Ordering::Release);
         self.coordinate_hud_probe_status = "Closing GPUI services for the egui restart…".to_owned();
         self.hash_wake_signal.close();
+        self.timer_wake.close();
+        let timer_session = self.timer_session.clone();
         self.hash_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6261,6 +6272,7 @@ impl RootWindow {
             restart_retiring: Arc::clone(&self.restart_retiring),
             restart_exit: Rc::clone(&self.restart_exit),
             restart_failure: Rc::clone(&self.restart_failure),
+            timer_session,
         })
     }
 
@@ -6269,6 +6281,12 @@ impl RootWindow {
         accepted: AcceptedRestart,
         cx: &mut AsyncApp,
     ) {
+        if let Some(session) = accepted.timer_session.clone() {
+            if let Err(error) = cx.background_executor().spawn(async move { session.shutdown() }).await {
+                let _ = root.update(cx, |root, cx| { root.restart_status = Some(format!("Egui restart stopped because Timer teardown failed: {error}")); cx.notify(); });
+                return;
+            }
+        }
         loop {
             let state = root.update(cx, |root, cx| root.xml_view.as_ref().map(|view| (view.read(cx).reaped(), view.read(cx).shutdown_failure())));
             match state {
@@ -7235,6 +7253,8 @@ impl RootWindow {
                 } else if provider == "tempfile" {
                     tempfile_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                         || self.tempfile_search.projected(&query, action)
+                } else if provider == "timer" {
+                    timer_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "snippets" {
                     snippets::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                         || self.snippets_search.projection.as_ref().is_some_and(|(raw, _, snapshot)| {
@@ -8129,6 +8149,13 @@ impl RootWindow {
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "calculator") && result.action.action == "calc:pad" {
             if calculation_pad::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 self.open_calculation_pad(window, cx);
+            }
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "timer") {
+            if timer_view::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                let alarm = matches!(parse_action(&result.action), Ok(Command::Timer(multi_launcher::commands::TimerCommand::AlarmDialog)));
+                self.open_timer(alarm, window, cx);
             }
             return;
         }
@@ -10477,6 +10504,7 @@ impl RootWindow {
             Some(RootCloseBlocker::MultiManager) => { self.restart_status = Some(multi_manager::WAIT.to_owned()); }
             Some(RootCloseBlocker::CalculationPad) => { self.restart_status = Some(calculation_pad::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
+            Some(RootCloseBlocker::TimerOperation) => { self.restart_status = Some(timer_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
             Some(RootCloseBlocker::RegexPresets) => { self.restart_status = Some(regex_presets::WAIT_QUIT.to_owned()); }
@@ -10563,8 +10591,11 @@ impl RootWindow {
         if let Some(popup) = self.regex_popup.take() { retiring_regex.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         let retiring = self.xml_popup.take().map(|popup| RetiringHashWindow { window: popup.window, native_window: popup.native });
         let view = self.xml_view.clone();
+        self.timer_wake.close();
+        let timer = self.timer_session.clone();
         if let Some(view) = &view { view.update(cx, |view, cx| view.shutdown(cx)); }
         cx.spawn(async move |_, cx| {
+            if let Some(timer) = timer { let _ = cx.background_executor().spawn(async move { timer.shutdown() }).await; }
             for retiring in retiring_clipboard { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             for retiring in retiring_search { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
             for retiring in retiring_regex { let _ = remove_and_wait_for_hash_window(cx, retiring).await; }
@@ -10585,6 +10616,7 @@ impl RootWindow {
         file_picker_pending: bool,
         cx: &App,
     ) -> Option<RootCloseBlocker> {
+        if self.timer_busy.load(Ordering::Acquire) { return Some(RootCloseBlocker::TimerOperation); }
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::DuplicateFinder); }
@@ -11141,6 +11173,11 @@ impl Render for RootWindow {
                 .child(div().flex().items_center().gap_2().w_full()
                     .child(gpui_kit::component::Icon::new(gpui_kit::component::IconName::Search))
                     .child(div().flex_1().min_w(px(0.0)).child(search_field)))
+                .children(self.timer_completion.clone().filter(|_| multi_launcher::settings::provider_capability_enabled(self.enabled_capabilities.as_ref(), "timer", "completion_dialog")).map(|(revision, message)| {
+                    div().id("timer-completion").flex().gap_2().child(Label::new(message)).child(Button::new("timer-completion-ok").label("OK").on_click(cx.listener(move |root, _, _, cx| {
+                        if root.timer_completion.as_ref().is_some_and(|(current, _)| *current == revision) { root.timer_completion = None; cx.notify(); }
+                    })))
+                }))
                 .children(self.structured_pins.error.clone().map(|status| Label::new(status)))
                 .children((if self.hash_pin.pending.is_some() { Some("Unpinning Hash Generator…".to_owned()) } else { self.hash_pin.error.clone() }).map(|status| {
                     Label::new(status).id("pinned-hash-toolbar-status").w_full().min_w(px(0.0))
@@ -11562,6 +11599,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.calculation_pad_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.timer_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -13207,6 +13247,22 @@ pub(crate) fn run_foundation_window(
 
     let startup_pin_order = hash_pin::startup_order(&saved_pinned_panels);
     let appearance_settings_for_run = theme_settings.clone();
+    let timer_wake = Arc::new(HashWakeSignal::default());
+    let timer_notify = timer_wake.clone();
+    let (timer_lifetime, timer_start_error) = match multi_launcher::plugins::timer_session::TimerSession::start(app_data_root.clone(), Arc::new(move || timer_notify.notify())) {
+        Ok(session) => (Some(Arc::new(session)), None),
+        Err(error) => (None, Some(error)),
+    };
+    let timer_busy = Arc::new(AtomicBool::new(timer_lifetime.is_some()));
+    let timer_restore_result = Arc::new(Mutex::new(None::<Result<(), String>>));
+    let timer_restore = timer_lifetime.as_ref().map(|session| {
+        let session = session.clone(); let busy = timer_busy.clone(); let result = timer_restore_result.clone(); let wake = timer_wake.clone();
+        std::thread::spawn(move || { let outcome = session.restore_alarms(); if let Ok(mut slot) = result.lock() { *slot = Some(outcome); } busy.store(false, Ordering::Release); wake.notify(); })
+    });
+    let timer_session_for_run = timer_lifetime.clone();
+    let timer_wake_for_run = timer_wake.clone();
+    let timer_busy_for_run = timer_busy.clone();
+    let timer_restore_for_run = timer_restore_result.clone();
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
         let initial_appearance = appearance::system_appearance(cx.window_appearance());
@@ -13223,8 +13279,11 @@ pub(crate) fn run_foundation_window(
         let restart_admission_for_quit = Arc::clone(&restart_admission_for_quit);
         let settings_save_workers_for_quit = settings_save_workers_for_quit.clone();
         let quit_subscription = cx.on_app_quit(move |app| {
+            let mut timer = None;
             if let Some(root) = root_for_quit_callback.borrow().clone() {
                 let _ = root.update(app, |root, cx| {
+                    root.timer_wake.close();
+                    timer = root.timer_session.clone();
                     root.snippets_search.wake.close();
                     if let Some(token) = root.settings_search.as_ref().and_then(|view| view.read(cx).pending_token()) { token.request_cancel(); }
                     root.retire_search_jump_mode();
@@ -13266,7 +13325,8 @@ pub(crate) fn run_foundation_window(
             {
                 listener.stop();
             }
-            async {}
+            let timer_task = timer.map(|timer| app.background_executor().spawn(async move { timer.shutdown() }));
+            async move { if let Some(task) = timer_task { let _ = task.await; } }
         });
         subscription_sink.borrow_mut().push(quit_subscription);
 
@@ -13485,6 +13545,12 @@ pub(crate) fn run_foundation_window(
                 note_editor_view: None,
                 multi_manager_view: None,
                 calculation_pad_view: None,
+                timer_view: None,
+                timer_session: timer_session_for_run.clone(),
+                timer_wake: timer_wake_for_run.clone(),
+                timer_busy: timer_busy_for_run.clone(),
+                timer_completion: None,
+                timer_completion_revision: 0,
                 note_open_epoch: Arc::new(AtomicU64::new(0)),
                 file_lock_popup: None,
                 file_lock_retiring: Vec::new(),
@@ -13893,7 +13959,7 @@ pub(crate) fn run_foundation_window(
                 match blocker {
                     None => {
                         let deferred = root_for_window_close.update(app, |root, cx| {
-                            if root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                            if root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                         }).unwrap_or(true);
                         if deferred { return false; }
                         let _ = root_for_window_close.update(app, |root, cx| {
@@ -13929,7 +13995,7 @@ pub(crate) fn run_foundation_window(
                             .unwrap_or(false);
                         if close_now {
                             let deferred = root_for_window_close.update(app, |root, cx| {
-                                if root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                                if root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                             }).unwrap_or(true);
                             if deferred { return false; }
                             let _ = root_for_window_close.update(app, |root, cx| {
@@ -14017,6 +14083,7 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::MultiManager) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(multi_manager::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::CalculationPad) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(calculation_pad::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::TimerOperation) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(timer_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::RegexPresets) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_presets::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
@@ -14046,6 +14113,7 @@ pub(crate) fn run_foundation_window(
             }
         };
         *root_for_quit.borrow_mut() = Some(root_view.downgrade());
+        root_view.update(cx, |root, cx| root.start_timer_wake(timer_restore_for_run, timer_start_error, cx));
 
         let native_window =
             match update_kit_window_content(root_window, &root_view, cx, |root, window, cx| {
@@ -14822,6 +14890,9 @@ pub(crate) fn run_foundation_window(
         }
     });
 
+    timer_wake.close();
+    if let Some(timer) = timer_lifetime { if let Err(error) = timer.shutdown() { tracing::error!(%error, "Timer shutdown failed"); } }
+    if let Some(restore) = timer_restore { let _ = restore.join(); }
     visibility_after_run.deactivate();
     let restart_exit = restart_exit_after_run.borrow_mut().take();
 
@@ -17090,9 +17161,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -17132,7 +17203,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 22 } else { 19 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 23 } else { 20 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(

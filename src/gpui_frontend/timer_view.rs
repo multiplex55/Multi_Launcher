@@ -1,0 +1,598 @@
+//! Retained timer form and exact session completion presentation.
+use super::*;
+use multi_launcher::plugin::Plugin;
+use multi_launcher::plugins::timer_session::TimerSession;
+pub(super) const WAIT: &str = "Wait for the Timer or Alarm operation to finish.";
+
+pub(super) fn current_provider(
+    query: &str,
+    action: &Action,
+    enabled: Option<&HashSet<String>>,
+    caps: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
+    enabled.is_none_or(|set| set.contains("timer"))
+        && multi_launcher::settings::provider_search_capability_enabled(caps, "timer")
+        && matches!(
+            parse_action(action),
+            Ok(Command::Timer(
+                multi_launcher::commands::TimerCommand::TimerDialog
+                    | multi_launcher::commands::TimerCommand::AlarmDialog
+            ))
+        )
+        && search_providers::search_routed(
+            [&search_providers::TimerBare as &dyn Plugin],
+            query,
+            enabled,
+            caps,
+        )
+        .into_iter()
+        .any(|(name, row)| name == "timer" && row == *action)
+}
+
+pub(super) struct TimerView {
+    pub open: bool,
+    pub session: Arc<TimerSession>,
+    busy: Arc<AtomicBool>,
+    alarm: bool,
+    root: WeakEntity<RootWindow>,
+    host: AnyWindowHandle,
+    owner: utility_mount::MountOwner,
+    mount: utility_mount::MountReceipt,
+    focus: FocusHandle,
+    duration: Entity<InputState>,
+    label: Entity<InputState>,
+    sound: usize,
+    feedback: Option<String>,
+}
+
+impl TimerView {
+    fn new(
+        root: WeakEntity<RootWindow>,
+        session: Arc<TimerSession>,
+        busy: Arc<AtomicBool>,
+        alarm: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let owner = utility_mount::MountOwner::default();
+        let mount = owner.attach();
+        Self {
+            open: true,
+            session,
+            busy,
+            alarm,
+            root,
+            host: window.window_handle(),
+            owner,
+            mount,
+            focus: cx.focus_handle(),
+            duration: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Duration (for example 5m)")),
+            label: cx.new(|cx| InputState::new(window, cx).placeholder("Label (optional)")),
+            sound: default_sound(),
+            feedback: None,
+        }
+    }
+    fn current(&self, window: &Window, cx: &App) -> bool {
+        self.open
+            && self.mount.is_current()
+            && self.host.window_id() == window.window_handle().window_id()
+            && self.root.upgrade().is_some_and(|root| {
+                let root = root.read(cx);
+                !root.restart_admission.is_fenced()
+                    && root.action_sheet.is_none()
+                    && root.root_visibility.active.load(Ordering::Acquire)
+                    && root.root_visibility.visible.load(Ordering::Acquire)
+                    && root.native_window.is_some_and(|native| {
+                        current_foreground_identity() == Some(native.identity)
+                    })
+            })
+    }
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.load(Ordering::Acquire) || !self.current(window, cx) {
+            return;
+        }
+        self.retire_form(window, cx);
+    }
+
+    fn retire_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = self.focus.is_focused(window) || self.focus.contains_focused(window, cx);
+        self.open = false;
+        self.owner.retire();
+        let _ = self.root.update(cx, |root, cx| {
+            if focused
+                && window.is_window_active()
+                && !window.has_active_dialog(cx)
+                && root
+                    .native_window
+                    .is_some_and(|native| current_foreground_identity() == Some(native.identity))
+            {
+                root.query.focus_handle(cx).focus(window, cx);
+            }
+            cx.notify();
+        });
+        cx.notify();
+    }
+    fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.current(window, cx) || !window.is_window_active() || window.has_active_dialog(cx) {
+            return;
+        }
+        let duration = self.duration.read(cx).value().to_string();
+        let label = self.label.read(cx).value().to_string();
+        let sound = multi_launcher::sound::SOUND_NAMES[self.sound].to_owned();
+        self.run_operation(
+            TimerOperation::Start {
+                duration,
+                label,
+                sound,
+                alarm: self.alarm,
+            },
+            cx,
+        );
+    }
+
+    fn run_operation(&mut self, operation: TimerOperation, cx: &mut Context<Self>) {
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let permit = self
+            .root
+            .update(cx, |root, _| root.restart_admission.admit())
+            .ok()
+            .flatten();
+        let Some(permit) = permit else {
+            self.busy.store(false, Ordering::Release);
+            return;
+        };
+        let session = self.session.clone();
+        let busy = self.busy.clone();
+        let wake = self
+            .root
+            .upgrade()
+            .map(|root| root.read(cx).timer_wake.clone());
+        let receipt = self.mount.clone();
+        let host = self.host;
+        let task = cx.background_executor().spawn(async move {
+            match operation {
+                TimerOperation::Start {
+                    duration,
+                    label,
+                    sound,
+                    alarm,
+                } => {
+                    if alarm {
+                        session.start_alarm(&duration, &label, &sound).map(|_| true)
+                    } else {
+                        session.start_timer(&duration, &label, &sound).map(|_| true)
+                    }
+                }
+                TimerOperation::Cancel { id, generation } => {
+                    session.cancel(id, generation).map(|_| false)
+                }
+            }
+        });
+        cx.spawn(async move |weak, cx| {
+            let _permit = permit;
+            let outcome = task.await;
+            if let Some(view) = weak.upgrade() {
+                let _ = update_kit_window_content(host, &view, cx, |view, window, cx| {
+                    if !receipt.is_current() || !receipt.matches(&view.mount) {
+                        return;
+                    }
+                    match outcome {
+                        Ok(true) => {
+                            view.feedback = None;
+                            view.retire_form(window, cx);
+                        }
+                        Ok(false) => {}
+                        Err(error) => view.feedback = Some(error),
+                    }
+                    cx.notify();
+                });
+            }
+            busy.store(false, Ordering::Release);
+            if let Some(wake) = wake {
+                wake.notify();
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+enum TimerOperation {
+    Start {
+        duration: String,
+        label: String,
+        sound: String,
+        alarm: bool,
+    },
+    Cancel {
+        id: u64,
+        generation: u64,
+    },
+}
+
+fn default_sound() -> usize {
+    multi_launcher::sound::SOUND_NAMES
+        .iter()
+        .position(|name| *name == "None")
+        .unwrap_or(0)
+}
+
+fn latest_completion(messages: Vec<String>) -> Option<String> {
+    messages.into_iter().last()
+}
+
+impl Render for TimerView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let keys = self.mount.clone();
+        let input_escape = self.mount.clone();
+        let mut panel = div()
+            .id("timer-pane")
+            .track_focus(&self.focus)
+            .capture_action(cx.listener(
+                move |view, _: &gpui_kit::base::input::Escape, window, cx| {
+                    if input_escape.is_current()
+                        && input_escape.matches(&view.mount)
+                        && view.current(window, cx)
+                        && !window.has_active_dialog(cx)
+                        && (view.focus.is_focused(window)
+                            || view.focus.contains_focused(window, cx))
+                    {
+                        let latched = view
+                            .root
+                            .update(cx, |root, _| {
+                                let was = root.pane_escape_latched;
+                                root.pane_escape_latched = true;
+                                was
+                            })
+                            .unwrap_or(true);
+                        if !latched {
+                            view.close(window, cx);
+                        }
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if !keys.is_current()
+                    || !keys.matches(&view.mount)
+                    || !view.current(window, cx)
+                    || window.has_active_dialog(cx)
+                    || !(view.focus.is_focused(window) || view.focus.contains_focused(window, cx))
+                {
+                    return;
+                }
+                if event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == Modifiers::default()
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    if !event.is_held {
+                        let _ = view
+                            .root
+                            .update(cx, |root, _| root.pane_escape_latched = true);
+                        view.close(window, cx);
+                    }
+                }
+            }))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3();
+        if self.open {
+            let busy = self.busy.load(Ordering::Acquire);
+            let start = self.mount.clone();
+            let close = self.mount.clone();
+            let sound = self.mount.clone();
+            let preview = self.mount.clone();
+            panel = panel
+                .child(Label::new(if self.alarm { "Alarm" } else { "Timer" }))
+                .children(
+                    self.alarm
+                        .then(|| Label::new("Time: HH:MM, 1d HH:MM, or YYYY-MM-DD HH:MM")),
+                )
+                .child(
+                    Input::new(&self.duration)
+                        .readonly(busy)
+                        .aria_label(if self.alarm {
+                            "Alarm date and time"
+                        } else {
+                            "Duration"
+                        }),
+                )
+                .child(Input::new(&self.label).readonly(busy).aria_label("Label"))
+                .child(
+                    Button::new("timer-sound")
+                        .label(format!(
+                            "Sound: {}",
+                            multi_launcher::sound::SOUND_NAMES[self.sound]
+                        ))
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            if !view.busy.load(Ordering::Acquire)
+                                && sound.is_current()
+                                && sound.matches(&view.mount)
+                                && view.current(window, cx)
+                                && !window.has_active_dialog(cx)
+                            {
+                                view.sound =
+                                    (view.sound + 1) % multi_launcher::sound::SOUND_NAMES.len();
+                                cx.notify();
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("timer-preview")
+                        .label("Preview sound")
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            if !view.busy.load(Ordering::Acquire)
+                                && preview.is_current()
+                                && preview.matches(&view.mount)
+                                && view.current(window, cx)
+                                && window.is_window_active()
+                                && !window.has_active_dialog(cx)
+                            {
+                                multi_launcher::sound::play_sound(
+                                    multi_launcher::sound::SOUND_NAMES[view.sound],
+                                );
+                            }
+                        })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new("timer-start")
+                                .label("Start")
+                                .disabled(busy)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if start.is_current() && start.matches(&view.mount) {
+                                        view.start(window, cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("timer-close")
+                                .label("Close")
+                                .disabled(busy)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if close.is_current() && close.matches(&view.mount) {
+                                        view.close(window, cx);
+                                    }
+                                })),
+                        ),
+                );
+            if let Some(error) = &self.feedback {
+                panel = panel.child(Label::new(error.clone()));
+            }
+            if busy {
+                panel = panel.child(Label::new("Working with timers and alarms…"));
+            }
+            for row in if busy {
+                Vec::new()
+            } else {
+                self.session.rows()
+            } {
+                let mount = self.mount.clone();
+                let id = row.id;
+                let generation = row.generation;
+                panel = panel.child(
+                    div()
+                        .id(SharedString::from(format!("timer-row-{id}-{generation}")))
+                        .flex()
+                        .gap_2()
+                        .child(Label::new(format!(
+                            "{} ({}s left)",
+                            row.label,
+                            row.remaining.as_secs()
+                        )))
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "timer-cancel-{id}-{generation}"
+                            )))
+                            .label("Cancel")
+                            .on_click(cx.listener(
+                                move |view, _, window, cx| {
+                                    if mount.is_current()
+                                        && mount.matches(&view.mount)
+                                        && view.current(window, cx)
+                                        && !window.has_active_dialog(cx)
+                                    {
+                                        view.run_operation(
+                                            TimerOperation::Cancel { id, generation },
+                                            cx,
+                                        );
+                                    }
+                                },
+                            )),
+                        ),
+                );
+            }
+        }
+        panel
+    }
+}
+
+impl RootWindow {
+    pub(super) fn start_timer_wake(
+        &mut self,
+        restore: Arc<Mutex<Option<Result<(), String>>>>,
+        start_error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(error) = start_error {
+            self.restart_status = Some(format!("Could not start Timer: {error}"));
+        }
+        let Some(session) = self.timer_session.clone() else {
+            return;
+        };
+        let wake = self.timer_wake.clone();
+        let busy = self.timer_busy.clone();
+        cx.spawn(async move |root, cx| {
+            while wake.wait().await {
+                let (messages, alarm_error) = if busy.load(Ordering::Acquire) {
+                    (Vec::new(), None)
+                } else {
+                    let session = session.clone();
+                    cx.background_executor()
+                        .spawn(async move { (session.take_finished(), session.take_alarm_error()) })
+                        .await
+                };
+                let result = restore.lock().ok().and_then(|mut value| value.take());
+                if root
+                    .update(cx, |root, cx| {
+                        if let Some(Err(error)) = result {
+                            root.restart_status =
+                                Some(format!("Could not restore alarms: {error}"));
+                        }
+                        if let Some(error) = alarm_error {
+                            root.restart_status = Some(error);
+                        } else if !busy.load(Ordering::Acquire)
+                            && root.restart_status.as_deref() == Some(WAIT)
+                        {
+                            root.restart_status = None;
+                        }
+                        if let Some(message) = latest_completion(messages) {
+                            root.timer_completion_revision =
+                                root.timer_completion_revision.wrapping_add(1).max(1);
+                            root.timer_completion = Some((root.timer_completion_revision, message));
+                        }
+                        if let Some(view) = &root.timer_view {
+                            view.update(cx, |_, cx| cx.notify());
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    pub(super) fn open_timer(&mut self, alarm: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.restart_admission.is_fenced()
+            || (self.timer_view.is_some() && self.timer_busy.load(Ordering::Acquire))
+        {
+            return;
+        }
+        if let Some(view) = &self.timer_view {
+            view.update(cx, |view, cx| {
+                view.mount = view.owner.attach();
+                view.open = true;
+                view.alarm = alarm;
+                view.duration
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                view.label
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                view.sound = default_sound();
+                view.feedback = None;
+                view.duration.focus_handle(cx).focus(window, cx);
+                cx.notify();
+            });
+        } else {
+            let Some(session) = self.timer_session.clone() else {
+                self.restart_status = Some("Timer notifications are unavailable.".into());
+                cx.notify();
+                return;
+            };
+            let root = cx.entity().downgrade();
+            let busy = self.timer_busy.clone();
+            let view = cx.new(|cx| TimerView::new(root, session, busy, alarm, window, cx));
+            view.read(cx).duration.focus_handle(cx).focus(window, cx);
+            self.timer_view = Some(view);
+        }
+        if let Some(view) = &self.timer_view {
+            let receipt = view.read(cx).mount.clone();
+            let weak = view.downgrade();
+            let visibility = self.root_visibility.clone();
+            cx.spawn(async move |_, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let keep = weak
+                        .update(cx, |view, cx| {
+                            if !view.open || !receipt.is_current() || !receipt.matches(&view.mount)
+                            {
+                                return false;
+                            }
+                            if view.busy.load(Ordering::Acquire) {
+                                return true;
+                            }
+                            if visibility.active.load(Ordering::Acquire)
+                                && visibility.visible.load(Ordering::Acquire)
+                            {
+                                cx.notify();
+                            }
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !keep {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        self.root_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{current_provider, default_sound, latest_completion};
+    use multi_launcher::plugin::Plugin;
+    use multi_launcher::plugins::timer::TimerPlugin;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn bare_timer_route_requires_exact_current_stock_action_and_search_capability() {
+        let action = TimerPlugin.search("TiMeR").pop().unwrap();
+        let enabled = HashSet::from(["timer".to_owned()]);
+        assert!(current_provider("TiMeR", &action, Some(&enabled), None));
+        assert!(!current_provider(
+            "timer list",
+            &action,
+            Some(&enabled),
+            None
+        ));
+        assert!(!current_provider(
+            "timer",
+            &action,
+            Some(&HashSet::new()),
+            None
+        ));
+        assert!(!current_provider(
+            "timer",
+            &action,
+            Some(&enabled),
+            Some(&HashMap::from([(
+                "timer".to_owned(),
+                vec!["completion_dialog".to_owned()]
+            )]))
+        ));
+        let mut forged = action.clone();
+        forged.label.push('!');
+        assert!(!current_provider("timer", &forged, Some(&enabled), None));
+        assert_eq!(multi_launcher::sound::SOUND_NAMES[default_sound()], "None");
+        let alarm = TimerPlugin.search("ALARM").pop().unwrap();
+        assert!(current_provider("ALARM", &alarm, Some(&enabled), None));
+        assert!(!current_provider(
+            "alarm 1d 12:00",
+            &alarm,
+            Some(&enabled),
+            None
+        ));
+        assert_eq!(
+            latest_completion(vec!["first".into(), "latest".into()]).as_deref(),
+            Some("latest")
+        );
+        assert_eq!(latest_completion(Vec::new()), None);
+    }
+}

@@ -98,7 +98,7 @@ Priority values encode user tier and preferred order, for example P0.02. For an 
 | Help | `help` | G05 | P0.01 | 2 → 3 | Actual provider catalog and query admission | Remaining navigation and matched verification | [Q](#evidence-keys) | Broader native pending | Shared Search and typed dispatch | Later original secondary criteria | [Q](#evidence-keys) |
 | Layout | `layout` | G24 | P3.10 | 1 → 2 | — | Stock placement workflows and settings | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Links | `link` | G05 | P2.17 | 1 → 2–3 | — | Stock standalone link commands | — | — | Shared Search and typed dispatch | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
-| Timers and Alarms | `timer` | G23 | P0.17 | 1 → 3 | — | Create/edit/list/cancel, scheduler and notifications | — | — | Stock organizer/widget/activity service | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Timers and Alarms | `timer` | G23 | P0.17 | 2 → 3 | Retained Timer and Alarm forms, active rows, checked Cancel, alarm restore and completion | Paired native replay and further active-entry controls | [Timer and Alarm checkpoint](CHECKPOINTS.md#p017-retained-timers-and-checked-alarms) | Focused only | Shared scheduler and Notification Inbox | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Stopwatch | `stopwatch` | G23 | P2.17 | 1 → 2–3 | — | Stock stopwatch and timing controls | — | — | Stock organizer/widget/activity service | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Weather Search | `weather` | G05 | P0.15 | 2 → 3 | Checked stock web route | Provider-specific native smoke | [W](#evidence-keys) | Matched Google/Wikipedia only | Shared Search and typed dispatch | Later original secondary criteria | [W](#evidence-keys) |
 
@@ -151,7 +151,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 | P0.14 Settings, authoring and recovery | settings | G03/G06 | 2 → 3 | Canonical Settings, typed navigation and next-reveal Launcher Window placement. Live hotkey editing needs checked invocation owner reconfiguration. | [Placement checkpoint](CHECKPOINTS.md#p014-checked-launcher-window-placement-settings) |
 | P0.15 Google and general Search | web_search and web providers | G05 | 3 → 3 | Stock provider admission and external execution | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.16 Temporary Files | tempfile | G13 | 2 → 3 | Canonical Create, list, checked Open and typed Alias and Remove. Matched Shell and authoring replay remain open. | [Alias and removal](CHECKPOINTS.md#p016-checked-temporary-file-alias-and-removal) |
-| P0.17 Timers and Alarms | timer | G23 | 1 → 3 | Stock scheduler and notifications | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.17 Timers and Alarms | timer | G23 | 2 → 3 | Canonical alarm restore and checked cancellation, stock scheduler and notifications. Essential Windows replay remains open. | [Timer and Alarm checkpoint](CHECKPOINTS.md#p017-retained-timers-and-checked-alarms) |
 | P0.18 Ordinary Mouse Gestures | mouse_gestures | G21 | 1 → 3 | Stock native gesture capture and action dispatch | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.19 Common Jump Mode | — | G05 | 3 → 3 | Launcher scope and fresh keyboard activation | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 
@@ -173,11 +173,11 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 
 Count built-in rows once by registration identifier. Report Stage 1–5 separately, real GPUI functionality, Search admission only, and unstarted routes. Report P0 workflow readiness separately using its 19-row register. For tier counts, use built-in rows plus separately identified non-plugin workflow rows, tallying those two denominators explicitly where overlapping workflows would otherwise be double counted. A target met means the listed interim stage passed with applicable evidence. Pending means no active implementation, and blocked requires a concrete dependency. Original GUI and acceptance counts stay in [Progress](PROGRESS.md) and the [parity matrix](PARITY_MATRIX.md).
 
-Windows snapshot after P0.16 Temporary Files alias and removal. **91 built-ins**, with **58 Stage 1, 26 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **33** have real GPUI functionality within the stated route. **0** have Search admission alone. **58** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **14 at Stage 2** and **3 at Stage 3 or higher**.
+Windows snapshot after P0.17 Timers and Alarms. **91 built-ins**, with **57 Stage 1, 27 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **34** have real GPUI functionality within the stated route. **0** have Search admission alone. **57** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **15 at Stage 2** and **3 at Stage 3 or higher**.
 
 | Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 | 21 | 2 | 14 | 5 | 0 |
+| P0 | 21 | 2 | 15 | 4 | 0 |
 | P1 | 16 | 4 | 6 | 6 | 0 |
 | P2 | 27 | 5 | 0 | 22 | 0 |
 | P3 | 25 | 1 | 0 | 24 | 0 |
@@ -187,7 +187,7 @@ The P2 interim floor is Stage 2. P4's existing functional Clipboard History is p
 
 | Priority tier · separate workflow view | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 · readiness workflows | 19 | 3 | 14 | 2 | 0 |
+| P0 · readiness workflows | 19 | 3 | 15 | 1 | 0 |
 | P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 1 | 3 | 0 |
 | P2 · represented by its built-ins | 0 | 0 | 0 | 0 | 0 |
 | P3 · other workspace and companion groups above | 5 | 0 | 0 | 5 | 0 |

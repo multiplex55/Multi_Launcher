@@ -84,6 +84,7 @@ pub mod task_manager;
 pub mod tempfile;
 pub mod text_case;
 pub mod timer;
+pub mod timer_session;
 pub mod timestamp;
 pub mod todo;
 pub mod unit_convert;

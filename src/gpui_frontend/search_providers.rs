@@ -13,6 +13,21 @@ pub(super) fn clipboard_catalog_is_current(
 pub(super) struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
 
 pub(super) struct MultiManagerBare;
+pub(super) struct TimerBare;
+impl multi_launcher::plugin::Plugin for TimerBare {
+    fn name(&self) -> &str { "timer" }
+    fn description(&self) -> &str { "Create timers and alarms (prefix: `timer` / `alarm`)" }
+    fn capabilities(&self) -> &[&str] { &["search", "completion_dialog"] }
+    fn query_prefixes(&self) -> &[&str] { &["timer", "alarm"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if !query.trim().eq_ignore_ascii_case("timer") && !query.trim().eq_ignore_ascii_case("alarm") { return Vec::new(); }
+        multi_launcher::plugin::Plugin::search(&multi_launcher::plugins::timer::TimerPlugin, query)
+    }
+    fn commands(&self) -> Vec<Action> {
+        multi_launcher::plugin::Plugin::commands(&multi_launcher::plugins::timer::TimerPlugin)
+            .into_iter().filter(|action| matches!(action.action.as_str(), "query:timer" | "query:alarm")).collect()
+    }
+}
 impl multi_launcher::plugin::Plugin for MultiManagerBare {
     fn name(&self) -> &str { "MultiManager" }
     fn description(&self) -> &str { "Manage window workspaces, home/target positions, hotkeys, and rotations" }
@@ -296,6 +311,7 @@ pub(super) struct InstalledLauncherProviders {
     json_utility: multi_launcher::plugins::json_utility::JsonUtilityPlugin,
     xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
     regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
+    timer: TimerBare,
     clipboard: ClipboardBare,
     snippets: SnippetsBare,
     tempfile: TempfileBare,
@@ -396,6 +412,7 @@ impl InstalledLauncherProviders {
             json_utility: multi_launcher::plugins::json_utility::JsonUtilityPlugin,
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
+            timer: TimerBare,
             clipboard: ClipboardBare,
             snippets: SnippetsBare::default(),
             tempfile: TempfileBare,
@@ -444,6 +461,7 @@ impl InstalledLauncherProviders {
             Some(&self.json_utility as &dyn multi_launcher::plugin::Plugin),
             Some(&self.xml_toolkit as &dyn multi_launcher::plugin::Plugin),
             Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.timer as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard as &dyn multi_launcher::plugin::Plugin),
             Some(&self.snippets as &dyn multi_launcher::plugin::Plugin),
             Some(&self.tempfile as &dyn multi_launcher::plugin::Plugin),
