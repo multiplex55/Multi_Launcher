@@ -106,6 +106,7 @@ pub(super) struct QuickNotesBare {
     owner: Arc<std::sync::Mutex<Option<Arc<multi_launcher::plugins::note::NotePlugin>>>>,
     snapshots: Arc<NoteSnapshots>,
     projected: std::sync::Mutex<Option<(String, u64, std::collections::HashMap<String, (Action, Arc<multi_launcher::plugins::note::Note>)>)>>,
+    new_projected: std::sync::Mutex<Option<(String, u64, Vec<Action>)>>,
 }
 impl multi_launcher::plugin::Plugin for QuickNotesBare {
     fn name(&self) -> &str { "notes" }
@@ -117,6 +118,19 @@ impl multi_launcher::plugin::Plugin for QuickNotesBare {
             vec![multi_launcher::plugins::note::quick_notes_action()]
         } else {
             let command = query.trim().split_whitespace().nth(1).unwrap_or("").to_ascii_lowercase();
+            if matches!(command.as_str(), "new" | "add" | "create") {
+                if query.to_ascii_lowercase().contains("--template") { return Vec::new(); }
+                return self.owner.lock().ok().and_then(|owner| owner.clone()).map_or_else(Vec::new, |plugin| {
+                    let Some(snapshot) = self.snapshots.current() else { return Vec::new(); };
+                    let rows: Vec<Action> = plugin.search(query).into_iter().filter(|action|
+                        action.action.starts_with("note:new:") && action.args.is_none()
+                        && matches!(multi_launcher::commands::parse_action(action), Ok(multi_launcher::commands::Command::Note(multi_launcher::commands::NoteCommand::New { template: None, .. })))
+                    ).collect();
+                    if multi_launcher::plugins::note::note_version() != snapshot.version { return Vec::new(); }
+                    if let Ok(mut slot) = self.new_projected.lock() { *slot = Some((query.to_owned(), snapshot.version, rows.clone())); }
+                    rows
+                });
+            }
             if !matches!(command.as_str(), "list" | "open" | "search") { return Vec::new(); }
             self.owner.lock().ok().and_then(|owner| owner.clone()).map_or_else(Vec::new, |plugin| {
                 let Some(snapshot) = self.snapshots.current() else { return Vec::new(); };
@@ -392,6 +406,11 @@ impl InstalledLauncherProviders {
         if query != effective || *version != multi_launcher::plugins::note::note_version() { return None; }
         let (expected, note) = rows.get(&action.action)?;
         (expected == action).then(|| (*version, note.clone()))
+    }
+    pub(super) fn note_new_source(&self, effective: &str, action: &Action) -> Option<u64> {
+        let slot = self.quick_notes.new_projected.lock().ok()?;
+        let (query, version, rows) = slot.as_ref()?;
+        (query == effective && *version == multi_launcher::plugins::note::note_version() && rows.contains(action)).then_some(*version)
     }
     pub(super) fn notes_owner(&self) -> Arc<std::sync::Mutex<Option<Arc<multi_launcher::plugins::note::NotePlugin>>>> {
         self.quick_notes.owner.clone()
@@ -722,7 +741,20 @@ mod tests {
         let rows = provider.search("note search needle");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].action, "note:open:alpha");
-        assert!(provider.search("note new alpha").is_empty());
+        for query in ["note new alpha", "notes add alpha", "note create alpha"] {
+            let rows = provider.search(query);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].action, "note:new:alpha");
+            assert!(rows[0].args.is_none());
+            let projected = provider.new_projected.lock().unwrap();
+            let (projected_query, version, projected_rows) = projected.as_ref().unwrap();
+            assert_eq!(projected_query, query);
+            assert_eq!(*version, multi_launcher::plugins::note::note_version());
+            assert_eq!(projected_rows, &rows);
+        }
+        assert!(provider.search("note new alpha --template weekly").is_empty());
+        assert!(provider.search("note new alpha --template").is_empty());
+        assert!(provider.search("note today").is_empty());
         let stored = provider.projected.lock().unwrap();
         let (_, version, projection) = stored.as_ref().unwrap();
         assert_eq!(*version, multi_launcher::plugins::note::note_version());

@@ -1722,6 +1722,98 @@ pub enum QuickNoteDraft<'a> {
     Editor { original: &'a Note, content: &'a str },
 }
 
+/// A plain New Note resolves an existing primary identity or an unsaved draft.
+pub enum CheckedNewNote {
+    Existing(Note),
+    Draft(Note),
+}
+
+/// Resolve the stock plain-New slug without creating a Markdown file.
+/// Ambiguous slugs or primary aliases are never silently assigned an owner.
+pub fn resolve_plain_new_note_if(slug: &str, is_current: impl Fn() -> bool) -> anyhow::Result<CheckedNewNote> {
+    anyhow::ensure!(!slug.is_empty() && slugify(slug) == slug, "Invalid note slug");
+    let _mutation = NOTE_MUTATION_LOCK.lock().map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
+    anyhow::ensure!(is_current(), "Note read superseded");
+    let notes = load_notes()?;
+    anyhow::ensure!(is_current(), "Note read superseded");
+    let mut matches = notes.into_iter().filter(|note| note.slug == slug
+        || note.alias.as_ref().is_some_and(|alias| alias.eq_ignore_ascii_case(slug)));
+    if let Some(note) = matches.next() {
+        anyhow::ensure!(matches.next().is_none(), "Note identity is ambiguous");
+        anyhow::ensure!(is_current(), "Note read superseded");
+        return Ok(CheckedNewNote::Existing(note));
+    }
+    let title = slug.replace('-', " ");
+    let content = format!("# {title}\n\n");
+    anyhow::ensure!(is_current(), "Note read superseded");
+    Ok(CheckedNewNote::Draft(Note {
+        title, path: PathBuf::new(), content, tags: Vec::new(), links: Vec::new(),
+        slug: String::new(), alias: None, aliases: Vec::new(), entity_refs: Vec::new(),
+    }))
+}
+
+/// Save a pathless full-editor draft without replacing an independently created note.
+/// A committed result remains usable even when the shared cache cannot publish it.
+pub fn write_plain_new_note_if(draft: &Note, content: &str, is_current: impl Fn() -> bool) -> anyhow::Result<QuickNoteWrite> {
+    write_plain_new_note_with_publish(draft, content, is_current, publish_note_cache)
+}
+
+fn write_plain_new_note_with_publish(
+    draft: &Note,
+    content: &str,
+    is_current: impl Fn() -> bool,
+    publish: impl FnOnce(Vec<Note>) -> anyhow::Result<bool>,
+) -> anyhow::Result<QuickNoteWrite> {
+    anyhow::ensure!(draft.path.as_os_str().is_empty() && draft.slug.is_empty(), "Note draft already has an identity");
+    let _mutation = NOTE_MUTATION_LOCK.lock().map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
+    anyhow::ensure!(is_current(), "Note write superseded");
+    let notes = load_notes()?;
+    let mut note = draft.clone();
+    note.content = content.to_owned();
+    if let Some(title) = content.lines().next().and_then(|line| line.strip_prefix("# ")) {
+        note.title = title.to_owned();
+    }
+    anyhow::ensure!(!slugify(&note.title).is_empty(), "Note title must produce a file name");
+    let persisted = note_content_for_persistence(&note);
+    let (path, slug) = create_note_noclobber(&notes, &note.title, &persisted, &is_current)?;
+    let note = note_from_persisted_content(path, slug, persisted);
+    let notes = match reload_after_create(&note) {
+        Ok(notes) => notes,
+        Err(cache_error) => return Ok(QuickNoteWrite::Committed { note, cache_error: cache_error.context("reload notes after committed create") }),
+    };
+    match publish(notes) {
+        Ok(_) => Ok(QuickNoteWrite::Published(note)),
+        Err(cache_error) => Ok(QuickNoteWrite::Committed { note, cache_error }),
+    }
+}
+
+fn reload_after_create(note: &Note) -> anyhow::Result<Vec<Note>> {
+    let notes = load_notes()?;
+    anyhow::ensure!(notes.iter().any(|current| current.path == note.path && current.slug == note.slug && current.content == note.content), "Committed note changed before cache publication");
+    Ok(notes)
+}
+
+fn create_note_noclobber(notes: &[Note], title: &str, content: &str, is_current: &dyn Fn() -> bool) -> anyhow::Result<(PathBuf, String)> {
+    anyhow::ensure!(!slugify(title).is_empty(), "Note title must produce a file name");
+    reset_slug_lookup();
+    for existing in notes { register_slug(&existing.slug); }
+    let dir = notes_dir();
+    let mut staged = tempfile::NamedTempFile::new_in(&dir)?;
+    staged.write_all(content.as_bytes())?;
+    staged.flush()?;
+    staged.as_file().sync_all()?;
+    loop {
+        let slug = unique_slug(title);
+        let path = dir.join(format!("{slug}.md"));
+        anyhow::ensure!(is_current(), "Note write superseded");
+        match staged.persist_noclobber(&path) {
+            Ok(_) => return Ok((path, slug)),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => staged = error.file,
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+}
+
 /// Read an exact existing slug from the canonical directory; aliases are never
 /// treated as identity. The optional path binds an already displayed row.
 pub fn read_note_exact_if(
@@ -1750,6 +1842,7 @@ pub fn write_quick_note_if(
         .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
     anyhow::ensure!(is_current(), "Note write superseded");
     let mut notes = load_notes()?;
+    let creating = matches!(&draft, QuickNoteDraft::New(_));
     let full_editor = matches!(&draft, QuickNoteDraft::Editor { .. });
     let (path, slug, content) = match draft {
         QuickNoteDraft::New(text) => {
@@ -1759,24 +1852,8 @@ pub fn write_quick_note_if(
             note.title = title.to_owned();
             note.alias = None;
             let content = note_content_for_persistence(&note);
-            reset_slug_lookup();
-            for note in &notes { register_slug(&note.slug); }
-            let dir = notes_dir();
-            let mut staged = tempfile::NamedTempFile::new_in(&dir)?;
-            staged.write_all(content.as_bytes())?;
-            staged.flush()?;
-            staged.as_file().sync_all()?;
-            loop {
-                let slug = unique_slug(title);
-                anyhow::ensure!(!slug.is_empty(), "Note title must produce a file name");
-                let path = dir.join(format!("{slug}.md"));
-                anyhow::ensure!(is_current(), "Note write superseded");
-                match staged.persist_noclobber(&path) {
-                    Ok(_) => break (path, slug, content),
-                    Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => staged = error.file,
-                    Err(error) => return Err(error.error.into()),
-                }
-            }
+            let (path, slug) = create_note_noclobber(&notes, title, &content, &is_current)?;
+            (path, slug, content)
         }
         QuickNoteDraft::Edit { original, content } | QuickNoteDraft::Editor { original, content } => {
             if !full_editor { anyhow::ensure!(!content.trim().is_empty(), "Text required"); }
@@ -1801,7 +1878,12 @@ pub fn write_quick_note_if(
         }
     };
     let note = note_from_persisted_content(path, slug, content);
-    notes.push(note.clone());
+    if creating {
+        notes = match reload_after_create(&note) {
+            Ok(notes) => notes,
+            Err(cache_error) => return Ok(QuickNoteWrite::Committed { note, cache_error: cache_error.context("reload notes after committed create") }),
+        };
+    } else { notes.push(note.clone()); }
     match publish_note_cache(notes) {
         Ok(_) => Ok(QuickNoteWrite::Published(note)),
         Err(cache_error) => Ok(QuickNoteWrite::Committed { note, cache_error }),
@@ -5551,6 +5633,7 @@ Body",
     #[test]
     fn checked_quick_note_preserves_metadata_bytes_and_late_guards() {
         let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let _cache = publish_note_cache_for_test(Vec::new());
         let dir = tempfile::tempdir().unwrap();
         let _env = NotesDirEnvGuard::set(dir.path());
         let source = "# Title\r\n  Aliases: alternate\r\nbody\r\n";
@@ -5559,15 +5642,19 @@ Body",
         let result = write_quick_note_if(QuickNoteDraft::New(source), || {
             let next = calls.get() + 1;
             calls.set(next);
-            if next == 2 { std::fs::write(&collision, b"foreign").unwrap(); }
+            if next == 2 { std::fs::write(&collision, b"# Competing note\n\nforeign").unwrap(); }
             true
         }).unwrap();
         let note = match result {
             QuickNoteWrite::Published(note) | QuickNoteWrite::Committed { note, .. } => note,
         };
         assert_ne!(note.path, collision);
-        assert_eq!(std::fs::read(collision).unwrap(), b"foreign");
+        assert_eq!(std::fs::read(&collision).unwrap(), b"# Competing note\n\nforeign");
         assert_eq!(std::fs::read(&note.path).unwrap(), source.as_bytes());
+        let cached = CACHE.lock().unwrap();
+        assert!(cached.notes.iter().any(|candidate| candidate.path == collision));
+        assert!(cached.notes.iter().any(|candidate| candidate.path == note.path));
+        drop(cached);
         let calls = std::cell::Cell::new(0);
         assert!(write_quick_note_if(QuickNoteDraft::Edit { original: &note, content: "changed" }, || {
             calls.set(calls.get() + 1);
@@ -5593,6 +5680,111 @@ Body",
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Alpha\nAlias: old\n\nplain body");
         assert_eq!(saved.alias.as_deref(), Some("old"));
         assert!(write_quick_note_if(QuickNoteDraft::Editor { original: &original, content: "later" }, || true).is_err());
+    }
+
+    #[test]
+    fn checked_plain_new_resolves_existing_primary_alias_or_pathless_draft() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let draft = match resolve_plain_new_note_if("fresh-note", || true).unwrap() {
+            CheckedNewNote::Draft(note) => note,
+            CheckedNewNote::Existing(_) => panic!("expected a draft"),
+        };
+        assert_eq!(draft.title, "fresh note");
+        assert_eq!(draft.content, "# fresh note\n\n");
+        assert!(draft.path.as_os_str().is_empty() && draft.slug.is_empty());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        std::fs::write(dir.path().join("alpha.md"), "# Alpha\nAlias: alternate\n\nbody").unwrap();
+        for slug in ["alpha", "alternate"] {
+            let note = match resolve_plain_new_note_if(slug, || true).unwrap() {
+                CheckedNewNote::Existing(note) => note,
+                CheckedNewNote::Draft(_) => panic!("expected existing note"),
+            };
+            assert_eq!(note.slug, "alpha");
+        }
+        std::fs::write(dir.path().join("alternate.md"), "# Other\n\nbody").unwrap();
+        assert!(resolve_plain_new_note_if("alternate", || true).is_err());
+        assert!(resolve_plain_new_note_if("fresh-note", || false).is_err());
+        assert!(resolve_plain_new_note_if("../outside", || true).is_err());
+    }
+
+    #[test]
+    fn checked_plain_new_first_save_handles_late_collision_and_promotes_identity() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let _cache = publish_note_cache_for_test(Vec::new());
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let draft = match resolve_plain_new_note_if("initial", || true).unwrap() {
+            CheckedNewNote::Draft(note) => note,
+            CheckedNewNote::Existing(_) => panic!("expected a draft"),
+        };
+        let source = "# Renamed\r\n\r\nfull body\r\n";
+        let collision = dir.path().join("renamed.md");
+        let calls = std::cell::Cell::new(0);
+        let saved = match write_plain_new_note_if(&draft, source, || {
+            let next = calls.get() + 1; calls.set(next);
+            if next == 2 { std::fs::write(&collision, b"# Competing note\n\nindependent").unwrap(); }
+            true
+        }).unwrap() {
+            QuickNoteWrite::Published(note) | QuickNoteWrite::Committed { note, .. } => note,
+        };
+        assert_eq!(std::fs::read(&collision).unwrap(), b"# Competing note\n\nindependent");
+        assert_eq!(saved.slug, "renamed-1");
+        assert_eq!(saved.title, "Renamed");
+        assert_eq!(std::fs::read(&saved.path).unwrap(), source.as_bytes());
+        let cached = CACHE.lock().unwrap();
+        assert!(cached.notes.iter().any(|note| note.path == collision));
+        assert!(cached.notes.iter().any(|note| note.path == saved.path));
+        drop(cached);
+        assert!(write_plain_new_note_if(&saved, "again", || true).is_err());
+        let updated = match write_quick_note_if(QuickNoteDraft::Editor { original: &saved, content: "# Renamed\n\nupdated" }, || true).unwrap() {
+            QuickNoteWrite::Published(note) | QuickNoteWrite::Committed { note, .. } => note,
+        };
+        assert_eq!(updated.path, saved.path);
+        assert_eq!(std::fs::read(&updated.path).unwrap(), b"# Renamed\n\nupdated");
+    }
+
+    #[test]
+    fn checked_plain_new_committed_cache_failure_keeps_promotable_identity() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let _cache = publish_note_cache_for_test(Vec::new());
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let draft = match resolve_plain_new_note_if("initial", || true).unwrap() {
+            CheckedNewNote::Draft(note) => note,
+            CheckedNewNote::Existing(_) => panic!("expected a draft"),
+        };
+        let saved = match write_plain_new_note_with_publish(&draft, "plain body", || true, |_| Err(anyhow::anyhow!("cache unavailable"))).unwrap() {
+            QuickNoteWrite::Committed { note, cache_error } => { assert!(cache_error.to_string().contains("cache unavailable")); note },
+            QuickNoteWrite::Published(_) => panic!("expected committed receipt"),
+        };
+        assert_eq!(saved.slug, "initial");
+        assert_eq!(std::fs::read(&saved.path).unwrap(), b"# initial\n\nplain body");
+        let promoted = match write_quick_note_if(QuickNoteDraft::Editor { original: &saved, content: "# initial\n\nnext" }, || true).unwrap() {
+            QuickNoteWrite::Published(note) | QuickNoteWrite::Committed { note, .. } => note,
+        };
+        assert_eq!(promoted.path, saved.path);
+        assert!(!dir.path().join("initial-1.md").exists());
+    }
+
+    #[test]
+    fn checked_plain_new_denies_revoked_save_and_unreadable_store() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let draft = match resolve_plain_new_note_if("untouched", || true).unwrap() {
+            CheckedNewNote::Draft(note) => note,
+            CheckedNewNote::Existing(_) => panic!("expected a draft"),
+        };
+        let calls = std::cell::Cell::new(0);
+        assert!(write_plain_new_note_if(&draft, &draft.content, || { calls.set(calls.get() + 1); calls.get() == 1 }).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        let invalid = dir.path().join("not-directory");
+        std::fs::write(&invalid, b"original").unwrap();
+        let _bad_env = NotesDirEnvGuard::set(&invalid);
+        assert!(resolve_plain_new_note_if("new-note", || true).is_err());
+        assert_eq!(std::fs::read(&invalid).unwrap(), b"original");
     }
 
     #[test]

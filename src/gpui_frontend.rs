@@ -248,6 +248,7 @@ enum LauncherResultOrigin {
     CalendarJump { serial: u64, index: usize },
     OmniNote { version: u64, note: Arc<multi_launcher::plugins::note::Note> },
     Note { version: u64, note: Arc<multi_launcher::plugins::note::Note> },
+    NoteNew { version: u64 },
     CachedCommand,
     Provider(String),
 }
@@ -592,6 +593,7 @@ impl LauncherSearchCatalog {
                     .then(|| omni_projection.as_ref().and_then(|projection| projection.note_for(&action))).flatten();
                 if omni_source == Some(multi_launcher::plugins::omni_search::OmniSource::Note) && omni_note.is_none() { return None; }
                 let note_source = (provider == "notes").then(|| self.providers.note_source(&note_effective, &action)).flatten();
+                let note_new = (provider == "notes").then(|| self.providers.note_new_source(&note_effective, &action)).flatten();
                 if provider == "omni_search" && omni_source.is_none() { return None; }
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
@@ -612,7 +614,7 @@ impl LauncherSearchCatalog {
                 let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || provider == "tempfile" || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || calculation_pad_result || note_source.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || provider == "tempfile" || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || calculation_pad_result || note_source.is_some() || note_new.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -621,7 +623,7 @@ impl LauncherSearchCatalog {
                         raw_query,
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
-                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || note_source.is_some() || settings_result || folder_command
+                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || note_source.is_some() || note_new.is_some() || settings_result || folder_command
                             || bookmark_authoring::normalized_add_bypass(&action, bookmark_command)
                             || (clipboard_modify_result && multi_launcher::actions::search::clipboard_modify_resolved_postfilter_bypass(raw_query, &action.action)),
                         &self.matcher,
@@ -634,12 +636,14 @@ impl LauncherSearchCatalog {
                 };
                 let origin = omni_note.map(|(version, note)| LauncherResultOrigin::OmniNote { version, note })
                     .or_else(|| omni_source.map(LauncherResultOrigin::Omni))
-                    .or_else(|| note_source.map(|(version, note)| LauncherResultOrigin::Note { version, note })).unwrap_or(LauncherResultOrigin::Provider(provider));
+                    .or_else(|| note_source.map(|(version, note)| LauncherResultOrigin::Note { version, note }))
+                    .or_else(|| note_new.map(|version| LauncherResultOrigin::NoteNew { version })).unwrap_or(LauncherResultOrigin::Provider(provider));
                 Some((action, score, origin))
             })
             .collect::<Vec<_>>();
         scored_provider_actions.retain(|(_, _, origin)| match origin {
             LauncherResultOrigin::OmniNote { version, .. } => *version == multi_launcher::plugins::note::note_version(),
+            LauncherResultOrigin::NoteNew { version } => *version == multi_launcher::plugins::note::note_version(),
             _ => true,
         });
         scored_provider_actions.extend(
@@ -7196,6 +7200,10 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
+        if self.launcher_results.query != query {
+            self.note_open_epoch.fetch_add(1, Ordering::AcqRel);
+            if let Some(view) = &self.note_editor_view { view.update(cx, |view, cx| view.revoke_switch(cx)); }
+        }
         self.calendar_results.retire();
         if let Some(view) = &self.calendar_view { view.update(cx, |view, _| view.search_refreshed(&query, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())); }
         self.external_launch.retire_omni();
@@ -7340,6 +7348,7 @@ impl RootWindow {
                 } else if provider == "notes" {
                     quick_notes::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                         || self.search_catalog.providers.note_source(&multi_launcher::common::query::split_action_filters(&query).0, action).is_some()
+                        || self.search_catalog.providers.note_new_source(&multi_launcher::common::query::split_action_filters(&query).0, action).is_some()
                 } else if provider == "file_lock" {
                     cfg!(windows) && file_lock::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "folder_size" {
@@ -8139,6 +8148,10 @@ impl RootWindow {
             self.open_checked_note(note.as_ref().clone(), *version, note_editor::OpenOrigin::Omni {
                 generation, index, query, action: result.action.clone(),
             }, window, cx);
+            return;
+        }
+        if let LauncherResultOrigin::NoteNew { version } = &result.origin {
+            self.open_checked_new_note(*version, generation, index, query, result.action.clone(), window, cx);
             return;
         }
         if let LauncherResultOrigin::Note { version, note } = &result.origin {

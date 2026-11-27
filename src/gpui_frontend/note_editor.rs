@@ -1,7 +1,7 @@
 //! Retained existing-note editor and checked canonical open/save.
 use super::*;
 use gpui_kit::component::text::{MarkdownExtensions, TextView, TextViewState};
-use multi_launcher::plugins::note::{self, Note, QuickNoteDraft, QuickNoteWrite};
+use multi_launcher::plugins::note::{self, CheckedNewNote, Note, QuickNoteDraft, QuickNoteWrite};
 use multi_launcher::settings::{NoteSettings, NoteViewMode};
 
 pub(super) const WAIT: &str = "Save or discard the Note Editor draft before closing.";
@@ -28,14 +28,30 @@ pub(super) enum OpenOrigin {
 }
 
 #[derive(Clone)]
+enum Identity { Existing, New(String) }
+
+#[derive(Clone)]
+struct Destination { note: Note, identity: Identity, resolve_slug: Option<String> }
+
+impl Destination {
+    fn existing(note: Note) -> Self { Self { note, identity: Identity::Existing, resolve_slug: None } }
+    fn resolved(slug: String, result: CheckedNewNote) -> Self {
+        match result {
+            CheckedNewNote::Existing(note) => Self { note, identity: Identity::Existing, resolve_slug: Some(slug) },
+            CheckedNewNote::Draft(note) => Self { note, identity: Identity::New(slug.clone()), resolve_slug: Some(slug) },
+        }
+    }
+}
+
+#[derive(Clone)]
 enum Decision {
     Close,
-    Switch(Note),
+    Switch(Destination),
 }
 enum AfterSave {
     Stay,
     Close,
-    Switch(Note),
+    Switch(Destination, u64),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,11 +60,11 @@ enum ClosePolicy {
     Save,
     Decide,
 }
-fn close_policy(dirty: bool, save_on_close: bool, confirm_discard: bool) -> ClosePolicy {
-    if !dirty {
-        ClosePolicy::Close
-    } else if save_on_close {
+fn close_policy(dirty: bool, save_on_close: bool, confirm_discard: bool, is_new: bool) -> ClosePolicy {
+    if save_on_close && (dirty || is_new) {
         ClosePolicy::Save
+    } else if !dirty {
+        ClosePolicy::Close
     } else if confirm_discard {
         ClosePolicy::Decide
     } else {
@@ -76,8 +92,28 @@ fn same_source(left: &Note, right: &Note) -> bool {
     same_note(left, right) && left.content == right.content
 }
 
+fn same_identity(left: &Identity, left_note: &Note, right: &Identity, right_note: &Note) -> bool {
+    match (left, right) {
+        (Identity::Existing, Identity::Existing) => same_note(left_note, right_note),
+        (Identity::New(a), Identity::New(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn same_destination(left: &Destination, right: &Destination) -> bool {
+    same_identity(&left.identity, &left.note, &right.identity, &right.note)
+        && same_source(&left.note, &right.note)
+}
+
 fn open_attempt_current(epoch: &AtomicU64, attempt: u64) -> bool {
     epoch.load(Ordering::Acquire) == attempt
+}
+
+fn decision_receipt_current(epoch: &AtomicU64, revision: u64, mount: &utility_mount::MountReceipt) -> bool {
+    epoch.load(Ordering::Acquire) == revision && mount.is_current()
+}
+fn issued_receipt_current(lease: &AtomicBool, issued_revision: u64, current_revision: u64) -> bool {
+    lease.load(Ordering::Acquire) && issued_revision == current_revision
 }
 
 pub(super) struct NoteEditor {
@@ -96,6 +132,7 @@ pub(super) struct NoteEditor {
     notes_wake: Arc<HashWakeSignal>,
     open_epoch: Arc<AtomicU64>,
     note: Note,
+    identity: Identity,
     baseline: String,
     mode: NoteViewMode,
     settings: NoteSettings,
@@ -103,6 +140,9 @@ pub(super) struct NoteEditor {
     confirm_discard: bool,
     pending: bool,
     decision: Option<Decision>,
+    decision_epoch: Arc<AtomicU64>,
+    switch_pending: bool,
+    switch_lease: Option<Arc<AtomicBool>>,
     focus_guard: Option<Subscription>,
     activation_guard: Option<Subscription>,
     message: Option<String>,
@@ -123,7 +163,7 @@ impl NoteEditor {
         }
     }
     fn new(
-        note: Note,
+        destination: Destination,
         settings: NoteSettings,
         save_on_close: bool,
         confirm_discard: bool,
@@ -136,6 +176,7 @@ impl NoteEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let Destination { note, identity, .. } = destination;
         let owner = utility_mount::MountOwner::default();
         let mount = owner.attach();
         let body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 24));
@@ -170,6 +211,7 @@ impl NoteEditor {
             notes_wake,
             open_epoch,
             note,
+            identity,
             baseline,
             mode,
             settings,
@@ -177,6 +219,9 @@ impl NoteEditor {
             confirm_discard,
             pending: false,
             decision: None,
+            decision_epoch: Arc::new(AtomicU64::new(0)),
+            switch_pending: false,
+            switch_lease: None,
             focus_guard: None,
             activation_guard: None,
             message: None,
@@ -185,10 +230,28 @@ impl NoteEditor {
     fn dirty(&self, cx: &App) -> bool {
         self.body.read(cx).value().as_str() != self.baseline
     }
+    fn set_decision(&mut self, decision: Option<Decision>) -> u64 {
+        let revision = self.decision_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        self.decision = decision;
+        revision
+    }
+    pub(super) fn revoke_switch(&mut self, cx: &mut Context<Self>) {
+        if !matches!(&self.decision, Some(Decision::Switch(_))) && !self.switch_pending { return; }
+        self.set_decision(None);
+        if self.switch_pending {
+            if let Some(lease) = self.switch_lease.take() { lease.store(false, Ordering::Release); }
+            self.switch_pending = false;
+            self.pending = false;
+            self.focus_guard = None;
+            self.activation_guard = None;
+            self.body.update(cx, |body, cx| body.set_readonly(false, cx));
+        }
+        cx.notify();
+    }
     pub(super) fn blocks_close(&self, cx: &App) -> bool {
         self.open
             && self.mount.is_current()
-            && (self.pending || self.decision.is_some() || self.dirty(cx))
+            && (self.pending || self.decision.is_some() || self.dirty(cx) || (self.save_on_close && matches!(&self.identity, Identity::New(_))))
     }
     pub(super) fn handle_escape(
         &mut self,
@@ -201,7 +264,7 @@ impl NoteEditor {
         }
         if !held {
             if self.decision.is_some() && !self.pending {
-                self.decision = None;
+                self.set_decision(None);
                 cx.notify();
             } else {
                 self.request_close(window, cx);
@@ -230,28 +293,42 @@ impl NoteEditor {
                     .external_owner_is_current(window.focused(cx).as_ref(), window, cx)
             })
     }
-    fn install(&mut self, note: Note, window: &mut Window, cx: &mut Context<Self>) {
+    fn install(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
+        let Destination { note, identity, .. } = destination;
         self.baseline = note.content.clone();
         self.note = note;
+        self.identity = identity;
         self.body.update(cx, |body, cx| {
             body.set_value(self.baseline.clone(), window, cx)
         });
         self.preview.update(cx, |preview, cx| {
             preview.set_text(preview_source(&self.baseline), cx)
         });
-        self.decision = None;
+        self.set_decision(None);
         self.message = None;
         cx.notify();
     }
-    fn verify_switch(&mut self, target: Note, window: &mut Window, cx: &mut Context<Self>) {
+    fn verify_switch(&mut self, target: Destination, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending || !self.current(window, cx) {
             return;
         }
+        let Some(permit) = self.admission.admit() else { return; };
         self.pending = true;
-        self.decision = Some(Decision::Switch(target.clone()));
+        self.switch_pending = true;
+        self.body.update(cx, |body, cx| body.set_readonly(true, cx));
+        let decision_revision = self.set_decision(Some(Decision::Switch(target.clone())));
         self.focus.focus(window, cx);
+        let lease = Arc::new(AtomicBool::new(true));
+        self.switch_lease = Some(lease.clone());
+        let blur = lease.clone();
+        self.focus_guard = Some(cx.on_focus_out(&self.focus, window, move |_, _, _, _| { blur.store(false, Ordering::Release); }));
+        let active = lease.clone();
+        self.activation_guard = Some(cx.observe_window_activation(window, move |_, window, _| { if !window.is_window_active() { active.store(false, Ordering::Release); } }));
+        let completion_lease = lease.clone();
         let receipt = self.mount.clone();
         let worker_receipt = receipt.clone();
+        let decision_epoch = self.decision_epoch.clone();
+        let worker_decision = decision_epoch.clone();
         let native = self.native;
         let visibility = self.visibility.clone();
         let revision = visibility.request_revision.load(Ordering::Acquire);
@@ -259,30 +336,43 @@ impl NoteEditor {
         let expected = target.clone();
         let host = self.host;
         let task = cx.background_executor().spawn(async move {
-            note::read_note_exact_if(&expected.slug, Some(&expected.path), || {
-                worker_receipt.is_current()
+            let current = || {
+                decision_receipt_current(&worker_decision, decision_revision, &worker_receipt)
+                    && lease.load(Ordering::Acquire)
                     && !admission.is_fenced()
                     && json_utility::native_host_current(&visibility, revision, native, false)
                     && native.is_some_and(|native| {
                         current_foreground_identity() == Some(native.identity)
                     })
-            })
+            };
+            let result = if let Some(slug) = &expected.resolve_slug {
+                note::resolve_plain_new_note_if(slug, current).map(|resolved| Some(Destination::resolved(slug.clone(), resolved)))
+            } else {
+                note::read_note_exact_if(&expected.note.slug, Some(&expected.note.path), current).map(|note| note.map(Destination::existing))
+            };
+            (permit, result)
         });
         cx.spawn(async move |weak, cx| {
-            let result = task.await;
+            let (_permit, result) = task.await;
             let delivered = host.update(cx, |_, window, cx| {
                 let _ = weak.update(cx, |view, cx| {
-                    if !receipt.is_current() || !receipt.matches(&view.mount) {
+                    if !decision_receipt_current(&decision_epoch, decision_revision, &receipt) || !receipt.matches(&view.mount) || !view.switch_pending {
                         return;
                     }
                     view.pending = false;
+                    view.switch_pending = false;
+                    view.switch_lease = None;
+                    view.focus_guard = None;
+                    view.activation_guard = None;
+                    view.body.update(cx, |body, cx| body.set_readonly(false, cx));
                     match result {
-                        Ok(Some(note))
-                            if view.focus.is_focused(window)
+                        Ok(Some(destination))
+                            if issued_receipt_current(&completion_lease, revision, view.visibility.request_revision.load(Ordering::Acquire)) && view.focus.is_focused(window)
+                                && json_utility::native_host_current(&view.visibility, revision, view.native, false)
                                 && view.current(window, cx)
-                                && same_source(&note, &target) =>
+                                && same_destination(&destination, &target) =>
                         {
-                            view.install(note, window, cx);
+                            view.install(destination, window, cx);
                             view.focus_content(window, cx);
                         }
                         _ => {
@@ -297,8 +387,13 @@ impl NoteEditor {
             });
             if delivered.is_err() {
                 let _ = weak.update(cx, |view, cx| {
-                    if receipt.is_current() && receipt.matches(&view.mount) {
+                    if decision_receipt_current(&decision_epoch, decision_revision, &receipt) && receipt.matches(&view.mount) && view.switch_pending {
                         view.pending = false;
+                        view.switch_pending = false;
+                        view.switch_lease = None;
+                        view.focus_guard = None;
+                        view.activation_guard = None;
+                        view.body.update(cx, |body, cx| body.set_readonly(false, cx));
                         view.message =
                             Some("The requested note could not be opened; try again.".into());
                         cx.notify();
@@ -309,21 +404,22 @@ impl NoteEditor {
         .detach();
         cx.notify();
     }
-    fn open_note(&mut self, note: Note, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_note(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending {
             self.message = Some(WAIT.into());
             cx.notify();
             return;
         }
-        if same_note(&self.note, &note) {
+        if same_identity(&self.identity, &self.note, &destination.identity, &destination.note) {
+            self.revoke_switch(cx);
             self.open = true;
             self.focus_content(window, cx);
             return;
         }
         if self.dirty(cx) {
-            self.decision = Some(Decision::Switch(note));
+            self.set_decision(Some(Decision::Switch(destination)));
         } else {
-            self.install(note, window, cx);
+            self.install(destination, window, cx);
             self.focus_content(window, cx);
         }
         cx.notify();
@@ -332,11 +428,11 @@ impl NoteEditor {
         if !self.current(window, cx) || self.pending {
             return;
         }
-        match close_policy(self.dirty(cx), self.save_on_close, self.confirm_discard) {
+        match close_policy(self.dirty(cx), self.save_on_close, self.confirm_discard, matches!(&self.identity, Identity::New(_))) {
             ClosePolicy::Close => self.retire(window, cx),
             ClosePolicy::Save => self.save(AfterSave::Close, window, cx),
             ClosePolicy::Decide => {
-                self.decision = Some(Decision::Close);
+                self.set_decision(Some(Decision::Close));
                 cx.notify();
             }
         }
@@ -351,7 +447,7 @@ impl NoteEditor {
         self.open = false;
         self.open_epoch.fetch_add(1, Ordering::AcqRel);
         self.owner.retire();
-        self.decision = None;
+        self.set_decision(None);
         self.baseline = self.note.content.clone();
         self.body.update(cx, |body, cx| {
             body.set_value(self.baseline.clone(), window, cx)
@@ -421,7 +517,9 @@ impl NoteEditor {
                 active.store(false, Ordering::Release);
             }
         }));
+        let completion_lease = lease.clone();
         let original = self.note.clone();
+        let is_new = matches!(&self.identity, Identity::New(_));
         let content = self.body.read(cx).value().to_string();
         let saved_input = content.clone();
         let receipt = self.mount.clone();
@@ -431,12 +529,7 @@ impl NoteEditor {
         let revision = visibility.request_revision.load(Ordering::Acquire);
         let native = self.native;
         let task = cx.background_executor().spawn(async move {
-            let result = note::write_quick_note_if(
-                QuickNoteDraft::Editor {
-                    original: &original,
-                    content: &content,
-                },
-                || {
+            let current = || {
                     worker_receipt.is_current()
                         && !admission.is_fenced()
                         && lease.load(Ordering::Acquire)
@@ -444,8 +537,12 @@ impl NoteEditor {
                         && native.is_some_and(|native| {
                             current_foreground_identity() == Some(native.identity)
                         })
-                },
-            );
+                };
+            let result = if is_new {
+                note::write_plain_new_note_if(&original, &content, current)
+            } else {
+                note::write_quick_note_if(QuickNoteDraft::Editor { original: &original, content: &content }, current)
+            };
             (permit, result)
         });
         let host = self.host;
@@ -481,6 +578,7 @@ impl NoteEditor {
                     if let Some(note) = note {
                         view.baseline = saved_input;
                         view.note = note;
+                        view.identity = Identity::Existing;
                         cx.notify();
                         true
                     } else {
@@ -494,6 +592,8 @@ impl NoteEditor {
                     let _ = weak.update(cx, |view, cx| {
                         if !receipt.is_current()
                             || !receipt.matches(&view.mount)
+                            || !issued_receipt_current(&completion_lease, revision, view.visibility.request_revision.load(Ordering::Acquire))
+                            || !json_utility::native_host_current(&view.visibility, revision, view.native, false)
                             || !view.current(window, cx)
                             || !issuing_focus.is_focused(window)
                         {
@@ -502,7 +602,9 @@ impl NoteEditor {
                         match after {
                             AfterSave::Stay => view.focus_content(window, cx),
                             AfterSave::Close => view.retire(window, cx),
-                            AfterSave::Switch(note) => view.verify_switch(note, window, cx),
+                            AfterSave::Switch(note, decision_revision) => {
+                                if decision_receipt_current(&view.decision_epoch, decision_revision, &receipt) { view.verify_switch(note, window, cx); }
+                            }
                         }
                         cx.notify();
                     });
@@ -573,7 +675,7 @@ impl Render for NoteEditor {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(Textarea::new(&self.body).aria_label("Note Markdown")),
+                    .child(Textarea::new(&self.body).readonly(self.pending).aria_label("Note Markdown")),
             );
         }
         if matches!(self.mode, NoteViewMode::Preview | NoteViewMode::Split) {
@@ -614,6 +716,10 @@ impl Render for NoteEditor {
             panel = panel.child(Label::new(message.clone()));
         }
         if self.decision.is_some() {
+            let decision_revision = self.decision_epoch.load(Ordering::Acquire);
+            let save_receipt = self.mount.clone();
+            let discard_receipt = self.mount.clone();
+            let keep_receipt = self.mount.clone();
             panel = panel
                 .child(Label::new("Save changes before continuing?"))
                 .child(
@@ -624,13 +730,13 @@ impl Render for NoteEditor {
                             Button::new("note-decision-save")
                                 .label("Save")
                                 .disabled(self.pending)
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    if !view.current(window, cx) {
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if !decision_receipt_current(&view.decision_epoch, decision_revision, &save_receipt) || !save_receipt.matches(&view.mount) || !view.current(window, cx) {
                                         return;
                                     }
                                     let after = match view.decision.clone() {
                                         Some(Decision::Close) => AfterSave::Close,
-                                        Some(Decision::Switch(note)) => AfterSave::Switch(note),
+                                        Some(Decision::Switch(note)) => AfterSave::Switch(note, decision_revision),
                                         None => return,
                                     };
                                     view.save(after, window, cx);
@@ -640,8 +746,8 @@ impl Render for NoteEditor {
                             Button::new("note-decision-discard")
                                 .label("Discard")
                                 .disabled(self.pending)
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    if !view.current(window, cx) || view.pending {
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if !decision_receipt_current(&view.decision_epoch, decision_revision, &discard_receipt) || !discard_receipt.matches(&view.mount) || !view.current(window, cx) || view.pending {
                                         return;
                                     }
                                     match view.decision.clone() {
@@ -658,9 +764,9 @@ impl Render for NoteEditor {
                             Button::new("note-decision-keep")
                                 .label("Keep Editing")
                                 .disabled(self.pending)
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    if view.current(window, cx) && !view.pending {
-                                        view.decision = None;
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    if decision_receipt_current(&view.decision_epoch, decision_revision, &keep_receipt) && keep_receipt.matches(&view.mount) && view.current(window, cx) && !view.pending {
+                                        view.set_decision(None);
                                         view.focus.focus(window, cx);
                                         cx.notify();
                                     }
@@ -695,6 +801,43 @@ impl Render for NoteEditor {
 }
 
 impl RootWindow {
+    fn mount_note_destination(&mut self, destination: Destination, native: NativeWindow, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.note_editor_view.clone() {
+            view.update(cx, |view, cx| {
+                if !view.open {
+                    view.open = true;
+                    view.mount = view.owner.attach();
+                    view.install(destination, window, cx);
+                    view.focus_content(window, cx);
+                } else { view.open_note(destination, window, cx); }
+            });
+        } else {
+            let owner = cx.entity().downgrade();
+            let settings = self.search_catalog.note_settings.clone();
+            let save = self.search_catalog.note_save_on_close;
+            let confirm = self.search_catalog.note_confirm_discard;
+            let visibility = self.root_visibility.clone();
+            let admission = self.restart_admission.clone();
+            let notes_wake = self.search_catalog.providers.notes_wake.clone();
+            let open_epoch = self.note_open_epoch.clone();
+            let view = cx.new(|cx| NoteEditor::new(destination, settings, save, confirm, owner, Some(native), visibility, admission, notes_wake, open_epoch, window, cx));
+            view.update(cx, |view, cx| view.focus_content(window, cx));
+            self.note_editor_view = Some(view);
+        }
+        let id = window.window_handle().window_id();
+        let index = self.clipboard_scroll_item(id, cx)
+            + usize::from(self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
+            + usize::from(self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
+            + usize::from(self.snippets_view.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.snippet_fill.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
+            + usize::from(self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
+            + usize::from(self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).open));
+        self.root_scroll.scroll_to_top_of_item(index);
+    }
+
     fn note_origin_enabled(&self, origin: &OpenOrigin, expected: &Note, version: u64) -> bool {
         match origin {
             OpenOrigin::Omni { query, action, .. } => {
@@ -726,6 +869,62 @@ impl RootWindow {
             }
         }
     }
+    pub(super) fn open_checked_new_note(&mut self, version: u64, generation: u64, index: usize, query: String, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(Command::Note(multi_launcher::commands::NoteCommand::New { slug, template: None })) = parse_action(&action) else { return; };
+        let effective = multi_launcher::common::query::split_action_filters(&query).0;
+        if !action.action.starts_with("note:new:") || action.args.is_some()
+            || self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains("notes"))
+            || !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "notes")
+            || self.search_catalog.providers.note_new_source(&effective, &action) != Some(version)
+            || self.restart_admission.is_fenced() || !window.is_window_active() || window.has_active_dialog(cx)
+            || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+        let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+        let Some(focus) = window.focused(cx) else { return; };
+        let Some(permit) = self.restart_admission.admit() else { return; };
+        if let Some(view) = &self.note_editor_view { view.update(cx, |view, cx| view.revoke_switch(cx)); }
+        let revision = self.root_visibility.request_revision.load(Ordering::Acquire);
+        let lease = Arc::new(AtomicBool::new(true));
+        let blur = lease.clone();
+        let focus_guard = cx.on_blur(&focus, window, move |_, _, _| { blur.store(false, Ordering::Release); });
+        let active = lease.clone();
+        let activation_guard = cx.observe_window_activation(window, move |_, window, _| { if !window.is_window_active() { active.store(false, Ordering::Release); } });
+        let open_epoch = self.note_open_epoch.clone();
+        let attempt = open_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let worker_epoch = open_epoch.clone(); let worker_lease = lease.clone();
+        let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone();
+        let worker_slug = slug.clone(); let host = window.window_handle();
+        let task = cx.background_executor().spawn(async move {
+            let result = note::resolve_plain_new_note_if(&worker_slug, || open_attempt_current(&worker_epoch, attempt)
+                && worker_lease.load(Ordering::Acquire) && note::note_version() == version && !admission.is_fenced()
+                && json_utility::native_host_current(&visibility, revision, Some(native), false)
+                && current_foreground_identity() == Some(native.identity));
+            (permit, result)
+        });
+        let root = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let (_permit, result) = task.await;
+            let _guards = (focus_guard, activation_guard);
+            let _ = host.update(cx, |_, window, app| { let _ = root.update(app, |root, cx| {
+                let effective = multi_launcher::common::query::split_action_filters(&query).0;
+                if !open_attempt_current(&open_epoch, attempt) || !lease.load(Ordering::Acquire)
+                    || !focus.is_focused(window) || !window.is_window_active() || window.has_active_dialog(cx)
+                    || root.restart_admission.is_fenced() || root.native_window != Some(native)
+                    || current_foreground_identity() != Some(native.identity)
+                    || !json_utility::native_host_current(&root.root_visibility, revision, Some(native), false)
+                    || !root.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+                    || root.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains("notes"))
+                    || !multi_launcher::settings::provider_search_capability_enabled(root.enabled_capabilities.as_ref(), "notes")
+                    || root.query.read(cx).value().as_str() != query
+                    || root.search_catalog.providers.note_new_source(&effective, &action) != Some(version)
+                    || root.launcher_results.resolve_result(generation, index, &query).is_none_or(|row| row.action != action || row.origin != LauncherResultOrigin::NoteNew { version }) { return; }
+                match result {
+                    Ok(resolved) => { root.launcher_search_error = None; root.mount_note_destination(Destination::resolved(slug, resolved), native, window, cx); }
+                    Err(error) => root.launcher_search_error = Some(format!("Could not open note: {error:#}")),
+                }
+                cx.notify();
+            }); });
+        }).detach();
+    }
     pub(super) fn open_checked_note(
         &mut self,
         expected: Note,
@@ -755,6 +954,7 @@ impl RootWindow {
         let Some(focus) = window.focused(cx) else {
             return;
         };
+        if let Some(view) = &self.note_editor_view { view.update(cx, |view, cx| view.revoke_switch(cx)); }
         let open_epoch = self.note_open_epoch.clone();
         let attempt = open_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
         let worker_epoch = open_epoch.clone();
@@ -861,94 +1061,7 @@ impl RootWindow {
                             return;
                         }
                     };
-                    if let Some(view) = root.note_editor_view.clone() {
-                        view.update(cx, |view, cx| {
-                            if !view.open {
-                                view.open = true;
-                                view.mount = view.owner.attach();
-                                view.install(note, window, cx);
-                                view.focus_content(window, cx);
-                            } else {
-                                view.open_note(note, window, cx);
-                            }
-                        });
-                    } else {
-                        let owner = cx.entity().downgrade();
-                        let settings = root.search_catalog.note_settings.clone();
-                        let save = root.search_catalog.note_save_on_close;
-                        let confirm = root.search_catalog.note_confirm_discard;
-                        let visibility = root.root_visibility.clone();
-                        let admission = root.restart_admission.clone();
-                        let notes_wake = root.search_catalog.providers.notes_wake.clone();
-                        let open_epoch = root.note_open_epoch.clone();
-                        let view = cx.new(|cx| {
-                            NoteEditor::new(
-                                note,
-                                settings,
-                                save,
-                                confirm,
-                                owner,
-                                Some(native),
-                                visibility,
-                                admission,
-                                notes_wake,
-                                open_epoch,
-                                window,
-                                cx,
-                            )
-                        });
-                        view.update(cx, |view, cx| view.focus_content(window, cx));
-                        root.note_editor_view = Some(view);
-                    }
-                    let id = window.window_handle().window_id();
-                    let history = root
-                        .clipboard_history
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).is_mounted_in(id, false));
-                    let modify = root
-                        .clipboard_modify_view
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).is_mounted_in(id, false));
-                    let snippets = root
-                        .snippets_view
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).open);
-                    let fill = root
-                        .snippet_fill
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).open);
-                    let tempfile = root
-                        .tempfile_view
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).open);
-                    let folder = root
-                        .folder_size_view
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).is_mounted_in(id, false));
-                    let lock = root
-                        .file_lock_view
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).is_mounted_in(id, false));
-                    let duplicates = root
-                        .duplicate_finder_view
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).open);
-                    let quick = root
-                        .quick_notes_view
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).open);
-                    root.root_scroll.scroll_to_top_of_item(
-                        root.clipboard_scroll_item(id, cx)
-                            + usize::from(history)
-                            + usize::from(modify)
-                            + usize::from(snippets)
-                            + usize::from(fill)
-                            + usize::from(tempfile)
-                            + usize::from(folder)
-                            + usize::from(lock)
-                            + usize::from(duplicates)
-                            + usize::from(quick),
-                    );
+                    root.mount_note_destination(Destination::existing(note), native, window, cx);
                     cx.notify();
                 });
             });
@@ -960,7 +1073,7 @@ impl RootWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClosePolicy, close_policy, open_attempt_current, preview_source, same_note, same_source,
+        ClosePolicy, Destination, Identity, close_policy, decision_receipt_current, issued_receipt_current, open_attempt_current, preview_source, same_destination, same_identity, same_note, same_source,
     };
     use multi_launcher::plugins::note::Note;
 
@@ -992,10 +1105,47 @@ mod tests {
 
     #[test]
     fn editor_close_policy_honors_save_and_discard_preferences() {
-        assert_eq!(close_policy(false, true, true), ClosePolicy::Close);
-        assert_eq!(close_policy(true, true, true), ClosePolicy::Save);
-        assert_eq!(close_policy(true, false, true), ClosePolicy::Decide);
-        assert_eq!(close_policy(true, false, false), ClosePolicy::Close);
+        assert_eq!(close_policy(false, true, true, false), ClosePolicy::Close);
+        assert_eq!(close_policy(false, true, true, true), ClosePolicy::Save);
+        assert_eq!(close_policy(false, false, true, true), ClosePolicy::Close);
+        assert_eq!(close_policy(true, true, true, false), ClosePolicy::Save);
+        assert_eq!(close_policy(true, false, true, false), ClosePolicy::Decide);
+        assert_eq!(close_policy(true, false, false, false), ClosePolicy::Close);
+    }
+
+    #[test]
+    fn plain_new_identity_and_deferred_destination_do_not_alias_pathless_drafts() {
+        let draft = note("", "");
+        assert!(same_identity(&Identity::New("alpha".into()), &draft, &Identity::New("alpha".into()), &draft));
+        assert!(!same_identity(&Identity::New("alpha".into()), &draft, &Identity::New("beta".into()), &draft));
+        let destination = Destination { note: draft.clone(), identity: Identity::New("alpha".into()), resolve_slug: Some("alpha".into()) };
+        let existing = Destination { note: note("alpha", "alpha.md"), identity: Identity::Existing, resolve_slug: Some("alpha".into()) };
+        assert!(!same_destination(&destination, &existing));
+        assert!(same_destination(&destination, &destination.clone()));
+    }
+
+    #[test]
+    fn newer_same_identity_retires_switch_decision_and_terminal_lease() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let draft = note("", "");
+        let a = Identity::New("alpha".into());
+        let b = Identity::New("beta".into());
+        let owner = super::utility_mount::MountOwner::default();
+        let mount = owner.attach();
+        let epoch = AtomicU64::new(1);
+        assert!(!same_identity(&a, &draft, &b, &draft));
+        assert!(decision_receipt_current(&epoch, 1, &mount));
+        assert!(same_identity(&a, &draft, &Identity::New("alpha".into()), &draft));
+        epoch.fetch_add(1, Ordering::AcqRel);
+        assert!(!decision_receipt_current(&epoch, 1, &mount));
+        assert!(decision_receipt_current(&epoch, 2, &mount));
+        owner.retire();
+        assert!(!decision_receipt_current(&epoch, 2, &mount));
+        let lease = AtomicBool::new(true);
+        assert!(issued_receipt_current(&lease, 7, 7));
+        assert!(!issued_receipt_current(&lease, 7, 8));
+        lease.store(false, Ordering::Release);
+        assert!(!issued_receipt_current(&lease, 7, 7));
     }
 
     #[test]
