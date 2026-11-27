@@ -37,6 +37,8 @@ pub(super) struct Projection {
     query: String,
     rows: HashMap<u64, Vec<OmniRow>>,
     notes: Option<Arc<super::search_providers::NoteSnapshot>>,
+    todos: Option<(Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, Arc<multi_launcher::plugins::todo::CheckedTodoSnapshot>)>,
+    todo_revision: (Arc<AtomicU64>, u64),
 }
 impl Projection {
     pub fn source_for(&self, action: &Action) -> Option<OmniSource> {
@@ -65,6 +67,11 @@ impl Projection {
             return None;
         };
         Some((snapshot.version, snapshot.by_slug.get(&slug)?.clone()))
+    }
+    pub fn todo_for(&self, action: &Action) -> Option<(Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, multi_launcher::plugins::todo::CheckedTodoReceipt, Arc<AtomicU64>, u64)> {
+        if self.todo_revision.0.load(Ordering::Acquire) != self.todo_revision.1 { return None; }
+        let (owner, snapshot) = self.todos.as_ref()?;
+        Some((owner.clone(), owner.receipt(snapshot, action)?, self.todo_revision.0.clone(), self.todo_revision.1))
     }
 }
 
@@ -99,7 +106,8 @@ pub(super) fn supported_child(source: &OmniSource, action: &Action) -> bool {
                 multi_launcher::commands::NoteCommand::Open { .. }
             ))
         ),
-        OmniSource::Todo | OmniSource::Calendar => false,
+        OmniSource::Todo => matches!(parse_action(action), Ok(Command::Todo(multi_launcher::commands::TodoCommand::Done { .. }))),
+        OmniSource::Calendar => false,
     }
 }
 
@@ -111,6 +119,8 @@ pub(super) struct Provider {
     settings: RwLock<OmniSearchSettings>,
     catalog: RwLock<Option<Arc<OmniAppCatalog>>>,
     projected: Mutex<Option<Arc<Projection>>>,
+    todos: RwLock<Option<Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, String>>>>>>,
+    todo_revision: Arc<AtomicU64>,
 }
 
 impl Provider {
@@ -128,13 +138,19 @@ impl Provider {
             settings: RwLock::new(OmniSearchSettings::default()),
             catalog: RwLock::new(None),
             projected: Mutex::new(None),
+            todos: RwLock::new(None),
+            todo_revision: Arc::new(AtomicU64::new(1)),
         }
+    }
+    pub fn attach_todos(&self, owner: Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, String>>>>) {
+        if let Ok(mut slot) = self.todos.write() { *slot = Some(owner); }
     }
     pub fn configure(&self, value: Option<&serde_json::Value>) {
         if let Some(settings) = value.and_then(|value| serde_json::from_value(value.clone()).ok())
             && let Ok(mut current) = self.settings.write()
         {
             *current = settings;
+            self.todo_revision.fetch_add(1, Ordering::AcqRel);
         }
     }
     pub fn install(&self, catalog: Option<Arc<OmniAppCatalog>>) {
@@ -266,6 +282,14 @@ impl RootWindow {
         else {
             return;
         };
+        if *child == OmniSource::Todo {
+            if !settings.include_todos { return; }
+            let Some((owner, receipt, scope, revision)) = self.search_catalog.providers.omni.projection(&query).and_then(|projection| projection.todo_for(&result.action)) else { return; };
+            let Some(catalog) = self.omni_search.current_authority() else { return; };
+            let guard = external_launch::OmniGuard { catalog, lease: Arc::new(AtomicBool::new(true)), effect_gate: Arc::new(external_launch::EffectGate::default()), visibility: self.root_visibility.clone(), revision: self.root_visibility.request_revision.load(Ordering::Acquire), native, admission: self.restart_admission.clone() };
+            self.start_omni_todo(result.action.clone(), owner, receipt, scope, revision, guard, query, source, window, cx);
+            return;
+        }
         let (catalog, target, command) = match child {
             OmniSource::Folder if settings.include_folders => {
                 let Some(catalog) = self.omni_search.current_authority() else {
@@ -466,7 +490,7 @@ impl Plugin for Provider {
         ]
     }
     fn search(&self, query: &str) -> Vec<Action> {
-        let settings = self.settings();
+        let (settings, todo_revision) = self.settings.read().map(|settings| (settings.clone(), self.todo_revision.load(Ordering::Acquire))).unwrap_or_else(|_| (OmniSearchSettings::default(), self.todo_revision.load(Ordering::Acquire)));
         let catalog = self.catalog.read().ok().and_then(|value| value.clone());
         let notes = if settings.include_notes {
             self.notes.lock().ok().and_then(|owner| owner.clone())
@@ -474,6 +498,9 @@ impl Plugin for Provider {
             None
         };
         let note_snapshot = notes.as_ref().and_then(|_| self.note_snapshots.current());
+        let todo_owner = settings.include_todos.then(|| self.todos.read().ok().and_then(|slot| slot.clone()).and_then(|slot| slot.lock().ok().and_then(|owner| owner.as_ref().and_then(|result| result.as_ref().ok()).cloned()))).flatten();
+        let todo_snapshot = todo_owner.as_ref().map(|owner| owner.snapshot());
+        let todo_provider = todo_snapshot.as_ref().map(|snapshot| TodoProjection(snapshot.clone()));
         let mut rows = project_omni(
             query,
             &settings,
@@ -482,7 +509,7 @@ impl Plugin for Provider {
                 bookmarks: self.bookmarks.as_deref().map(|owner| owner as &dyn Plugin),
                 apps: catalog.as_deref(),
                 notes: notes.as_deref().map(|owner| owner as &dyn Plugin),
-                todos: None,
+                todos: todo_provider.as_ref().map(|provider| provider as &dyn Plugin),
                 calendar: None,
             },
         );
@@ -491,6 +518,8 @@ impl Plugin for Provider {
         }) {
             rows.retain(|row| row.source != OmniSource::Note);
         }
+        rows.retain(|row| row.source != OmniSource::Todo || todo_owner.as_ref().zip(todo_snapshot.as_ref())
+            .is_some_and(|(owner, snapshot)| owner.receipt(snapshot, &row.action).is_some()));
         let actions = rows.iter().map(|row| row.action.clone()).collect();
         let mut indexed = HashMap::<u64, Vec<OmniRow>>::new();
         for row in rows {
@@ -504,9 +533,21 @@ impl Plugin for Provider {
                 query: query.to_owned(),
                 rows: indexed,
                 notes: note_snapshot,
+                todos: todo_owner.zip(todo_snapshot),
+                todo_revision: (self.todo_revision.clone(), todo_revision),
             }));
         }
         actions
+    }
+}
+
+struct TodoProjection(Arc<multi_launcher::plugins::todo::CheckedTodoSnapshot>);
+impl Plugin for TodoProjection {
+    fn name(&self) -> &str { "todo" }
+    fn description(&self) -> &str { "Todo snapshot" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        query.strip_prefix("todo list").map(|filter| multi_launcher::plugins::todo::project_todo_list(&self.0.entries, filter)).unwrap_or_default()
     }
 }
 
@@ -520,6 +561,29 @@ mod tests {
         collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn todo_projection_uses_snapshot_and_own_omni_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("todo.json"), br#"[{"id":"one","text":"Caf\u00e9 task","done":false,"priority":2,"tags":[],"entity_refs":[]},{"id":"","text":"blank","done":false},{"id":"dupe","text":"duplicate one","done":false},{"id":"dupe","text":"duplicate two","done":true},{"id":"other","text":"ambiguous","done":false,"extra":1,"extra":2}]"#).unwrap();
+        let root = multi_launcher::platform::app_data::AppDataRoot::from_settings_path(temp.path().join("settings.json")).unwrap();
+        let owner = multi_launcher::plugins::todo::CheckedTodoOwner::start(&root, Arc::new(|| {})).unwrap();
+        let provider = Provider::new(None, None, Arc::new(Mutex::new(None)), Arc::new(super::super::search_providers::NoteSnapshots::default()));
+        provider.attach_todos(Arc::new(Mutex::new(Some(Ok(owner.clone())))));
+        assert_eq!(owner.snapshot().entries.len(), 5);
+        assert_eq!(provider.search("o").len(), 1);
+        let rows = provider.search("o Café");
+        assert_eq!(rows.len(), 1);
+        let projection = provider.projection("o Café").unwrap();
+        assert_eq!(projection.source_for(&rows[0]), Some(OmniSource::Todo));
+        assert!(projection.todo_for(&rows[0]).is_some());
+        let enabled = HashSet::from(["omni_search".to_owned()]);
+        assert_eq!(super::super::search_providers::search_routed([&provider as &dyn Plugin], "o Café", Some(&enabled), None).len(), 1);
+        provider.configure(Some(&serde_json::json!({"include_todos": false})));
+        assert!(projection.todo_for(&rows[0]).is_none());
+        assert!(provider.search("o Café").is_empty());
+        owner.shutdown();
+    }
 
     #[test]
     fn omni_note_gate_does_not_depend_on_direct_notes_search() {

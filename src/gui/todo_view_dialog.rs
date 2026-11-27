@@ -7,19 +7,12 @@ use crate::gui::theme::widgets::{
 use crate::plugins::note::{Note, load_notes};
 #[cfg(test)]
 use crate::plugins::todo::replace_todos;
-use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, update_todos};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, TodoSortMode, load_todos, update_todos};
 use eframe::egui;
 use std::collections::HashMap;
 
 const TODO_VIEW_SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
 const TODO_VIEW_LIST_HEIGHT: f32 = 170.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-enum TodoSortMode {
-    #[default]
-    Priority,
-    Name,
-}
 
 pub fn todo_view_layout_sizes() -> (egui::Vec2, f32) {
     (TODO_VIEW_SIZE, TODO_VIEW_LIST_HEIGHT)
@@ -293,48 +286,7 @@ impl TodoViewDialog {
         filter: &str,
         sort_mode: TodoSortMode,
     ) -> Vec<usize> {
-        let filter = filter.trim().to_lowercase();
-        let mut indices: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                if filter.is_empty() {
-                    true
-                } else if filter.starts_with('#') {
-                    let tag = filter.trim_start_matches('#');
-                    e.tags.iter().any(|t| t.to_lowercase().contains(tag))
-                } else {
-                    e.text.to_lowercase().contains(&filter)
-                        || e.tags.iter().any(|t| t.to_lowercase().contains(&filter))
-                }
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        indices.sort_by(|a, b| {
-            let entry_a = &entries[*a];
-            let entry_b = &entries[*b];
-            match sort_mode {
-                TodoSortMode::Priority => entry_b
-                    .priority
-                    .cmp(&entry_a.priority)
-                    .then_with(|| {
-                        entry_a
-                            .text
-                            .to_lowercase()
-                            .cmp(&entry_b.text.to_lowercase())
-                    })
-                    .then_with(|| a.cmp(b)),
-                TodoSortMode::Name => entry_a
-                    .text
-                    .to_lowercase()
-                    .cmp(&entry_b.text.to_lowercase())
-                    .then_with(|| entry_b.priority.cmp(&entry_a.priority))
-                    .then_with(|| a.cmp(b)),
-            }
-        });
-
-        indices
+        crate::plugins::todo::sorted_todo_indices(entries, filter, sort_mode)
     }
 
     fn link_note_to_todo(entry: &mut TodoEntry, note_slug: &str, note_title: &str) {

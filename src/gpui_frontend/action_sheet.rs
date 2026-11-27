@@ -52,7 +52,8 @@ fn primary_allowed(
     let saved_shortcut = result.saved_shortcut().is_some();
     #[cfg(not(windows))]
     let saved_shortcut = false;
-    candidate == &result.action
+    !matches!(parse_action(candidate), Ok(Command::Todo(multi_launcher::commands::TodoCommand::Done { .. })))
+        && candidate == &result.action
         && (parse_installed_search_invocation(candidate.clone(), ActivationSource::Enter).is_ok()
             || matches!(&result.origin, LauncherResultOrigin::Omni(source) if super::omni_search::supported_child(source, candidate))
             || (matches!(&result.origin, LauncherResultOrigin::OmniNote { .. })
@@ -554,6 +555,13 @@ mod tests {
         ResolvedQueryResultsLayout,
     };
     use super::{primary_allowed, sheet_key_owned, snapshot_matches};
+
+    #[test]
+    fn todo_toggle_is_not_an_action_sheet_primary() {
+        let action = Action { label: "[ ] task".into(), desc: "Todo".into(), action: "todo:done:0".into(), args: None };
+        let result = LauncherSearchResult { action: action.clone(), origin: LauncherResultOrigin::Omni(multi_launcher::plugins::omni_search::OmniSource::Todo), display_label: None, hide_description: false };
+        assert!(!primary_allowed(&result, &action, false, &[]));
+    }
 
     #[test]
     fn receipt_rejects_changed_result_generation_payload_and_visibility() {

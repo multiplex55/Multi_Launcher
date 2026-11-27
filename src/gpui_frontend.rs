@@ -54,6 +54,7 @@ mod snippet_fill;
 mod clipboard_modify_view;
 mod tempfile_view;
 mod timer_view;
+mod todo_view;
 mod gesture_editor;
 mod gesture_query;
 mod invocation;
@@ -2527,6 +2528,9 @@ struct RootWindow {
     multi_manager_view: Option<Entity<multi_manager::MultiManagerView>>,
     calculation_pad_view: Option<Entity<calculation_pad::CalculationPadView>>,
     timer_view: Option<Entity<timer_view::TimerView>>,
+    todo_view: Option<Entity<todo_view::TodoView>>,
+    todo_owner: Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, String>>>>,
+    todo_wake: Arc<HashWakeSignal>,
     gesture_editor: Option<Entity<gesture_editor::GestureEditor>>,
     timer_session: Option<Arc<multi_launcher::plugins::timer_session::TimerSession>>,
     timer_wake: Arc<HashWakeSignal>,
@@ -7290,6 +7294,8 @@ impl RootWindow {
                         || self.tempfile_search.projected(&query, action)
                 } else if provider == "timer" {
                     timer_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                } else if provider == "todo" {
+                    todo_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "mouse_gestures" {
                     gesture_editor::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "snippets" {
@@ -8193,6 +8199,12 @@ impl RootWindow {
             if timer_view::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 let alarm = matches!(parse_action(&result.action), Ok(Command::Timer(multi_launcher::commands::TimerCommand::AlarmDialog)));
                 self.open_timer(alarm, window, cx);
+            }
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "todo") {
+            if todo_view::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                self.open_todo_view(window, cx);
             }
             return;
         }
@@ -11668,6 +11680,9 @@ impl Render for RootWindow {
         if let Some(view) = self.timer_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
+        if let Some(view) = self.todo_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
         if let Some(view) = self.gesture_editor.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
@@ -13263,8 +13278,10 @@ pub(crate) fn run_foundation_window(
         search_startup.jump_mode_hint_alphabet.clone(),
     );
     let external_launch_preferences_for_root = external_launch_preferences;
+    let todo_slot = Arc::new(Mutex::new(None));
     let launcher_search_catalog =
         LauncherSearchCatalog::new(search_startup, enabled_plugins.as_ref());
+    launcher_search_catalog.providers.omni.attach_todos(todo_slot.clone());
     let search_jump_geometry_frame_for_root =
         Rc::new(RefCell::new(None::<JumpGeometryFrame>));
     let hash_tool_key = UtilityToolKey::parse("hash-generator")
@@ -13378,6 +13395,22 @@ pub(crate) fn run_foundation_window(
     let gesture_owner_for_run = gesture_lifetime.clone();
     let gesture_wake_for_run = gesture_wake.clone();
     let timer_wake = Arc::new(HashWakeSignal::default());
+    let todo_wake = Arc::new(HashWakeSignal::default());
+    let todo_wake_for_root = todo_wake.clone();
+    let todo_slot_for_root = todo_slot.clone();
+    let todo_start = {
+        let slot = todo_slot.clone();
+        let wake = todo_wake.clone();
+        let root = app_data_root.clone();
+        std::thread::spawn(move || {
+            let notify = wake.clone();
+            let owner = multi_launcher::plugins::todo::CheckedTodoOwner::start(
+                &root, Arc::new(move || notify.notify()),
+            ).map_err(|error| error.to_string());
+            *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(owner);
+            wake.notify();
+        })
+    };
     let timer_notify = timer_wake.clone();
     let (timer_lifetime, timer_start_error) = match multi_launcher::plugins::timer_session::TimerSession::start(app_data_root.clone(), Arc::new(move || timer_notify.notify())) {
         Ok(session) => (Some(Arc::new(session)), None),
@@ -13682,6 +13715,9 @@ pub(crate) fn run_foundation_window(
                 multi_manager_view: None,
                 calculation_pad_view: None,
                 timer_view: None,
+                todo_view: None,
+                todo_owner: todo_slot_for_root.clone(),
+                todo_wake: todo_wake_for_root.clone(),
                 gesture_editor: None,
                 gesture_owner: gesture_owner_for_run.clone(),
                 gesture_wake: gesture_wake_for_run.clone(),
@@ -13745,7 +13781,7 @@ pub(crate) fn run_foundation_window(
                 })
             });
             appearance_subscription_sink.borrow_mut().push(sheet_subscription);
-            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); root.start_notes_owner(cx); });
+            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); root.start_notes_owner(cx); root.start_todo_wake(cx); });
             #[cfg(windows)]
             {
                 let keypad_subscription = root.update(cx, |_, cx| {
@@ -15137,6 +15173,11 @@ pub(crate) fn run_foundation_window(
     });
 
     restart_admission.fence();
+    todo_wake.close();
+    let _ = todo_start.join();
+    if let Some(Ok(owner)) = todo_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        owner.shutdown();
+    }
     settings_save_workers.begin_shutdown();
     gesture_wake.close();
     if let Some(owner) = &gesture_lifetime { owner.fence(); }
@@ -17427,9 +17468,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "todo", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "todo", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()

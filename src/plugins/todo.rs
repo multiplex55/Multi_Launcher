@@ -32,6 +32,9 @@ use std::sync::{
 
 pub const TODO_FILE: &str = "todo.json";
 
+mod checked;
+pub use checked::{CheckedTodoOwner, CheckedTodoReceipt, CheckedTodoSnapshot};
+
 static TODO_VERSION: AtomicU64 = AtomicU64::new(0);
 static NEXT_TODO_ID: AtomicU64 = AtomicU64::new(1);
 static TODO_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -289,6 +292,69 @@ pub fn todo_version() -> u64 {
 /// Sort todo entries by priority descending (highest priority first).
 pub fn sort_by_priority_desc(entries: &mut Vec<TodoEntry>) {
     entries.sort_by(|a, b| b.priority.cmp(&a.priority));
+}
+
+/// Stock list projection, preserving canonical source ordinals for actions.
+pub fn project_todo_list(todos: &[TodoEntry], filter: &str) -> Vec<Action> {
+    let mut entries: Vec<(usize, &TodoEntry)> = todos.iter().enumerate().collect();
+    let filters = parse_query_filters(filter.trim(), &["@", "#", "tag:"]);
+    let text_filter = filters.remaining_tokens.join(" ");
+    let has_tag_filter = !filters.include_tags.is_empty() || !filters.exclude_tags.is_empty();
+    if !filters.include_tags.is_empty() {
+        entries.retain(|(_, todo)| filters.include_tags.iter().all(|requested| {
+            let requested = requested.to_lowercase();
+            todo.tags.iter().any(|tag| tag.to_lowercase().contains(&requested))
+        }));
+    }
+    if !filters.exclude_tags.is_empty() {
+        entries.retain(|(_, todo)| !filters.exclude_tags.iter().any(|excluded| {
+            let excluded = excluded.to_lowercase();
+            todo.tags.iter().any(|tag| tag.to_lowercase().contains(&excluded))
+        }));
+    }
+    if !text_filter.is_empty() {
+        let matcher = SkimMatcherV2::default();
+        entries.retain(|(_, todo)| {
+            let matched = matcher.fuzzy_match(&todo.text, &text_filter).is_some();
+            if filters.negate_text { !matched } else { matched }
+        });
+    }
+    if text_filter.is_empty() || has_tag_filter { entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority)); }
+    entries.into_iter().map(|(idx, todo)| Action {
+        label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
+        desc: "Todo".into(), action: format!("todo:done:{idx}"), args: None,
+    }).collect()
+}
+
+/// The stock direct View action, shared with frontends that do not install the
+/// legacy Todo plugin (and therefore do not start its global watcher).
+pub fn todo_view_action() -> Action {
+    Action {
+        label: "todo: view list".into(),
+        desc: "Todo".into(),
+        action: "todo:view".into(),
+        args: None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TodoSortMode { #[default] Priority, Name }
+
+pub fn sorted_todo_indices(entries: &[TodoEntry], filter: &str, mode: TodoSortMode) -> Vec<usize> {
+    let filter = filter.trim().to_lowercase();
+    let mut indices: Vec<_> = entries.iter().enumerate().filter(|(_, entry)| {
+        if filter.is_empty() { true }
+        else if filter.starts_with('#') { let tag = filter.trim_start_matches('#'); entry.tags.iter().any(|value| value.to_lowercase().contains(tag)) }
+        else { entry.text.to_lowercase().contains(&filter) || entry.tags.iter().any(|value| value.to_lowercase().contains(&filter)) }
+    }).map(|(index, _)| index).collect();
+    indices.sort_by(|a, b| {
+        let left = &entries[*a]; let right = &entries[*b];
+        match mode {
+            TodoSortMode::Priority => right.priority.cmp(&left.priority).then_with(|| left.text.to_lowercase().cmp(&right.text.to_lowercase())).then_with(|| a.cmp(b)),
+            TodoSortMode::Name => left.text.to_lowercase().cmp(&right.text.to_lowercase()).then_with(|| right.priority.cmp(&left.priority)).then_with(|| a.cmp(b)),
+        }
+    });
+    indices
 }
 
 /// Load todo entries from `path`.
@@ -659,12 +725,7 @@ impl TodoPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo view") {
             if rest.trim().is_empty() {
-                return vec![Action {
-                    label: "todo: view list".into(),
-                    desc: "Todo".into(),
-                    action: "todo:view".into(),
-                    args: None,
-                }];
+                return vec![todo_view_action()];
             }
             return vec![usage_action(TODO_VIEW_USAGE, "todo view")];
         }
@@ -1023,60 +1084,7 @@ impl TodoPlugin {
             } else {
                 mem_todos.clone()
             };
-            let mut entries: Vec<(usize, &TodoEntry)> = todos.iter().enumerate().collect();
-
-            let filters = parse_query_filters(filter, &["@", "#", "tag:"]);
-            let text_filter = filters.remaining_tokens.join(" ");
-            let has_tag_filter =
-                !filters.include_tags.is_empty() || !filters.exclude_tags.is_empty();
-
-            // Tag filters run first, then text filters apply fuzzy matching against remaining text.
-            if !filters.include_tags.is_empty() {
-                entries.retain(|(_, t)| {
-                    filters.include_tags.iter().all(|requested| {
-                        let requested = requested.to_lowercase();
-                        t.tags
-                            .iter()
-                            .any(|tag| tag.to_lowercase().contains(&requested))
-                    })
-                });
-            }
-
-            if !filters.exclude_tags.is_empty() {
-                entries.retain(|(_, t)| {
-                    !filters.exclude_tags.iter().any(|excluded| {
-                        let excluded = excluded.to_lowercase();
-                        t.tags
-                            .iter()
-                            .any(|tag| tag.to_lowercase().contains(&excluded))
-                    })
-                });
-            }
-
-            if !text_filter.is_empty() {
-                entries.retain(|(_, t)| {
-                    let text_match = self.matcher.fuzzy_match(&t.text, &text_filter).is_some();
-                    if filters.negate_text {
-                        !text_match
-                    } else {
-                        text_match
-                    }
-                });
-            }
-
-            if text_filter.is_empty() || has_tag_filter {
-                entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
-            }
-
-            return entries
-                .into_iter()
-                .map(|(idx, t)| Action {
-                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
-                    desc: "Todo".into(),
-                    action: format!("todo:done:{idx}"),
-                    args: None,
-                })
-                .collect();
+            return project_todo_list(&todos, filter);
         }
 
         if crate::common::strip_prefix_ci(trimmed, "todo").is_some() {

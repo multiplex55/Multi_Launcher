@@ -1,5 +1,5 @@
 //! Single-flight ownership for ordinary external launcher actions.
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU8, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering}};
 
 use gpui_kit::{AppContext as _, Context, FocusHandle, Focusable as _, WeakEntity, Window, WindowId};
 use multi_launcher::actions::Action;
@@ -549,6 +549,7 @@ pub(super) enum RunCommand {
     Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
     Favorite(ExternalCommand),
     TempfileMutation { command: multi_launcher::commands::StorageCommand, row: multi_launcher::actions::tempfiles::ListedTempFile, guard: OmniGuard },
+    Todo { owner: Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, receipt: multi_launcher::plugins::todo::CheckedTodoReceipt, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard },
     Copy(String),
     WindowSwitch(multi_launcher::window_activation::CheckedWindowSwitch),
     WindowClose(multi_launcher::window_close::CheckedWindowClose),
@@ -626,6 +627,19 @@ impl EffectGate {
 fn claim_omni_effect(gate: &EffectGate, current: impl FnOnce() -> bool) -> bool {
     if !current() { return false; }
     gate.0.compare_exchange(EFFECT_PENDING, EFFECT_ENTERED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+}
+
+// The first check precedes the source reread; later checks run immediately
+// before each native replace attempt. A successful claim is retained across
+// sharing-violation retries, but current authority is checked every time.
+fn todo_effect_current(checked: &AtomicBool, entered: &AtomicBool, current: impl Fn() -> bool, claim: impl FnOnce() -> bool) -> bool {
+    if !current() { return false; }
+    if !checked.swap(true, Ordering::AcqRel) { return current(); }
+    if !entered.load(Ordering::Acquire) {
+        if !claim() { return false; }
+        entered.store(true, Ordering::Release);
+    }
+    current()
 }
 
 #[derive(Clone)]
@@ -765,8 +779,8 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
-            omni_lease: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => Some(guard.lease.clone()), _ => None },
-            omni_gate: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
+            omni_lease: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_gate: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
         });
         Some(ticket)
     }
@@ -977,6 +991,18 @@ fn execute_request(
                     refocus: true,
                 })
         }
+        RunCommand::Todo { owner, receipt, scope, revision, guard } => {
+            let command = multi_launcher::commands::parse_action(&request.action).map_err(|error| CommandError::new("todo", error.to_string()).with_gui_failure_policy())?;
+            let checked = AtomicBool::new(false);
+            let entered = AtomicBool::new(false);
+            owner.toggle(receipt, || {
+                todo_effect_current(&checked, &entered,
+                    || scope.load(Ordering::Acquire) == *revision && guard.current(),
+                    || guard.effect_current())
+            }).map_err(|error| CommandError::new("todo", error.to_string()).with_gui_failure_policy())?;
+            let invocation = multi_launcher::commands::CommandInvocation { command, original_action: request.action.clone(), query_override: None, source: request.source };
+            Ok(multi_launcher::commands::handlers::checked_todo_done_outcome(&invocation, &request.query))
+        }
         RunCommand::WindowSwitch(checked) => {
             let effect = multi_launcher::window_activation::activate_checked_window_switch(checked.clone())
                 .map_err(anyhow::Error::new);
@@ -1099,7 +1125,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1547,6 +1573,9 @@ impl RootWindow {
         window: &mut Window, cx: &mut Context<Self>) {
         self.start_run(action, RunCommand::TempfileMutation { command, row, guard }, query, source, None, window, cx);
     }
+    pub(super) fn start_omni_todo(&mut self, action: Action, owner: Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, receipt: multi_launcher::plugins::todo::CheckedTodoReceipt, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_run(action, RunCommand::Todo { owner, receipt, scope, revision, guard }, query, source, None, window, cx);
+    }
 
     fn start_run(
         &mut self,
@@ -1598,7 +1627,7 @@ impl RootWindow {
                 lease.store(false, Ordering::Release);
             }
         }
-        if let RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } = &request.command {
+        if let RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } = &request.command {
             if let Some(focus) = window.focused(cx) {
                 let lease = guard.lease.clone();
                 let effect_gate = guard.effect_gate.clone();
@@ -1631,6 +1660,7 @@ impl RootWindow {
                     root.apply_external_receipt(ticket, receipt, window, cx);
                     if root.external_launch.take_deferred_notes_wake() {
                         root.search_catalog.providers.notes_wake.notify();
+                        root.todo_wake.notify();
                     }
                     if root.window_search.take_deferred_update() {
                         root.root_visibility.notify_window_search();
@@ -1731,6 +1761,7 @@ impl RootWindow {
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
             RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
             RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => guard.receipt_current(),
+            RunCommand::Todo { guard, scope, revision, .. } => guard.current() && scope.load(Ordering::Acquire) == *revision,
             _ => true,
         };
         let local_focus_owned = self.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx);
@@ -1940,7 +1971,7 @@ impl RootWindow {
                 );
             }
         }
-        if matches!(&receipt.request.command, RunCommand::TempfileMutation { .. })
+        if matches!(&receipt.request.command, RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. })
             && receipt.result.outcome.as_ref().is_ok_and(|outcome| outcome.search)
             && changed_query.is_none() {
             let query = self.query.read(cx).value().to_string();
@@ -2070,6 +2101,24 @@ pub(super) fn bookkeep_bookmark(outcome: Result<CommandOutcome, CommandError>, a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn todo_replace_retries_keep_one_claim_but_recheck_authority() {
+        let checked = AtomicBool::new(false);
+        let entered = AtomicBool::new(false);
+        let current = AtomicBool::new(true);
+        let claims = std::cell::Cell::new(0);
+        let check = || todo_effect_current(&checked, &entered,
+            || current.load(Ordering::Acquire),
+            || { claims.set(claims.get() + 1); true });
+        assert!(check()); // initial source admission
+        assert!(check()); // first replace
+        assert!(check()); // retry after a sharing violation
+        assert_eq!(claims.get(), 1);
+        current.store(false, Ordering::Release);
+        assert!(!check());
+        assert_eq!(claims.get(), 1);
+    }
 
     #[test]
     fn notes_wake_waits_for_exact_omni_settlement_without_revoking_lease() {

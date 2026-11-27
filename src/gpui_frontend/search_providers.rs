@@ -14,6 +14,18 @@ pub(super) struct CalculatorMetadata(multi_launcher::plugins_builtin::Calculator
 
 pub(super) struct MultiManagerBare;
 pub(super) struct TimerBare;
+pub(super) struct TodoViewBare;
+impl multi_launcher::plugin::Plugin for TodoViewBare {
+    fn name(&self) -> &str { "todo" }
+    fn description(&self) -> &str { "View todos" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["todo"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if query.trim().eq_ignore_ascii_case("todo view") {
+            vec![multi_launcher::plugins::todo::todo_view_action()]
+        } else { Vec::new() }
+    }
+}
 pub(super) struct MouseGestureEdit;
 impl multi_launcher::plugin::Plugin for MouseGestureEdit {
     fn name(&self) -> &str { "mouse_gestures" }
@@ -328,6 +340,7 @@ pub(super) struct InstalledLauncherProviders {
     xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
     regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
     timer: TimerBare,
+    todo_view: TodoViewBare,
     mouse_gestures: MouseGestureEdit,
     clipboard: ClipboardBare,
     snippets: SnippetsBare,
@@ -430,6 +443,7 @@ impl InstalledLauncherProviders {
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             timer: TimerBare,
+            todo_view: TodoViewBare,
             mouse_gestures: MouseGestureEdit,
             clipboard: ClipboardBare,
             snippets: SnippetsBare::default(),
@@ -480,6 +494,7 @@ impl InstalledLauncherProviders {
             Some(&self.xml_toolkit as &dyn multi_launcher::plugin::Plugin),
             Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
             Some(&self.timer as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.todo_view as &dyn multi_launcher::plugin::Plugin),
             Some(&self.mouse_gestures as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard as &dyn multi_launcher::plugin::Plugin),
             Some(&self.snippets as &dyn multi_launcher::plugin::Plugin),

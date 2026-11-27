@@ -5,6 +5,22 @@ use crate::commands::{
     TodoCompatibilityKind, VisibilityPolicy,
 };
 
+fn apply_done_outcome(outcome: &mut CommandOutcome, invocation: &CommandInvocation, current_query: &str) {
+    outcome.search = true;
+    outcome.invalidate_results = true;
+    outcome.focus = true;
+    outcome.pending_query = PendingQueryPolicy::Set(current_query.to_owned());
+    let label = invocation.original_action.label.trim_start_matches("[x] ").trim_start_matches("[ ] ");
+    outcome.toasts.push(ToastPolicy::Success(format!("Toggled todo {label}")));
+}
+
+/// Stock Done post-policy after a separately checked Todo effect succeeds.
+pub fn checked_todo_done_outcome(invocation: &CommandInvocation, current_query: &str) -> CommandOutcome {
+    let mut outcome = CommandOutcome { history: HistoryPolicy::Record, toasts: vec![ToastPolicy::Launched(invocation.original_action.label.clone())], favorite_log: favorite_log(invocation), ..CommandOutcome::default() };
+    apply_done_outcome(&mut outcome, invocation, current_query);
+    outcome
+}
+
 pub(crate) fn handle_todo<H>(
     host: &mut H,
     command: &TodoCommand,
@@ -121,19 +137,8 @@ where
         | TodoCommand::Compatibility {
             kind: TodoCompatibilityKind::Done,
         } => {
-            outcome.search = true;
-            outcome.invalidate_results = true;
-            outcome.focus = true;
-            outcome.pending_query = PendingQueryPolicy::Set(current_query.clone());
+            apply_done_outcome(&mut outcome, invocation, &current_query);
             command_changed_query = true;
-            let label = invocation
-                .original_action
-                .label
-                .trim_start_matches("[x] ")
-                .trim_start_matches("[ ] ");
-            outcome
-                .toasts
-                .push(ToastPolicy::Success(format!("Toggled todo {label}")));
         }
         TodoCommand::SetPriority { .. }
         | TodoCommand::Compatibility {
@@ -440,6 +445,7 @@ mod tests {
             ..Host::default()
         };
         let outcome = handle_todo(&mut host, &command, &invocation).unwrap();
+        assert_eq!(outcome, checked_todo_done_outcome(&invocation, "todo list"));
         assert_eq!(outcome.query, QueryPolicy::Keep);
         assert_eq!(
             outcome.pending_query,

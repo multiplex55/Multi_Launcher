@@ -27,6 +27,7 @@ mod search_replace;
 mod snippet_run;
 mod table_utility;
 mod todo;
+pub use todo::checked_todo_done_outcome;
 mod xml_toolkit;
 mod zip_extractor;
 
