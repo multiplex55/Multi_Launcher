@@ -29,6 +29,12 @@ impl CheckedWorkspaceSnapshot {
     pub fn workspaces(&self) -> &[MmWorkspace] { &self.workspaces }
 }
 
+/// Recheck the exact raw document retained by an authoring/placement receipt.
+pub fn checked_workspace_source_is_current(snapshot: &CheckedWorkspaceSnapshot) -> bool {
+    let _transaction = WORKSPACE_TRANSACTION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    read_workspace_source(&snapshot.path).is_ok_and(|source| source == snapshot.source)
+}
+
 fn read_workspace_source(path: &Path) -> Result<WorkspaceSource> {
     match std::fs::read(path) {
         Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(WorkspaceSource::Empty(bytes)),

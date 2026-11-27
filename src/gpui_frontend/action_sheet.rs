@@ -279,6 +279,7 @@ impl RootWindow {
                 }
             },
         );
+        self.revoke_multi_manager_operation(cx);
         self.action_sheet = Some(Sheet {
             serial,
             generation,

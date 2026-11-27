@@ -2,6 +2,7 @@ pub mod activation;
 pub mod apply_capture;
 pub mod bindings;
 pub mod capture;
+pub mod checked;
 pub mod commands;
 pub mod identity;
 pub mod model;

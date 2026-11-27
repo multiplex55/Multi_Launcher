@@ -117,7 +117,7 @@ fn activate_window_with_fence(
 ) -> Result<(), WindowActivationError> {
     #[cfg(windows)]
     {
-        activate_with_fence(&mut WindowsActivationBackend { checked: None, root: None }, request, fence.as_ref())
+        activate_with_fence(&mut WindowsActivationBackend { checked: None, root: None, predecessor: None, placement: false, required_desktop: None, placement_issued: false, placement_started: None }, request, fence.as_ref())
     }
     #[cfg(not(windows))]
     {
@@ -137,7 +137,7 @@ pub struct CheckedWindowSwitch {
     pub is_current: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
-#[cfg(any(test, windows))]
+#[cfg(test)]
 fn checked_switch_identities_match(
     checked: &CheckedWindowSwitch,
     hwnd: usize,
@@ -145,13 +145,41 @@ fn checked_switch_identities_match(
     selected: Option<&crate::window_catalog::WindowSwitchIdentity>,
     foreground: Option<crate::window_catalog::WindowNativeIdentity>,
 ) -> bool {
+    checked_switch_identities_match_after(checked, hwnd, initiating, selected, foreground, None)
+}
+
+#[cfg(any(test, windows))]
+fn checked_switch_identities_match_after(
+    checked: &CheckedWindowSwitch,
+    hwnd: usize,
+    initiating: Option<crate::window_catalog::WindowNativeIdentity>,
+    selected: Option<&crate::window_catalog::WindowSwitchIdentity>,
+    foreground: Option<crate::window_catalog::WindowNativeIdentity>,
+    predecessor: Option<&crate::window_catalog::WindowSwitchIdentity>,
+) -> bool {
     (checked.is_current)()
-        && hwnd == checked.selected.native.hwnd
+        && checked_switch_identity_fields_match(checked, hwnd, initiating, selected, foreground, predecessor)
+        && (checked.is_current)()
+}
+
+#[cfg(any(test, windows))]
+fn checked_switch_identity_fields_match(
+    checked: &CheckedWindowSwitch,
+    hwnd: usize,
+    initiating: Option<crate::window_catalog::WindowNativeIdentity>,
+    selected: Option<&crate::window_catalog::WindowSwitchIdentity>,
+    foreground: Option<crate::window_catalog::WindowNativeIdentity>,
+    predecessor: Option<&crate::window_catalog::WindowSwitchIdentity>,
+) -> bool {
+    hwnd == checked.selected.native.hwnd
         && checked.selected.native.pid != checked.initiating.pid
         && initiating == Some(checked.initiating)
         && selected == Some(&checked.selected)
-        && (foreground == Some(checked.initiating) || foreground == Some(checked.selected.native))
-        && (checked.is_current)()
+        && (foreground == Some(checked.selected.native)
+            || match predecessor {
+                Some(previous) => foreground == Some(previous.native),
+                None => foreground == Some(checked.initiating),
+            })
 }
 
 /// Activate a captured Switch target on the current virtual desktop only.
@@ -159,11 +187,55 @@ pub fn activate_checked_window_switch(checked: CheckedWindowSwitch) -> Result<()
     #[cfg(windows)]
     {
         let request = WindowActivationRequest::current_desktop_only(checked.selected.native.hwnd);
-        activate_with_fence(&mut WindowsActivationBackend { checked: Some(checked), root: None }, request, None)
+        activate_with_fence(&mut WindowsActivationBackend { checked: Some(checked), root: None, predecessor: None, placement: false, required_desktop: None, placement_issued: false, placement_started: None }, request, None)
     }
     #[cfg(not(windows))]
     {
         let _ = checked;
+        Err(WindowActivationError::new(WindowActivationErrorKind::ForegroundDenied, "Window activation is available only on Windows"))
+    }
+}
+
+/// Checked current-desktop activation after a previously accepted external
+/// sibling. The original launcher remains the issuer throughout the sequence.
+#[cfg(any(test, windows))]
+fn placement_initial_foreground_matches(issuer: crate::window_catalog::WindowNativeIdentity,
+    predecessor: Option<crate::window_catalog::WindowNativeIdentity>, foreground: Option<crate::window_catalog::WindowNativeIdentity>) -> bool {
+    foreground == Some(predecessor.unwrap_or(issuer))
+}
+
+#[cfg(any(test, windows))]
+fn placement_foreground_allowed(
+    issued: bool,
+    issuer: crate::window_catalog::WindowNativeIdentity,
+    predecessor: Option<crate::window_catalog::WindowNativeIdentity>,
+    selected: crate::window_catalog::WindowNativeIdentity,
+    foreground: Option<crate::window_catalog::WindowNativeIdentity>,
+) -> bool {
+    placement_initial_foreground_matches(issuer, predecessor, foreground)
+        || (issued && foreground == Some(selected))
+}
+
+pub fn activate_checked_window_switch_after(checked: CheckedWindowSwitch, predecessor: Option<crate::window_catalog::WindowSwitchIdentity>, required_desktop: Option<VirtualDesktopId>, effect_started: Arc<AtomicBool>) -> Result<(), WindowActivationError> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        if !(checked.is_current)() {
+            return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Placement is no longer current"));
+        }
+        if predecessor.as_ref().is_some_and(|previous| crate::window_catalog::current_switch_identity(previous.native.hwnd).as_ref() != Some(previous))
+            || crate::window_catalog::native_window_identity(checked.initiating.hwnd) != Some(checked.initiating)
+            || !placement_initial_foreground_matches(checked.initiating, predecessor.as_ref().map(|previous| previous.native),
+                crate::window_catalog::native_window_identity(unsafe { GetForegroundWindow() }.0 as usize))
+        {
+            return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Placement foreground changed before activation"));
+        }
+        let request = WindowActivationRequest::current_desktop_only(checked.selected.native.hwnd);
+        activate_with_fence(&mut WindowsActivationBackend { checked: Some(checked), root: None, predecessor, placement: true, required_desktop, placement_issued: false, placement_started: Some(effect_started) }, request, None)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (checked, predecessor, required_desktop, effect_started);
         Err(WindowActivationError::new(WindowActivationErrorKind::ForegroundDenied, "Window activation is available only on Windows"))
     }
 }
@@ -201,7 +273,7 @@ pub fn prepare_checked_root_desktop(root: CheckedRootDesktop) -> Result<(), Wind
                 && crate::window_catalog::native_window_identity(original.identity.hwnd) == Some(original.identity)
                 && (original.is_current)()
         })) };
-        let mut backend = WindowsActivationBackend { checked: None, root: Some(guarded) };
+        let mut backend = WindowsActivationBackend { checked: None, root: Some(guarded), predecessor: None, placement: false, required_desktop: None, placement_issued: false, placement_started: None };
         prepare_checked_root_with(&mut backend, hwnd)
     }
     #[cfg(not(windows))]
@@ -1909,6 +1981,31 @@ fn desktop_error(
 struct WindowsActivationBackend {
     checked: Option<CheckedWindowSwitch>,
     root: Option<CheckedRootDesktop>,
+    predecessor: Option<crate::window_catalog::WindowSwitchIdentity>,
+    placement: bool,
+    required_desktop: Option<VirtualDesktopId>,
+    placement_issued: bool,
+    placement_started: Option<Arc<AtomicBool>>,
+}
+
+#[cfg(any(test, windows))]
+fn placement_effect_accepted(previous: bool, accepted: bool) -> bool {
+    previous || accepted
+}
+
+#[cfg(windows)]
+impl WindowsActivationBackend {
+    fn begin_placement_effect(&self) {
+        if self.placement {
+            if let Some(started) = &self.placement_started { started.store(true, Ordering::Release); }
+        }
+    }
+
+    fn finish_placement_effect(&mut self, accepted: bool) {
+        if self.placement {
+            self.placement_issued = placement_effect_accepted(self.placement_issued, accepted);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1974,6 +2071,7 @@ impl ActivationBackend for WindowsActivationBackend {
     fn checked_attachment_allowed(&self, thread: u32) -> bool {
         self.checked.as_ref().is_none_or(|checked| {
             thread == checked.initiating.tid || thread == checked.selected.native.tid
+                || self.predecessor.as_ref().is_some_and(|previous| thread == previous.native.tid)
         })
     }
     fn checked_success(&mut self, hwnd: usize) -> Result<(), WindowActivationError> {
@@ -2002,8 +2100,50 @@ impl ActivationBackend for WindowsActivationBackend {
             return Err(WindowActivationError::new(WindowActivationErrorKind::Desktop, "Target window is on another virtual desktop"));
         }
         let foreground = self.foreground_window().and_then(crate::window_catalog::native_window_identity);
-        if !checked_switch_identities_match(&checked, hwnd, initiating, selected.as_ref(), foreground) {
+        if self.placement && !placement_foreground_allowed(
+            self.placement_issued, checked.initiating, self.predecessor.as_ref().map(|previous| previous.native), checked.selected.native, foreground) {
+            return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Placement foreground changed before the first effect"));
+        }
+        let predecessor = self.predecessor.as_ref().filter(|previous| {
+            crate::window_catalog::current_switch_identity(previous.native.hwnd).as_ref() == Some(*previous)
+        });
+        if self.predecessor.is_some() && predecessor.is_none() {
+            return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Previous placement target changed"));
+        }
+        if !checked_switch_identities_match_after(&checked, hwnd, initiating, selected.as_ref(), foreground, predecessor) {
             return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Window switch target or launcher is no longer current"));
+        }
+        if self.placement {
+            // The authority callback may read disk. Sample the exact native
+            // identities, desktop and foreground again after it returns.
+            let initiating = crate::window_catalog::native_window_identity(checked.initiating.hwnd);
+            let selected = crate::window_catalog::current_switch_identity(hwnd);
+            if !self.is_window_on_current(checked.initiating.hwnd).map_err(|error| WindowActivationError::new(
+                WindowActivationErrorKind::Desktop, format!("Could not check launcher desktop: {error}"),
+            ))? { return Err(WindowActivationError::new(WindowActivationErrorKind::Desktop, "Launcher is on another virtual desktop")); }
+            if let Some(required) = &self.required_desktop {
+                let actual = VirtualDesktopService.current_for_launcher_restore().map_err(|error| WindowActivationError::new(
+                    WindowActivationErrorKind::Desktop, format!("Could not check target desktop: {error}"),
+                ))?;
+                if &actual != required { return Err(WindowActivationError::new(WindowActivationErrorKind::Desktop, "Workspace target desktop changed")); }
+            }
+            if !self.is_window_on_current(hwnd).map_err(|error| WindowActivationError::new(
+                WindowActivationErrorKind::Desktop, format!("Could not check target desktop: {error}"),
+            ))? { return Err(WindowActivationError::new(WindowActivationErrorKind::Desktop, "Target window is on another virtual desktop")); }
+            let predecessor = self.predecessor.clone().filter(|previous| {
+                crate::window_catalog::current_switch_identity(previous.native.hwnd).as_ref() == Some(previous)
+            });
+            if self.predecessor.is_some() && predecessor.is_none() {
+                return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Previous placement target changed"));
+            }
+            let foreground = self.foreground_window().and_then(crate::window_catalog::native_window_identity);
+            if !placement_foreground_allowed(
+                self.placement_issued, checked.initiating, predecessor.as_ref().map(|previous| previous.native), checked.selected.native, foreground) {
+                return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Placement foreground changed before the first effect"));
+            }
+            if !checked_switch_identity_fields_match(&checked, hwnd, initiating, selected.as_ref(), foreground, predecessor.as_ref()) {
+                return Err(WindowActivationError::new(WindowActivationErrorKind::Superseded, "Placement target or foreground changed"));
+            }
         }
         Ok(())
     }
@@ -2056,7 +2196,10 @@ impl ActivationBackend for WindowsActivationBackend {
     fn restore(&mut self, hwnd: usize) -> bool {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, ShowWindowAsync};
-        unsafe { ShowWindowAsync(HWND(hwnd as *mut _), SW_RESTORE) }.as_bool()
+        self.begin_placement_effect();
+        let accepted = unsafe { ShowWindowAsync(HWND(hwnd as *mut _), SW_RESTORE) }.as_bool();
+        self.finish_placement_effect(accepted);
+        accepted
     }
 
     fn is_minimized(&mut self, hwnd: usize) -> bool {
@@ -2120,13 +2263,19 @@ impl ActivationBackend for WindowsActivationBackend {
     fn bring_to_top(&mut self, hwnd: usize) -> bool {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::BringWindowToTop;
-        unsafe { BringWindowToTop(HWND(hwnd as *mut _)) }.is_ok()
+        self.begin_placement_effect();
+        let accepted = unsafe { BringWindowToTop(HWND(hwnd as *mut _)) }.is_ok();
+        self.finish_placement_effect(accepted);
+        accepted
     }
 
     fn set_foreground(&mut self, hwnd: usize) -> bool {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-        unsafe { SetForegroundWindow(HWND(hwnd as *mut _)) }.as_bool()
+        self.begin_placement_effect();
+        let accepted = unsafe { SetForegroundWindow(HWND(hwnd as *mut _)) }.as_bool();
+        self.finish_placement_effect(accepted);
+        accepted
     }
 
     fn target_process(&mut self, hwnd: usize) -> u32 {
@@ -3668,6 +3817,24 @@ mod tests {
         assert!(selected.descriptor.matches(&renamed));
         assert!(checked_switch_identities_match(&checked, 42, Some(launcher), Some(&selected), Some(launcher)));
         assert!(checked_switch_identities_match(&checked, 42, Some(launcher), Some(&selected), Some(target)));
+        let mut previous = selected.clone();
+        previous.native.hwnd = 41; previous.native.tid = 2; previous.descriptor.hwnd = 41;
+        assert!(checked_switch_identities_match_after(&checked, 42, Some(launcher), Some(&selected), Some(previous.native), Some(&previous)));
+        assert!(!checked_switch_identities_match_after(&checked, 42, Some(launcher), Some(&selected), Some(launcher), Some(&previous)));
+        assert!(placement_initial_foreground_matches(launcher, Some(previous.native), Some(previous.native)));
+        assert!(!placement_initial_foreground_matches(launcher, Some(previous.native), Some(target)));
+        // The target may become foreground only after this attempt has issued an effect.
+        assert!(placement_foreground_allowed(false, launcher, None, target, Some(launcher)));
+        assert!(!placement_foreground_allowed(false, launcher, None, target, Some(target)));
+        assert!(!placement_foreground_allowed(false, launcher, Some(previous.native), target, Some(target)));
+        assert!(placement_foreground_allowed(true, launcher, Some(previous.native), target, Some(target)));
+        let denied = placement_effect_accepted(false, false);
+        assert!(!placement_foreground_allowed(denied, launcher, Some(previous.native), target, Some(target)));
+        let accepted = placement_effect_accepted(denied, true);
+        assert!(placement_foreground_allowed(accepted, launcher, Some(previous.native), target, Some(target)));
+        assert!(placement_effect_accepted(accepted, false));
+        assert!(!placement_foreground_allowed(true, launcher, Some(previous.native), target, Some(launcher)));
+        assert!(!checked_switch_identities_match_after(&checked, 42, Some(launcher), Some(&selected), Some(WindowNativeIdentity { hwnd: 40, ..previous.native }), Some(&previous)));
         let mut self_target = checked.clone();
         self_target.initiating.pid = target.pid;
         assert!(!checked_switch_identities_match(&self_target, 42, Some(self_target.initiating), Some(&selected), Some(self_target.initiating)));

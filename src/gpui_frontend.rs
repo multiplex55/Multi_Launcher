@@ -4960,6 +4960,12 @@ impl RootWindow {
         }
     }
 
+    fn revoke_multi_manager_operation(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.multi_manager_view {
+            view.update(cx, |view, _| view.revoke_operation());
+        }
+    }
+
     fn set_root_menu_open(
         &mut self,
         menu: RootMenuKind,
@@ -4968,6 +4974,7 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         if open {
+            self.revoke_multi_manager_operation(cx);
             self.external_launch.retire_focus_bound_effects();
             self.external_launch.retire_omni();
             self.app_editor.revoke_picker_prelaunch();
@@ -7721,6 +7728,7 @@ impl RootWindow {
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
         self.external_drop.revoke();
+        self.revoke_multi_manager_operation(cx);
         self.context_favorite_popup = Some(ContextFavoritePopup {
             receipt: receipt.clone(),
             position,
