@@ -17,7 +17,8 @@ pub(super) fn current_provider(
         && multi_launcher::settings::provider_search_capability_enabled(capabilities, "notes")
         && *action == note::quick_notes_action()
         && super::search_providers::search_routed(
-            [&super::search_providers::QuickNotesBare as &dyn multi_launcher::plugin::Plugin],
+            [&super::search_providers::QuickNotesBare::default()
+                as &dyn multi_launcher::plugin::Plugin],
             query,
             enabled,
             capabilities,
@@ -90,9 +91,9 @@ pub(super) struct QuickNotesView {
     filter: Entity<InputState>,
     body: Entity<TextareaState>,
     _subscriptions: Vec<Subscription>,
-    wake: Arc<HashWakeSignal>,
+    note_owner: Arc<Mutex<Option<Arc<NotePlugin>>>>,
     reload_error: Arc<Mutex<Option<String>>>,
-    plugin: Option<Arc<NotePlugin>>,
+    notes_wake: Arc<HashWakeSignal>,
     loading: bool,
     pending: bool,
     reload_requested: bool,
@@ -114,6 +115,9 @@ impl QuickNotesView {
         native: Option<NativeWindow>,
         visibility: RootVisibility,
         admission: Arc<RestartAdmission>,
+        note_owner: Arc<Mutex<Option<Arc<NotePlugin>>>>,
+        reload_error: Arc<Mutex<Option<String>>>,
+        notes_wake: Arc<HashWakeSignal>,
     ) -> Self {
         let owner = utility_mount::MountOwner::default();
         let mount = owner.attach();
@@ -132,25 +136,6 @@ impl QuickNotesView {
                 }
             }),
         ];
-        let wake = Arc::new(HashWakeSignal::default());
-        let reload_error = Arc::new(Mutex::new(None));
-        let receiver = wake.clone();
-        let weak = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| {
-            while receiver.wait().await {
-                if weak
-                    .update(cx, |view, cx| {
-                        if view.open {
-                            view.refresh(cx);
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
         let mut view = Self {
             open: true,
             root,
@@ -164,9 +149,9 @@ impl QuickNotesView {
             filter,
             body,
             _subscriptions: subscriptions,
-            wake,
+            note_owner,
             reload_error,
-            plugin: None,
+            notes_wake,
             loading: false,
             pending: false,
             reload_requested: false,
@@ -200,6 +185,30 @@ impl QuickNotesView {
                 })
                 .collect(),
         );
+    }
+    pub(super) fn open_receipt_current(
+        &self,
+        mount: &utility_mount::MountReceipt,
+        version: u64,
+        filter: &str,
+        note: &Note,
+        cx: &App,
+    ) -> bool {
+        self.open
+            && self.draft.is_none()
+            && !self.pending
+            && row_receipt_current(
+                mount,
+                &self.mount,
+                version,
+                self.version,
+                filter,
+                self.filter.read(cx).value().as_str(),
+            )
+            && self.rows.iter().any(|row| {
+                &row.note == note
+                    && (filter.is_empty() || row.search.contains(&filter.to_lowercase()))
+            })
     }
     pub(super) fn handle_escape(
         &mut self,
@@ -307,7 +316,7 @@ impl QuickNotesView {
                     .external_owner_is_current(window.focused(cx).as_ref(), window, cx)
             })
     }
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         if !self.open {
             return;
         }
@@ -315,21 +324,20 @@ impl QuickNotesView {
             self.reload_requested = true;
             return;
         }
+        if self
+            .note_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            self.message = Some("Loading notes…".into());
+            cx.notify();
+            return;
+        }
         self.loading = true;
         let mount = self.mount.clone();
-        let existing = self.plugin.clone();
-        let wake = self.wake.clone();
-        let reload_error = self.reload_error.clone();
         let task = cx.background_executor().spawn(async move {
-            let plugin = existing.unwrap_or_else(|| {
-                Arc::new(NotePlugin::new_with_wake(move |result| {
-                    *reload_error
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = result.err();
-                    wake.notify();
-                }))
-            });
-            let snapshot = note::note_cache_snapshot_with_version().map(|(version, notes)| {
+            note::note_cache_snapshot_with_version().map(|(version, notes)| {
                 (
                     version,
                     notes
@@ -341,14 +349,12 @@ impl QuickNotesView {
                         })
                         .collect::<Vec<_>>(),
                 )
-            });
-            (plugin, snapshot)
+            })
         });
         cx.spawn(async move |weak, cx| {
-            let (plugin, result) = task.await;
+            let result = task.await;
             let _ = weak.update(cx, |view, cx| {
                 view.loading = false;
-                view.plugin = Some(plugin);
                 if !mount.is_current() || !mount.matches(&view.mount) || !view.open {
                     if view.open {
                         view.refresh(cx);
@@ -462,6 +468,7 @@ impl QuickNotesView {
                     let (refresh, message) = settle_save(&mut view.draft, result);
                     view.message = message;
                     if refresh {
+                        view.notes_wake.notify();
                         view.refresh(cx);
                     }
                     cx.notify();
@@ -491,7 +498,6 @@ impl QuickNotesView {
 
 impl Drop for QuickNotesView {
     fn drop(&mut self) {
-        self.wake.close();
         self.owner.retire();
     }
 }
@@ -584,10 +590,14 @@ impl Render for QuickNotesView {
                         let owner = weak.clone();
                         let receipt = mount.clone();
                         let issuing_filter = issuing_filter.clone();
+                        let open_owner = owner.clone();
+                        let open_note = expected.clone();
+                        let open_receipt = receipt.clone();
+                        let open_filter = issuing_filter.clone();
                         let title = row.note.alias.as_ref().unwrap_or(&row.note.title).clone();
                         Some(
                             div()
-                                .h(px(60.0))
+                                .h(px(90.0))
                                 .w_full()
                                 .flex()
                                 .flex_col()
@@ -622,6 +632,44 @@ impl Render for QuickNotesView {
                                         "quick-note-preview-{index}"
                                     ))),
                                 )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "quick-note-open-{index}"
+                                    )))
+                                    .label("Open")
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            let owner = open_owner.clone();
+                                            let note = open_note.clone();
+                                            let mount = open_receipt.clone();
+                                            let filter = open_filter.clone();
+                                            let _ = owner.update(cx, |view, cx| {
+                                                if !view.open_receipt_current(
+                                                    &mount, version, &filter, &note, cx,
+                                                ) || !view.current(window, cx)
+                                                {
+                                                    return;
+                                                }
+                                                let root = view.root.clone();
+                                                window.defer(cx, move |window, app| {
+                                                    let _ = root.update(app, |root, cx| {
+                                                        root.open_checked_note(
+                                                            note,
+                                                            version,
+                                                            super::note_editor::OpenOrigin::Quick {
+                                                                mount,
+                                                                version,
+                                                                filter,
+                                                            },
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                });
+                                            });
+                                        },
+                                    ),
+                                )
                                 .into_any_element(),
                         )
                     })
@@ -641,6 +689,75 @@ impl Render for QuickNotesView {
 }
 
 impl RootWindow {
+    pub(super) fn start_notes_owner(&mut self, cx: &mut Context<Self>) {
+        if self
+            .enabled_plugins
+            .as_ref()
+            .is_some_and(|enabled| !enabled.contains("notes"))
+        {
+            return;
+        }
+        let owner = self.search_catalog.providers.notes_owner();
+        let wake = self.search_catalog.providers.notes_wake.clone();
+        let errors = self.search_catalog.providers.notes_error.clone();
+        let settings = self.search_catalog.note_provider_settings.clone();
+        let admission = self.restart_admission.clone();
+        let worker_wake = wake.clone();
+        let task = cx.background_executor().spawn(async move {
+            if admission.is_fenced() {
+                return;
+            }
+            let callback_wake = worker_wake.clone();
+            let mut plugin = NotePlugin::new_with_wake(move |result| {
+                *errors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = result.err();
+                callback_wake.notify();
+            });
+            if let Some(settings) = settings {
+                multi_launcher::plugin::Plugin::apply_settings(&mut plugin, &settings);
+            }
+            if admission.is_fenced() {
+                return;
+            }
+            let plugin = Arc::new(plugin);
+            *owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plugin);
+            worker_wake.notify();
+        });
+        cx.spawn(async move |_, _| {
+            task.await;
+        })
+        .detach();
+        cx.spawn(async move |weak, cx| {
+            while wake.wait().await {
+                if weak
+                    .update(cx, |root, cx| {
+                        if root.restart_admission.is_fenced() {
+                            return;
+                        }
+                        if let Some(view) = root.quick_notes_view.clone() {
+                            view.update(cx, |view, cx| view.refresh(cx));
+                        }
+                        let query = root.query.read(cx).value().to_string();
+                        let effective =
+                            multi_launcher::common::query::split_action_filters(&query).0;
+                        let first = effective.split_whitespace().next().unwrap_or("");
+                        if first.eq_ignore_ascii_case("note") || first.eq_ignore_ascii_case("notes")
+                        {
+                            root.refresh_launcher_results_with_viewport(query, false, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn open_quick_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.restart_admission.is_fenced()
             || window.has_active_dialog(cx)
@@ -672,8 +789,22 @@ impl RootWindow {
             let native = self.native_window;
             let visibility = self.root_visibility.clone();
             let admission = self.restart_admission.clone();
-            let view =
-                cx.new(|cx| QuickNotesView::new(window, cx, root, native, visibility, admission));
+            let note_owner = self.search_catalog.providers.notes_owner();
+            let reload_error = self.search_catalog.providers.notes_error.clone();
+            let notes_wake = self.search_catalog.providers.notes_wake.clone();
+            let view = cx.new(|cx| {
+                QuickNotesView::new(
+                    window,
+                    cx,
+                    root,
+                    native,
+                    visibility,
+                    admission,
+                    note_owner,
+                    reload_error,
+                    notes_wake,
+                )
+            });
             view.update(cx, |view, cx| {
                 view.filter.focus_handle(cx).focus(window, cx)
             });
@@ -739,7 +870,7 @@ mod tests {
         let action = multi_launcher::plugins::note::quick_notes_action();
         assert!(current_provider("NoTeS", &action, None, None));
         let routed = super::super::search_providers::search_routed(
-            [&super::super::search_providers::QuickNotesBare
+            [&super::super::search_providers::QuickNotesBare::default()
                 as &dyn multi_launcher::plugin::Plugin],
             "kind:note note",
             None,

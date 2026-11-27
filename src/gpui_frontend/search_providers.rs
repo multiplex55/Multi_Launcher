@@ -11,7 +11,11 @@ pub(super) fn clipboard_catalog_is_current(
 
 struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
 
-pub(super) struct QuickNotesBare;
+#[derive(Default)]
+pub(super) struct QuickNotesBare {
+    owner: Arc<std::sync::Mutex<Option<Arc<multi_launcher::plugins::note::NotePlugin>>>>,
+    projected: std::sync::Mutex<Option<(String, u64, std::collections::HashMap<String, (Action, Arc<multi_launcher::plugins::note::Note>)>)>>,
+}
 impl multi_launcher::plugin::Plugin for QuickNotesBare {
     fn name(&self) -> &str { "notes" }
     fn description(&self) -> &str { "Notes (prefix: `note`)" }
@@ -20,7 +24,25 @@ impl multi_launcher::plugin::Plugin for QuickNotesBare {
     fn search(&self, query: &str) -> Vec<Action> {
         if query.trim().eq_ignore_ascii_case("note") || query.trim().eq_ignore_ascii_case("notes") {
             vec![multi_launcher::plugins::note::quick_notes_action()]
-        } else { Vec::new() }
+        } else {
+            let command = query.trim().split_whitespace().nth(1).unwrap_or("").to_ascii_lowercase();
+            if !matches!(command.as_str(), "list" | "open" | "search") { return Vec::new(); }
+            self.owner.lock().ok().and_then(|owner| owner.clone()).map_or_else(Vec::new, |plugin| {
+                let Ok((version, notes)) = multi_launcher::plugins::note::note_cache_snapshot_with_version() else { return Vec::new(); };
+                let rows: Vec<Action> = plugin.search(query).into_iter().filter(|action| matches!(multi_launcher::commands::parse_action(action), Ok(multi_launcher::commands::Command::Note(multi_launcher::commands::NoteCommand::Open { .. })))).collect();
+                if multi_launcher::plugins::note::note_version() != version { return Vec::new(); }
+                let notes: std::collections::HashMap<_, _> = notes.into_iter().map(|note| (note.slug.clone(), Arc::new(note))).collect();
+                let mut projected = std::collections::HashMap::new();
+                for action in &rows {
+                    if let Ok(multi_launcher::commands::Command::Note(multi_launcher::commands::NoteCommand::Open { slug })) = multi_launcher::commands::parse_action(action)
+                        && let Some(note) = notes.get(&slug) {
+                        projected.insert(action.action.clone(), (action.clone(), note.clone()));
+                    }
+                }
+                if let Ok(mut slot) = self.projected.lock() { *slot = Some((query.to_owned(), version, projected)); }
+                rows
+            })
+        }
     }
     fn commands(&self) -> Vec<Action> { vec![multi_launcher::plugins::note::quick_notes_command()] }
 }
@@ -254,13 +276,25 @@ pub(super) struct InstalledLauncherProviders {
     bookmarks: Option<Arc<multi_launcher::plugins::bookmarks::BookmarksPlugin>>,
     pub(super) omni: super::omni_search::Provider,
     pub(super) omni_wake: Arc<super::HashWakeSignal>,
+    pub(super) notes_wake: Arc<super::HashWakeSignal>,
+    pub(super) notes_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Drop for InstalledLauncherProviders {
-    fn drop(&mut self) { self.omni_wake.close(); }
+    fn drop(&mut self) { self.omni_wake.close(); self.notes_wake.close(); }
 }
 
 impl InstalledLauncherProviders {
+    pub(super) fn note_source(&self, effective: &str, action: &Action) -> Option<(u64, Arc<multi_launcher::plugins::note::Note>)> {
+        let projection = self.quick_notes.projected.lock().ok()?;
+        let (query, version, rows) = projection.as_ref()?;
+        if query != effective || *version != multi_launcher::plugins::note::note_version() { return None; }
+        let (expected, note) = rows.get(&action.action)?;
+        (expected == action).then(|| (*version, note.clone()))
+    }
+    pub(super) fn notes_owner(&self) -> Arc<std::sync::Mutex<Option<Arc<multi_launcher::plugins::note::NotePlugin>>>> {
+        self.quick_notes.owner.clone()
+    }
     pub(super) fn install_snippets_owner(&self, owner: Arc<multi_launcher::plugins::snippets::SnippetSearchOwner>) {
         if let Ok(mut current) = self.snippets.owner.lock() { *current = Some(owner); }
     }
@@ -308,6 +342,8 @@ impl InstalledLauncherProviders {
         Self {
             omni,
             omni_wake,
+            notes_wake: Arc::new(super::HashWakeSignal::default()),
+            notes_error: Arc::new(std::sync::Mutex::new(None)),
             hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
             settings: multi_launcher::plugins::settings::SettingsPlugin,
             help: multi_launcher::plugins::help::HelpPlugin,
@@ -329,7 +365,7 @@ impl InstalledLauncherProviders {
             ),
             folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
             duplicate_finder: multi_launcher::plugins::duplicate_finder::DuplicateFinderPlugin,
-            quick_notes: QuickNotesBare,
+            quick_notes: QuickNotesBare::default(),
             #[cfg(windows)]
             file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
             calculator: CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin::default()),
@@ -561,6 +597,31 @@ fn admitted_commands(provider: &dyn multi_launcher::plugin::Plugin) -> Vec<Actio
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn note_provider_projects_body_search_to_exact_stock_open() {
+        use multi_launcher::plugin::Plugin;
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("ML_NOTES_DIR");
+        let old_templates = std::env::var_os("ML_NOTE_TEMPLATES_DIR");
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()); std::env::set_var("ML_NOTE_TEMPLATES_DIR", dir.path().join("templates")); }
+        std::fs::write(dir.path().join("alpha.md"), "# Alpha\n\nunique body needle").unwrap();
+        let provider = super::QuickNotesBare::default();
+        *provider.owner.lock().unwrap() = Some(std::sync::Arc::new(multi_launcher::plugins::note::NotePlugin::new()));
+        let rows = provider.search("note search needle");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "note:open:alpha");
+        assert!(provider.search("note new alpha").is_empty());
+        let stored = provider.projected.lock().unwrap();
+        let (_, version, projection) = stored.as_ref().unwrap();
+        assert_eq!(*version, multi_launcher::plugins::note::note_version());
+        assert_eq!(projection.get("note:open:alpha").unwrap().1.path, dir.path().join("alpha.md"));
+        drop(stored); drop(provider);
+        if let Some(old) = old { unsafe { std::env::set_var("ML_NOTES_DIR", old); } }
+        else { unsafe { std::env::remove_var("ML_NOTES_DIR"); } }
+        if let Some(old) = old_templates { unsafe { std::env::set_var("ML_NOTE_TEMPLATES_DIR", old); } }
+        else { unsafe { std::env::remove_var("ML_NOTE_TEMPLATES_DIR"); } }
+    }
+
     use super::admitted_commands;
     use multi_launcher::{
         actions::Action,

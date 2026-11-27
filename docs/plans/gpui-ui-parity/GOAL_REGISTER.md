@@ -18,7 +18,7 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | G09 | [Batch Rename and Search & Replace](goals/G09-rename-and-replace.md) | G00–G05; shared file contracts | Not started |
 | G10 | [ZIP, duplicate finding, folder size, and file locks](goals/G10-file-utilities.md) | G00–G05; G04 owns Hash Generator | In implementation for Folder Size, File Lock and Duplicate Finder |
 | G11 | [File Operations Center, Downloads Triage, and Explorer Tabs](goals/G11-file-workflows.md) | G00–G05; relevant G07–G10 handoffs | In implementation for Downloads Triage |
-| G12 | [Notes, Markdown Studio, links, export, and printing](goals/G12-notes-and-markdown.md) | G00–G05 | In implementation for retained Quick Notes |
+| G12 | [Notes, Markdown Studio, links, export, and printing](goals/G12-notes-and-markdown.md) | G00–G05 | In implementation for retained Quick Notes and the existing-note editor |
 | G13 | [Clipboard history, Clipboard Modify, snippets, and prompts](goals/G13-clipboard-and-snippets.md) | G00–G05 | In implementation for Clipboard History, Clipboard Modify, Snippets and Create Temp File |
 | G14 | [JSON, XML, Regex, and structured text tooling](goals/G14-structured-text.md) | G00–G05; G13 where clipboard handoffs apply | In implementation |
 | G15 | [Calculation Pad, editors, reference, and companion windows](goals/G15-calculation-pad.md) | G00–G05 | Not started |

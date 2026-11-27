@@ -15,6 +15,7 @@ mod folder_size;
 mod file_lock;
 mod duplicate_finder;
 mod quick_notes;
+mod note_editor;
 mod file_search_handoff;
 mod file_search_preview;
 mod settings_actions;
@@ -206,6 +207,10 @@ pub(crate) struct LauncherSearchStartup {
     pub branding: launcher_header::Branding,
     pub calculator_settings: Option<serde_json::Value>,
     pub omni_settings: Option<serde_json::Value>,
+    pub note_settings: multi_launcher::settings::NoteSettings,
+    pub note_provider_settings: Option<serde_json::Value>,
+    pub note_save_on_close: bool,
+    pub note_confirm_discard: bool,
     pub match_exact: bool,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
@@ -226,6 +231,7 @@ enum LauncherResultOrigin {
     Saved,
     Indexed { generation: u64, index: usize },
     Omni(multi_launcher::plugins::omni_search::OmniSource),
+    Note { version: u64, note: Arc<multi_launcher::plugins::note::Note> },
     CachedCommand,
     Provider(String),
 }
@@ -275,6 +281,10 @@ struct LauncherSearchCatalog {
     providers: InstalledLauncherProviders,
     branding: launcher_header::Branding,
     calculator_settings: Option<serde_json::Value>,
+    note_settings: multi_launcher::settings::NoteSettings,
+    note_provider_settings: Option<serde_json::Value>,
+    note_save_on_close: bool,
+    note_confirm_discard: bool,
     command_help_providers: Arc<[CommandHelpProvider]>,
     quick_help_providers: Arc<[QuickHelpProvider]>,
     actions: Arc<Vec<Action>>,
@@ -344,6 +354,10 @@ impl LauncherSearchCatalog {
             providers,
             branding: startup.branding,
             calculator_settings: startup.calculator_settings,
+            note_settings: startup.note_settings,
+            note_provider_settings: startup.note_provider_settings,
+            note_save_on_close: startup.note_save_on_close,
+            note_confirm_discard: startup.note_confirm_discard,
             command_help_providers,
             quick_help_providers,
             actions: Arc::new(actions),
@@ -548,11 +562,13 @@ impl LauncherSearchCatalog {
             .as_ref()
             .unwrap_or(&self.bookmark_aliases_lc);
         let omni_projection = self.providers.omni.projection(raw_query);
+        let note_effective = multi_launcher::common::query::split_action_filters(raw_query).0;
         let mut scored_provider_actions = provider_actions
             .into_iter()
             .filter_map(|(provider, action)| {
                 let omni_source = (provider == "omni_search")
                     .then(|| omni_projection.as_ref().and_then(|projection| projection.source_for(&action))).flatten();
+                let note_source = (provider == "notes").then(|| self.providers.note_source(&note_effective, &action)).flatten();
                 if provider == "omni_search" && omni_source.is_none() { return None; }
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
@@ -571,7 +587,7 @@ impl LauncherSearchCatalog {
                 let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || note_source.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -580,7 +596,7 @@ impl LauncherSearchCatalog {
                         raw_query,
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
-                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || settings_result || folder_command
+                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || note_source.is_some() || settings_result || folder_command
                             || bookmark_authoring::normalized_add_bypass(&action, bookmark_command)
                             || (clipboard_modify_result && multi_launcher::actions::search::clipboard_modify_resolved_postfilter_bypass(raw_query, &action.action)),
                         &self.matcher,
@@ -591,7 +607,7 @@ impl LauncherSearchCatalog {
                 } else {
                     0.0
                 };
-                let origin = omni_source.map(LauncherResultOrigin::Omni).unwrap_or(LauncherResultOrigin::Provider(provider));
+                let origin = omni_source.map(LauncherResultOrigin::Omni).or_else(|| note_source.map(|(version, note)| LauncherResultOrigin::Note { version, note })).unwrap_or(LauncherResultOrigin::Provider(provider));
                 Some((action, score, origin))
             })
             .collect::<Vec<_>>();
@@ -2474,6 +2490,8 @@ struct RootWindow {
     file_lock_view: Option<Entity<file_lock::FileLockView>>,
     duplicate_finder_view: Option<Entity<duplicate_finder::DuplicateFinderView>>,
     quick_notes_view: Option<Entity<quick_notes::QuickNotesView>>,
+    note_editor_view: Option<Entity<note_editor::NoteEditor>>,
+    note_open_epoch: Arc<AtomicU64>,
     file_lock_popup: Option<utility_mount::UtilityPopup>,
     file_lock_retiring: Vec<RetiringHashWindow>,
     folder_size_popup: Option<utility_mount::UtilityPopup>,
@@ -3375,10 +3393,11 @@ fn intercept_root_pane_escape(
     let file_lock = context_stack_has_primary(&event.context_stack, "FileLockPane");
     let duplicate_finder = context_stack_has_primary(&event.context_stack, "DuplicateFinderPane");
     let quick_notes = context_stack_has_primary(&event.context_stack, "QuickNotesPane");
+    let note_editor = context_stack_has_primary(&event.context_stack, "NoteEditorPane");
     if event.keystroke.key != "escape"
         || receipt.virtual_key != 0x1b
         || receipt.modifiers.modified()
-        || (!plugin_editor && !folder_size && !file_lock && !duplicate_finder && !quick_notes && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
+        || (!plugin_editor && !folder_size && !file_lock && !duplicate_finder && !quick_notes && !note_editor && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
     {
         return false;
     }
@@ -3417,6 +3436,12 @@ fn intercept_root_pane_escape(
     }
     if quick_notes {
         let view = state.quick_notes_view.clone();
+        let handled = view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, receipt.held)));
+        if handled && !receipt.held { root.update(cx, |root, _| root.pane_escape_latched = true); }
+        return handled;
+    }
+    if note_editor {
+        let view = state.note_editor_view.clone();
         let handled = view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, receipt.held)));
         if handled && !receipt.held { root.update(cx, |root, _| root.pane_escape_latched = true); }
         return handled;
@@ -3475,6 +3500,7 @@ fn root_tab_traversed_to_search(
         && !context_stack_has_primary(context_stack, "FileLockPane")
         && !context_stack_has_primary(context_stack, "DuplicateFinderPane")
         && !context_stack_has_primary(context_stack, "QuickNotesPane")
+        && !context_stack_has_primary(context_stack, "NoteEditorPane")
         && !context_stack_has_primary(context_stack, "DownloadsTriagePane")
         && !context_stack_has_primary(context_stack, "PluginEditorPane")
         && !context_stack_has_primary(context_stack, "PopupMenu")
@@ -3643,6 +3669,7 @@ enum RootCloseBlocker {
     FileLock,
     DuplicateFinder,
     QuickNotes,
+    NoteEditor,
     AppWrite,
     FolderAuthoring,
     ExternalDrop,
@@ -5619,6 +5646,7 @@ impl RootWindow {
         if self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(file_lock::WAIT.into()); }
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(duplicate_finder::WAIT.into()); }
         if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(quick_notes::WAIT.into()); }
+        if self.note_editor_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(note_editor::WAIT.into()); }
         if self.calculator_search.active {
             return Err(calculator_search::SEARCH_PENDING_STATUS.to_owned());
         }
@@ -6133,6 +6161,7 @@ impl RootWindow {
         self.snippets_search.wake.close();
         self.window_search.retire();
         self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
+        self.note_open_epoch.fetch_add(1, Ordering::AcqRel);
         self.omni_search.retire(); self.search_catalog.providers.omni.install(None);
         self.indexed_applications.retire();
         self.retire_search_jump_mode();
@@ -7169,6 +7198,7 @@ impl RootWindow {
                     duplicate_finder::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "notes" {
                     quick_notes::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                        || self.search_catalog.providers.note_source(&multi_launcher::common::query::split_action_filters(&query).0, action).is_some()
                 } else if provider == "file_lock" {
                     cfg!(windows) && file_lock::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "folder_size" {
@@ -7937,6 +7967,12 @@ impl RootWindow {
         }
         if matches!(&result.origin, LauncherResultOrigin::Omni(_)) {
             self.activate_omni(&result, query, source, window, cx);
+            return;
+        }
+        if let LauncherResultOrigin::Note { version, note } = &result.origin {
+            self.open_checked_note(note.as_ref().clone(), *version, note_editor::OpenOrigin::Search {
+                generation, index, query, action: result.action.clone(),
+            }, window, cx);
             return;
         }
         if result.action.action == "settings:search" {
@@ -10334,6 +10370,7 @@ impl RootWindow {
             Some(RootCloseBlocker::FileLock) => { self.restart_status = Some(file_lock::WAIT.to_owned()); }
             Some(RootCloseBlocker::DuplicateFinder) => { self.restart_status = Some(duplicate_finder::WAIT.to_owned()); }
             Some(RootCloseBlocker::QuickNotes) => { self.restart_status = Some(quick_notes::WAIT.to_owned()); }
+            Some(RootCloseBlocker::NoteEditor) => { self.restart_status = Some(note_editor::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
@@ -10393,6 +10430,7 @@ impl RootWindow {
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         self.window_search.retire();
         self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
+        self.note_open_epoch.fetch_add(1, Ordering::AcqRel);
         self.omni_search.retire(); self.search_catalog.providers.omni.install(None);
         self.indexed_applications.retire();
         self.hash_docked_resize.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
@@ -10445,6 +10483,7 @@ impl RootWindow {
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::DuplicateFinder); }
         if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::QuickNotes); }
+        if self.note_editor_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::NoteEditor); }
         if self.file_lock_retiring.iter().any(|window| window.native_window.is_none()) || self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FileLock); }
         if self.folder_size_retiring.iter().any(|window| window.native_window.is_none())
             || self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FolderSize); }
@@ -11396,6 +11435,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.quick_notes_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.note_editor_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -13313,6 +13355,8 @@ pub(crate) fn run_foundation_window(
                 file_lock_view: None,
                 duplicate_finder_view: None,
                 quick_notes_view: None,
+                note_editor_view: None,
+                note_open_epoch: Arc::new(AtomicU64::new(0)),
                 file_lock_popup: None,
                 file_lock_retiring: Vec::new(),
                 folder_size_popup: None,
@@ -13366,7 +13410,7 @@ pub(crate) fn run_foundation_window(
                 })
             });
             appearance_subscription_sink.borrow_mut().push(sheet_subscription);
-            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); });
+            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); root.start_notes_owner(cx); });
             #[cfg(windows)]
             {
                 let keypad_subscription = root.update(cx, |_, cx| {
@@ -13727,6 +13771,7 @@ pub(crate) fn run_foundation_window(
                             root.retire_json_workspace(cx);
                             if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
                             root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
+                            root.note_open_epoch.fetch_add(1, Ordering::AcqRel);
                             root.omni_search.retire(); root.search_catalog.providers.omni.install(None);
                             root.indexed_applications.retire();
                         });
@@ -13762,6 +13807,7 @@ pub(crate) fn run_foundation_window(
                             root.retire_json_workspace(cx);
                             if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
                             root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
+                            root.note_open_epoch.fetch_add(1, Ordering::AcqRel);
                             root.omni_search.retire(); root.search_catalog.providers.omni.install(None);
                             root.indexed_applications.retire();
                         });
@@ -13837,6 +13883,7 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::FileLock) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(file_lock::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::DuplicateFinder) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(duplicate_finder::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::QuickNotes) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(quick_notes::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::NoteEditor) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(note_editor::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
@@ -15563,6 +15610,10 @@ mod tests {
                 actions,
                 calculator_settings: None,
                 omni_settings: None,
+                note_settings: multi_launcher::settings::NoteSettings::default(),
+                note_provider_settings: None,
+                note_save_on_close: true,
+                note_confirm_discard: true,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -16433,6 +16484,10 @@ mod tests {
                 actions: Vec::new(),
                 calculator_settings: None,
                 omni_settings: None,
+                note_settings: multi_launcher::settings::NoteSettings::default(),
+                note_provider_settings: None,
+                note_save_on_close: true,
+                note_confirm_discard: true,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -16476,6 +16531,10 @@ mod tests {
                 actions: Vec::new(),
                 calculator_settings: None,
                 omni_settings: None,
+                note_settings: multi_launcher::settings::NoteSettings::default(),
+                note_provider_settings: None,
+                note_save_on_close: true,
+                note_confirm_discard: true,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -16630,6 +16689,10 @@ mod tests {
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
             calculator_settings: None,
                 omni_settings: None,
+                note_settings: multi_launcher::settings::NoteSettings::default(),
+                note_provider_settings: None,
+                note_save_on_close: true,
+                note_confirm_discard: true,
             actions: vec![settings_action.clone()],
             match_exact: true,
             fuzzy_weight: 0.25,
@@ -16843,6 +16906,10 @@ mod tests {
                 actions: Vec::new(),
                 calculator_settings: None,
                 omni_settings: None,
+                note_settings: multi_launcher::settings::NoteSettings::default(),
+                note_provider_settings: None,
+                note_save_on_close: true,
+                note_confirm_discard: true,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -16895,6 +16962,10 @@ mod tests {
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 calculator_settings: None,
                 omni_settings: None,
+                note_settings: multi_launcher::settings::NoteSettings::default(),
+                note_provider_settings: None,
+                note_save_on_close: true,
+                note_confirm_discard: true,
                 actions: vec![saved_action("Saved Help", "help:show", None)],
                 match_exact: true,
                 fuzzy_weight: 0.75,
@@ -17618,6 +17689,10 @@ mod tests {
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 calculator_settings: None,
                 omni_settings: None,
+                note_settings: multi_launcher::settings::NoteSettings::default(),
+                note_provider_settings: None,
+                note_save_on_close: true,
+                note_confirm_discard: true,
                 actions: vec![
                     alpha.clone(),
                     beta.clone(),
@@ -17692,6 +17767,10 @@ mod tests {
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
             calculator_settings: None,
                 omni_settings: None,
+                note_settings: multi_launcher::settings::NoteSettings::default(),
+                note_provider_settings: None,
+                note_save_on_close: true,
+                note_confirm_discard: true,
             actions: Vec::new(),
             match_exact,
             fuzzy_weight: 0.25,

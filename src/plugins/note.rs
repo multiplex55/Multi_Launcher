@@ -1719,6 +1719,26 @@ pub enum QuickNoteWrite {
 pub enum QuickNoteDraft<'a> {
     New(&'a str),
     Edit { original: &'a Note, content: &'a str },
+    Editor { original: &'a Note, content: &'a str },
+}
+
+/// Read an exact existing slug from the canonical directory; aliases are never
+/// treated as identity. The optional path binds an already displayed row.
+pub fn read_note_exact_if(
+    slug: &str,
+    expected_path: Option<&std::path::Path>,
+    is_current: impl Fn() -> bool,
+) -> anyhow::Result<Option<Note>> {
+    let _mutation = NOTE_MUTATION_LOCK.lock()
+        .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
+    anyhow::ensure!(is_current(), "Note read superseded");
+    let notes = load_notes()?;
+    anyhow::ensure!(is_current(), "Note read superseded");
+    let mut matches = notes.into_iter().filter(|note| note.slug == slug);
+    let Some(note) = matches.next() else { return Ok(None); };
+    if matches.next().is_some() || expected_path.is_some_and(|path| note.path != path) { return Ok(None); }
+    anyhow::ensure!(is_current(), "Note read superseded");
+    Ok(Some(note))
 }
 
 /// Write a Quick Notes draft under the canonical note mutation lock.
@@ -1730,6 +1750,7 @@ pub fn write_quick_note_if(
         .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
     anyhow::ensure!(is_current(), "Note write superseded");
     let mut notes = load_notes()?;
+    let full_editor = matches!(&draft, QuickNoteDraft::Editor { .. });
     let (path, slug, content) = match draft {
         QuickNoteDraft::New(text) => {
             anyhow::ensure!(!text.trim().is_empty(), "Text required");
@@ -1757,8 +1778,8 @@ pub fn write_quick_note_if(
                 }
             }
         }
-        QuickNoteDraft::Edit { original, content } => {
-            anyhow::ensure!(!content.trim().is_empty(), "Text required");
+        QuickNoteDraft::Edit { original, content } | QuickNoteDraft::Editor { original, content } => {
+            if !full_editor { anyhow::ensure!(!content.trim().is_empty(), "Text required"); }
             let matches: Vec<_> = notes.iter().filter(|note| note.slug == original.slug && note.path == original.path).collect();
             anyhow::ensure!(matches.len() == 1 && matches[0].content == original.content, "Note changed or was removed; reopen it before saving");
             let expected = original.content.as_bytes();
@@ -1766,7 +1787,11 @@ pub fn write_quick_note_if(
             let slug = original.slug.clone();
             let mut note = original.clone();
             note.content = content.to_owned();
-            note.title = content.lines().next().unwrap_or(&note.title).to_owned();
+            if full_editor {
+                if let Some(title) = content.lines().next().and_then(|line| line.strip_prefix("# ")) { note.title = title.to_owned(); }
+            } else {
+                note.title = content.lines().next().unwrap_or(&note.title).to_owned();
+            }
             let content = note_content_for_persistence(&note);
             crate::common::atomic_file::save_atomic_if(&path, content.as_bytes(), || {
                 std::fs::read(&path).is_ok_and(|bytes| bytes == expected) && is_current()
@@ -5550,6 +5575,24 @@ Body",
         }).is_err());
         assert!(calls.get() >= 2);
         assert_eq!(std::fs::read(&note.path).unwrap(), source.as_bytes());
+    }
+
+    #[test]
+    fn checked_full_editor_uses_exact_identity_and_stock_title_rule() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let path = dir.path().join("alpha.md");
+        std::fs::write(&path, "# Alpha\nAlias: old\nbody").unwrap();
+        let original = read_note_exact_if("alpha", Some(&path), || true).unwrap().unwrap();
+        assert!(read_note_exact_if("old", None, || true).unwrap().is_none());
+        assert!(read_note_exact_if("alpha", Some(&dir.path().join("other.md")), || true).unwrap().is_none());
+        let saved = match write_quick_note_if(QuickNoteDraft::Editor { original: &original, content: "plain body" }, || true).unwrap() {
+            QuickNoteWrite::Published(note) | QuickNoteWrite::Committed { note, .. } => note,
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Alpha\nAlias: old\n\nplain body");
+        assert_eq!(saved.alias.as_deref(), Some("old"));
+        assert!(write_quick_note_if(QuickNoteDraft::Editor { original: &original, content: "later" }, || true).is_err());
     }
 
     #[test]
