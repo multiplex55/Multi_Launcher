@@ -1,7 +1,6 @@
 //! Position mapping and literal search over the Pad's authoritative source.
 
 use std::ops::Range;
-use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct FoldRegion {
@@ -588,100 +587,17 @@ pub(super) struct EditorTools {
     pub open: bool,
     pub replace: bool,
     pub goto: bool,
-    pub query: String,
-    pub replacement: String,
-    pub case_sensitive: bool,
     pub line_input: String,
     pub message: Option<String>,
-    pub matches: Arc<[Range<usize>]>,
-    pub current: Option<usize>,
-    indexed_revision: Option<u64>,
-    indexed_query: String,
-    indexed_case: bool,
+    pub find: crate::calculation_pad::FindReplace,
 }
 
-impl EditorTools {
-    pub fn current_match(&self, revision: u64) -> Option<&Range<usize>> {
-        (self.indexed_revision == Some(revision))
-            .then(|| self.current.and_then(|index| self.matches.get(index)))
-            .flatten()
-    }
-
-    pub fn refresh(&mut self, source: &str, revision: u64) {
-        if self.indexed_revision == Some(revision)
-            && self.indexed_query == self.query
-            && self.indexed_case == self.case_sensitive
-        {
-            return;
-        }
-        self.matches = Arc::default();
-        self.current = None;
-        if !self.query.is_empty()
-            && let Ok(regex) = regex::RegexBuilder::new(&regex::escape(&self.query))
-                .case_insensitive(!self.case_sensitive)
-                .size_limit(1024 * 1024)
-                .build()
-        {
-            self.matches = regex
-                .find_iter(source)
-                .map(|found| found.range())
-                .collect::<Vec<_>>()
-                .into();
-        }
-        self.indexed_revision = Some(revision);
-        self.indexed_query.clone_from(&self.query);
-        self.indexed_case = self.case_sensitive;
-    }
-
-    pub fn navigate(&mut self, forward: bool) -> Option<Range<usize>> {
-        let len = self.matches.len();
-        if len == 0 {
-            self.current = None;
-            return None;
-        }
-        let index = match (self.current, forward) {
-            (Some(index), true) => (index + 1) % len,
-            (Some(index), false) => (index + len - 1) % len,
-            (None, true) => 0,
-            (None, false) => len - 1,
-        };
-        self.current = Some(index);
-        self.matches.get(index).cloned()
-    }
-
-    pub fn replacement(&self, source: &str, all: bool) -> Option<String> {
-        if self.replacement.len() > crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES {
-            return None;
-        }
-        let ranges = if all {
-            self.matches.as_ref()
-        } else {
-            std::slice::from_ref(self.matches.get(self.current?)?)
-        };
-        if ranges.is_empty() {
-            return None;
-        }
-        let removed = ranges
-            .iter()
-            .try_fold(0usize, |sum, range| sum.checked_add(range.len()))?;
-        let added = self.replacement.len().checked_mul(ranges.len())?;
-        let size = source.len().checked_sub(removed)?.checked_add(added)?;
-        if size > crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES {
-            return None;
-        }
-        let mut result = String::with_capacity(size);
-        let mut cursor = 0;
-        for range in ranges {
-            result.push_str(source.get(cursor..range.start)?);
-            result.push_str(&self.replacement);
-            cursor = range.end;
-        }
-        result.push_str(source.get(cursor..)?);
-        if !crate::calculation_pad::source_admitted(&result) {
-            return None;
-        }
-        Some(result)
-    }
+impl std::ops::Deref for EditorTools {
+    type Target = crate::calculation_pad::FindReplace;
+    fn deref(&self) -> &Self::Target { &self.find }
+}
+impl std::ops::DerefMut for EditorTools {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.find }
 }
 
 pub(super) struct SourcePositions<'a> {
@@ -1066,11 +982,9 @@ mod tests {
     #[test]
     fn literal_matches_replacements_and_unicode_positions() {
         let source = "雪A\r\n雪a\r\n";
-        let mut tools = EditorTools {
-            query: "雪a".into(),
-            replacement: "λ".into(),
-            ..Default::default()
-        };
+        let mut tools = EditorTools::default();
+        tools.query = "雪a".into();
+        tools.replacement = "λ".into();
         tools.refresh(source, 1);
         assert_eq!(tools.matches.len(), 2);
         assert_eq!(
@@ -1092,11 +1006,9 @@ mod tests {
     #[test]
     fn oversized_replacement_is_rejected_without_applying_a_prefix() {
         let source = "needle";
-        let mut tools = EditorTools {
-            query: source.into(),
-            replacement: "x".repeat(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES + 1),
-            ..Default::default()
-        };
+        let mut tools = EditorTools::default();
+        tools.query = source.into();
+        tools.replacement = "x".repeat(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES + 1);
         tools.refresh(source, 1);
         assert!(tools.replacement(source, true).is_none());
         tools.replacement = "雪".repeat(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES / 3 + 1);

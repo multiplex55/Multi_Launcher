@@ -1,5 +1,7 @@
 //! Retained Calculation Pad editor, backed by the shared session.
 use super::*;
+#[path = "calculation_pad_find.rs"]
+mod find;
 use multi_launcher::calculation_pad::{
     self, CalculationPadSession, CalculationPolicy, EvaluationBasis, LineId, LineOutcome,
 };
@@ -57,6 +59,7 @@ pub(super) struct CalculationPadView {
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     editor: Entity<TextareaState>,
+    find: find::FindOwner,
     _editor_subscription: Subscription,
     session: Option<CalculationPadSession>,
     documents: Vec<calculation_pad::PadDocumentSummary>,
@@ -115,6 +118,7 @@ impl CalculationPadView {
                 cx.notify();
             },
         );
+        let find = find::FindOwner::new(window, cx);
         let wake = Arc::new(HashWakeSignal::default());
         let notify = wake.clone();
         let mut session = CalculationPadSession::new(&data);
@@ -145,6 +149,7 @@ impl CalculationPadView {
             owner,
             mount,
             editor,
+            find,
             _editor_subscription: subscription,
             session: Some(session),
             documents: Vec::new(),
@@ -249,6 +254,7 @@ impl CalculationPadView {
                     view.save_name.focus_handle(cx).focus(window, cx);
                 }
                 if view.session.as_ref().is_some_and(|session| session.source().is_none()) {
+                    view.reset_find(window, cx);
                     view.open = false;
                     view.owner.retire();
                     if lease.load(Ordering::Acquire) && view.focus.contains_focused(window, cx) && window.is_window_active() && let Some(root) = view.root.upgrade() {
@@ -443,6 +449,7 @@ impl CalculationPadView {
         .detach();
     }
     fn set_editor_from_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_find_if_document_changed(window, cx);
         let Some(session) = self.session.as_mut() else { return; };
         let source = session.source().unwrap_or("").to_owned();
         let selection = self.editor.read(cx).selected_range();
@@ -497,7 +504,23 @@ impl Render for CalculationPadView {
             .is_some_and(|result| Some(result.basis) != basis);
         let mut panel = div()
             .id("calculation-pad")
+            .key_context("CalculationPad")
             .track_focus(&self.focus)
+            .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Search, window, cx| {
+                if view.open_find(false, window, cx) { cx.stop_propagation(); }
+            }))
+            .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Replace, window, cx| {
+                if view.open_find(true, window, cx) { cx.stop_propagation(); }
+            }))
+            .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Escape, window, cx| {
+                if view.close_find(window, cx) { cx.stop_propagation(); }
+            }))
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && event.keystroke.modifiers == Modifiers::default()
+                    && !event.is_held && view.close_find(window, cx) {
+                    window.prevent_default(); cx.stop_propagation();
+                }
+            }))
             .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Undo, window, cx| {
                 if view.editor.focus_handle(cx).is_focused(window) && view.current(window, cx) && view.session.as_ref().is_some_and(|session| session.pending_transition().is_none()) {
                     view.revoke_copy();
@@ -526,6 +549,7 @@ impl Render for CalculationPadView {
             .child(Label::new(format!("{name}{}", if dirty { " · Unsaved" } else { "" })))
             .child(Textarea::new(&self.editor).readonly(pending.is_some()).aria_label("Calculation Pad source"))
             .child(Label::new(format!("Calculation: {status}")));
+        if let Some(find) = self.find_panel(cx) { panel = panel.child(find); }
         let mut controls = div().flex().gap_2();
         for (name, kind) in [
             ("Calculate", 0),
@@ -704,6 +728,7 @@ impl RootWindow {
         };
         view.update(cx, |view, cx| {
             if !view.open {
+                view.reset_find(window, cx);
                 view.mount = view.owner.attach();
                 view.open = true;
                 if let Some(session) = view.session.as_mut() && session.source().is_none() {

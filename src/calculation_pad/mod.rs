@@ -13,6 +13,8 @@ pub use copy::copy_all_results;
 mod dependencies;
 mod document;
 mod exact;
+mod find_replace;
+pub use find_replace::FindReplace;
 mod examples;
 mod inspector;
 mod input;

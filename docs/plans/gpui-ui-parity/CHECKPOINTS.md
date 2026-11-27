@@ -1982,3 +1982,15 @@ An accepted result replaces the prior Restore entries while preserving independe
 Locked `fast-dev` checks passed in 1m 30s for the initial shared boundary, 25.09 s for its first correction, 1m 25s for integration, and 29.17 s after the retained corrections. Independent review checked exact identity, stale outcomes, deferred reopening, duplicate activation, Repair and placement selection. One grouped library and launcher Nextest build took 20m 23s. Nextest run `879e72c9-28a3-409f-87c2-4dcec9ae36fa` passed 17 of 17 tests across two binaries in 5.140 s. The Rust test library took 981.14 s in the Cargo timing report. A final access-only API cleanup passed a scoped check in 1m 32s.
 
 P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open with owned probe windows and two isolated profiles. Check stock command invocation, new and reopened panes, unchanged geometry through Restore, later Home and Target effects with a refused mismatched target, and preserved workspace and binding bytes. Runtime startup, Settings, hotkeys, Save Bindings and remaining criteria stay open. Continue P0.11 Calculation Pad Find and Replace.
+
+### P0.11 Calculation Pad Find and Replace
+
+The retained `calc pad` editor uses the same bounded literal matcher and replacement model as egui. Its toolbar supports Find, Match case, Previous, Next, Replace and Replace All. GPUI's Pad-scoped Ctrl+F and Ctrl+H open the appropriate toolbar. Escape and Close return focus to the source while the Pad owns input. Previous and Next apply the exact UTF-8 source selection while keeping toolbar focus.
+
+Each toolbar receipt binds its open or mode revision and the current document ID, incarnation, source revision and mount. Reopening the same saved document clears the old tool state even if its revision is unchanged. Changed inputs and pending document decisions retire stale actions. A same-document toolbar close retains the entered values.
+
+Replace and Replace All use one checked source replacement in the shared Pad session. The complete edit is one Undo action. Pending Copy loses the old evaluation authority. Manual calculations retain the prior stale result and Automatic mode uses the existing evaluation worker.
+
+The locked `fast-dev` library check passed in 1m 15s, the library and launcher integration in 12.43 s, and the final launcher correction in 4.75 s. Independent review covered the shared egui extraction, keyboard scope, selection, and exact document and toolbar authority. The grouped library and launcher build took 20m 11s. Nextest run `aba9e054-dde5-4b48-a253-d9d97ed3ee51` passed 8 of 8 tests across two binaries in 2.040 s. The shared test library took 981.90 s in the Cargo timing report.
+
+P0.11 remains Stage 2. Paired 1516 × 937 Windows replay remains open for Ctrl+F, Ctrl+H, Escape, offscreen selection and reveal, case and navigation, Replace All with exact Undo, and keyboard behavior outside the Pad. Go to Line, remembered hosts, layout and advanced editor or companion controls retain their original requirements. Continue P0.06 Omni Search category Settings.

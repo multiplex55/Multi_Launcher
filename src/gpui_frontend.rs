@@ -13495,6 +13495,11 @@ pub(crate) fn run_foundation_window(
             cx,
         );
         cx.bind_keys(gpui_key_bindings());
+        cx.bind_keys([
+            KeyBinding::new("ctrl-f", gpui_kit::base::input::Search, Some("CalculationPad")),
+            KeyBinding::new("ctrl-h", gpui_kit::base::input::Replace, Some("CalculationPad")),
+            KeyBinding::new("escape", gpui_kit::base::input::Escape, Some("CalculationPad")),
+        ]);
         let coordinate_hud_probe_closing_for_quit = Arc::clone(&closing_for_app);
         let hash_session_for_quit = Arc::clone(&hash_session_for_quit);
         let hash_wake_signal_for_quit = Arc::clone(&hash_wake_signal_for_quit);
